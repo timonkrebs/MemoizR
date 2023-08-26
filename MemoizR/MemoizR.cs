@@ -1,8 +1,10 @@
+namespace MemoizR;
+
 internal enum CacheState
 {
-    CacheClean,
-    CacheCheck,
-    CacheDirty
+    CacheClean = 0,
+    CacheCheck = 1,
+    CacheDirty = 2
 }
 
 public class MemoizR<T>
