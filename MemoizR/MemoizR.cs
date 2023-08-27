@@ -7,39 +7,52 @@ public enum CacheState
     CacheDirty = 2
 }
 
-internal static class Globals{
+internal static class Globals
+{
     /** current capture context for identifying @reactive sources (other reactive elements) and cleanups
     * - active while evaluating a reactive function body  */
     internal static dynamic? CurrentReaction = null;
-    internal static MemoHandlR<dynamic>[] CurrentGets = Array.Empty<MemoHandlR<dynamic>>();
+    internal static IMemoHandlR[] CurrentGets = Array.Empty<IMemoHandlR>();
     internal static int CurrentGetsIndex = 0;
 }
 
-public class MemoHandlR<T>
+interface IMemoHandlR
 {
-    internal MemoizR<dynamic>[] observers = Array.Empty<MemoizR<dynamic>>(); // nodes that have us as sources (down links)
+    IMemoizR[] Observers { get; set; }
+}
+
+public interface IMemoizR
+{
+    void Stale(CacheState state);
+
+    CacheState State { get; set; }
+}
+
+public class MemoHandlR<T> : IMemoHandlR, IMemoizR
+{
+    public IMemoizR[] Observers { get; set; } = Array.Empty<IMemoizR>(); // nodes that have us as sources (down links)
 
     protected Func<T?> fn = () => default;
     protected T? value = default;
     protected string label;
-    protected CacheState state = CacheState.CacheClean;
+    public CacheState State { get; set; } = CacheState.CacheClean;
 
     internal MemoHandlR(string label = "label")
     {
         this.label = label;
     }
 
-    internal void Stale(CacheState state)
+    public void Stale(CacheState state)
     {
-        if (this.state < state)
+        if (this.State < state)
         {
-            this.state = state;
+            this.State = state;
 
-            if (observers.Length > 0)
+            if (Observers.Length > 0)
             {
-                for (int i = 0; i < observers.Length; i++)
+                for (int i = 0; i < Observers.Length; i++)
                 {
-                    observers[i].Stale(CacheState.CacheCheck);
+                    Observers[i].Stale(CacheState.CacheCheck);
                 }
             }
         }
@@ -59,11 +72,11 @@ public class MemoSetR<T> : MemoHandlR<T>
     {
         if (this.value != null && !this.value.Equals(value))
         {
-            if (observers.Length > 0)
+            if (Observers.Length > 0)
             {
-                for (int i = 0; i < observers.Length; i++)
+                for (int i = 0; i < Observers.Length; i++)
                 {
-                    var observer = observers[i];
+                    var observer = Observers[i];
                     observer.Stale(CacheState.CacheDirty);
                 }
             }
@@ -84,8 +97,8 @@ public class MemoSetR<T> : MemoHandlR<T>
             }
             else
             {
-                if (!Globals.CurrentGets.Any()) Globals.CurrentGets = (new[] { this }).Cast<MemoizR<dynamic>>().ToArray();
-                else Globals.CurrentGets = Globals.CurrentGets.Union(new[] { this }.Cast<MemoHandlR<dynamic>>()).ToArray();
+                if (!Globals.CurrentGets.Any()) Globals.CurrentGets = new[] { this };
+                else Globals.CurrentGets = Globals.CurrentGets.Union(new[] { this }).ToArray();
             }
         }
 
@@ -96,12 +109,12 @@ public class MemoSetR<T> : MemoHandlR<T>
 
 public class MemoizR<T> : MemoHandlR<T>
 {
-    internal MemoHandlR<dynamic>[] sources = Array.Empty<MemoHandlR<dynamic>>(); // sources in reference order, not deduplicated (up links)
+    internal IMemoHandlR[] sources = Array.Empty<IMemoHandlR>(); // sources in reference order, not deduplicated (up links)
 
     public MemoizR(Func<T> fn) : base()
     {
         this.fn = fn;
-        this.state = CacheState.CacheDirty;
+        this.State = CacheState.CacheDirty;
     }
 
     public T Get()
@@ -118,8 +131,8 @@ public class MemoizR<T> : MemoHandlR<T>
             }
             else
             {
-                if (!Globals.CurrentGets.Any()) Globals.CurrentGets = (new[] { this }).Cast<MemoizR<dynamic>>().ToArray();
-                else Globals.CurrentGets = Globals.CurrentGets.Union(new[] { this }.Cast<MemoHandlR<dynamic>>()).ToArray();
+                if (!Globals.CurrentGets.Any()) Globals.CurrentGets = new[] { this };
+                else Globals.CurrentGets = Globals.CurrentGets.Union(new[] { this }).ToArray();
             }
         }
 
@@ -131,12 +144,12 @@ public class MemoizR<T> : MemoHandlR<T>
     private void UpdateIfNecessary()
     {
         // If we are potentially dirty, see if we have a parent who has actually changed value
-        if (state == CacheState.CacheCheck)
+        if (State == CacheState.CacheCheck)
         {
             foreach (var source in sources.Cast<MemoizR<dynamic>>())
             {
                 source.UpdateIfNecessary(); // updateIfNecessary() can change state
-                if (state == CacheState.CacheDirty)
+                if (State == CacheState.CacheDirty)
                 {
                     // Stop the loop here so we won't trigger updates on other parents unnecessarily
                     // If our computation changes to no longer use some sources, we don't
@@ -147,13 +160,13 @@ public class MemoizR<T> : MemoHandlR<T>
         }
 
         // If we were already dirty or marked dirty by the step above, update.
-        if (state == CacheState.CacheDirty)
+        if (State == CacheState.CacheDirty)
         {
             Update();
         }
 
         // By now, we're clean
-        state = CacheState.CacheClean;
+        State = CacheState.CacheClean;
     }
 
     /** run the computation fn, updating the cached value */
@@ -193,13 +206,13 @@ public class MemoizR<T> : MemoHandlR<T>
                 {
                     // Add ourselves to the end of the parent .observers array
                     var source = sources[i];
-                    if (!source.observers.Any())
+                    if (!source.Observers.Any())
                     {
-                        source.observers = (new[] { this }).Cast<MemoizR<dynamic>>().ToArray();
+                        source.Observers = (new[] { this }).ToArray();
                     }
                     else
                     {
-                        source.observers = source.observers.Union((new[] { this }).Cast<MemoizR<dynamic>>()).ToArray();
+                        source.Observers = source.Observers.Union((new[] { this })).ToArray();
                     }
                 }
             }
@@ -210,7 +223,7 @@ public class MemoizR<T> : MemoHandlR<T>
                 sources = sources.Take(Globals.CurrentGetsIndex).ToArray();
             }
         }
-        catch(Exception e)
+        catch (Exception e)
         {
             var m = e.Message;
         }
@@ -222,19 +235,19 @@ public class MemoizR<T> : MemoHandlR<T>
         }
 
         // handles diamond depenendencies if we're the parent of a diamond.
-        if (oldValue != null && oldValue.Equals(value) && observers.Length > 0)
+        if (oldValue != null && oldValue.Equals(value) && Observers.Length > 0)
         {
             // We've changed value, so mark our children as dirty so they'll reevaluate
-            for (int i = 0; i < observers.Length; i++)
+            for (int i = 0; i < Observers.Length; i++)
             {
-                var observer = observers[i];
-                observer.state = CacheState.CacheDirty;
+                var observer = Observers[i];
+                observer.State = CacheState.CacheDirty;
             }
         }
 
         // We've rerun with the latest values from all of our sources.
         // This means that we no longer need to update until a signal changes
-        state = CacheState.CacheClean;
+        State = CacheState.CacheClean;
     }
 
     private void RemoveParentObservers(int index)
@@ -243,9 +256,9 @@ public class MemoizR<T> : MemoHandlR<T>
         for (var i = index; i < sources.Length; i++)
         {
             var source = sources[i]; // We don't actually delete sources here because we're replacing the entire array soon
-            var swap = Array.FindIndex(source.observers, (v) => v.Equals(this));
-            source.observers![swap] = source.observers![source.observers!.Length - 1];
-            source.observers = source.observers.SkipLast(1).ToArray();
+            var swap = Array.FindIndex(source.Observers, (v) => v.Equals(this));
+            source.Observers![swap] = source.Observers![source.Observers!.Length - 1];
+            source.Observers = source.Observers.SkipLast(1).ToArray();
         }
     }
 }

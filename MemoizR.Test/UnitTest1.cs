@@ -21,7 +21,7 @@ public class UnitTest1
         Assert.Equal(3, m1.Get());
     }
 
-        [Fact]
+    [Fact]
     public void TestComputed()
     {
         var v1 = new MemoSetR<int>(1);
