@@ -11,18 +11,18 @@ public class MemoHandlR<T>
 {
     /** current capture context for identifying @reactive sources (other reactive elements) and cleanups
     * - active while evaluating a reactive function body  */
-    protected dynamic CurrentReaction = null;
+    protected dynamic? CurrentReaction = null;
     protected MemoHandlR<dynamic>[] CurrentGets = Array.Empty<MemoHandlR<dynamic>>();
     protected int CurrentGetsIndex = 0;
 
     internal MemoizR<dynamic>[] observers = Array.Empty<MemoizR<dynamic>>(); // nodes that have us as sources (down links)
 
-    protected Func<T> fn = () => default;
-    protected T value = default;
+    protected Func<T?> fn = () => default;
+    protected T? value = default;
     protected string label;
     protected CacheState state = CacheState.CacheClean;
 
-    public MemoHandlR(string label = "label")
+    internal MemoHandlR(string label = "label")
     {
         this.label = label;
     }
@@ -57,16 +57,38 @@ public class MemoSetR<T> : MemoHandlR<T>
     {
         if (this.value != null && !this.value.Equals(value))
         {
-            if (this.observers.Length > 0)
+            if (observers.Length > 0)
             {
-                for (int i = 0; i < this.observers.Length; i++)
+                for (int i = 0; i < observers.Length; i++)
                 {
-                    var observer = this.observers[i];
+                    var observer = observers[i];
                     observer.Stale(CacheState.CacheDirty);
                 }
             }
             this.value = value;
         }
+    }
+
+    public T Get()
+    {
+        if (CurrentReaction != null)
+        {
+            if (
+              !CurrentGets.Any() &&
+              CurrentReaction.sources.Any() &&
+              CurrentReaction.sources[CurrentGetsIndex].Equals(this)
+            )
+            {
+                CurrentGetsIndex++;
+            }
+            else
+            {
+                if (!CurrentGets.Any()) CurrentGets = (new[] { this }).Cast<MemoizR<dynamic>>().ToArray();
+                else CurrentGets = CurrentGets.Union(new[] { this }.Cast<MemoHandlR<dynamic>>()).ToArray();
+            }
+        }
+
+        return value;
     }
 }
 
@@ -75,7 +97,7 @@ public class MemoizR<T> : MemoHandlR<T>
 {
     private MemoHandlR<dynamic>[] sources = Array.Empty<MemoHandlR<dynamic>>(); // sources in reference order, not deduplicated (up links)
 
-    MemoizR(Func<T> fn) : base()
+    public MemoizR(Func<T> fn) : base()
     {
         this.fn = fn;
         this.state = CacheState.CacheDirty;
@@ -100,20 +122,20 @@ public class MemoizR<T> : MemoHandlR<T>
             }
         }
 
-        this.UpdateIfNecessary();
-        return this.value;
+        UpdateIfNecessary();
+        return value;
     }
 
-        /** update() if dirty, or a parent turns out to be dirty. */
+    /** update() if dirty, or a parent turns out to be dirty. */
     private void UpdateIfNecessary()
     {
         // If we are potentially dirty, see if we have a parent who has actually changed value
         if (state == CacheState.CacheCheck)
         {
-            foreach (var source in this.sources.Cast<MemoizR<dynamic>>())
+            foreach (var source in sources.Cast<MemoizR<dynamic>>())
             {
-                source.UpdateIfNecessary(); // updateIfNecessary() can change this.state
-                if (this.state == CacheState.CacheDirty)
+                source.UpdateIfNecessary(); // updateIfNecessary() can change state
+                if (state == CacheState.CacheDirty)
                 {
                     // Stop the loop here so we won't trigger updates on other parents unnecessarily
                     // If our computation changes to no longer use some sources, we don't
@@ -124,13 +146,13 @@ public class MemoizR<T> : MemoHandlR<T>
         }
 
         // If we were already dirty or marked dirty by the step above, update.
-        if (this.state == CacheState.CacheDirty)
+        if (state == CacheState.CacheDirty)
         {
-            this.Update();
+            Update();
         }
 
         // By now, we're clean
-        this.state = CacheState.CacheClean;
+        state = CacheState.CacheClean;
     }
 
     /** run the computation fn, updating the cached value */
@@ -155,18 +177,18 @@ public class MemoizR<T> : MemoHandlR<T>
             if (CurrentGets.Length > 0)
             {
                 // remove all old sources' .observers links to us
-                this.RemoveParentObservers(CurrentGetsIndex);
+                RemoveParentObservers(CurrentGetsIndex);
                 // update source up links
-                if (this.sources.Any() && CurrentGetsIndex > 0)
+                if (sources.Any() && CurrentGetsIndex > 0)
                 {
-                    this.sources = sources.Take(CurrentGetsIndex).Union(CurrentGets).ToArray();
+                    sources = sources.Take(CurrentGetsIndex).Union(CurrentGets).ToArray();
                 }
                 else
                 {
                     sources = CurrentGets;
                 }
 
-                for (var i = CurrentGetsIndex; i < this.sources.Length; i++)
+                for (var i = CurrentGetsIndex; i < sources.Length; i++)
                 {
                     // Add ourselves to the end of the parent .observers array
                     var source = sources[i];
@@ -180,11 +202,11 @@ public class MemoizR<T> : MemoHandlR<T>
                     }
                 }
             }
-            else if (this.sources.Any() && CurrentGetsIndex < this.sources.Length)
+            else if (sources.Any() && CurrentGetsIndex < sources.Length)
             {
                 // remove all old sources' .observers links to us
-                this.RemoveParentObservers(CurrentGetsIndex);
-                this.sources = sources.Take(CurrentGetsIndex).ToArray();
+                RemoveParentObservers(CurrentGetsIndex);
+                sources = sources.Take(CurrentGetsIndex).ToArray();
             }
         }
         finally
@@ -195,19 +217,19 @@ public class MemoizR<T> : MemoHandlR<T>
         }
 
         // handles diamond depenendencies if we're the parent of a diamond.
-        if (oldValue != null && oldValue.Equals(this.value) && this.observers.Length > 0)
+        if (oldValue != null && oldValue.Equals(value) && observers.Length > 0)
         {
             // We've changed value, so mark our children as dirty so they'll reevaluate
-            for (int i = 0; i < this.observers.Length; i++)
+            for (int i = 0; i < observers.Length; i++)
             {
-                var observer = this.observers[i];
+                var observer = observers[i];
                 observer.state = CacheState.CacheDirty;
             }
         }
 
         // We've rerun with the latest values from all of our sources.
         // This means that we no longer need to update until a signal changes
-        this.state = CacheState.CacheClean;
+        state = CacheState.CacheClean;
     }
 
     private void RemoveParentObservers(int index)
