@@ -7,14 +7,16 @@ public enum CacheState
     CacheDirty = 2
 }
 
-public class MemoHandlR<T>
-{
+internal static class Globals{
     /** current capture context for identifying @reactive sources (other reactive elements) and cleanups
     * - active while evaluating a reactive function body  */
-    protected dynamic? CurrentReaction = null;
-    protected MemoHandlR<dynamic>[] CurrentGets = Array.Empty<MemoHandlR<dynamic>>();
-    protected int CurrentGetsIndex = 0;
+    internal static dynamic? CurrentReaction = null;
+    internal static MemoHandlR<dynamic>[] CurrentGets = Array.Empty<MemoHandlR<dynamic>>();
+    internal static int CurrentGetsIndex = 0;
+}
 
+public class MemoHandlR<T>
+{
     internal MemoizR<dynamic>[] observers = Array.Empty<MemoizR<dynamic>>(); // nodes that have us as sources (down links)
 
     protected Func<T?> fn = () => default;
@@ -71,20 +73,19 @@ public class MemoSetR<T> : MemoHandlR<T>
 
     public T Get()
     {
-        if (CurrentReaction != null)
+        if (Globals.CurrentReaction != null)
         {
-            if (
-              !CurrentGets.Any() &&
-              CurrentReaction.sources.Any() &&
-              CurrentReaction.sources[CurrentGetsIndex].Equals(this)
+            if ((Globals.CurrentGets == null || !(Globals.CurrentGets.Length > 0)) &&
+              (Globals.CurrentReaction.sources != null && Globals.CurrentReaction.sources.Length > 0) &&
+              Globals.CurrentReaction.sources[Globals.CurrentGetsIndex].Equals(this)
             )
             {
-                CurrentGetsIndex++;
+                Globals.CurrentGetsIndex++;
             }
             else
             {
-                if (!CurrentGets.Any()) CurrentGets = (new[] { this }).Cast<MemoizR<dynamic>>().ToArray();
-                else CurrentGets = CurrentGets.Union(new[] { this }.Cast<MemoHandlR<dynamic>>()).ToArray();
+                if (!Globals.CurrentGets.Any()) Globals.CurrentGets = (new[] { this }).Cast<MemoizR<dynamic>>().ToArray();
+                else Globals.CurrentGets = Globals.CurrentGets.Union(new[] { this }.Cast<MemoHandlR<dynamic>>()).ToArray();
             }
         }
 
@@ -95,7 +96,7 @@ public class MemoSetR<T> : MemoHandlR<T>
 
 public class MemoizR<T> : MemoHandlR<T>
 {
-    private MemoHandlR<dynamic>[] sources = Array.Empty<MemoHandlR<dynamic>>(); // sources in reference order, not deduplicated (up links)
+    internal MemoHandlR<dynamic>[] sources = Array.Empty<MemoHandlR<dynamic>>(); // sources in reference order, not deduplicated (up links)
 
     public MemoizR(Func<T> fn) : base()
     {
@@ -105,20 +106,20 @@ public class MemoizR<T> : MemoHandlR<T>
 
     public T Get()
     {
-        if (CurrentReaction != null)
+        if (Globals.CurrentReaction != null)
         {
             if (
-              !CurrentGets.Any() &&
-              CurrentReaction.sources.Any() &&
-              CurrentReaction.sources[CurrentGetsIndex].Equals(this)
+              !Globals.CurrentGets.Any() &&
+              Globals.CurrentReaction.sources.Any() &&
+              Globals.CurrentReaction.sources[Globals.CurrentGetsIndex].Equals(this)
             )
             {
-                CurrentGetsIndex++;
+                Globals.CurrentGetsIndex++;
             }
             else
             {
-                if (!CurrentGets.Any()) CurrentGets = (new[] { this }).Cast<MemoizR<dynamic>>().ToArray();
-                else CurrentGets = CurrentGets.Union(new[] { this }.Cast<MemoHandlR<dynamic>>()).ToArray();
+                if (!Globals.CurrentGets.Any()) Globals.CurrentGets = (new[] { this }).Cast<MemoizR<dynamic>>().ToArray();
+                else Globals.CurrentGets = Globals.CurrentGets.Union(new[] { this }.Cast<MemoHandlR<dynamic>>()).ToArray();
             }
         }
 
@@ -161,34 +162,34 @@ public class MemoizR<T> : MemoHandlR<T>
         var oldValue = value;
 
         /* Evalute the reactive function body, dynamically capturing any other reactives used */
-        var prevReaction = CurrentReaction;
-        var prevGets = CurrentGets;
-        var prevIndex = CurrentGetsIndex;
+        var prevReaction = Globals.CurrentReaction;
+        var prevGets = Globals.CurrentGets;
+        var prevIndex = Globals.CurrentGetsIndex;
 
-        CurrentReaction = this;
-        CurrentGets = Array.Empty<MemoHandlR<object>>();
-        CurrentGetsIndex = 0;
+        Globals.CurrentReaction = this;
+        Globals.CurrentGets = Array.Empty<MemoHandlR<object>>();
+        Globals.CurrentGetsIndex = 0;
 
         try
         {
             value = fn();
 
             // if the sources have changed, update source & observer links
-            if (CurrentGets.Length > 0)
+            if (Globals.CurrentGets.Length > 0)
             {
                 // remove all old sources' .observers links to us
-                RemoveParentObservers(CurrentGetsIndex);
+                RemoveParentObservers(Globals.CurrentGetsIndex);
                 // update source up links
-                if (sources.Any() && CurrentGetsIndex > 0)
+                if (sources.Any() && Globals.CurrentGetsIndex > 0)
                 {
-                    sources = sources.Take(CurrentGetsIndex).Union(CurrentGets).ToArray();
+                    sources = sources.Take(Globals.CurrentGetsIndex).Union(Globals.CurrentGets).ToArray();
                 }
                 else
                 {
-                    sources = CurrentGets;
+                    sources = Globals.CurrentGets;
                 }
 
-                for (var i = CurrentGetsIndex; i < sources.Length; i++)
+                for (var i = Globals.CurrentGetsIndex; i < sources.Length; i++)
                 {
                     // Add ourselves to the end of the parent .observers array
                     var source = sources[i];
@@ -202,18 +203,22 @@ public class MemoizR<T> : MemoHandlR<T>
                     }
                 }
             }
-            else if (sources.Any() && CurrentGetsIndex < sources.Length)
+            else if (sources.Any() && Globals.CurrentGetsIndex < sources.Length)
             {
                 // remove all old sources' .observers links to us
-                RemoveParentObservers(CurrentGetsIndex);
-                sources = sources.Take(CurrentGetsIndex).ToArray();
+                RemoveParentObservers(Globals.CurrentGetsIndex);
+                sources = sources.Take(Globals.CurrentGetsIndex).ToArray();
             }
+        }
+        catch(Exception e)
+        {
+            var m = e.Message;
         }
         finally
         {
-            CurrentGets = prevGets;
-            CurrentReaction = prevReaction;
-            CurrentGetsIndex = prevIndex;
+            Globals.CurrentGets = prevGets;
+            Globals.CurrentReaction = prevReaction;
+            Globals.CurrentGetsIndex = prevIndex;
         }
 
         // handles diamond depenendencies if we're the parent of a diamond.
