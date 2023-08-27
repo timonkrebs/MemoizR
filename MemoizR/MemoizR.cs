@@ -15,7 +15,7 @@ public class MemoHandlR<T>
     protected MemoHandlR<dynamic>[] CurrentGets = Array.Empty<MemoHandlR<dynamic>>();
     protected int CurrentGetsIndex = 0;
 
-    protected MemoHandlR<dynamic>[] observers = Array.Empty<MemoHandlR<dynamic>>(); // nodes that have us as sources (down links)
+    protected MemoizR<dynamic>[] observers = Array.Empty<MemoizR<dynamic>>(); // nodes that have us as sources (down links)
 
     internal MemoHandlR<dynamic>[] sources = Array.Empty<MemoHandlR<dynamic>>(); // sources in reference order, not deduplicated (up links)
 
@@ -113,11 +113,11 @@ public class MemoHandlR<T>
                     var source = sources[i];
                     if (!source.observers.Any())
                     {
-                        source.observers = new[] { this };
+                        source.observers = (new[] { this }).Cast<MemoizR<dynamic>>().ToArray();
                     }
                     else
                     {
-                        source.observers = source.observers.Append(this).ToArray();
+                        source.observers = source.observers.Union((new[] { this }).Cast<MemoizR<dynamic>>()).ToArray();
                     }
                 }
             }
@@ -153,13 +153,13 @@ public class MemoHandlR<T>
 
     private void RemoveParentObservers(int index)
     {
-        if (!this.sources.Any()) return;
-        for (var i = index; i < this.sources.Length; i++)
+        if (!sources.Any()) return;
+        for (var i = index; i < sources.Length; i++)
         {
-            var source = this.sources[i]; // We don't actually delete sources here because we're replacing the entire array soon
-            var swap = Array.FindIndex(source.observers, 0, int.MaxValue, (v) => v.Equals(this));
+            var source = sources[i]; // We don't actually delete sources here because we're replacing the entire array soon
+            var swap = Array.FindIndex(source.observers, (v) => v.Equals(this));
             source.observers![swap] = source.observers![source.observers!.Length - 1];
-            source.observers.pop();
+            source.observers = source.observers.SkipLast(1).ToArray();
         }
     }
 }
@@ -213,8 +213,8 @@ public class MemoizR<T> : MemoHandlR<T>
             }
             else
             {
-                if (!CurrentGets.Any()) CurrentGets = new[] { this };
-                else CurrentGets = CurrentGets.Append(this).ToArray();
+                if (!CurrentGets.Any()) CurrentGets = (new[] { this }).Cast<MemoizR<dynamic>>().ToArray();
+                else CurrentGets = CurrentGets.Union(new[] { this }.Cast<MemoHandlR<dynamic>>()).ToArray();
             }
         }
 
