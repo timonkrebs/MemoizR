@@ -10,14 +10,12 @@ public enum CacheState
 public class MemoHandlR<T>
 {
     /** current capture context for identifying @reactive sources (other reactive elements) and cleanups
- * - active while evaluating a reactive function body  */
+    * - active while evaluating a reactive function body  */
     protected dynamic CurrentReaction = null;
     protected MemoHandlR<dynamic>[] CurrentGets = Array.Empty<MemoHandlR<dynamic>>();
     protected int CurrentGetsIndex = 0;
 
-    protected MemoizR<dynamic>[] observers = Array.Empty<MemoizR<dynamic>>(); // nodes that have us as sources (down links)
-
-    internal MemoHandlR<dynamic>[] sources = Array.Empty<MemoHandlR<dynamic>>(); // sources in reference order, not deduplicated (up links)
+    internal MemoizR<dynamic>[] observers = Array.Empty<MemoizR<dynamic>>(); // nodes that have us as sources (down links)
 
     protected Func<T> fn = () => default;
     protected T value = default;
@@ -44,14 +42,75 @@ public class MemoHandlR<T>
             }
         }
     }
+}
 
-    /** update() if dirty, or a parent turns out to be dirty. */
-    internal void UpdateIfNecessary()
+public class MemoSetR<T> : MemoHandlR<T>
+{
+    // equals = defaultEquality;
+
+    public MemoSetR(T value) : base()
+    {
+        this.value = value;
+    }
+
+    public void Set(T value)
+    {
+        if (this.value != null && !this.value.Equals(value))
+        {
+            if (this.observers.Length > 0)
+            {
+                for (int i = 0; i < this.observers.Length; i++)
+                {
+                    var observer = this.observers[i];
+                    observer.Stale(CacheState.CacheDirty);
+                }
+            }
+            this.value = value;
+        }
+    }
+}
+
+
+public class MemoizR<T> : MemoHandlR<T>
+{
+    private MemoHandlR<dynamic>[] sources = Array.Empty<MemoHandlR<dynamic>>(); // sources in reference order, not deduplicated (up links)
+
+    MemoizR(Func<T> fn) : base()
+    {
+        this.fn = fn;
+        this.state = CacheState.CacheDirty;
+    }
+
+    public T Get()
+    {
+        if (CurrentReaction != null)
+        {
+            if (
+              !CurrentGets.Any() &&
+              CurrentReaction.sources.Any() &&
+              CurrentReaction.sources[CurrentGetsIndex].Equals(this)
+            )
+            {
+                CurrentGetsIndex++;
+            }
+            else
+            {
+                if (!CurrentGets.Any()) CurrentGets = (new[] { this }).Cast<MemoizR<dynamic>>().ToArray();
+                else CurrentGets = CurrentGets.Union(new[] { this }.Cast<MemoHandlR<dynamic>>()).ToArray();
+            }
+        }
+
+        this.UpdateIfNecessary();
+        return this.value;
+    }
+
+        /** update() if dirty, or a parent turns out to be dirty. */
+    private void UpdateIfNecessary()
     {
         // If we are potentially dirty, see if we have a parent who has actually changed value
         if (state == CacheState.CacheCheck)
         {
-            foreach (var source in this.sources!)
+            foreach (var source in this.sources.Cast<MemoizR<dynamic>>())
             {
                 source.UpdateIfNecessary(); // updateIfNecessary() can change this.state
                 if (this.state == CacheState.CacheDirty)
@@ -161,64 +220,5 @@ public class MemoHandlR<T>
             source.observers![swap] = source.observers![source.observers!.Length - 1];
             source.observers = source.observers.SkipLast(1).ToArray();
         }
-    }
-}
-
-public class MemoSetR<T> : MemoHandlR<T>
-{
-    // equals = defaultEquality;
-
-    public MemoSetR(T value) : base()
-    {
-        this.value = value;
-    }
-
-    public void Set(T value)
-    {
-        if (this.value != null && !this.value.Equals(value))
-        {
-            if (this.observers.Length > 0)
-            {
-                for (int i = 0; i < this.observers.Length; i++)
-                {
-                    var observer = this.observers[i];
-                    observer.Stale(CacheState.CacheDirty);
-                }
-            }
-            this.value = value;
-        }
-    }
-}
-
-
-public class MemoizR<T> : MemoHandlR<T>
-{
-    MemoizR(Func<T> fn) : base()
-    {
-        this.fn = fn;
-        this.state = CacheState.CacheDirty;
-    }
-
-    public T Get()
-    {
-        if (CurrentReaction != null)
-        {
-            if (
-              !CurrentGets.Any() &&
-              CurrentReaction.sources.Any() &&
-              CurrentReaction.sources[CurrentGetsIndex].Equals(this)
-            )
-            {
-                CurrentGetsIndex++;
-            }
-            else
-            {
-                if (!CurrentGets.Any()) CurrentGets = (new[] { this }).Cast<MemoizR<dynamic>>().ToArray();
-                else CurrentGets = CurrentGets.Union(new[] { this }.Cast<MemoHandlR<dynamic>>()).ToArray();
-            }
-        }
-
-        this.UpdateIfNecessary();
-        return this.value;
     }
 }
