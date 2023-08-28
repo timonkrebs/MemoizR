@@ -11,66 +11,135 @@ internal static class Globals
 {
     /** current capture context for identifying @reactive sources (other reactive elements) and cleanups
     * - active while evaluating a reactive function body  */
-    internal static dynamic? CurrentReaction = null;
+    internal static dynamic? CurrentReaction = null;  // ToDo Find a way to get rid of dynamic type
     internal static IMemoHandlR[] CurrentGets = Array.Empty<IMemoHandlR>();
     internal static int CurrentGetsIndex = 0;
 }
 
-interface IMemoHandlR
+internal interface IMemoizR : IMemoHandlR
 {
-    IMemoizR[] Observers { get; set; }
-
     void UpdateIfNecessary();
-}
-
-public interface IMemoizR
-{
-    void Stale(CacheState state);
 
     CacheState State { get; set; }
+
+    void Stale(CacheState state);
 }
 
-public class MemoHandlR<T> : IMemoHandlR, IMemoizR
+internal interface IMemoHandlR
+{
+    IMemoizR[] Observers { get; set; }
+}
+
+public class MemoHandlR<T> : IMemoHandlR
 {
     internal IMemoHandlR[] sources = Array.Empty<IMemoHandlR>(); // sources in reference order, not deduplicated (up links)
-    public IMemoizR[] Observers { get; set; } = Array.Empty<IMemoizR>(); // nodes that have us as sources (down links)
+    internal IMemoizR[] Observers { get; set; } = Array.Empty<IMemoizR>(); // nodes that have us as sources (down links)
+
+    IMemoizR[] IMemoHandlR.Observers { get => Observers; set => Observers = value; }
 
     protected Func<T?, T?, bool> equals = (a, b) => Object.Equals(a, b);
     protected Func<T?> fn = () => default;
     protected T? value = default;
     protected string label;
-    public CacheState State { get; set; } = CacheState.CacheClean;
+
 
     internal MemoHandlR(string label = "label")
     {
         this.label = label;
     }
+}
 
-    public void Stale(CacheState state)
+public class MemoSetR<T> : MemoHandlR<T>
+{
+    public MemoSetR(T value, string label = "Label") : base()
     {
-        if (State < state)
-        {
-            State = state;
+        this.value = value;
+        this.label = label;
+    }
 
+    public void Set(T value)
+    {
+        if (!equals(this.value, value))
+        {
             if (Observers.Length > 0)
             {
                 for (int i = 0; i < Observers.Length; i++)
                 {
-                    Observers[i].Stale(CacheState.CacheCheck);
+                    var observer = Observers[i];
+                    observer.Stale(CacheState.CacheDirty);
                 }
             }
+            this.value = value;
         }
     }
 
+    public T? Get()
+    {
+        if (Globals.CurrentReaction != null)
+        {
+            if ((Globals.CurrentGets == null || !(Globals.CurrentGets.Length > 0)) &&
+              (Globals.CurrentReaction.sources != null && Globals.CurrentReaction.sources.Length > 0) &&
+              Globals.CurrentReaction.sources[Globals.CurrentGetsIndex].Equals(this)
+            )
+            {
+                Globals.CurrentGetsIndex++;
+            }
+            else
+            {
+                if (!Globals.CurrentGets!.Any()) Globals.CurrentGets = new[] { this };
+                else Globals.CurrentGets = Globals.CurrentGets!.Union(new[] { this }).ToArray();
+            }
+        }
+
+        return value;
+    }
+}
+
+
+public class MemoizR<T> : MemoHandlR<T>, IMemoizR
+{
+    private CacheState State { get; set; } = CacheState.CacheClean;
+    
+    CacheState IMemoizR.State { get => State; set => State = value; }
+
+    public MemoizR(Func<T> fn, string label = "Label") : base()
+    {
+        this.fn = fn;
+        this.State = CacheState.CacheDirty;
+        this.label = label;
+    }
+
+    public T? Get()
+    {
+        if (Globals.CurrentReaction != null)
+        {
+            if ((Globals.CurrentGets == null || !(Globals.CurrentGets.Length > 0)) &&
+              (Globals.CurrentReaction.sources != null && Globals.CurrentReaction.sources.Length > 0) &&
+              Globals.CurrentReaction.sources[Globals.CurrentGetsIndex].Equals(this)
+            )
+            {
+                Globals.CurrentGetsIndex++;
+            }
+            else
+            {
+                if (!Globals.CurrentGets!.Any()) Globals.CurrentGets = new[] { this };
+                else Globals.CurrentGets = Globals.CurrentGets!.Union(new[] { this }).ToArray();
+            }
+        }
+
+        UpdateIfNecessary();
+        return value;
+    }
+
     /** update() if dirty, or a parent turns out to be dirty. */
-    public void UpdateIfNecessary()
+    internal void UpdateIfNecessary()
     {
         // If we are potentially dirty, see if we have a parent who has actually changed value
         if (State == CacheState.CacheCheck)
         {
             foreach (var source in sources)
             {
-                source.UpdateIfNecessary(); // updateIfNecessary() can change state
+                (source as IMemoizR)?.UpdateIfNecessary(); // updateIfNecessary() can change state
                 if (State == CacheState.CacheDirty)
                 {
                     // Stop the loop here so we won't trigger updates on other parents unnecessarily
@@ -183,83 +252,30 @@ public class MemoHandlR<T> : IMemoHandlR, IMemoizR
             source.Observers = source.Observers.SkipLast(1).ToArray();
         }
     }
-}
 
-public class MemoSetR<T> : MemoHandlR<T>
-{
-    public MemoSetR(T value, string label = "Label") : base()
+    void IMemoizR.UpdateIfNecessary()
     {
-        this.value = value;
-        this.label = label;
+        UpdateIfNecessary();
     }
 
-    public void Set(T value)
+    internal void Stale(CacheState state)
     {
-        if (!equals(this.value, value))
+        if (State < state)
         {
+            State = state;
+
             if (Observers.Length > 0)
             {
                 for (int i = 0; i < Observers.Length; i++)
                 {
-                    var observer = Observers[i];
-                    observer.Stale(CacheState.CacheDirty);
+                    Observers[i].Stale(CacheState.CacheCheck);
                 }
             }
-            this.value = value;
         }
     }
 
-    public T? Get()
+    void IMemoizR.Stale(CacheState state)
     {
-        if (Globals.CurrentReaction != null)
-        {
-            if ((Globals.CurrentGets == null || !(Globals.CurrentGets.Length > 0)) &&
-              (Globals.CurrentReaction.sources != null && Globals.CurrentReaction.sources.Length > 0) &&
-              Globals.CurrentReaction.sources[Globals.CurrentGetsIndex].Equals(this)
-            )
-            {
-                Globals.CurrentGetsIndex++;
-            }
-            else
-            {
-                if (!Globals.CurrentGets!.Any()) Globals.CurrentGets = new[] { this };
-                else Globals.CurrentGets = Globals.CurrentGets!.Union(new[] { this }).ToArray();
-            }
-        }
-
-        return value;
-    }
-}
-
-
-public class MemoizR<T> : MemoHandlR<T>
-{
-    public MemoizR(Func<T> fn, string label = "Label") : base()
-    {
-        this.fn = fn;
-        this.State = CacheState.CacheDirty;
-        this.label = label;
-    }
-
-    public T? Get()
-    {
-        if (Globals.CurrentReaction != null)
-        {
-            if ((Globals.CurrentGets == null || !(Globals.CurrentGets.Length > 0)) &&
-              (Globals.CurrentReaction.sources != null && Globals.CurrentReaction.sources.Length > 0) &&
-              Globals.CurrentReaction.sources[Globals.CurrentGetsIndex].Equals(this)
-            )
-            {
-                Globals.CurrentGetsIndex++;
-            }
-            else
-            {
-                if (!Globals.CurrentGets!.Any()) Globals.CurrentGets = new[] { this };
-                else Globals.CurrentGets = Globals.CurrentGets!.Union(new[] { this }).ToArray();
-            }
-        }
-
-        UpdateIfNecessary();
-        return value;
+        Stale(state);
     }
 }
