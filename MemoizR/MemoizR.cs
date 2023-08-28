@@ -35,6 +35,7 @@ public class MemoHandlR<T> : IMemoHandlR, IMemoizR
     internal IMemoHandlR[] sources = Array.Empty<IMemoHandlR>(); // sources in reference order, not deduplicated (up links)
     public IMemoizR[] Observers { get; set; } = Array.Empty<IMemoizR>(); // nodes that have us as sources (down links)
 
+    protected Func<T?, T?, bool> equals = (a, b) => Object.Equals(a, b);
     protected Func<T?> fn = () => default;
     protected T? value = default;
     protected string label;
@@ -156,7 +157,7 @@ public class MemoHandlR<T> : IMemoHandlR, IMemoizR
         }
 
         // handles diamond depenendencies if we're the parent of a diamond.
-        if (oldValue != null && !oldValue.Equals(value) && Observers.Length > 0)
+        if (!equals(oldValue, value) && Observers.Length > 0)
         {
             // We've changed value, so mark our children as dirty so they'll reevaluate
             for (int i = 0; i < Observers.Length; i++)
@@ -186,8 +187,6 @@ public class MemoHandlR<T> : IMemoHandlR, IMemoizR
 
 public class MemoSetR<T> : MemoHandlR<T>
 {
-    // equals = defaultEquality;
-
     public MemoSetR(T value, string label = "Label") : base()
     {
         this.value = value;
@@ -196,7 +195,7 @@ public class MemoSetR<T> : MemoHandlR<T>
 
     public void Set(T value)
     {
-        if (this.value != null && !this.value.Equals(value))
+        if (!equals(this.value, value))
         {
             if (Observers.Length > 0)
             {
