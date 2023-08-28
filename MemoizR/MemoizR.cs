@@ -47,9 +47,9 @@ public class MemoHandlR<T> : IMemoHandlR, IMemoizR
 
     public void Stale(CacheState state)
     {
-        if (this.State < state)
+        if (State < state)
         {
-            this.State = state;
+            State = state;
 
             if (Observers.Length > 0)
             {
@@ -156,7 +156,7 @@ public class MemoHandlR<T> : IMemoHandlR, IMemoizR
         }
 
         // handles diamond depenendencies if we're the parent of a diamond.
-        if (oldValue != null && oldValue.Equals(value) && Observers.Length > 0)
+        if (oldValue != null && !oldValue.Equals(value) && Observers.Length > 0)
         {
             // We've changed value, so mark our children as dirty so they'll reevaluate
             for (int i = 0; i < Observers.Length; i++)
@@ -210,7 +210,7 @@ public class MemoSetR<T> : MemoHandlR<T>
         }
     }
 
-    public T Get()
+    public T? Get()
     {
         if (Globals.CurrentReaction != null)
         {
@@ -223,8 +223,8 @@ public class MemoSetR<T> : MemoHandlR<T>
             }
             else
             {
-                if (!Globals.CurrentGets.Any()) Globals.CurrentGets = new[] { this };
-                else Globals.CurrentGets = Globals.CurrentGets.Union(new[] { this }).ToArray();
+                if (!Globals.CurrentGets!.Any()) Globals.CurrentGets = new[] { this };
+                else Globals.CurrentGets = Globals.CurrentGets!.Union(new[] { this }).ToArray();
             }
         }
 
@@ -242,7 +242,7 @@ public class MemoizR<T> : MemoHandlR<T>
         this.label = label;
     }
 
-    public T Get()
+    public T? Get()
     {
         if (Globals.CurrentReaction != null)
         {
@@ -255,8 +255,8 @@ public class MemoizR<T> : MemoHandlR<T>
             }
             else
             {
-                if (!Globals.CurrentGets.Any()) Globals.CurrentGets = new[] { this };
-                else Globals.CurrentGets = Globals.CurrentGets.Union(new[] { this }).ToArray();
+                if (!Globals.CurrentGets!.Any()) Globals.CurrentGets = new[] { this };
+                else Globals.CurrentGets = Globals.CurrentGets!.Union(new[] { this }).ToArray();
             }
         }
 

@@ -36,6 +36,12 @@ public class UnitTest1
         Assert.Equal(2, m1.Get());
         Assert.Equal(2, m1.Get());
         Assert.Equal(2, v1.Get());
+
+        v1.Set(4);
+
+        Assert.Equal(4, m1.Get());
+        Assert.Equal(4, m1.Get());
+        Assert.Equal(4, v1.Get());
     }
 
     [Fact]
@@ -84,6 +90,12 @@ public class UnitTest1
         Assert.Equal(6, m3.Get());
         Assert.Equal(6, m3.Get());
         Assert.Equal(2, v1.Get());
+
+        v1.Set(3);
+
+        Assert.Equal(9, m3.Get());
+        Assert.Equal(9, m3.Get());
+        Assert.Equal(3, v1.Get());
     }
 
     [Fact]
@@ -118,7 +130,9 @@ public class UnitTest1
         Assert.Equal(1, invocationsM1);
         Assert.Equal(1, invocationsM2);
         Assert.Equal(1, invocationsM3);
-        m3.Get();
+        
+        Assert.Equal(r1, m3.Get());
+
         Assert.Equal(1, invocationsM1);
         Assert.Equal(1, invocationsM2);
         Assert.Equal(1, invocationsM3);
@@ -127,10 +141,66 @@ public class UnitTest1
         var r2 = m3.Get();
         Assert.Equal(2, invocationsM1);
         Assert.Equal(2, invocationsM2);
-        Assert.Equal(1, invocationsM3);
-        m3.Get();
+        Assert.Equal(2, invocationsM3);
+        
+        Assert.Equal(r2, m3.Get());
+
         Assert.Equal(2, invocationsM1);
         Assert.Equal(2, invocationsM2);
+        Assert.Equal(2, invocationsM3);
+    }
+
+    [Fact]
+    public void TestTwoSourcesInvocations()
+    {
+        var v1 = new MemoSetR<int>(1, "v1");
+        var v2 = new MemoSetR<int>(1, "v2");
+        var invocationsM1 = 0;
+        var m1 = new MemoizR<int>(() =>
+        {
+            invocationsM1++;
+            return v1.Get();
+        }, "m1");
+        var invocationsM2 = 0;
+        var m2 = new MemoizR<int>(() =>
+        {
+            invocationsM2++;
+            return v2.Get() * 2;
+        }, "m2");
+        var invocationsM3 = 0;
+        var m3 = new MemoizR<int>(() =>
+        {
+            invocationsM3++;
+            return m1.Get() + m2.Get();
+        }, "m3");
+
+        Assert.Equal(0, invocationsM1);
+        Assert.Equal(0, invocationsM2);
+        Assert.Equal(0, invocationsM3);
+
+        var r1 = m3.Get();
+
+        Assert.Equal(1, invocationsM1);
+        Assert.Equal(1, invocationsM2);
         Assert.Equal(1, invocationsM3);
+
+        Assert.Equal(r1, m3.Get());
+
+        Assert.Equal(1, invocationsM1);
+        Assert.Equal(1, invocationsM2);
+        Assert.Equal(1, invocationsM3);
+
+        v1.Set(3);
+        var r2 = m3.Get();
+
+        Assert.Equal(2, invocationsM1);
+        Assert.Equal(1, invocationsM2);
+        Assert.Equal(2, invocationsM3);
+
+        Assert.Equal(r2, m3.Get());
+
+        Assert.Equal(2, invocationsM1);
+        Assert.Equal(1, invocationsM2);
+        Assert.Equal(2, invocationsM3);
     }
 }
