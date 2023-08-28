@@ -19,6 +19,8 @@ internal static class Globals
 interface IMemoHandlR
 {
     IMemoizR[] Observers { get; set; }
+
+    void UpdateIfNecessary();
 }
 
 public interface IMemoizR
@@ -30,6 +32,7 @@ public interface IMemoizR
 
 public class MemoHandlR<T> : IMemoHandlR, IMemoizR
 {
+    internal IMemoHandlR[] sources = Array.Empty<IMemoHandlR>(); // sources in reference order, not deduplicated (up links)
     public IMemoizR[] Observers { get; set; } = Array.Empty<IMemoizR>(); // nodes that have us as sources (down links)
 
     protected Func<T?> fn = () => default;
@@ -57,96 +60,14 @@ public class MemoHandlR<T> : IMemoHandlR, IMemoizR
             }
         }
     }
-}
-
-public class MemoSetR<T> : MemoHandlR<T>
-{
-    // equals = defaultEquality;
-
-    public MemoSetR(T value) : base()
-    {
-        this.value = value;
-    }
-
-    public void Set(T value)
-    {
-        if (this.value != null && !this.value.Equals(value))
-        {
-            if (Observers.Length > 0)
-            {
-                for (int i = 0; i < Observers.Length; i++)
-                {
-                    var observer = Observers[i];
-                    observer.Stale(CacheState.CacheDirty);
-                }
-            }
-            this.value = value;
-        }
-    }
-
-    public T Get()
-    {
-        if (Globals.CurrentReaction != null)
-        {
-            if ((Globals.CurrentGets == null || !(Globals.CurrentGets.Length > 0)) &&
-              (Globals.CurrentReaction.sources != null && Globals.CurrentReaction.sources.Length > 0) &&
-              Globals.CurrentReaction.sources[Globals.CurrentGetsIndex].Equals(this)
-            )
-            {
-                Globals.CurrentGetsIndex++;
-            }
-            else
-            {
-                if (!Globals.CurrentGets.Any()) Globals.CurrentGets = new[] { this };
-                else Globals.CurrentGets = Globals.CurrentGets.Union(new[] { this }).ToArray();
-            }
-        }
-
-        return value;
-    }
-}
-
-
-public class MemoizR<T> : MemoHandlR<T>
-{
-    internal IMemoHandlR[] sources = Array.Empty<IMemoHandlR>(); // sources in reference order, not deduplicated (up links)
-
-    public MemoizR(Func<T> fn) : base()
-    {
-        this.fn = fn;
-        this.State = CacheState.CacheDirty;
-    }
-
-    public T Get()
-    {
-        if (Globals.CurrentReaction != null)
-        {
-            if (
-              !Globals.CurrentGets.Any() &&
-              Globals.CurrentReaction.sources.Any() &&
-              Globals.CurrentReaction.sources[Globals.CurrentGetsIndex].Equals(this)
-            )
-            {
-                Globals.CurrentGetsIndex++;
-            }
-            else
-            {
-                if (!Globals.CurrentGets.Any()) Globals.CurrentGets = new[] { this };
-                else Globals.CurrentGets = Globals.CurrentGets.Union(new[] { this }).ToArray();
-            }
-        }
-
-        UpdateIfNecessary();
-        return value;
-    }
 
     /** update() if dirty, or a parent turns out to be dirty. */
-    private void UpdateIfNecessary()
+    public void UpdateIfNecessary()
     {
         // If we are potentially dirty, see if we have a parent who has actually changed value
         if (State == CacheState.CacheCheck)
         {
-            foreach (var source in sources.Cast<MemoizR<dynamic>>())
+            foreach (var source in sources)
             {
                 source.UpdateIfNecessary(); // updateIfNecessary() can change state
                 if (State == CacheState.CacheDirty)
@@ -260,5 +181,86 @@ public class MemoizR<T> : MemoHandlR<T>
             source.Observers![swap] = source.Observers![source.Observers!.Length - 1];
             source.Observers = source.Observers.SkipLast(1).ToArray();
         }
+    }
+}
+
+public class MemoSetR<T> : MemoHandlR<T>
+{
+    // equals = defaultEquality;
+
+    public MemoSetR(T value, string label = "Label") : base()
+    {
+        this.value = value;
+        this.label = label;
+    }
+
+    public void Set(T value)
+    {
+        if (this.value != null && !this.value.Equals(value))
+        {
+            if (Observers.Length > 0)
+            {
+                for (int i = 0; i < Observers.Length; i++)
+                {
+                    var observer = Observers[i];
+                    observer.Stale(CacheState.CacheDirty);
+                }
+            }
+            this.value = value;
+        }
+    }
+
+    public T Get()
+    {
+        if (Globals.CurrentReaction != null)
+        {
+            if ((Globals.CurrentGets == null || !(Globals.CurrentGets.Length > 0)) &&
+              (Globals.CurrentReaction.sources != null && Globals.CurrentReaction.sources.Length > 0) &&
+              Globals.CurrentReaction.sources[Globals.CurrentGetsIndex].Equals(this)
+            )
+            {
+                Globals.CurrentGetsIndex++;
+            }
+            else
+            {
+                if (!Globals.CurrentGets.Any()) Globals.CurrentGets = new[] { this };
+                else Globals.CurrentGets = Globals.CurrentGets.Union(new[] { this }).ToArray();
+            }
+        }
+
+        return value;
+    }
+}
+
+
+public class MemoizR<T> : MemoHandlR<T>
+{
+    public MemoizR(Func<T> fn, string label = "Label") : base()
+    {
+        this.fn = fn;
+        this.State = CacheState.CacheDirty;
+        this.label = label;
+    }
+
+    public T Get()
+    {
+        if (Globals.CurrentReaction != null)
+        {
+            if ((Globals.CurrentGets == null || !(Globals.CurrentGets.Length > 0)) &&
+              (Globals.CurrentReaction.sources != null && Globals.CurrentReaction.sources.Length > 0) &&
+              Globals.CurrentReaction.sources[Globals.CurrentGetsIndex].Equals(this)
+            )
+            {
+                Globals.CurrentGetsIndex++;
+            }
+            else
+            {
+                if (!Globals.CurrentGets.Any()) Globals.CurrentGets = new[] { this };
+                else Globals.CurrentGets = Globals.CurrentGets.Union(new[] { this }).ToArray();
+            }
+        }
+
+        UpdateIfNecessary();
+        return value;
     }
 }
