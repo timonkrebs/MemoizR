@@ -2,7 +2,7 @@
   <PropertyGroup>
     <TargetFramework>net7.0</TargetFramework>
     <PackageId>MemoizR</PackageId>
-    <Version>0.0.2-rc1</Version>
+    <Version>0.0.2-rc2</Version>
     <Authors>Timon Krebs</Authors>
     <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
     <ImplicitUsings>enable</ImplicitUsings>

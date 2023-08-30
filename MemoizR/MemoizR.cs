@@ -1,6 +1,6 @@
 namespace MemoizR;
 
-public enum CacheState
+internal enum CacheState
 {
     CacheClean = 0,
     CacheCheck = 1,
