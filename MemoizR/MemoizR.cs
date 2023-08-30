@@ -9,11 +9,16 @@ public enum CacheState
 
 internal static class Globals
 {
+    internal static Context Context { get; } = new Context();
+}
+
+internal class Context
+{
     /** current capture context for identifying @reactive sources (other reactive elements) and cleanups
     * - active while evaluating a reactive function body  */
-    internal static dynamic? CurrentReaction = null;  // ToDo Find a way to get rid of dynamic type
-    internal static IMemoHandlR[] CurrentGets = Array.Empty<IMemoHandlR>();
-    internal static int CurrentGetsIndex = 0;
+    internal dynamic? CurrentReaction = null;  // ToDo Find a way to get rid of dynamic type
+    internal IMemoHandlR[] CurrentGets = Array.Empty<IMemoHandlR>();
+    internal int CurrentGetsIndex = 0;
 }
 
 internal interface IMemoizR : IMemoHandlR
@@ -58,35 +63,44 @@ public class MemoSetR<T> : MemoHandlR<T>
 
     public void Set(T value)
     {
-        if (!equals(this.value, value))
+        if (equals(this.value, value))
         {
-            if (Observers.Length > 0)
+            return;
+        }
+
+        lock (Globals.Context)
+        {
+            for (int i = 0; i < Observers.Length; i++)
             {
-                for (int i = 0; i < Observers.Length; i++)
-                {
-                    var observer = Observers[i];
-                    observer.Stale(CacheState.CacheDirty);
-                }
+                var observer = Observers[i];
+                observer.Stale(CacheState.CacheDirty);
             }
+
             this.value = value;
         }
     }
 
     public T? Get()
     {
-        if (Globals.CurrentReaction != null)
+        if (Globals.Context.CurrentReaction == null)
         {
-            if ((Globals.CurrentGets == null || !(Globals.CurrentGets.Length > 0)) &&
-              (Globals.CurrentReaction.sources != null && Globals.CurrentReaction.sources.Length > 0) &&
-              Globals.CurrentReaction.sources[Globals.CurrentGetsIndex].Equals(this)
+            return value;
+        }
+
+        lock (Globals.Context)
+        {
+
+            if ((Globals.Context.CurrentGets == null || !(Globals.Context.CurrentGets.Length > 0)) &&
+              (Globals.Context.CurrentReaction.sources != null && Globals.Context.CurrentReaction.sources.Length > 0) &&
+              Globals.Context.CurrentReaction.sources[Globals.Context.CurrentGetsIndex].Equals(this)
             )
             {
-                Globals.CurrentGetsIndex++;
+                Globals.Context.CurrentGetsIndex++;
             }
             else
             {
-                if (!Globals.CurrentGets!.Any()) Globals.CurrentGets = new[] { this };
-                else Globals.CurrentGets = Globals.CurrentGets!.Union(new[] { this }).ToArray();
+                if (!Globals.Context.CurrentGets!.Any()) Globals.Context.CurrentGets = new[] { this };
+                else Globals.Context.CurrentGets = Globals.Context.CurrentGets!.Union(new[] { this }).ToArray();
             }
         }
 
@@ -98,7 +112,7 @@ public class MemoSetR<T> : MemoHandlR<T>
 public class MemoizR<T> : MemoHandlR<T>, IMemoizR
 {
     private CacheState State { get; set; } = CacheState.CacheClean;
-    
+
     CacheState IMemoizR.State { get => State; set => State = value; }
 
     public MemoizR(Func<T> fn, string label = "Label", Func<T?, T?, bool>? equals = null) : base(equals)
@@ -110,23 +124,32 @@ public class MemoizR<T> : MemoHandlR<T>, IMemoizR
 
     public T? Get()
     {
-        if (Globals.CurrentReaction != null)
+        if (State == CacheState.CacheClean)
         {
-            if ((Globals.CurrentGets == null || !(Globals.CurrentGets.Length > 0)) &&
-              (Globals.CurrentReaction.sources != null && Globals.CurrentReaction.sources.Length > 0) &&
-              Globals.CurrentReaction.sources[Globals.CurrentGetsIndex].Equals(this)
-            )
-            {
-                Globals.CurrentGetsIndex++;
-            }
-            else
-            {
-                if (!Globals.CurrentGets!.Any()) Globals.CurrentGets = new[] { this };
-                else Globals.CurrentGets = Globals.CurrentGets!.Union(new[] { this }).ToArray();
-            }
+            return value;
         }
 
-        UpdateIfNecessary();
+        lock (Globals.Context)
+        {
+            if (Globals.Context.CurrentReaction != null)
+            {
+                if ((Globals.Context.CurrentGets == null || !(Globals.Context.CurrentGets.Length > 0)) &&
+                  (Globals.Context.CurrentReaction.sources != null && Globals.Context.CurrentReaction.sources.Length > 0) &&
+                  Globals.Context.CurrentReaction.sources[Globals.Context.CurrentGetsIndex].Equals(this)
+                )
+                {
+                    Globals.Context.CurrentGetsIndex++;
+                }
+                else
+                {
+                    if (!Globals.Context.CurrentGets!.Any()) Globals.Context.CurrentGets = new[] { this };
+                    else Globals.Context.CurrentGets = Globals.Context.CurrentGets!.Union(new[] { this }).ToArray();
+                }
+            }
+
+            UpdateIfNecessary();
+        }
+
         return value;
     }
 
@@ -165,34 +188,34 @@ public class MemoizR<T> : MemoHandlR<T>, IMemoizR
         var oldValue = value;
 
         /* Evalute the reactive function body, dynamically capturing any other reactives used */
-        var prevReaction = Globals.CurrentReaction;
-        var prevGets = Globals.CurrentGets;
-        var prevIndex = Globals.CurrentGetsIndex;
+        var prevReaction = Globals.Context.CurrentReaction;
+        var prevGets = Globals.Context.CurrentGets;
+        var prevIndex = Globals.Context.CurrentGetsIndex;
 
-        Globals.CurrentReaction = this;
-        Globals.CurrentGets = Array.Empty<MemoHandlR<object>>();
-        Globals.CurrentGetsIndex = 0;
+        Globals.Context.CurrentReaction = this;
+        Globals.Context.CurrentGets = Array.Empty<MemoHandlR<object>>();
+        Globals.Context.CurrentGetsIndex = 0;
 
         try
         {
             value = fn();
 
             // if the sources have changed, update source & observer links
-            if (Globals.CurrentGets.Length > 0)
+            if (Globals.Context.CurrentGets.Length > 0)
             {
                 // remove all old sources' .observers links to us
-                RemoveParentObservers(Globals.CurrentGetsIndex);
+                RemoveParentObservers(Globals.Context.CurrentGetsIndex);
                 // update source up links
-                if (sources.Any() && Globals.CurrentGetsIndex > 0)
+                if (sources.Any() && Globals.Context.CurrentGetsIndex > 0)
                 {
-                    sources = sources.Take(Globals.CurrentGetsIndex).Union(Globals.CurrentGets).ToArray();
+                    sources = sources.Take(Globals.Context.CurrentGetsIndex).Union(Globals.Context.CurrentGets).ToArray();
                 }
                 else
                 {
-                    sources = Globals.CurrentGets;
+                    sources = Globals.Context.CurrentGets;
                 }
 
-                for (var i = Globals.CurrentGetsIndex; i < sources.Length; i++)
+                for (var i = Globals.Context.CurrentGetsIndex; i < sources.Length; i++)
                 {
                     // Add ourselves to the end of the parent .observers array
                     var source = sources[i];
@@ -206,11 +229,11 @@ public class MemoizR<T> : MemoHandlR<T>, IMemoizR
                     }
                 }
             }
-            else if (sources.Any() && Globals.CurrentGetsIndex < sources.Length)
+            else if (sources.Any() && Globals.Context.CurrentGetsIndex < sources.Length)
             {
                 // remove all old sources' .observers links to us
-                RemoveParentObservers(Globals.CurrentGetsIndex);
-                sources = sources.Take(Globals.CurrentGetsIndex).ToArray();
+                RemoveParentObservers(Globals.Context.CurrentGetsIndex);
+                sources = sources.Take(Globals.Context.CurrentGetsIndex).ToArray();
             }
         }
         catch (Exception e)
@@ -219,9 +242,9 @@ public class MemoizR<T> : MemoHandlR<T>, IMemoizR
         }
         finally
         {
-            Globals.CurrentGets = prevGets;
-            Globals.CurrentReaction = prevReaction;
-            Globals.CurrentGetsIndex = prevIndex;
+            Globals.Context.CurrentGets = prevGets;
+            Globals.Context.CurrentReaction = prevReaction;
+            Globals.Context.CurrentGetsIndex = prevIndex;
         }
 
         // handles diamond depenendencies if we're the parent of a diamond.
@@ -259,17 +282,16 @@ public class MemoizR<T> : MemoHandlR<T>, IMemoizR
 
     internal void Stale(CacheState state)
     {
-        if (State < state)
+        if (state <= State)
         {
-            State = state;
+            return;
+        }
 
-            if (Observers.Length > 0)
-            {
-                for (int i = 0; i < Observers.Length; i++)
-                {
-                    Observers[i].Stale(CacheState.CacheCheck);
-                }
-            }
+        State = state;
+
+        for (int i = 0; i < Observers.Length; i++)
+        {
+            Observers[i].Stale(CacheState.CacheCheck);
         }
     }
 
