@@ -37,21 +37,20 @@ public class MemoHandlR<T> : IMemoHandlR
 
     IMemoizR[] IMemoHandlR.Observers { get => Observers; set => Observers = value; }
 
-    protected Func<T?, T?, bool> equals = (a, b) => Object.Equals(a, b);
+    protected Func<T?, T?, bool> equals;
     protected Func<T?> fn = () => default;
     protected T? value = default;
-    protected string label;
+    protected string? label;
 
-
-    internal MemoHandlR(string label = "label")
+    internal MemoHandlR(Func<T?, T?, bool>? equals)
     {
-        this.label = label;
+        this.equals = equals ?? ((a, b) => Object.Equals(a, b));
     }
 }
 
 public class MemoSetR<T> : MemoHandlR<T>
 {
-    public MemoSetR(T value, string label = "Label") : base()
+    public MemoSetR(T value, string label = "Label", Func<T?, T?, bool>? equals = null) : base(equals)
     {
         this.value = value;
         this.label = label;
@@ -102,7 +101,7 @@ public class MemoizR<T> : MemoHandlR<T>, IMemoizR
     
     CacheState IMemoizR.State { get => State; set => State = value; }
 
-    public MemoizR(Func<T> fn, string label = "Label") : base()
+    public MemoizR(Func<T> fn, string label = "Label", Func<T?, T?, bool>? equals = null) : base(equals)
     {
         this.fn = fn;
         this.State = CacheState.CacheDirty;

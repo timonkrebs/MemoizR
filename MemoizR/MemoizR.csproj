@@ -2,10 +2,14 @@
   <PropertyGroup>
     <TargetFramework>net7.0</TargetFramework>
     <PackageId>MemoizR</PackageId>
-    <Version>0.0.1-alpha2</Version>
+    <Version>0.0.2-beta2</Version>
     <Authors>Timon Krebs</Authors>
     <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <PackageTags>Memoization, Graph, Dependency, Dependencies, Dynamic, Dynamic Dependencies</PackageTags>
   </PropertyGroup>
+  <ItemGroup>
+        <None Include="docs\NUGET_README.md" Pack="true" PackagePath="\"/>
+    </ItemGroup>
 </Project>
