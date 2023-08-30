@@ -16,7 +16,7 @@ internal class Context
 {
     /** current capture context for identifying @reactive sources (other reactive elements) and cleanups
     * - active while evaluating a reactive function body  */
-    internal dynamic? CurrentReaction = null;  // ToDo Find a way to get rid of dynamic type
+    internal dynamic? CurrentReaction = null;  // ToDo type it to get rid of dynamic type but without forcing boxing
     internal IMemoHandlR[] CurrentGets = Array.Empty<IMemoHandlR>();
     internal int CurrentGetsIndex = 0;
 }
@@ -68,6 +68,8 @@ public class MemoSetR<T> : MemoHandlR<T>
             return;
         }
 
+        // There should be a way to override Context to be able to have multiple execution Contexts 
+        // (should be better for perf when many seperate graphs are evaluated at the same time)
         lock (Globals.Context)
         {
             for (int i = 0; i < Observers.Length; i++)
@@ -82,25 +84,29 @@ public class MemoSetR<T> : MemoHandlR<T>
 
     public T? Get()
     {
-        if (Globals.Context.CurrentReaction == null)
+        // There should be a way to override Context to be able to have multiple execution Contexts 
+        // (should be better for perf when many seperate graphs are evaluated at the same time)
+        var context = Globals.Context;
+
+        if (context.CurrentReaction == null)
         {
             return value;
         }
 
-        lock (Globals.Context)
+        lock (context)
         {
 
-            if ((Globals.Context.CurrentGets == null || !(Globals.Context.CurrentGets.Length > 0)) &&
-              (Globals.Context.CurrentReaction.sources != null && Globals.Context.CurrentReaction.sources.Length > 0) &&
-              Globals.Context.CurrentReaction.sources[Globals.Context.CurrentGetsIndex].Equals(this)
+            if ((context.CurrentGets == null || !(context.CurrentGets.Length > 0)) &&
+              (context.CurrentReaction.sources != null && context.CurrentReaction.sources.Length > 0) &&
+              context.CurrentReaction.sources[context.CurrentGetsIndex].Equals(this)
             )
             {
-                Globals.Context.CurrentGetsIndex++;
+                context.CurrentGetsIndex++;
             }
             else
             {
-                if (!Globals.Context.CurrentGets!.Any()) Globals.Context.CurrentGets = new[] { this };
-                else Globals.Context.CurrentGets = Globals.Context.CurrentGets!.Union(new[] { this }).ToArray();
+                if (!context.CurrentGets!.Any()) context.CurrentGets = new[] { this };
+                else context.CurrentGets = context.CurrentGets!.Union(new[] { this }).ToArray();
             }
         }
 
@@ -124,26 +130,30 @@ public class MemoizR<T> : MemoHandlR<T>, IMemoizR
 
     public T? Get()
     {
-        if (State == CacheState.CacheClean)
+        // There should be a way to override Context to be able to have multiple execution Contexts 
+        // (should be better for perf when many seperate graphs are evaluated at the same time)
+        var context = Globals.Context;
+
+        if (State == CacheState.CacheClean && context.CurrentReaction == null)
         {
             return value;
         }
 
-        lock (Globals.Context)
+        lock (context)
         {
-            if (Globals.Context.CurrentReaction != null)
+            if (context.CurrentReaction != null)
             {
-                if ((Globals.Context.CurrentGets == null || !(Globals.Context.CurrentGets.Length > 0)) &&
-                  (Globals.Context.CurrentReaction.sources != null && Globals.Context.CurrentReaction.sources.Length > 0) &&
-                  Globals.Context.CurrentReaction.sources[Globals.Context.CurrentGetsIndex].Equals(this)
+                if ((context.CurrentGets == null || !(context.CurrentGets.Length > 0)) &&
+                  (context.CurrentReaction.sources != null && context.CurrentReaction.sources.Length > 0) &&
+                  context.CurrentReaction.sources[context.CurrentGetsIndex].Equals(this)
                 )
                 {
-                    Globals.Context.CurrentGetsIndex++;
+                    context.CurrentGetsIndex++;
                 }
                 else
                 {
-                    if (!Globals.Context.CurrentGets!.Any()) Globals.Context.CurrentGets = new[] { this };
-                    else Globals.Context.CurrentGets = Globals.Context.CurrentGets!.Union(new[] { this }).ToArray();
+                    if (!context.CurrentGets!.Any()) context.CurrentGets = new[] { this };
+                    else context.CurrentGets = context.CurrentGets!.Union(new[] { this }).ToArray();
                 }
             }
 
@@ -156,6 +166,11 @@ public class MemoizR<T> : MemoHandlR<T>, IMemoizR
     /** update() if dirty, or a parent turns out to be dirty. */
     internal void UpdateIfNecessary()
     {
+        if (State == CacheState.CacheClean)
+        {
+            return;
+        }
+
         // If we are potentially dirty, see if we have a parent who has actually changed value
         if (State == CacheState.CacheCheck)
         {
@@ -186,36 +201,39 @@ public class MemoizR<T> : MemoHandlR<T>, IMemoizR
     private void Update()
     {
         var oldValue = value;
+        // There should be a way to override Context to be able to have multiple execution Contexts 
+        // (should be better for perf when many seperate graphs are evaluated at the same time)
+        var context = Globals.Context;
 
         /* Evalute the reactive function body, dynamically capturing any other reactives used */
-        var prevReaction = Globals.Context.CurrentReaction;
-        var prevGets = Globals.Context.CurrentGets;
-        var prevIndex = Globals.Context.CurrentGetsIndex;
+        var prevReaction = context.CurrentReaction;
+        var prevGets = context.CurrentGets;
+        var prevIndex = context.CurrentGetsIndex;
 
-        Globals.Context.CurrentReaction = this;
-        Globals.Context.CurrentGets = Array.Empty<MemoHandlR<object>>();
-        Globals.Context.CurrentGetsIndex = 0;
+        context.CurrentReaction = this;
+        context.CurrentGets = Array.Empty<MemoHandlR<object>>();
+        context.CurrentGetsIndex = 0;
 
         try
         {
             value = fn();
 
             // if the sources have changed, update source & observer links
-            if (Globals.Context.CurrentGets.Length > 0)
+            if (context.CurrentGets.Length > 0)
             {
                 // remove all old sources' .observers links to us
-                RemoveParentObservers(Globals.Context.CurrentGetsIndex);
+                RemoveParentObservers(context.CurrentGetsIndex);
                 // update source up links
-                if (sources.Any() && Globals.Context.CurrentGetsIndex > 0)
+                if (sources.Any() && context.CurrentGetsIndex > 0)
                 {
-                    sources = sources.Take(Globals.Context.CurrentGetsIndex).Union(Globals.Context.CurrentGets).ToArray();
+                    sources = sources.Take(context.CurrentGetsIndex).Union(context.CurrentGets).ToArray();
                 }
                 else
                 {
-                    sources = Globals.Context.CurrentGets;
+                    sources = context.CurrentGets;
                 }
 
-                for (var i = Globals.Context.CurrentGetsIndex; i < sources.Length; i++)
+                for (var i = context.CurrentGetsIndex; i < sources.Length; i++)
                 {
                     // Add ourselves to the end of the parent .observers array
                     var source = sources[i];
@@ -229,11 +247,11 @@ public class MemoizR<T> : MemoHandlR<T>, IMemoizR
                     }
                 }
             }
-            else if (sources.Any() && Globals.Context.CurrentGetsIndex < sources.Length)
+            else if (sources.Any() && context.CurrentGetsIndex < sources.Length)
             {
                 // remove all old sources' .observers links to us
-                RemoveParentObservers(Globals.Context.CurrentGetsIndex);
-                sources = sources.Take(Globals.Context.CurrentGetsIndex).ToArray();
+                RemoveParentObservers(context.CurrentGetsIndex);
+                sources = sources.Take(context.CurrentGetsIndex).ToArray();
             }
         }
         catch (Exception e)
@@ -242,9 +260,9 @@ public class MemoizR<T> : MemoHandlR<T>, IMemoizR
         }
         finally
         {
-            Globals.Context.CurrentGets = prevGets;
-            Globals.Context.CurrentReaction = prevReaction;
-            Globals.Context.CurrentGetsIndex = prevIndex;
+            context.CurrentGets = prevGets;
+            context.CurrentReaction = prevReaction;
+            context.CurrentGetsIndex = prevIndex;
         }
 
         // handles diamond depenendencies if we're the parent of a diamond.
