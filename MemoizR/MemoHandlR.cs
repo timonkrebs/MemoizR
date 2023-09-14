@@ -29,7 +29,6 @@ public abstract class MemoHandlR<T> : IMemoHandlR
     IMemoizR[] IMemoHandlR.Observers { get => Observers; set => Observers = value; }
 
     protected Func<T?, T?, bool> equals;
-    protected Func<T?> fn = () => default;
     protected T? value = default;
     protected string? label;
 

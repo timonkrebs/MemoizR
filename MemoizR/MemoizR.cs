@@ -3,6 +3,7 @@ namespace MemoizR;
 public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR
 {
     private CacheState State { get; set; } = CacheState.CacheClean;
+    private Func<T?> fn;
 
     CacheState IMemoizR.State { get => State; set => State = value; }
 
