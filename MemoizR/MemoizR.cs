@@ -133,10 +133,6 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR
                 sources = sources.Take(context.CurrentGetsIndex).ToArray();
             }
         }
-        catch (Exception e)
-        {
-            var m = e.Message;
-        }
         finally
         {
             context.CurrentGets = prevGets;

@@ -3,8 +3,15 @@
 Initial inspiration by https://github.com/modderme123/reactively
 Yet not primarily by the reactivity but by the unique idea of dynamic lazy memoization.
 
-The value that this package can bring is a really simple concurency model.
-It aims to be simpler than the current async await behaviour in C# where e.g. async void, .wait, ConfigureAwait or not awaiting everything can lead to problems. This model has also the potential to be expanded to work also in a distributed setup.
+The synchronisation for the concurency model ist inspired by VHDL.
+
+The value that this package can bring is a simple concurency model.
+
+It aims to be simpler than the current async await behaviour in C# where e.g. async void, .wait, ConfigureAwait or not awaiting everything can lead to problems. This model has also the potential to be expanded to work also in a distributed setup like the actor model.
+
+Even for simple usecases it can optimize performance if:
+- there are more reads than writes: The memoization leads to perf gains.
+- there are more writes than writes: The lazy evaluation leads to perf gains.
 
 With this package it is possible to build a dependency graph that does dynamic lazy memoization. 
 It calculates only the values that are needed and also only when they are not already calculated (memoization).
