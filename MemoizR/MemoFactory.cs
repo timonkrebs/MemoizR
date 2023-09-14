@@ -31,12 +31,12 @@ public class MemoFactory
         contexts.Add(contextKey, new WeakReference<Context>(this.context));
     }
 
-    public MemoizR<T> AddMemoizR<T>(Func<T> fn, string label = "Label", Func<T?, T?, bool>? equals = null)
+    public MemoizR<T> CreateMemoizR<T>(Func<T> fn, string label = "Label", Func<T?, T?, bool>? equals = null)
     {
         return new MemoizR<T>(fn, context, label, equals);
     }
 
-    public MemoSetR<T> AddMemoSetR<T>(T value, string label = "Label", Func<T?, T?, bool>? equals = null)
+    public MemoSetR<T> CreateMemoSetR<T>(T value, string label = "Label", Func<T?, T?, bool>? equals = null)
     {
         return new MemoSetR<T>(value, context, label, equals);
     }
