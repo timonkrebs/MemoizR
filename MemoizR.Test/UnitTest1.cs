@@ -7,7 +7,8 @@ public class UnitTest1
     [Fact]
     public void TestInitialization()
     {
-        var v1 = new MemoSetR<int>(1);
+        var f = new MemoFactory();
+        var v1 = f.AddMemoSetR(1);
         Assert.Equal(1, v1.Get());
         Assert.Equal(1, v1.Get());
 
@@ -15,7 +16,7 @@ public class UnitTest1
         Assert.Equal(2, v1.Get());
         Assert.Equal(2, v1.Get());
 
-        var m1 = new MemoizR<int>(() => 3);
+        var m1 = f.AddMemoizR(() => 3);
 
         Assert.Equal(3, m1.Get());
         Assert.Equal(3, m1.Get());
@@ -24,10 +25,11 @@ public class UnitTest1
     [Fact]
     public void TestComputed()
     {
-        var v1 = new MemoSetR<int>(1);
+        var f = new MemoFactory();
+        var v1 = f.AddMemoSetR(1);
         Assert.Equal(1, v1.Get());
 
-        var m1 = new MemoizR<int>(() => v1.Get());
+        var m1 = f.AddMemoizR(() => v1.Get());
         Assert.Equal(1, m1.Get());
         Assert.Equal(1, m1.Get());
 
@@ -48,10 +50,11 @@ public class UnitTest1
     public void TestComputedInvocations()
     {
         var invocations = 0;
-        var v1 = new MemoSetR<int>(1);
+        var f = new MemoFactory();
+        var v1 = f.AddMemoSetR(1);
         Assert.Equal(1, v1.Get());
 
-        var m1 = new MemoizR<int>(() =>
+        var m1 = f.AddMemoizR(() =>
         {
             invocations++;
             return v1.Get();
@@ -72,18 +75,19 @@ public class UnitTest1
     [Fact]
     public void TestDiamond()
     {
-        var v1 = new MemoSetR<int>(1, "v1");
+        var f = new MemoFactory();
+        var v1 = f.AddMemoSetR(1, "v1");
         Assert.Equal(1, v1.Get());
 
-        var m1 = new MemoizR<int>(() => v1.Get(), "m1");
+        var m1 = f.AddMemoizR(() => v1.Get(), "m1");
         Assert.Equal(1, m1.Get());
         Assert.Equal(1, m1.Get());
 
-        var m2 = new MemoizR<int>(() => v1.Get() * 2, "m2");
+        var m2 = f.AddMemoizR(() => v1.Get() * 2, "m2");
         Assert.Equal(2, m2.Get());
         Assert.Equal(2, m2.Get());
 
-        var m3 = new MemoizR<int>(() => m1.Get() + m2.Get(), "m3");
+        var m3 = f.AddMemoizR(() => m1.Get() + m2.Get(), "m3");
 
         v1.Set(2);
 
@@ -101,21 +105,22 @@ public class UnitTest1
     [Fact]
     public void TestDiamondInvocations()
     {
-        var v1 = new MemoSetR<int>(1, "v1");
+        var f = new MemoFactory();
+        var v1 = f.AddMemoSetR(1, "v1");
         var invocationsM1 = 0;
-        var m1 = new MemoizR<int>(() =>
+        var m1 = f.AddMemoizR(() =>
         {
             invocationsM1++;
             return v1.Get();
         }, "m1");
         var invocationsM2 = 0;
-        var m2 = new MemoizR<int>(() =>
+        var m2 = f.AddMemoizR(() =>
         {
             invocationsM2++;
             return v1.Get() * 2;
         }, "m2");
         var invocationsM3 = 0;
-        var m3 = new MemoizR<int>(() =>
+        var m3 = f.AddMemoizR(() =>
         {
             invocationsM3++;
             return m1.Get() + m2.Get();
@@ -153,22 +158,23 @@ public class UnitTest1
     [Fact]
     public void TestTwoSourcesInvocations()
     {
-        var v1 = new MemoSetR<int>(1, "v1");
-        var v2 = new MemoSetR<int>(1, "v2");
+        var f = new MemoFactory();
+        var v1 = f.AddMemoSetR(1, "v1");
+        var v2 = f.AddMemoSetR(1, "v2");
         var invocationsM1 = 0;
-        var m1 = new MemoizR<int>(() =>
+        var m1 = f.AddMemoizR(() =>
         {
             invocationsM1++;
             return v1.Get();
         }, "m1");
         var invocationsM2 = 0;
-        var m2 = new MemoizR<int>(() =>
+        var m2 = f.AddMemoizR(() =>
         {
             invocationsM2++;
             return v2.Get() * 2;
         }, "m2");
         var invocationsM3 = 0;
-        var m3 = new MemoizR<int>(() =>
+        var m3 = f.AddMemoizR(() =>
         {
             invocationsM3++;
             return m1.Get() + m2.Get();

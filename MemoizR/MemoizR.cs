@@ -1,127 +1,12 @@
 namespace MemoizR;
 
-internal enum CacheState
-{
-    CacheClean = 0,
-    CacheCheck = 1,
-    CacheDirty = 2
-}
-
-internal static class Globals
-{
-    internal static Context Context { get; } = new Context();
-}
-
-internal class Context
-{
-    /** current capture context for identifying @reactive sources (other reactive elements) and cleanups
-    * - active while evaluating a reactive function body  */
-    internal dynamic? CurrentReaction = null;  // ToDo type it to get rid of dynamic type but without forcing boxing
-    internal IMemoHandlR[] CurrentGets = Array.Empty<IMemoHandlR>();
-    internal int CurrentGetsIndex = 0;
-}
-
-internal interface IMemoizR : IMemoHandlR
-{
-    void UpdateIfNecessary();
-
-    CacheState State { get; set; }
-
-    void Stale(CacheState state);
-}
-
-internal interface IMemoHandlR
-{
-    IMemoizR[] Observers { get; set; }
-}
-
-public class MemoHandlR<T> : IMemoHandlR
-{
-    internal IMemoHandlR[] sources = Array.Empty<IMemoHandlR>(); // sources in reference order, not deduplicated (up links)
-    internal IMemoizR[] Observers { get; set; } = Array.Empty<IMemoizR>(); // nodes that have us as sources (down links)
-
-    IMemoizR[] IMemoHandlR.Observers { get => Observers; set => Observers = value; }
-
-    protected Func<T?, T?, bool> equals;
-    protected Func<T?> fn = () => default;
-    protected T? value = default;
-    protected string? label;
-
-    internal MemoHandlR(Func<T?, T?, bool>? equals)
-    {
-        this.equals = equals ?? ((a, b) => Object.Equals(a, b));
-    }
-}
-
-public class MemoSetR<T> : MemoHandlR<T>
-{
-    public MemoSetR(T value, string label = "Label", Func<T?, T?, bool>? equals = null) : base(equals)
-    {
-        this.value = value;
-        this.label = label;
-    }
-
-    public void Set(T value)
-    {
-        if (equals(this.value, value))
-        {
-            return;
-        }
-
-        // There should be a way to override Context to be able to have multiple execution Contexts 
-        // (should be better for perf when many seperate graphs are evaluated at the same time)
-        lock (Globals.Context)
-        {
-            for (int i = 0; i < Observers.Length; i++)
-            {
-                var observer = Observers[i];
-                observer.Stale(CacheState.CacheDirty);
-            }
-
-            this.value = value;
-        }
-    }
-
-    public T? Get()
-    {
-        // There should be a way to override Context to be able to have multiple execution Contexts 
-        // (should be better for perf when many seperate graphs are evaluated at the same time)
-        var context = Globals.Context;
-
-        if (context.CurrentReaction == null)
-        {
-            return value;
-        }
-
-        lock (context)
-        {
-
-            if ((context.CurrentGets == null || !(context.CurrentGets.Length > 0)) &&
-              (context.CurrentReaction.sources != null && context.CurrentReaction.sources.Length > 0) &&
-              context.CurrentReaction.sources[context.CurrentGetsIndex].Equals(this)
-            )
-            {
-                context.CurrentGetsIndex++;
-            }
-            else
-            {
-                if (!context.CurrentGets!.Any()) context.CurrentGets = new[] { this };
-                else context.CurrentGets = context.CurrentGets!.Union(new[] { this }).ToArray();
-            }
-        }
-
-        return value;
-    }
-}
-
-
-public class MemoizR<T> : MemoHandlR<T>, IMemoizR
+public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR
 {
     private CacheState State { get; set; } = CacheState.CacheClean;
 
     CacheState IMemoizR.State { get => State; set => State = value; }
 
-    public MemoizR(Func<T> fn, string label = "Label", Func<T?, T?, bool>? equals = null) : base(equals)
+    internal MemoizR(Func<T> fn, Context context, string label = "Label", Func<T?, T?, bool>? equals = null) : base(context, equals)
     {
         this.fn = fn;
         this.State = CacheState.CacheDirty;
@@ -130,10 +15,6 @@ public class MemoizR<T> : MemoHandlR<T>, IMemoizR
 
     public T? Get()
     {
-        // There should be a way to override Context to be able to have multiple execution Contexts 
-        // (should be better for perf when many seperate graphs are evaluated at the same time)
-        var context = Globals.Context;
-
         if (State == CacheState.CacheClean && context.CurrentReaction == null)
         {
             return value;
@@ -201,9 +82,6 @@ public class MemoizR<T> : MemoHandlR<T>, IMemoizR
     private void Update()
     {
         var oldValue = value;
-        // There should be a way to override Context to be able to have multiple execution Contexts 
-        // (should be better for perf when many seperate graphs are evaluated at the same time)
-        var context = Globals.Context;
 
         /* Evalute the reactive function body, dynamically capturing any other reactives used */
         var prevReaction = context.CurrentReaction;
