@@ -4,15 +4,7 @@
 [![NuGet](https://img.shields.io/nuget/dt/memoizr.svg)](https://www.nuget.org/packages/memoizr) 
 [![NuGet](https://img.shields.io/nuget/vpre/memoizr.svg)](https://www.nuget.org/packages/memoizr)
 
-
-Initial inspiration by https://github.com/modderme123/reactively
-Yet not primarily by the reactivity but by the unique idea of dynamic lazy memoization.
-
-The idea for the synchronisation in the concurency model also comes from VHDL.
-
-Some ideas also come from S.js (https://github.com/adamhaile/S) and the JS eventloop.
-
-## Value
+Simple concurrency model implementation in .NET
 
 The value that this package can bring is a simple and performant concurency model.
 
@@ -24,6 +16,15 @@ Even for simple usecases it can optimize performance if:
 
 With this package it is possible to build a dependency graph that does dynamic lazy memoization. 
 It calculates only the values that are needed and also only when they are not already calculated (memoization).
+
+## Inspiration
+
+Initial inspiration by https://github.com/modderme123/reactively
+Yet not primarily by the reactivity but by the unique idea of dynamic lazy memoization.
+
+The idea for the synchronisation in the concurency model also comes from VHDL.
+
+Some ideas also come from S.js (https://github.com/adamhaile/S) and the JS eventloop.
 
 
 ## Examples
@@ -60,6 +61,3 @@ It also works if the Graph is not stable at runtime. MemoizR can handle if the G
 ```cs
 var m3 = f.CreateMemoizR(() => v1.Get() ? m1.Get() : m2.Get());
 ```
-
-## Publish to nuget:
-MemoizR> dotnet pack --configuration Release /p:ContinuousIntegrationBuild=true -p:PackageVersion=0.0.3-rc1
