@@ -1,17 +1,22 @@
 # MemoizR
 
+![CI](https://github.com/timonkrebs/MemoizR/workflows/.NET/badge.svg)
+[![NuGet](https://img.shields.io/nuget/dt/memoizr.svg)](https://www.nuget.org/packages/memoizr) 
+[![NuGet](https://img.shields.io/nuget/vpre/memoizr.svg)](https://www.nuget.org/packages/memoizr)
+
+
 Initial inspiration by https://github.com/modderme123/reactively
 Yet not primarily by the reactivity but by the unique idea of dynamic lazy memoization.
 
-The synchronisation for the concurency model ist inspired by VHDL.
+The idea for the synchronisation in the concurency model also comes from VHDL.
 
-Some inspirations also come from S.js (https://github.com/adamhaile/S) and the JS eventloop.
+Some ideas also come from S.js (https://github.com/adamhaile/S) and the JS eventloop.
 
 ## Value
 
-The value that this package can bring is a simple concurency model.
+The value that this package can bring is a simple and performant concurency model.
 
-It aims to be simpler than the current async await behaviour in C# where e.g. async void, .wait, ConfigureAwait or not awaiting everything can lead to problems. This model has also the potential to be expanded to work also in a distributed setup like the actor model.
+It aims to be simpler than the current async await behaviour in C# where leaving the single async path e.g. async void, .wait, ConfigureAwait or not awaiting everything can lead to problems. This model has also the potential to be expanded to work also in a distributed setup like the actor model.
 
 Even for simple usecases it can optimize performance if:
 - there are more reads than writes: The memoization leads to perf gains.

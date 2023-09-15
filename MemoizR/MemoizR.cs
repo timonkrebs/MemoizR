@@ -22,9 +22,19 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR
         }
 
         context.WaitHandle.WaitOne();
-        
+
+        if (State == CacheState.CacheClean && context.CurrentReaction == null)
+        {
+            return value;
+        }
+
         lock (context)
         {
+            if (State == CacheState.CacheClean && context.CurrentReaction == null)
+            {
+                return value;
+            }
+
             if (context.CurrentReaction != null)
             {
                 if ((context.CurrentGets == null || !(context.CurrentGets.Length > 0)) &&
