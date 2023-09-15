@@ -8,7 +8,7 @@ public sealed class MemoRelativeSetR<T> : MemoHandlR<T>
         this.label = label;
     }
 
-    public void Set(Func<T, T> reduce)
+    public void Set(Func<T, T> set)
     {
         Interlocked.Increment(ref context.WaitCount);
         context.WaitHandle.Reset();
@@ -21,9 +21,8 @@ public sealed class MemoRelativeSetR<T> : MemoHandlR<T>
 
         lock (this)
         {
-            this.value = reduce(value!);
+            this.value = set(value!);
         }
-
 
         Interlocked.Decrement(ref context.WaitCount);
 

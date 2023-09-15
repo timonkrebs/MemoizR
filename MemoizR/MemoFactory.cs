@@ -40,4 +40,9 @@ public class MemoFactory
     {
         return new MemoSetR<T>(value, context, label, equals);
     }
+
+    public MemoRelativeSetR<T> CreateMemoRelativeSetR<T>(T value, string label = "Label")
+    {
+        return new MemoRelativeSetR<T>(value, context, label);
+    }
 }

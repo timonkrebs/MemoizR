@@ -1,6 +1,6 @@
 namespace MemoizR;
 
-public class Context
+internal class Context
 {
     internal ManualResetEvent WaitHandle = new ManualResetEvent(false);
     internal int WaitCount;
