@@ -21,6 +21,8 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR
             return value;
         }
 
+        context.WaitHandle.WaitOne();
+        
         lock (context)
         {
             if (context.CurrentReaction != null)

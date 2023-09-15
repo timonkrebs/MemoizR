@@ -15,15 +15,22 @@ public sealed class MemoSetR<T> : MemoHandlR<T>
             return;
         }
 
-        lock (context)
-        {
-            for (int i = 0; i < Observers.Length; i++)
-            {
-                var observer = Observers[i];
-                observer.Stale(CacheState.CacheDirty);
-            }
+        Interlocked.Increment(ref context.WaitCount);
+        context.WaitHandle.Reset();
 
-            this.value = value;
+        for (int i = 0; i < Observers.Length; i++)
+        {
+            var observer = Observers[i];
+            observer.Stale(CacheState.CacheDirty);
+        }
+
+        this.value = value;
+
+        Interlocked.Decrement(ref context.WaitCount);
+        
+        if (Volatile.Read(ref context.WaitCount) == 0)
+        {
+            context.WaitHandle.Set();
         }
     }
 
@@ -36,7 +43,6 @@ public sealed class MemoSetR<T> : MemoHandlR<T>
 
         lock (context)
         {
-
             if ((context.CurrentGets == null || !(context.CurrentGets.Length > 0)) &&
               (context.CurrentReaction.sources != null && context.CurrentReaction.sources.Length > 0) &&
               context.CurrentReaction.sources[context.CurrentGetsIndex].Equals(this)

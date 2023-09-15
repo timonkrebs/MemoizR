@@ -5,6 +5,10 @@ Yet not primarily by the reactivity but by the unique idea of dynamic lazy memoi
 
 The synchronisation for the concurency model ist inspired by VHDL.
 
+Some inspirations also come from S.js (https://github.com/adamhaile/S) and the JS eventloop.
+
+## Value
+
 The value that this package can bring is a simple concurency model.
 
 It aims to be simpler than the current async await behaviour in C# where e.g. async void, .wait, ConfigureAwait or not awaiting everything can lead to problems. This model has also the potential to be expanded to work also in a distributed setup like the actor model.
@@ -17,6 +21,7 @@ With this package it is possible to build a dependency graph that does dynamic l
 It calculates only the values that are needed and also only when they are not already calculated (memoization).
 
 
+## Examples
 ```cs
   /*
      Initialize Graph without evaluation
