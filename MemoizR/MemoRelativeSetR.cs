@@ -2,9 +2,6 @@ namespace MemoizR;
 
 public sealed class MemoRelativeSetR<T> : MemoHandlR<T>
 {
-    private List<Func<T, T>> reducers = new List<Func<T, T>>();
-
-
     internal MemoRelativeSetR(T value, Context context, string label = "Label") : base(context, null)
     {
         this.value = value;
@@ -40,22 +37,8 @@ public sealed class MemoRelativeSetR<T> : MemoHandlR<T>
     {
         if (context.CurrentReaction == null)
         {
-            var hasReducers = reducers.Any();
-            if (!hasReducers)
-            {
-                return value;
-            }
-            else if (hasReducers)
-            {
-                foreach (var reducer in reducers)
-                {
-                    value = reducer(value!);
-                }
-                reducers.Clear();
-                return value;
-            }
+            return value;
         }
-
 
         lock (context)
         {
@@ -70,15 +53,6 @@ public sealed class MemoRelativeSetR<T> : MemoHandlR<T>
             {
                 if (!context.CurrentGets!.Any()) context.CurrentGets = new[] { this };
                 else context.CurrentGets = context.CurrentGets!.Union(new[] { this }).ToArray();
-            }
-
-            lock (this)
-            {
-                foreach (var reducer in reducers)
-                {
-                    value = reducer(value!);
-                }
-                reducers.Clear();
             }
         }
 
