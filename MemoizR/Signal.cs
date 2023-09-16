@@ -1,8 +1,8 @@
 namespace MemoizR;
 
-public sealed class MemoSetR<T> : MemoHandlR<T>
+public sealed class Signal<T> : MemoHandlR<T>
 {
-    internal MemoSetR(T value, Context context, string label = "Label", Func<T?, T?, bool>? equals = null) : base(context, equals)
+    internal Signal(T value, Context context, string label = "Label", Func<T?, T?, bool>? equals = null) : base(context, equals)
     {
         this.value = value;
         this.label = label;

@@ -2,8 +2,8 @@ using MemoizR;
 
 public class MemoFactory
 {
-    private static Dictionary<string, WeakReference<Context>> contexts = new Dictionary<string, WeakReference<Context>>();
-    private Context context;
+    internal static Dictionary<string, WeakReference<Context>> CONTEXTS = new Dictionary<string, WeakReference<Context>>();
+    internal Context context;
 
     public MemoFactory(string? contextKey = null)
     {
@@ -13,7 +13,7 @@ public class MemoFactory
             contextKey = "";
         }
 
-        if (contexts.TryGetValue(contextKey, out var weakContext))
+        if (CONTEXTS.TryGetValue(contextKey, out var weakContext))
         {
             if (weakContext.TryGetTarget(out var context) && context != null)
             {
@@ -28,7 +28,7 @@ public class MemoFactory
         }
 
         this.context = new Context();
-        contexts.Add(contextKey, new WeakReference<Context>(this.context));
+        CONTEXTS.Add(contextKey, new WeakReference<Context>(this.context));
     }
 
     public MemoizR<T> CreateMemoizR<T>(Func<T> fn, string label = "Label", Func<T?, T?, bool>? equals = null)
@@ -36,13 +36,13 @@ public class MemoFactory
         return new MemoizR<T>(fn, context, label, equals);
     }
 
-    public MemoSetR<T> CreateMemoSetR<T>(T value, string label = "Label", Func<T?, T?, bool>? equals = null)
+    public Signal<T> CreateSignal<T>(T value, string label = "Label", Func<T?, T?, bool>? equals = null)
     {
-        return new MemoSetR<T>(value, context, label, equals);
+        return new Signal<T>(value, context, label, equals);
     }
 
-    public MemoRelativeSetR<T> CreateMemoRelativeSetR<T>(T value, string label = "Label")
+    public EagerRelativeSignal<T> CreateEagerRelativeSignal<T>(T value, string label = "Label")
     {
-        return new MemoRelativeSetR<T>(value, context, label);
+        return new EagerRelativeSignal<T>(value, context, label);
     }
 }

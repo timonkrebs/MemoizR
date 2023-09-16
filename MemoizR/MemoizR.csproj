@@ -12,5 +12,5 @@
   </PropertyGroup>
   <ItemGroup>
         <None Include="..\docs\NUGET_README.md" Pack="true" PackagePath="\"/>
-    </ItemGroup>
+  </ItemGroup>
 </Project>

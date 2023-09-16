@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\MemoizR\MemoizR.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <TargetFramework>net7.0</TargetFramework>
+    <PackageId>MemoizR.Reactive</PackageId>
+    <Version>0.0.3</Version>
+    <Authors>Timon Krebs</Authors>
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <PackageReadmeFile>NUGET_REACTIVE_README.md</PackageReadmeFile>
+    <PackageTags>Signal, Signals, Signaling, Reactive, Reactiv, Memoization, Graph, Dependency, Dependencies, Dynamic, Dynamic Dependencies, Concurrency, Lazy, Resolve, Perf, Performance, Parallel, Parallel Computing, Sync, Synchronization, State, State Synchronization</PackageTags>
+  </PropertyGroup>
+  <ItemGroup>
+        <None Include="..\docs\NUGET_REACTIVE_README.md" Pack="true" PackagePath="\"/>
+  </ItemGroup>
+</Project>

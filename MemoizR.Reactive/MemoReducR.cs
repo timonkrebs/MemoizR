@@ -1,13 +1,13 @@
 namespace MemoizR;
 
-public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR
+public sealed class MemoReducR<T> : MemoHandlR<T>, IMemoizR
 {
     private CacheState State { get; set; } = CacheState.CacheClean;
-    private Func<T?> fn;
+    private Func<T?, T> fn;
 
     CacheState IMemoizR.State { get => State; set => State = value; }
 
-    internal MemoizR(Func<T> fn, Context context, string label = "Label", Func<T?, T?, bool>? equals = null) : base(context, equals)
+    internal MemoReducR(Func<T?, T> fn, Context context, string label = "Label", Func<T?, T?, bool>? equals = null) : base(context, equals)
     {
         this.fn = fn;
         this.State = CacheState.CacheDirty;
@@ -16,13 +16,6 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR
 
     public T? Get()
     {
-        if (State == CacheState.CacheClean && context.CurrentReaction == null)
-        {
-            return value;
-        }
-        
-        context.WaitHandle.WaitOne();
-
         if (State == CacheState.CacheClean && context.CurrentReaction == null)
         {
             return value;
@@ -107,7 +100,7 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR
 
         try
         {
-            value = fn();
+            value = fn(value);
 
             // if the sources have changed, update source & observer links
             if (context.CurrentGets.Length > 0)
@@ -189,10 +182,11 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR
     {
         if (state <= State)
         {
+            Update();
             return;
         }
 
-        State = state;
+        Update();
 
         for (int i = 0; i < Observers.Length; i++)
         {

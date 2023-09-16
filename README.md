@@ -6,9 +6,11 @@
 
 Simple concurrency model implementation in .NET
 
-The value that this package can bring is a simple and performant concurency model.
+It brings a performant and save way to synchronize state over multiple threads.
 
-It aims to be simpler than the current async await behaviour in C# where leaving the single async path e.g. async void, .wait, ConfigureAwait or not awaiting everything can lead to problems. This model has also the potential to be expanded to work also in a distributed setup like the actor model.
+It aims to be simpler and more intuitive than the current async await behaviour in C#, where not strictly following a single async path (e.g. async void, .Wait, simply not awaiting everything and even .ConfigureAwait) most of the time lead to problems. This model has also the potential to be expanded to work also in a distributed setup like the actor model.
+
+It aims to make it save and maintainable to work with hard to concurrently synchronize state even in multi threaded scenarios. 
 
 Even for simple usecases it can optimize performance if:
 - there are more reads than writes: The memoization leads to perf gains.

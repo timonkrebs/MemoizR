@@ -8,7 +8,7 @@ public class UnitTest1
     public void TestInitialization()
     {
         var f = new MemoFactory();
-        var v1 = f.CreateMemoSetR(1);
+        var v1 = f.CreateSignal(1);
         Assert.Equal(1, v1.Get());
         Assert.Equal(1, v1.Get());
 
@@ -26,7 +26,7 @@ public class UnitTest1
     public void TestComputed()
     {
         var f = new MemoFactory();
-        var v1 = f.CreateMemoSetR(1);
+        var v1 = f.CreateSignal(1);
         Assert.Equal(1, v1.Get());
 
         var m1 = f.CreateMemoizR(() => v1.Get());
@@ -51,7 +51,7 @@ public class UnitTest1
     {
         var invocations = 0;
         var f = new MemoFactory();
-        var v1 = f.CreateMemoSetR(1);
+        var v1 = f.CreateSignal(1);
         Assert.Equal(1, v1.Get());
 
         var m1 = f.CreateMemoizR(() =>
@@ -76,7 +76,7 @@ public class UnitTest1
     public void TestDiamond()
     {
         var f = new MemoFactory();
-        var v1 = f.CreateMemoSetR(1, "v1");
+        var v1 = f.CreateSignal(1, "v1");
         Assert.Equal(1, v1.Get());
 
         var m1 = f.CreateMemoizR(() => v1.Get(), "m1");
@@ -106,7 +106,7 @@ public class UnitTest1
     public void TestDiamondInvocations()
     {
         var f = new MemoFactory();
-        var v1 = f.CreateMemoSetR(1, "v1");
+        var v1 = f.CreateSignal(1, "v1");
         var invocationsM1 = 0;
         var m1 = f.CreateMemoizR(() =>
         {
@@ -159,8 +159,8 @@ public class UnitTest1
     public void TestTwoSourcesInvocations()
     {
         var f = new MemoFactory();
-        var v1 = f.CreateMemoSetR(1, "v1");
-        var v2 = f.CreateMemoSetR(1, "v2");
+        var v1 = f.CreateSignal(1, "v1");
+        var v2 = f.CreateSignal(1, "v2");
         var invocationsM1 = 0;
         var m1 = f.CreateMemoizR(() =>
         {
