@@ -21,8 +21,17 @@ public sealed class MemoReducR<T> : MemoHandlR<T>, IMemoizR
             return value;
         }
 
+        context.WaitHandle.WaitOne();
+        if (State == CacheState.CacheClean && context.CurrentReaction == null)
+        {
+            return value;
+        }
+
+        // this should also block setter => Signals. (But writes should not block each other)
+        // Maybe the readwritelock could be the right thing after all
         lock (context)
         {
+            // if someone else did read the graph it could be that this is already Clean
             if (State == CacheState.CacheClean && context.CurrentReaction == null)
             {
                 return value;

@@ -14,42 +14,6 @@ public sealed class Reaction<T> : MemoHandlR<T>, IMemoizR
         this.label = label;
     }
 
-    public T? Get()
-    {
-        if (State == CacheState.CacheClean && context.CurrentReaction == null)
-        {
-            return value;
-        }
-
-        lock (context)
-        {
-            if (State == CacheState.CacheClean && context.CurrentReaction == null)
-            {
-                return value;
-            }
-
-            if (context.CurrentReaction != null)
-            {
-                if ((context.CurrentGets == null || !(context.CurrentGets.Length > 0)) &&
-                  (context.CurrentReaction.sources != null && context.CurrentReaction.sources.Length > 0) &&
-                  context.CurrentReaction.sources[context.CurrentGetsIndex].Equals(this)
-                )
-                {
-                    context.CurrentGetsIndex++;
-                }
-                else
-                {
-                    if (!context.CurrentGets!.Any()) context.CurrentGets = new[] { this };
-                    else context.CurrentGets = context.CurrentGets!.Union(new[] { this }).ToArray();
-                }
-            }
-
-            UpdateIfNecessary();
-        }
-
-        return value;
-    }
-
     /** update() if dirty, or a parent turns out to be dirty. */
     internal void UpdateIfNecessary()
     {
