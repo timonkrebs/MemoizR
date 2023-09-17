@@ -10,7 +10,8 @@ public sealed class EagerRelativeSignal<T> : MemoHandlR<T>
 
     public void Set(Func<T?, T> fn)
     {
-        lock (context)
+        context.contextLock.EnterUpgradeableReadLock();
+        try
         {
             for (int i = 0; i < Observers.Length; i++)
             {
@@ -19,6 +20,10 @@ public sealed class EagerRelativeSignal<T> : MemoHandlR<T>
             }
 
             value = fn(value);
+        }
+        finally
+        {
+            context.contextLock.ExitUpgradeableReadLock();
         }
     }
 
@@ -29,7 +34,8 @@ public sealed class EagerRelativeSignal<T> : MemoHandlR<T>
             return value;
         }
 
-        lock (context)
+        context.contextLock.EnterWriteLock();
+        try
         {
             if ((context.CurrentGets == null || !(context.CurrentGets.Length > 0)) &&
               (context.CurrentReaction.sources != null && context.CurrentReaction.sources.Length > 0) &&
@@ -43,6 +49,10 @@ public sealed class EagerRelativeSignal<T> : MemoHandlR<T>
                 if (!context.CurrentGets!.Any()) context.CurrentGets = new[] { this };
                 else context.CurrentGets = context.CurrentGets!.Union(new[] { this }).ToArray();
             }
+        }
+        finally
+        {
+            context.contextLock.ExitWriteLock();
         }
 
         return value;

@@ -21,17 +21,11 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR
             return value;
         }
         
-        context.WaitHandle.WaitOne();
-        if (State == CacheState.CacheClean && context.CurrentReaction == null)
+        // only one thread should evaluate the graph at a time. <otherwise the context could get messed up
+        context.contextLock.EnterWriteLock();
+        try
         {
-            return value;
-        }
-
-        // this should also block setter => Signals. (But writes should not block each other)
-        // Maybe the readwritelock could be the right thing after all
-        lock (context)
-        {
-            // if someone else did read the graph it could be that this is already Clean
+            // if someone else did read the graph while this thread was blocekd it could be that this is already Clean
             if (State == CacheState.CacheClean && context.CurrentReaction == null)
             {
                 return value;
@@ -54,6 +48,10 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR
             }
 
             UpdateIfNecessary();
+        }
+        finally
+        {
+            context.contextLock.ExitWriteLock();
         }
 
         return value;

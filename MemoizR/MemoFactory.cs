@@ -13,22 +13,26 @@ public class MemoFactory
             contextKey = "";
         }
 
-        if (CONTEXTS.TryGetValue(contextKey, out var weakContext))
+        lock (CONTEXTS)
         {
-            if (weakContext.TryGetTarget(out var context) && context != null)
+            if (CONTEXTS.TryGetValue(contextKey, out var weakContext))
             {
-                this.context = context;
+                if (weakContext.TryGetTarget(out var context) && context != null)
+                {
+                    this.context = context;
+                }
+                else
+                {
+                    this.context = new Context();
+                    weakContext.SetTarget(this.context);
+                }
+                return;
             }
-            else
-            {
-                this.context = new Context();
-                weakContext.SetTarget(this.context);
-            }
-            return;
+
+            this.context = new Context();
+            CONTEXTS.Add(contextKey, new WeakReference<Context>(this.context));
         }
 
-        this.context = new Context();
-        CONTEXTS.Add(contextKey, new WeakReference<Context>(this.context));
     }
 
     public MemoizR<T> CreateMemoizR<T>(Func<T> fn, string label = "Label", Func<T?, T?, bool>? equals = null)

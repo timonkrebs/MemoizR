@@ -15,22 +15,25 @@ public sealed class Signal<T> : MemoHandlR<T>
             return;
         }
 
-        Interlocked.Increment(ref context.WaitCount);
-        context.WaitHandle.Reset();
-
-        for (int i = 0; i < Observers.Length; i++)
+        // There can be multiple threads updating the CacheState at the same time but no reads should be possible while in the process
+        context.contextLock.EnterUpgradeableReadLock();
+        try
         {
-            var observer = Observers[i];
-            observer.Stale(CacheState.CacheDirty);
+            for (int i = 0; i < Observers.Length; i++)
+            {
+                var observer = Observers[i];
+                observer.Stale(CacheState.CacheDirty);
+            }
+
+            // only updating the value should be locked
+            lock (this)
+            {
+                this.value = value;
+            }
         }
-
-        this.value = value;
-
-        Interlocked.Decrement(ref context.WaitCount);
-        
-        if (Volatile.Read(ref context.WaitCount) == 0)
+        finally
         {
-            context.WaitHandle.Set();
+            context.contextLock.ExitUpgradeableReadLock();
         }
     }
 
@@ -41,7 +44,9 @@ public sealed class Signal<T> : MemoHandlR<T>
             return value;
         }
 
-        lock (context)
+        // only one thread should evaluate the graph at a time. <otherwise the context could get messed
+        context.contextLock.EnterWriteLock();
+        try
         {
             if ((context.CurrentGets == null || !(context.CurrentGets.Length > 0)) &&
               (context.CurrentReaction.sources != null && context.CurrentReaction.sources.Length > 0) &&
@@ -55,6 +60,10 @@ public sealed class Signal<T> : MemoHandlR<T>
                 if (!context.CurrentGets!.Any()) context.CurrentGets = new[] { this };
                 else context.CurrentGets = context.CurrentGets!.Union(new[] { this }).ToArray();
             }
+        }
+        finally
+        {
+            context.contextLock.ExitWriteLock();
         }
 
         return value;

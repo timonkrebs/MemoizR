@@ -2,7 +2,7 @@ using MemoizR;
 
 namespace MemoizR.Test;
 
-public class UnitTest1
+public class Core
 {
     [Fact]
     public void TestInitialization()

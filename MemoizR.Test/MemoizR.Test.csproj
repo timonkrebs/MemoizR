@@ -24,6 +24,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\MemoizR\MemoizR.csproj" />
+    <ProjectReference Include="..\MemoizR.Reactive\MemoizR.Reactive.csproj" />
   </ItemGroup>
 
 </Project>

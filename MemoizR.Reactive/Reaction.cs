@@ -12,6 +12,16 @@ public sealed class Reaction<T> : MemoHandlR<T>, IMemoizR
         this.fn = fn;
         this.State = CacheState.CacheDirty;
         this.label = label;
+
+        context.contextLock.EnterWriteLock();
+        try
+        {
+            Update();
+        }
+        finally
+        {
+            context.contextLock.ExitWriteLock();
+        }
     }
 
     /** update() if dirty, or a parent turns out to be dirty. */
@@ -150,12 +160,8 @@ public sealed class Reaction<T> : MemoHandlR<T>, IMemoizR
             return;
         }
 
+        State = state;
         UpdateIfNecessary();
-
-        for (int i = 0; i < Observers.Length; i++)
-        {
-            Observers[i].Stale(CacheState.CacheCheck);
-        }
     }
 
     void IMemoizR.Stale(CacheState state)
