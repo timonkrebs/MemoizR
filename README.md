@@ -26,6 +26,10 @@ Yet not primarily by the reactivity but by the unique idea of dynamic lazy memoi
 
 The idea for the synchronisation in the concurency model also comes from VHDL.
 
+I am a huge fan of reactivex https://reactivex.io/. Lots of inspiration came from working a lot with it.
+
+An idea from @mfp22 for signal operators was also a driver for me to start this library.
+
 Some ideas also come from S.js (https://github.com/adamhaile/S) and the JS eventloop.
 
 

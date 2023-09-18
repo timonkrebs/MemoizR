@@ -32,7 +32,6 @@ public class MemoFactory
             this.context = new Context();
             CONTEXTS.Add(contextKey, new WeakReference<Context>(this.context));
         }
-
     }
 
     public MemoizR<T> CreateMemoizR<T>(Func<T> fn, string label = "Label", Func<T?, T?, bool>? equals = null)

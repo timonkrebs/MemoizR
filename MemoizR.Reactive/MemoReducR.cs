@@ -195,6 +195,7 @@ public sealed class MemoReducR<T> : MemoHandlR<T>, IMemoizR
             return;
         }
 
+        State = state;
         Update();
 
         for (int i = 0; i < Observers.Length; i++)

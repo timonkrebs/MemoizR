@@ -22,7 +22,11 @@ public sealed class EagerRelativeSignal<T> : MemoHandlR<T>
                 observer.Stale(CacheState.CacheDirty);
             }
 
-            value = fn(value);
+            // only updating the value should be locked
+            lock (this)
+            {
+                value = fn(value);
+            }
         }
         finally
         {
