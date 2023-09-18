@@ -13,6 +13,7 @@ public sealed class Reaction<T> : MemoHandlR<T>, IMemoizR
         this.State = CacheState.CacheDirty;
         this.label = label;
 
+        // The reaction must be initialized to build the sources
         context.contextLock.EnterWriteLock();
         try
         {
@@ -74,13 +75,11 @@ public sealed class Reaction<T> : MemoHandlR<T>, IMemoizR
 
         try
         {
-            value = fn();
+            fn();
 
             // if the sources have changed, update source & observer links
             if (context.CurrentGets.Length > 0)
             {
-                // remove all old sources' .observers links to us
-                RemoveParentObservers(context.CurrentGetsIndex);
                 // update source up links
                 if (sources.Any() && context.CurrentGetsIndex > 0)
                 {
@@ -107,8 +106,6 @@ public sealed class Reaction<T> : MemoHandlR<T>, IMemoizR
             }
             else if (sources.Any() && context.CurrentGetsIndex < sources.Length)
             {
-                // remove all old sources' .observers links to us
-                RemoveParentObservers(context.CurrentGetsIndex);
                 sources = sources.Take(context.CurrentGetsIndex).ToArray();
             }
         }
@@ -119,32 +116,9 @@ public sealed class Reaction<T> : MemoHandlR<T>, IMemoizR
             context.CurrentGetsIndex = prevIndex;
         }
 
-        // handles diamond depenendencies if we're the parent of a diamond.
-        if (!equals(oldValue, value) && Observers.Length > 0)
-        {
-            // We've changed value, so mark our children as dirty so they'll reevaluate
-            for (int i = 0; i < Observers.Length; i++)
-            {
-                var observer = Observers[i];
-                observer.State = CacheState.CacheDirty;
-            }
-        }
-
         // We've rerun with the latest values from all of our sources.
         // This means that we no longer need to update until a signal changes
         State = CacheState.CacheClean;
-    }
-
-    private void RemoveParentObservers(int index)
-    {
-        if (!sources.Any()) return;
-        for (var i = index; i < sources.Length; i++)
-        {
-            var source = sources[i]; // We don't actually delete sources here because we're replacing the entire array soon
-            var swap = Array.FindIndex(source.Observers, (v) => v.Equals(this));
-            source.Observers![swap] = source.Observers![source.Observers!.Length - 1];
-            source.Observers = source.Observers.SkipLast(1).ToArray();
-        }
     }
 
     void IMemoizR.UpdateIfNecessary()
