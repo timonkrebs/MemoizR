@@ -42,8 +42,8 @@ public sealed class ReactionReducR<T> : MemoHandlR<T>, IMemoizR
             if (context.CurrentReaction != null)
             {
                 if ((context.CurrentGets == null || !(context.CurrentGets.Length > 0)) &&
-                  (context.CurrentReaction.sources != null && context.CurrentReaction.sources.Length > 0) &&
-                  context.CurrentReaction.sources[context.CurrentGetsIndex].Equals(this)
+                  context.CurrentReaction.Sources != null && context.CurrentReaction.Sources.Length > 0 &&
+                  context.CurrentReaction.Sources[context.CurrentGetsIndex].Equals(this)
                 )
                 {
                     context.CurrentGetsIndex++;
@@ -76,13 +76,13 @@ public sealed class ReactionReducR<T> : MemoHandlR<T>, IMemoizR
         // If we are potentially dirty, see if we have a parent who has actually changed value
         if (State == CacheState.CacheCheck)
         {
-            foreach (var source in sources)
+            foreach (var source in Sources)
             {
                 (source as IMemoizR)?.UpdateIfNecessary(); // updateIfNecessary() can change state
                 if (State == CacheState.CacheDirty)
                 {
                     // Stop the loop here so we won't trigger updates on other parents unnecessarily
-                    // If our computation changes to no longer use some sources, we don't
+                    // If our computation changes to no longer use some Sources, we don't
                     // want to update() a source we used last time, but now don't use.
                     break;
                 }
@@ -123,19 +123,19 @@ public sealed class ReactionReducR<T> : MemoHandlR<T>, IMemoizR
                 // remove all old sources' .observers links to us
                 RemoveParentObservers(context.CurrentGetsIndex);
                 // update source up links
-                if (sources.Any() && context.CurrentGetsIndex > 0)
+                if (Sources.Any() && context.CurrentGetsIndex > 0)
                 {
-                    sources = sources.Take(context.CurrentGetsIndex).Union(context.CurrentGets).ToArray();
+                    Sources = Sources.Take(context.CurrentGetsIndex).Union(context.CurrentGets).ToArray();
                 }
                 else
                 {
-                    sources = context.CurrentGets;
+                    Sources = context.CurrentGets;
                 }
 
-                for (var i = context.CurrentGetsIndex; i < sources.Length; i++)
+                for (var i = context.CurrentGetsIndex; i < Sources.Length; i++)
                 {
                     // Add ourselves to the end of the parent .observers array
-                    var source = sources[i];
+                    var source = Sources[i];
                     if (!source.Observers.Any())
                     {
                         source.Observers = (new[] { this }).ToArray();
@@ -146,11 +146,11 @@ public sealed class ReactionReducR<T> : MemoHandlR<T>, IMemoizR
                     }
                 }
             }
-            else if (sources.Any() && context.CurrentGetsIndex < sources.Length)
+            else if (Sources.Any() && context.CurrentGetsIndex < Sources.Length)
             {
-                // remove all old sources' .observers links to us
+                // remove all old Sources' .observers links to us
                 RemoveParentObservers(context.CurrentGetsIndex);
-                sources = sources.Take(context.CurrentGetsIndex).ToArray();
+                Sources = Sources.Take(context.CurrentGetsIndex).ToArray();
             }
         }
         finally
@@ -178,10 +178,10 @@ public sealed class ReactionReducR<T> : MemoHandlR<T>, IMemoizR
 
     private void RemoveParentObservers(int index)
     {
-        if (!sources.Any()) return;
-        for (var i = index; i < sources.Length; i++)
+        if (!Sources.Any()) return;
+        for (var i = index; i < Sources.Length; i++)
         {
-            var source = sources[i]; // We don't actually delete sources here because we're replacing the entire array soon
+            var source = Sources[i]; // We don't actually delete Sources here because we're replacing the entire array soon
             var swap = Array.FindIndex(source.Observers, (v) => v.Equals(this));
             source.Observers![swap] = source.Observers![source.Observers!.Length - 1];
             source.Observers = source.Observers.SkipLast(1).ToArray();

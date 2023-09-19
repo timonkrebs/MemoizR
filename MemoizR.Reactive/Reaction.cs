@@ -13,7 +13,7 @@ public sealed class Reaction<T> : MemoHandlR<T>, IMemoizR
         this.State = CacheState.CacheDirty;
         this.label = label;
 
-        // The reaction must be initialized to build the sources
+        // The reaction must be initialized to build the Sources
         context.contextLock.EnterWriteLock();
         try
         {
@@ -36,13 +36,13 @@ public sealed class Reaction<T> : MemoHandlR<T>, IMemoizR
         // If we are potentially dirty, see if we have a parent who has actually changed value
         if (State == CacheState.CacheCheck)
         {
-            foreach (var source in sources)
+            foreach (var source in Sources)
             {
                 (source as IMemoizR)?.UpdateIfNecessary(); // updateIfNecessary() can change state
                 if (State == CacheState.CacheDirty)
                 {
                     // Stop the loop here so we won't trigger updates on other parents unnecessarily
-                    // If our computation changes to no longer use some sources, we don't
+                    // If our computation changes to no longer use some Sources, we don't
                     // want to update() a source we used last time, but now don't use.
                     break;
                 }
@@ -77,23 +77,23 @@ public sealed class Reaction<T> : MemoHandlR<T>, IMemoizR
         {
             fn();
 
-            // if the sources have changed, update source & observer links
+            // if the Sources have changed, update source & observer links
             if (context.CurrentGets.Length > 0)
             {
                 // update source up links
-                if (sources.Any() && context.CurrentGetsIndex > 0)
+                if (Sources.Any() && context.CurrentGetsIndex > 0)
                 {
-                    sources = sources.Take(context.CurrentGetsIndex).Union(context.CurrentGets).ToArray();
+                    Sources = Sources.Take(context.CurrentGetsIndex).Union(context.CurrentGets).ToArray();
                 }
                 else
                 {
-                    sources = context.CurrentGets;
+                    Sources = context.CurrentGets;
                 }
 
-                for (var i = context.CurrentGetsIndex; i < sources.Length; i++)
+                for (var i = context.CurrentGetsIndex; i < Sources.Length; i++)
                 {
                     // Add ourselves to the end of the parent .observers array
-                    var source = sources[i];
+                    var source = Sources[i];
                     if (!source.Observers.Any())
                     {
                         source.Observers = (new[] { this }).ToArray();
@@ -104,9 +104,9 @@ public sealed class Reaction<T> : MemoHandlR<T>, IMemoizR
                     }
                 }
             }
-            else if (sources.Any() && context.CurrentGetsIndex < sources.Length)
+            else if (Sources.Any() && context.CurrentGetsIndex < Sources.Length)
             {
-                sources = sources.Take(context.CurrentGetsIndex).ToArray();
+                Sources = Sources.Take(context.CurrentGetsIndex).ToArray();
             }
         }
         finally
@@ -116,7 +116,7 @@ public sealed class Reaction<T> : MemoHandlR<T>, IMemoizR
             context.CurrentGetsIndex = prevIndex;
         }
 
-        // We've rerun with the latest values from all of our sources.
+        // We've rerun with the latest values from all of our Sources.
         // This means that we no longer need to update until a signal changes
         State = CacheState.CacheClean;
     }

@@ -48,8 +48,8 @@ public sealed class EagerRelativeSignal<T> : MemoHandlR<T>
         try
         {
             if ((context.CurrentGets == null || !(context.CurrentGets.Length > 0)) &&
-              (context.CurrentReaction.sources != null && context.CurrentReaction.sources.Length > 0) &&
-              context.CurrentReaction.sources[context.CurrentGetsIndex].Equals(this)
+              context.CurrentReaction.Sources != null && context.CurrentReaction.Sources.Length > 0 &&
+              context.CurrentReaction.Sources[context.CurrentGetsIndex].Equals(this)
             )
             {
                 context.CurrentGetsIndex++;
