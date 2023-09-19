@@ -1,3 +1,4 @@
+namespace MemoizR.Reactive;
 using MemoizR;
 
 public class ReactiveMemoFactory : MemoFactory
@@ -9,8 +10,8 @@ public class ReactiveMemoFactory : MemoFactory
         return new Reaction<T>(fn, context, label, equals);
     }
 
-    public MemoReducR<T> CreateMemoReducR<T>(Func<T?, T> fn, string label = "Label", Func<T?, T?, bool>? equals = null)
+    public ReactionReducR<T> CreateReactionReducR<T>(Func<T?, T> fn, string label = "Label", Func<T?, T?, bool>? equals = null)
     {
-        return new MemoReducR<T>(fn, context, label, equals);
+        return new ReactionReducR<T>(fn, context, label, equals);
     }
 }

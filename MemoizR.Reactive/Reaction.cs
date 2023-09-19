@@ -1,4 +1,4 @@
-﻿namespace MemoizR;
+﻿namespace MemoizR.Reactive;
 
 public sealed class Reaction<T> : MemoHandlR<T>, IMemoizR
 {

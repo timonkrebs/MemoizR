@@ -1,3 +1,4 @@
+using MemoizR;
 namespace MemoizR.Test;
 
 public class Core
@@ -206,5 +207,59 @@ public class Core
         Assert.Equal(2, invocationsM1);
         Assert.Equal(1, invocationsM2);
         Assert.Equal(2, invocationsM3);
+    }
+
+    [Fact]
+    public async Task TestConcurrency()
+    {
+        var f = new MemoFactory();
+        var v1 = f.CreateSignal(1);
+
+        v1.Set(2);
+
+        var m1 = f.CreateMemoizR(() => v1.Get() * 2);
+
+        var t1 = Task.Run(() => {
+            for(int i = 0; i < 1000; i++){
+                v1.Set(i);
+            }
+        });
+
+        var t2 = Task.Run(() => {
+            for(int i = 0; i < 1000; i++){
+                v1.Set(i);
+            }
+        });
+
+        await Task.WhenAll(t1, t2);
+
+        var r1 = m1.Get();
+        Assert.Equal(1998, r1);
+    }
+
+    [Fact]
+    public async Task TestRelativeConcurrency()
+    {
+        var f = new MemoFactory();
+        var v1 = f.CreateEagerRelativeSignal(1);
+
+        var m1 = f.CreateMemoizR(() => v1.Get() * 2);
+
+        var t1 = Task.Run(() => {
+            for(int i = 0; i < 1000; i++){
+                v1.Set(i => i + 1);
+            }
+        });
+
+        var t2 = Task.Run(() => {
+            for(int i = 0; i < 1000; i++){
+                v1.Set(i => i + 1);
+            }
+        });
+
+        await Task.WhenAll(t1, t2);
+
+        var r1 = m1.Get();
+        Assert.Equal(4002, r1);
     }
 }

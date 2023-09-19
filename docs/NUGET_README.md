@@ -1,5 +1,5 @@
 With this package it is possible to build a dependency graph that does dynamic lazy memoization. 
-It calculates only the values that are needed and also only when they are not already calculated (memoization).
+It calculates only the values that are needed and only when they are not already calculated (memoization).
 
 
 

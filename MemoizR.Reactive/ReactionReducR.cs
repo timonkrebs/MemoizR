@@ -1,26 +1,32 @@
-namespace MemoizR;
+namespace MemoizR.Reactive;
 
-public sealed class MemoReducR<T> : MemoHandlR<T>, IMemoizR
+public sealed class ReactionReducR<T> : MemoHandlR<T>, IMemoizR
 {
     private CacheState State { get; set; } = CacheState.CacheClean;
     private Func<T?, T> fn;
 
     CacheState IMemoizR.State { get => State; set => State = value; }
 
-    internal MemoReducR(Func<T?, T> fn, Context context, string label = "Label", Func<T?, T?, bool>? equals = null) : base(context, equals)
+    internal ReactionReducR(Func<T?, T> fn, Context context, string label = "Label", Func<T?, T?, bool>? equals = null) : base(context, equals)
     {
         this.fn = fn;
         this.State = CacheState.CacheDirty;
         this.label = label;
+
+        // The reaction must be initialized to build the sources
+        context.contextLock.EnterWriteLock();
+        try
+        {
+            Update();
+        }
+        finally
+        {
+            context.contextLock.ExitWriteLock();
+        }
     }
 
     public T? Get()
     {
-        if (State == CacheState.CacheClean && context.CurrentReaction == null)
-        {
-            return value;
-        }
-
         // The naming of the lock could be confusing because Set must be locked by WriteLock.
         // Only one thread should evaluate the graph at a time. otherwise the context could get messed up.
         // This should lead to perf gains because memoization can be utilized more efficiently.

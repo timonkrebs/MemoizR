@@ -12,6 +12,11 @@ public sealed class Signal<T> : MemoHandlR<T>
     {
         if (equals(this.value, value))
         {
+            for (int i = 0; i < Observers.Length; i++)
+            {
+                var observer = Observers[i];
+                observer.Stale(CacheState.CacheCheck);
+            }
             return;
         }
 
@@ -21,16 +26,16 @@ public sealed class Signal<T> : MemoHandlR<T>
         context.contextLock.EnterUpgradeableReadLock();
         try
         {
-            for (int i = 0; i < Observers.Length; i++)
-            {
-                var observer = Observers[i];
-                observer.Stale(CacheState.CacheDirty);
-            }
-
             // only updating the value should be locked
             lock (this)
             {
                 this.value = value;
+            }
+
+            for (int i = 0; i < Observers.Length; i++)
+            {
+                var observer = Observers[i];
+                observer.Stale(CacheState.CacheDirty);
             }
         }
         finally
