@@ -57,8 +57,8 @@ public sealed class Signal<T> : MemoHandlR<T>
         context.contextLock.EnterWriteLock();
         try
         {
-            if ((context.CurrentGets == null || !(context.CurrentGets.Length == 0)) &&
-              context.CurrentReaction.Sources != null && context.CurrentReaction.Sources.Length > 0 &&
+            if ((context.CurrentGets == null || context.CurrentGets.Length == 0) &&
+              context.CurrentReaction.Sources?.Length > 0 &&
               context.CurrentReaction.Sources[context.CurrentGetsIndex].Equals(this))
             {
                 context.CurrentGetsIndex++;
