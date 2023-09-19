@@ -44,7 +44,7 @@ Some ideas also come from S.js (https://github.com/adamhaile/S) and the JS event
           m3
   */
 var f = new MemoFactory();
-var v1 = f.CreateMemoSetR(1, "v1");
+var v1 = f.CreateSignal(1, "v1");
 var m1 = f.CreateMemoizR(() => v1.Get(), "m1");
 var m2 = f.CreateMemoizR(() => v1.Get() * 2, "m2");
 var m3 = f.CreateMemoizR(() => m1.Get() + m2.Get(), "m3");
