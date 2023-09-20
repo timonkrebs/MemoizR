@@ -1,16 +1,28 @@
+# Simple concurrency model implementation in .NET
+
+It brings a performant and save way to synchronize state over multiple threads.
+
+It aims to be simpler and more intuitive than the current async await behaviour in C#, where not strictly following a single async path (e.g. async void, .Wait, simply not awaiting everything and even .ConfigureAwait) most of the time lead to problems. This model has also the potential to be expanded to work also in a distributed setup like the actor model.
+
+It aims to make it save and maintainable to work with hard to concurrently synchronize state even in multi-threaded scenarios. 
+
+Even for simple usecases it can optimize performance if:
+- there are more reads than writes: The memoization leads to perf gains.
+- there are more writes than reads: The lazy evaluation leads to perf gains.
+
 With this package it is possible to build a dependency graph that does dynamic lazy memoization. 
-It calculates only the values that are needed and only when they are not already calculated (memoization).
+It calculates only the values that are needed and also only when they are not already calculated (memoization).
 
 Initial inspiration by https://github.com/modderme123/reactively
 Yet not primarily by the reactivity but by the unique idea of dynamic lazy memoization.
 
-## Vs. Manual Caching
+## MemoizR Vs. Manual Caching
 You could build caching yourself of course, but using MemoizR has several advantages.
 
-- First, as you've seen, it's very simple.
-- Second, MemoizR functions and methods automatically track their sources. Many approaches to caching require that the programmer manually list sources. That's not just more effort to maintain, a static source list is apt to include sources that are not needed every time, which means your MemoizR functions are apt to rerun unnecessarily.
-- Third, MemoizR dependency tracking extends beyond class/component boundaries, so the benefits of clever caching and smart recalculation extends across modules.
-- Finally, MemoizR includes some clever global optimization algorithms. A MemoizR function is run only if needed and only runs once. Furthermore, even deep and complicated networks of dependencies are analyzed efficiently in linear time. Without something like MemoizR, it's easy to end up with O(n log n) searches if every use of a MemoizR function needs to check every dependency, or every change needs to notify every dependent.
+- It's very simple to use.
+- MemoizR dependency tracking extends beyond class/component boundaries, so the benefits of clever caching and smart recalculation extends across modules.
+- MemoizR functions and methods automatically track their sources. Many approaches to caching require that the programmer manually list sources. That's not just more effort to maintain, a static source list is apt to include sources that are not needed every time, which means your MemoizR functions are apt to rerun unnecessarily.
+- MemoizR includes some clever global optimization algorithms. A MemoizR function is run only if needed and only runs once. Furthermore, even deep and complicated networks of dependencies are analyzed efficiently in linear time. Without something like MemoizR, it's easy to end up with O(n log n) searches if every use of a MemoizR function needs to check every dependency, or every change needs to notify every dependent.
 
 ## Execution model
 
