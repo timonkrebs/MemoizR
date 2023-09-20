@@ -1,7 +1,7 @@
 This package builds on the functionality of the base package MemoizR
 
 This behaves mostly the same as signals in solid.js (with added thread-safety).
-The implementation is based on Reactively https://github.com/modderme123/reactively which is the first draft for the reactivity model in Solid 2.0
+The implementation is based on https://github.com/modderme123/reactively
 
 ```cs
   /*
