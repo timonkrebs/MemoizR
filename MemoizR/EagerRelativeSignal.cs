@@ -47,10 +47,12 @@ public sealed class EagerRelativeSignal<T> : MemoHandlR<T>
         context.contextLock.EnterWriteLock();
         try
         {
-            if ((context.CurrentGets == null || context.CurrentGets.Length == 0) &&
-              context.CurrentReaction.Sources?.Length > 0 &&
-              context.CurrentReaction.Sources[context.CurrentGetsIndex].Equals(this)
-            )
+            var hasCurrentGets = context.CurrentGets == null || context.CurrentGets.Length == 0;
+            var currentSourceEqualsThis = context.CurrentReaction.Sources?.Length > 0
+            && context.CurrentReaction.Sources?.Length >= context.CurrentGetsIndex + 1
+            && context.CurrentReaction.Sources[context.CurrentGetsIndex] == (this);
+
+            if (hasCurrentGets && currentSourceEqualsThis)
             {
                 context.CurrentGetsIndex++;
             }

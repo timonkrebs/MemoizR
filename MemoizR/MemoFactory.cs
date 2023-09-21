@@ -26,11 +26,17 @@ public class MemoFactory
                     this.context = new Context();
                     weakContext.SetTarget(this.context);
                 }
-                return;
             }
+            else
+            {
+                this.context = new Context();
+                CONTEXTS.Add(contextKey, new WeakReference<Context>(this.context));
+            }
+        }
 
-            this.context = new Context();
-            CONTEXTS.Add(contextKey, new WeakReference<Context>(this.context));
+        if (this.context == null)
+        {
+            throw new NullReferenceException("Context can not be null");
         }
     }
 

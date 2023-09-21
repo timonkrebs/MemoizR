@@ -20,7 +20,7 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR
         {
             return value;
         }
-        
+
         // The naming of the lock could be confusing because Set must be locked by WriteLock.
         // Only one thread should evaluate the graph at a time. otherwise the context could get messed up.
         // This should lead to perf gains because memoization can be utilized more efficiently.
@@ -35,10 +35,12 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR
 
             if (context.CurrentReaction != null)
             {
-                if ((context.CurrentGets == null || context.CurrentGets.Length == 0) &&
-                  context.CurrentReaction.Sources?.Length > 0 &&
-                  context.CurrentReaction.Sources[context.CurrentGetsIndex].Equals(this)
-                )
+                var hasCurrentGets = context.CurrentGets == null || context.CurrentGets.Length == 0;
+                var currentSourceEqualsThis = context.CurrentReaction.Sources?.Length > 0
+                && context.CurrentReaction.Sources?.Length >= context.CurrentGetsIndex + 1
+                && context.CurrentReaction.Sources[context.CurrentGetsIndex] == (this);
+
+                if (hasCurrentGets && currentSourceEqualsThis)
                 {
                     context.CurrentGetsIndex++;
                 }
