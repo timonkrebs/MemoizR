@@ -36,8 +36,8 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR
             if (context.CurrentReaction != null)
             {
                 var hasCurrentGets = context.CurrentGets == null || context.CurrentGets.Length == 0;
-                var currentSourceEqualsThis = context.CurrentReaction.Sources?.Length > 0
-                && context.CurrentReaction.Sources?.Length >= context.CurrentGetsIndex + 1
+                var currentSourceEqualsThis = context.CurrentReaction?.Sources?.Length > 0
+                && context.CurrentReaction.Sources.Length >= context.CurrentGetsIndex + 1
                 && context.CurrentReaction.Sources[context.CurrentGetsIndex] == (this);
 
                 if (hasCurrentGets && currentSourceEqualsThis)

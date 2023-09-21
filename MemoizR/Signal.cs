@@ -58,8 +58,8 @@ public sealed class Signal<T> : MemoHandlR<T>
         try
         {
             var hasCurrentGets = context.CurrentGets == null || context.CurrentGets.Length == 0;
-            var currentSourceEqualsThis = context.CurrentReaction.Sources?.Length > 0
-            && context.CurrentReaction.Sources?.Length >= context.CurrentGetsIndex + 1
+            var currentSourceEqualsThis = context.CurrentReaction?.Sources?.Length > 0
+            && context.CurrentReaction.Sources.Length >= context.CurrentGetsIndex + 1
             && context.CurrentReaction.Sources[context.CurrentGetsIndex] == (this);
 
             if (hasCurrentGets && currentSourceEqualsThis)
