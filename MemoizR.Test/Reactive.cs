@@ -84,12 +84,13 @@ public class Reactive
 
         var invocationCount = 0;
         // Create a memoized computation 'm1' that depends on 'v1'
-        var m1 = f.CreateMemoizR(() => v1.Get() * 2 );
+        var m1 = f.CreateMemoizR(() => v1.Get() * 2);
 
-        var r1 = f.CreateReaction(() => {
+        var r1 = f.CreateReaction(() =>
+        {
             invocationCount++;
             return m1.Get();
-            });
+        });
 
         var tasks = new List<Task>();
         for (var i = 0; i < 10; i++)
@@ -115,7 +116,7 @@ public class Reactive
         Assert.Equal(40, m1.Get());
 
         // Check if 'r1' was evaluated three times (thread-safe)
-        // This is not completely reliable because if all the set are evaluated the gets trigger again
+        // This is not completely reliable because if all the set are evaluated the gets trigger again because how the readwrite lock works
         Assert.InRange(invocationCount, 3, 30);
     }
 
@@ -130,12 +131,13 @@ public class Reactive
 
         var invocationCount = 0;
         // Create a memoized computation 'm1' that depends on 'v1'
-        var m1 = f.CreateMemoizR(() => v1.Get() * 2 );
+        var m1 = f.CreateMemoizR(() => v1.Get() * 2);
 
-        var r1 = f.CreateReaction(() => {
+        var r1 = f.CreateReaction(() =>
+        {
             invocationCount++;
             return m1.Get();
-            });
+        });
 
         var tasks = new List<Task>();
         for (var i = 0; i < 20; i++)
@@ -156,7 +158,7 @@ public class Reactive
         Assert.Equal(40, m1.Get());
 
         // Check if 'r1' was evaluated 22 times (thread-safe)
-        // This is not completely reliable because if all the set are evaluated the gets trigger again
+        // This is not completely reliable because if all the set are evaluated the gets trigger again because how the readwrite lock works
         Assert.InRange(invocationCount, 22, 30);
     }
 }
