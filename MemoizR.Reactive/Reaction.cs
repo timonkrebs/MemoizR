@@ -128,14 +128,17 @@ public sealed class Reaction<T> : MemoHandlR<T>, IMemoizR
 
     internal void Stale(CacheState state)
     {
-        if (state <= State)
+        context.contextLock.EnterWriteLock();
+        try
         {
+            State = state;
             UpdateIfNecessary();
-            return;
         }
-
-        State = state;
-        UpdateIfNecessary();
+        finally
+        {
+            context.contextLock.ExitWriteLock();
+        }
+        return;
     }
 
     void IMemoizR.Stale(CacheState state)

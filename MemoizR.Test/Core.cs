@@ -134,7 +134,7 @@ public class Core
         Assert.Equal(1, invocationsM1);
         Assert.Equal(1, invocationsM2);
         Assert.Equal(1, invocationsM3);
-        
+
         Assert.Equal(r1, m3.Get());
 
         Assert.Equal(1, invocationsM1);
@@ -146,7 +146,7 @@ public class Core
         Assert.Equal(2, invocationsM1);
         Assert.Equal(2, invocationsM2);
         Assert.Equal(2, invocationsM3);
-        
+
         Assert.Equal(r2, m3.Get());
 
         Assert.Equal(2, invocationsM1);
@@ -219,14 +219,18 @@ public class Core
 
         var m1 = f.CreateMemoizR(() => v1.Get() * 2);
 
-        var t1 = Task.Run(() => {
-            for(int i = 0; i < 1000; i++){
+        var t1 = Task.Run(() =>
+        {
+            for (int i = 0; i < 1000; i++)
+            {
                 v1.Set(i);
             }
         });
 
-        var t2 = Task.Run(() => {
-            for(int i = 0; i < 1000; i++){
+        var t2 = Task.Run(() =>
+        {
+            for (int i = 0; i < 1000; i++)
+            {
                 v1.Set(i);
             }
         });
@@ -245,14 +249,18 @@ public class Core
 
         var m1 = f.CreateMemoizR(() => v1.Get() * 2);
 
-        var t1 = Task.Run(() => {
-            for(int i = 0; i < 1000; i++){
+        var t1 = Task.Run(() =>
+        {
+            for (int i = 0; i < 1000; i++)
+            {
                 v1.Set(i => i + 1);
             }
         });
 
-        var t2 = Task.Run(() => {
-            for(int i = 0; i < 1000; i++){
+        var t2 = Task.Run(() =>
+        {
+            for (int i = 0; i < 1000; i++)
+            {
                 v1.Set(i => i + 1);
             }
         });
@@ -261,5 +269,110 @@ public class Core
 
         var r1 = m1.Get();
         Assert.Equal(4002, r1);
+    }
+
+    [Fact]
+    public void TestDependencyUpdate()
+    {
+        // Create a MemoFactory instance
+        var f = new MemoFactory();
+
+        // Create a signal 'v1' with an initial value of 1
+        var v1 = f.CreateSignal(1);
+
+        // Create a memoized computation 'm1' that depends on 'v1'
+        var m1 = f.CreateMemoizR(() => v1.Get() * 2);
+
+        // Check the initial value of 'm1'
+        Assert.Equal(2, m1.Get());
+
+        // Update 'v1' to 3
+        v1.Set(3);
+
+        // Confirm that 'm1' updates automatically due to the change in 'v1'
+        Assert.Equal(6, m1.Get());
+    }
+
+    [Fact]
+    public void TestCaching()
+    {
+        // Create a MemoFactory instance
+        var f = new MemoFactory();
+
+
+        // Create a signal 'v1' with an initial value of 1
+        var v1 = f.CreateSignal(1);
+
+        var invocationCount = 0;
+        // Create a memoized computation 'm1' that depends on 'v1'
+        var m1 = f.CreateMemoizR(() =>
+        {
+            invocationCount++;
+            return v1.Get() * 2;
+        });
+
+        // Call 'm1' multiple times to ensure memoization
+        m1.Get();
+        m1.Get();
+        m1.Get();
+
+        // Check if 'm1' was evaluated only once
+        Assert.Equal(1, invocationCount);
+    }
+
+    [Fact]
+    public async Task TestThreadSafety()
+    {
+        // Create a MemoFactory instance
+        var f = new MemoFactory();
+
+        // Create a signal 'v1' with an initial value of 1
+        var v1 = f.CreateSignal(1);
+
+        var invocationCount = 0;
+        // Create a memoized computation 'm1' that depends on 'v1'
+        var m1 = f.CreateMemoizR(() =>
+        {
+            invocationCount++;
+            return v1.Get() * 2;
+        });
+
+        // Create multiple threads to access 'm1' concurrently
+        var tasks = new List<Task<int>>();
+        for (var i = 0; i < 100; i++)
+        {
+            tasks.Add(Task.Run(() => m1.Get()));
+        }
+
+        // Wait for all tasks to complete
+        await Task.WhenAll(tasks);
+
+        // Check if 'm1' was evaluated only once (thread-safe)
+        Assert.Equal(1, invocationCount);
+    }
+
+    [Fact]
+    public void TestSignalEquality()
+    {
+        // Create a MemoFactory instance
+        var f = new MemoFactory();
+
+        // Create two signals with the same initial value
+        var v1 = f.CreateSignal(1);
+        var v2 = f.CreateSignal(1);
+
+        // Create a memoized computation 'm1' for each signal
+        var m1 = f.CreateMemoizR(() => v1.Get() * 2);
+        var m2 = f.CreateMemoizR(() => v2.Get() * 2);
+
+        // Check if 'm1' and 'm2' are equal due to the same input signals
+        Assert.Equal(m1.Get(), m2.Get());
+
+        // Update 'v1' and 'v2' to different values
+        v1.Set(2);
+        v2.Set(3);
+
+        // Confirm that 'm1' and 'm2' remain equal despite different signal values
+        Assert.NotEqual(m1.Get(), m2.Get());
     }
 }

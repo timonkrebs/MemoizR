@@ -40,6 +40,27 @@ public class MemoFactory
         }
     }
 
+    public static void CleanUpContexts()
+    {
+        lock (CONTEXTS)
+        {
+            var keysToRemove = new List<string>();
+
+            foreach (var kvp in CONTEXTS)
+            {
+                if (!kvp.Value.TryGetTarget(out _))
+                {
+                    keysToRemove.Add(kvp.Key);
+                }
+            }
+
+            foreach (var key in keysToRemove)
+            {
+                CONTEXTS.Remove(key);
+            }
+        }
+    }
+
     public MemoizR<T> CreateMemoizR<T>(Func<T> fn, string label = "Label", Func<T?, T?, bool>? equals = null)
     {
         return new MemoizR<T>(fn, context, label, equals);

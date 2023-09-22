@@ -199,12 +199,28 @@ public sealed class ReactionReducR<T> : MemoHandlR<T>, IMemoizR
     {
         if (state <= State)
         {
-            Update();
+            context.contextLock.EnterWriteLock();
+            try
+            {
+                Update();
+            }
+            finally
+            {
+                context.contextLock.ExitWriteLock();
+            }
             return;
         }
 
         State = state;
-        Update();
+        context.contextLock.EnterWriteLock();
+        try
+        {
+            Update();
+        }
+        finally
+        {
+            context.contextLock.ExitWriteLock();
+        }
 
         for (int i = 0; i < Observers.Length; i++)
         {
