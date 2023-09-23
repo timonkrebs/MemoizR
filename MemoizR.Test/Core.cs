@@ -339,6 +339,8 @@ public class Core
 
         // Create multiple threads to access 'm1' concurrently
         var tasks = new List<Task<int>>();
+
+        v1.Set(2);
         for (var i = 0; i < 100; i++)
         {
             tasks.Add(Task.Run(() => m1.Get()));
@@ -348,6 +350,41 @@ public class Core
         await Task.WhenAll(tasks);
 
         // Check if 'm1' was evaluated only once (thread-safe)
+        Assert.Equal(1, invocationCount);
+    }
+
+    [Fact]
+    public async Task TestRelativeThreadSafety()
+    {
+        // Create a MemoFactory instance
+        var f = new MemoFactory();
+
+        // Create a signal 'v1' with an initial value of 1
+        var v1 = f.CreateEagerRelativeSignal(1);
+
+        var invocationCount = 0;
+        // Create a memoized computation 'm1' that depends on 'v1'
+        var m1 = f.CreateMemoizR(() =>
+        {
+            invocationCount++;
+            return v1.Get() * 2;
+        });
+
+        // Create multiple threads to set 'v1' concurrently
+        var tasks = new List<Task>();
+        for (var i = 0; i < 10000; i++)
+        {
+            tasks.Add(Task.Run(() => v1.Set(x => x + 2)));
+        }
+
+        // Wait for all tasks to complete
+        await Task.WhenAll(tasks);
+
+        // Check if 'm1' was not evaluated
+        Assert.Equal(0, invocationCount);
+
+        Assert.Equal(40002, m1.Get());
+
         Assert.Equal(1, invocationCount);
     }
 
