@@ -14,7 +14,7 @@ MemoizR is a powerful concurrency model implementation designed to simplify and 
 
 ## Dynamic Lazy Memoization
 
-With MemoizR, you can create a dependency graph that performs dynamic lazy memoization. This means that values are calculated only when needed and only if they haven't been calculated before (memoization). This feature ensures efficient resource utilization and reduces unnecessary calculations.
+With MemoizR, you can create a dependency graph that performs dynamic lazy memoization. This means that values are calculated only when needed and only if they haven't been calculated before (memoization). It also ensures efficient resource utilization and reduces unnecessary calculations (lazy). This implementation draws inspiration from the concepts found in reactively (https://github.com/modderme123/reactively)
 
 ## Inspiration and Benefits
 

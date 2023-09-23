@@ -7,13 +7,14 @@
 MemoizR is a powerful concurrency model implementation for .NET that simplifies and enhances state synchronization across multiple threads. It provides a safe and efficient way to manage concurrency, making it suitable for both simple and complex multi-threaded scenarios.
 
 ## Key Features
-- **Dynamic Lazy Memoization**: MemoizR introduces the concept of dynamic lazy memoization, allowing you to calculate values only when they are needed and not already calculated.
+- **Dynamic Lazy Memoization**: MemoizR introduces the concept of dynamic lazy memoization, allowing you to calculate values only when they are needed and not already calculated. 
 - **Dependency Graph**: It enables you to build a dependency graph of your data, ensuring that only necessary computations are performed.
 - **Automatic Synchronization**: MemoizR handles synchronization, making it easy to work with hard-to-concurrently-synchronize state.
 - **Performance Optimization**: Depending on your use case, MemoizR can optimize performance for scenarios with more reads than writes (thanks to memoization) or more writes than reads (using lazy evaluation).
 
 ## Inspiration
-- MemoizR draws inspiration from various sources, including the concept of dynamic lazy memoization, VHDL for synchronization, ReactiveX (https://reactivex.io/) and many more.
+- This implementation draws inspiration from the concepts found in reactively (https://github.com/modderme123/reactively), primarily the concept of dynamic lazy memoization.
+- Also from various other sources, VHDL for synchronization, ReactiveX (https://reactivex.io/) and many more.
 - Special thanks to @mfp22 for the idea of signal operators, which got me started with this library.
 
 ## Getting Started
