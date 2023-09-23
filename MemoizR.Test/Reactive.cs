@@ -55,14 +55,17 @@ public class Reactive
         // Create a memoized computation 'm1' that depends on 'v1'
         var m1 = f.CreateMemoizR(() => v1.Get() * 2);
 
+
+        var result = 0;
         var r1 = f.CreateReaction(() =>
         {
             invocationCount++;
+            result = m1.Get();
             return m1.Get();
         });
 
         var tasks = new List<Task>();
-        for (var i = 0; i < 10; i++)
+        for (var i = 0; i < 100; i++)
         {
             tasks.Add(Task.Run(() => v1.Set(i)));
         }
@@ -83,10 +86,12 @@ public class Reactive
 
         Assert.Equal(40, resultM1);
         Assert.Equal(40, m1.Get());
+        Assert.Equal(40, result);
+        Assert.Equal(m1.Get(), result);
 
         // Check if 'r1' was evaluated three times (thread-safe)
         // This is not completely reliable because if all the set are evaluated the gets trigger again because how the readwrite lock works
-        Assert.InRange(invocationCount, 3, 30);
+        Assert.InRange(invocationCount, 3, 3);
     }
 
     [Fact]

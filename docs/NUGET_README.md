@@ -60,4 +60,4 @@ var m3 = f.CreateMemoizR(() => v1.Get() ? m1.Get() : m2.Get());
 
 ## Get Started with MemoizR
 
-Start using MemoizR to simplify and optimize concurrency management in your .NET applications. Enjoy a cleaner, safer, and more efficient approach to handling concurrency challenges.
+Start using MemoizR to simplify and optimize concurrency management in your .NET applications. Enjoy a cleaner, and more efficient approach to handling concurrency challenges.

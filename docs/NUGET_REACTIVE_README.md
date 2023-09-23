@@ -2,7 +2,9 @@
 
 This package extends the functionality provided by the foundational MemoizR package.
 
-It closely mirrors the behavior of signals in solid.js, while also incorporating essential thread-safety features. This implementation draws inspiration from the concepts found in reactively (https://github.com/modderme123/reactively).
+It closely resembles the behavior of signals in solid.js, while also incorporating essential thread-safety features. This implementation draws inspiration from the concepts found in reactively (https://github.com/modderme123/reactively).
+
+Unlike RxJS, there's no need to handle subscriptions manually.
 
 ## Reactivity
 You can use MemoizR.Reactive to create reactive data flows easily:
