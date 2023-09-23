@@ -1,17 +1,23 @@
-namespace MemoizR;
+namespace MemoizR.Reactive;
 
-public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR
+public sealed class ReactionReducR<T> : MemoHandlR<T>, IMemoizR
 {
     private CacheState State { get; set; } = CacheState.CacheClean;
-    private Func<T?> fn;
+    private Func<T?, T> fn;
 
     CacheState IMemoizR.State { get => State; set => State = value; }
 
-    internal MemoizR(Func<T> fn, Context context, string label = "Label", Func<T?, T?, bool>? equals = null) : base(context, equals)
+    internal ReactionReducR(Func<T?, T> fn, Context context, string label = "Label", Func<T?, T?, bool>? equals = null) : base(context, equals)
     {
         this.fn = fn;
         this.State = CacheState.CacheDirty;
         this.label = label;
+
+        // The reaction must be initialized to build the sources
+        lock (context)
+        {
+            Update();
+        }
     }
 
     public T? Get()
@@ -19,13 +25,8 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR
         // The naming of the lock could be confusing because Set must be locked by WriteLock.
         // Only one thread should evaluate the graph at a time. otherwise the context could get messed up.
         // This should lead to perf gains because memoization can be utilized more efficiently.
-        lock(context)
+        lock (context)
         {
-            if (State == CacheState.CacheClean && context.CurrentReaction == null)
-            {
-                return value;
-            }
-
             // if someone else did read the graph while this thread was blocekd it could be that this is already Clean
             if (State == CacheState.CacheClean && context.CurrentReaction == null)
             {
@@ -106,12 +107,12 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR
 
         try
         {
-            value = fn();
+            value = fn(value);
 
             // if the sources have changed, update source & observer links
             if (context.CurrentGets.Length > 0)
             {
-                // remove all old Sources' .observers links to us
+                // remove all old sources' .observers links to us
                 RemoveParentObservers(context.CurrentGetsIndex);
                 // update source up links
                 if (Sources.Any() && context.CurrentGetsIndex > 0)
@@ -162,7 +163,7 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR
             }
         }
 
-        // We've rerun with the latest values from all of our Sources.
+        // We've rerun with the latest values from all of our sources.
         // This means that we no longer need to update until a signal changes
         State = CacheState.CacheClean;
     }
@@ -186,16 +187,22 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR
 
     internal void Stale(CacheState state)
     {
-        if (state <= State)
+        lock (context)
         {
-            return;
-        }
+            if (state <= State)
+            {
+                Update();
+                return;
+            }
 
-        State = state;
+            State = state;
 
-        for (int i = 0; i < Observers.Length; i++)
-        {
-            Observers[i].Stale(CacheState.CacheCheck);
+            Update();
+
+            for (int i = 0; i < Observers.Length; i++)
+            {
+                Observers[i].Stale(CacheState.CacheCheck);
+            }
         }
     }
 
