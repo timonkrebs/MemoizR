@@ -1,12 +1,12 @@
-# MemoizR
+![Logo](docs/MemoizR.png)
 
 ![CI](https://github.com/timonkrebs/MemoizR/workflows/.NET/badge.svg)
 [![NuGet](https://img.shields.io/nuget/dt/memoizr.svg)](https://www.nuget.org/packages/memoizr) 
 [![NuGet](https://img.shields.io/nuget/vpre/memoizr.svg)](https://www.nuget.org/packages/memoizr)
 
-> "The world is still short on languages that deal super elegantly and inherently and intuitively with concurrency" Mads Torgersen (https://www.youtube.com/watch?v=Nuw3afaXLUc&t=4402s)
+> "The world is still short on languages that deal super elegantly and inherently and intuitively with concurrency" **Mads Torgersen** Lead Designer of C# (https://www.youtube.com/watch?v=Nuw3afaXLUc&t=4402s)
 
-MemoizR is a powerful concurrency model implementation for .NET that simplifies and enhances state synchronization across multiple threads. It provides a thread-safe and efficient way to manage concurrency, making it suitable for both simple and complex multi-threaded scenarios.
+MemoizR is a powerful Structured Concurrency model implementation for .NET that simplifies and enhances state synchronization across multiple threads. It provides a thread-safe and efficient way to manage concurrency, making it suitable for both simple and complex multi-threaded scenarios.
 
 ## Key Features
 - **Dynamic Lazy Memoization**: MemoizR introduces the concept of dynamic lazy memoization, allowing you to calculate values only when they are needed and not already calculated. 
@@ -16,7 +16,7 @@ MemoizR is a powerful concurrency model implementation for .NET that simplifies 
 
 ## Inspiration
 - This implementation draws inspiration from the concepts found in reactively (https://github.com/modderme123/reactively), primarily the concept of dynamic lazy memoization.
-- Also from various other sources, VHDL for synchronization, ReactiveX (https://reactivex.io/), structured concurrency (https://github.com/apple/swift-evolution/blob/main/proposals/0304-structured-concurrency.md) and many more.
+- Also from various other sources, VHDL for synchronization, ReactiveX (https://reactivex.io/), structured concurrency (https://github.com/StephenCleary/StructuredConcurrency) and many more.
 - Special thanks to @mfp22 for the idea of signal operators, which got me started with this library.
 
 ## Getting Started

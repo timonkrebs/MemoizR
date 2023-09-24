@@ -1,8 +1,8 @@
-# MemoizR: Simplifying Concurrency in .NET
+# MemoizR: Simplifying Structured Concurrency in .NET
 
-> "The world is still short on languages that deal super elegantly and inherently and intuitively with concurrency" Mads Torgersen (https://www.youtube.com/watch?v=Nuw3afaXLUc&t=4402s)
+> "The world is still short on languages that deal super elegantly and inherently and intuitively with concurrency" **Mads Torgersen** Lead Designer of C# (https://www.youtube.com/watch?v=Nuw3afaXLUc&t=4402s)
 
-MemoizR is a powerful concurrency model implementation designed to simplify and enhance state synchronization across multiple threads in .NET applications. It offers a performant and thread-safe approach to managing concurrency challenges, making it an excellent choice for various scenarios.
+MemoizR is a powerful Structured Concurrency model implementation designed to simplify and enhance state synchronization across multiple threads in .NET applications. It offers a performant and thread-safe approach to managing concurrency challenges, making it an excellent choice for various scenarios.
 
 ## Key Advantages
 
@@ -23,7 +23,7 @@ With MemoizR, you can create a dependency graph that performs dynamic lazy memoi
 MemoizR draws inspiration from various sources:
 
 - **Dynamic Lazy Memoization**:  (https://github.com/modderme123/reactively)
-- **Structured Concurrency**: (https://github.com/apple/swift-evolution/blob/main/proposals/0304-structured-concurrency.md)
+- **Structured Concurrency**: (https://github.com/StephenCleary/StructuredConcurrency)
 
 ##  Benefits
 Here are some key benefits of using MemoizR:
