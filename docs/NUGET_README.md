@@ -1,10 +1,12 @@
 # MemoizR: Simplifying Concurrency in .NET
 
+> "The world is still short on languages that deal super elegantly and inherently and intuitively with concurrency" Mads Torgersen (https://www.youtube.com/watch?v=Nuw3afaXLUc&t=4402s)
+
 MemoizR is a powerful concurrency model implementation designed to simplify and enhance state synchronization across multiple threads in .NET applications. It offers a performant and thread-safe approach to managing concurrency challenges, making it an excellent choice for various scenarios.
 
 ## Key Advantages
 
-- **Simplicity and Intuitiveness**: MemoizR aims to provide a straightforward and intuitive way to handle concurrency, avoiding the complexities often associated with async/await patterns in C#. It offers a more natural approach to managing asynchronous tasks and multithreading.
+- **Simplicity and Intuitiveness**: MemoizR aims to provide a straightforward and intuitive way to handle concurrency, avoiding the complexities often associated with async/await patterns (e.g. async void, .Wait, not awaiting everything and even .ConfigureAwait) in C#. It offers a more natural approach to managing asynchronous tasks and multithreading.
 
 - **Scalability**: This concurrency model has the potential for expansion into distributed setups, similar to the actor model. It can help you build scalable and distributed systems with ease.
 
@@ -16,9 +18,15 @@ MemoizR is a powerful concurrency model implementation designed to simplify and 
 
 With MemoizR, you can create a dependency graph that performs dynamic lazy memoization. This means that values are calculated only when needed and only if they haven't been calculated before (memoization). It also ensures efficient resource utilization and reduces unnecessary calculations (lazy). This implementation draws inspiration from the concepts found in reactively (https://github.com/modderme123/reactively)
 
-## Inspiration and Benefits
+## Inspiration
 
-MemoizR draws inspiration from various sources, including the concept of dynamic lazy memoization, VHDL for synchronization, and ReactiveX. Here are some key benefits of using MemoizR:
+MemoizR draws inspiration from various sources:
+
+- **Dynamic Lazy Memoization**:  (https://github.com/modderme123/reactively)
+- **Structured Concurrency**: (https://github.com/apple/swift-evolution/blob/main/proposals/0304-structured-concurrency.md)
+
+##  Benefits
+Here are some key benefits of using MemoizR:
 
 - **Dependency Tracking**: MemoizR automatically tracks dependencies between functions and methods, eliminating the need for manual source listing. This ensures that calculations are triggered only when necessary.
 
