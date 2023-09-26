@@ -1,4 +1,13 @@
-![Logo](docs/MemoizR.png)
+<h1 align="center">MemoizR</h1>
+
+<p align="center">
+  <img src="docs/MemoizR.png" alt="MemoizR-logo" width="120px" height="120px"/>
+  <br>
+  <em>MemoizR is a powerful Declarative Structured Concurrency</em>
+  <br>
+</p>
+
+
 
 ![CI](https://github.com/timonkrebs/MemoizR/workflows/.NET/badge.svg)
 [![NuGet](https://img.shields.io/nuget/dt/memoizr.svg)](https://www.nuget.org/packages/memoizr) 
