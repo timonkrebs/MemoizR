@@ -28,7 +28,7 @@ public class Reactive
         var m1 = f.CreateReaction(() =>
         {
             invocations++;
-            return v1.Get();
+            v1.Get();
         });
 
         Assert.Equal(1, invocations);
@@ -61,7 +61,6 @@ public class Reactive
         {
             invocationCount++;
             result = m1.Get();
-            return m1.Get();
         });
 
         var tasks = new List<Task>();
@@ -110,7 +109,7 @@ public class Reactive
         var r1 = f.CreateReaction(() =>
         {
             invocationCount++;
-            return m1.Get();
+            m1.Get();
         });
 
         var tasks = new List<Task>();

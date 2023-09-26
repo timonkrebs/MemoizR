@@ -1,13 +1,13 @@
 ﻿namespace MemoizR.Reactive;
 
-public sealed class Reaction<T> : MemoHandlR<T>, IMemoizR
+public sealed class Reaction : SignalHandlR, IMemoizR
 {
     private CacheState State { get; set; } = CacheState.CacheClean;
-    private Func<T?> fn;
+    private Action fn;
 
     CacheState IMemoizR.State { get => State; set => State = value; }
 
-    internal Reaction(Func<T> fn, Context context, string label = "Label", Func<T?, T?, bool>? equals = null) : base(context, equals)
+    internal Reaction(Action fn, Context context, string label = "Label") : base(context)
     {
         this.fn = fn;
         this.State = CacheState.CacheDirty;
@@ -62,8 +62,6 @@ public sealed class Reaction<T> : MemoHandlR<T>, IMemoizR
     /** run the computation fn, updating the cached value */
     private void Update()
     {
-        var oldValue = value;
-
         /* Evalute the reactive function body, dynamically capturing any other reactives used */
         var prevReaction = context.CurrentReaction;
         var prevGets = context.CurrentGets;
