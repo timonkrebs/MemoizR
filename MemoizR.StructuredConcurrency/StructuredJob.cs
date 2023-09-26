@@ -71,7 +71,7 @@ public sealed class StructuredJob<T>
     }
 }
 
-public sealed class ConcurrentMemoizR<T> : SignalHandlR, IMemoizR
+public sealed class ConcurrentMapReduce<T> : SignalHandlR, IMemoizR
 {
     private CacheState State { get; set; } = CacheState.CacheClean;
     private IEnumerable<Func<T>> fns;
@@ -80,7 +80,7 @@ public sealed class ConcurrentMemoizR<T> : SignalHandlR, IMemoizR
 
     CacheState IMemoizR.State { get => State; set => State = value; }
 
-    internal ConcurrentMemoizR(ReadOnlyCollection<Func<T>> fns, Context context, string label = "Label", Func<T, T, T>? reduce = null) : base(context)
+    internal ConcurrentMapReduce(ReadOnlyCollection<Func<T>> fns, Context context, string label = "Label", Func<T, T, T>? reduce = null) : base(context)
     {
         this.fns = fns;
         this.reduce = reduce;
