@@ -16,16 +16,16 @@ public sealed class EagerRelativeSignal<T> : MemoHandlR<T>
         context.contextLock.EnterUpgradeableReadLock();
         try
         {
-            for (int i = 0; i < Observers.Length; i++)
-            {
-                var observer = Observers[i];
-                observer.Stale(CacheState.CacheDirty);
-            }
-
             // only updating the value should be locked
             lock (this)
             {
                 value = fn(value);
+            }
+
+            for (int i = 0; i < Observers.Length; i++)
+            {
+                var observer = Observers[i];
+                observer.Stale(CacheState.CacheDirty);
             }
         }
         finally
