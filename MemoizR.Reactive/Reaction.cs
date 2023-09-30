@@ -3,34 +3,29 @@
 public sealed class Reaction : SignalHandlR, IMemoizR
 {
     private CacheState State { get; set; } = CacheState.CacheClean;
-    private Action fn;
+    private Func<Task> fn;
 
     CacheState IMemoizR.State { get => State; set => State = value; }
 
-    internal Reaction(Action fn, Context context, string label = "Label") : base(context)
+    internal Reaction(Func<Task> fn, Context context, string label = "Label") : base(context)
     {
         this.fn = fn;
         this.State = CacheState.CacheDirty;
         this.label = label;
 
         // The reaction must be initialized to build the Sources
-        context.contextLock.EnterWriteLock();
-        try
+        using(context.contextLock.WriterLock(-1))
         {
-            Update();
-        }
-        finally
-        {
-            context.contextLock.ExitWriteLock();
+            Update().Wait();
         }
     }
 
     /** update() if dirty, or a parent turns out to be dirty. */
-    internal void UpdateIfNecessary()
+    internal Task UpdateIfNecessary()
     {
         if (State == CacheState.CacheClean)
         {
-            return;
+            return Task.CompletedTask;
         }
 
         // If we are potentially dirty, see if we have a parent who has actually changed value
@@ -52,15 +47,16 @@ public sealed class Reaction : SignalHandlR, IMemoizR
         // If we were already dirty or marked dirty by the step above, update.
         if (State == CacheState.CacheDirty)
         {
-            Update();
+            return Update();
         }
 
         // By now, we're clean
         State = CacheState.CacheClean;
+        return Task.CompletedTask;
     }
 
     /** run the computation fn, updating the cached value */
-    private void Update()
+    private async Task Update()
     {
         /* Evalute the reactive function body, dynamically capturing any other reactives used */
         var prevReaction = context.CurrentReaction;
@@ -73,7 +69,7 @@ public sealed class Reaction : SignalHandlR, IMemoizR
 
         try
         {
-            fn();
+            await fn();
 
             // if the Sources have changed, update source & observer links
             if (context.CurrentGets.Length > 0)
@@ -119,28 +115,23 @@ public sealed class Reaction : SignalHandlR, IMemoizR
         State = CacheState.CacheClean;
     }
 
-    void IMemoizR.UpdateIfNecessary()
+    Task IMemoizR.UpdateIfNecessary()
     {
-        UpdateIfNecessary();
+        return UpdateIfNecessary();
     }
 
-    internal void Stale(CacheState state)
+    internal async Task Stale(CacheState state)
     {
-        context.contextLock.EnterWriteLock();
-        try
+        using( await context.contextLock.WriterLockAsync(context.reactionIndex))
         {
             State = state;
-            UpdateIfNecessary();
-        }
-        finally
-        {
-            context.contextLock.ExitWriteLock();
+            await UpdateIfNecessary();
         }
         return;
     }
 
-    void IMemoizR.Stale(CacheState state)
+    Task IMemoizR.Stale(CacheState state)
     {
-        Stale(state);
+        return Stale(state);
     }
 }

@@ -1,4 +1,5 @@
 ﻿using System.Collections.ObjectModel;
+using MemoizR.AsyncLock;
 
 namespace MemoizR.StructuredConcurrency;
 
@@ -34,7 +35,7 @@ public sealed class StructuredJob<T>
         }
     }
 
-    public T Run()
+    public Task<T> Run()
     {
         try
         {
@@ -48,7 +49,7 @@ public sealed class StructuredJob<T>
         }
     }
 
-    private T WaitAll()
+    private async Task<T> WaitAll()
     {
         if (!this.tasks.Any()) return aggregate;
         List<Task> tasks;
@@ -60,7 +61,7 @@ public sealed class StructuredJob<T>
 
         try
         {
-            Task.WaitAll(tasks.ToArray());
+            await Task.WhenAll(tasks.ToArray());
             return aggregate;
         }
         catch
@@ -88,18 +89,22 @@ public sealed class ConcurrentMapReduce<T> : SignalHandlR, IMemoizR
         this.label = label;
     }
 
-    public T? Get()
+    public async Task<T?> Get()
     {
         if (State == CacheState.CacheClean && context.CurrentReaction == null)
         {
             return value;
         }
 
+        if (context.CurrentReaction == null)
+        {
+            context.reactionIndex++;
+        }
+
         // The naming of the lock could be confusing because Set must be locked by WriteLock.
         // Only one thread should evaluate the graph at a time. otherwise the context could get messed up.
         // This should lead to perf gains because memoization can be utilized more efficiently.
-        context.contextLock.EnterWriteLock();
-        try
+        using (await context.contextLock.WriterLockAsync(context.reactionIndex))
         {
             // if someone else did read the graph while this thread was blocekd it could be that this is already Clean
             if (State == CacheState.CacheClean && context.CurrentReaction == null)
@@ -127,20 +132,16 @@ public sealed class ConcurrentMapReduce<T> : SignalHandlR, IMemoizR
 
             UpdateIfNecessary();
         }
-        finally
-        {
-            context.contextLock.ExitWriteLock();
-        }
 
         return value;
     }
 
     /** update() if dirty, or a parent turns out to be dirty. */
-    internal void UpdateIfNecessary()
+    internal Task UpdateIfNecessary()
     {
         if (State == CacheState.CacheClean)
         {
-            return;
+            return Task.CompletedTask;
         }
 
         // If we are potentially dirty, see if we have a parent who has actually changed value
@@ -162,15 +163,16 @@ public sealed class ConcurrentMapReduce<T> : SignalHandlR, IMemoizR
         // If we were already dirty or marked dirty by the step above, update.
         if (State == CacheState.CacheDirty)
         {
-            Update();
+            return Update();
         }
 
         // By now, we're clean
         State = CacheState.CacheClean;
+        return Task.CompletedTask;
     }
 
     /** run the computation fn, updating the cached value */
-    private void Update()
+    private async Task Update()
     {
         var oldValue = value;
 
@@ -185,7 +187,7 @@ public sealed class ConcurrentMapReduce<T> : SignalHandlR, IMemoizR
 
         try
         {
-            value = new StructuredJob<T>(fns, reduce).Run();
+            value = await new StructuredJob<T>(fns, reduce).Run();
 
             // if the sources have changed, update source & observer links
             if (context.CurrentGets.Length > 0)
@@ -258,16 +260,16 @@ public sealed class ConcurrentMapReduce<T> : SignalHandlR, IMemoizR
         }
     }
 
-    void IMemoizR.UpdateIfNecessary()
+    Task IMemoizR.UpdateIfNecessary()
     {
-        UpdateIfNecessary();
+        return UpdateIfNecessary();
     }
 
-    internal void Stale(CacheState state)
+    internal Task Stale(CacheState state)
     {
         if (state <= State)
         {
-            return;
+            return Task.CompletedTask;
         }
 
         State = state;
@@ -276,10 +278,11 @@ public sealed class ConcurrentMapReduce<T> : SignalHandlR, IMemoizR
         {
             Observers[i].Stale(CacheState.CacheCheck);
         }
+        return Task.CompletedTask;
     }
 
-    void IMemoizR.Stale(CacheState state)
+    Task IMemoizR.Stale(CacheState state)
     {
-        Stale(state);
+        return Stale(state);
     }
 }

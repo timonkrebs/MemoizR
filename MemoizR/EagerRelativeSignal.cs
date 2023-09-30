@@ -8,13 +8,12 @@ public sealed class EagerRelativeSignal<T> : MemoHandlR<T>
         this.label = label;
     }
 
-    public void Set(Func<T?, T> fn)
+    public async Task Set(Func<T?, T> fn)
     {
         // The naming of the lock could be confusing because Set must be locked by ReadLock.
         // There can be multiple threads updating the CacheState at the same time but no reads should be possible while in the process.
         // Must be Upgradeable because it could change to "Writeble-Lock" if something synchronously reactive is listening.
-        context.contextLock.EnterUpgradeableReadLock();
-        try
+        using(await context.contextLock.ReaderLockAsync())
         {
             // only updating the value should be locked
             lock (this)
@@ -28,13 +27,9 @@ public sealed class EagerRelativeSignal<T> : MemoHandlR<T>
                 observer.Stale(CacheState.CacheDirty);
             }
         }
-        finally
-        {
-            context.contextLock.ExitUpgradeableReadLock();
-        }
     }
 
-    public T? Get()
+    public async Task<T?> Get()
     {
         if (context.CurrentReaction == null)
         {
@@ -44,8 +39,7 @@ public sealed class EagerRelativeSignal<T> : MemoHandlR<T>
         // The naming of the lock could be confusing because Set must be locked by WriteLock.
         // Only one thread should evaluate the graph at a time. otherwise the context could get messed up.
         // This should lead to perf gains because memoization can be utilized more efficiently.
-        context.contextLock.EnterWriteLock();
-        try
+        using( await context.contextLock.WriterLockAsync(context.reactionIndex))
         {
             var hasCurrentGets = context.CurrentGets == null || context.CurrentGets.Length == 0;
             var currentSourceEqualsThis = context.CurrentReaction?.Sources?.Length > 0
@@ -61,10 +55,6 @@ public sealed class EagerRelativeSignal<T> : MemoHandlR<T>
                 if (!context.CurrentGets!.Any()) context.CurrentGets = new[] { this };
                 else context.CurrentGets = context.CurrentGets!.Union(new[] { this }).ToArray();
             }
-        }
-        finally
-        {
-            context.contextLock.ExitWriteLock();
         }
 
         return value;

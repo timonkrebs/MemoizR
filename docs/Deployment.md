@@ -1,1 +1,4 @@
 MemoizR> dotnet pack --configuration Release /p:ContinuousIntegrationBuild=true -p:PackageVersion=0.0.4-rc1
+
+(...\w*Get)
+await $1

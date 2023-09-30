@@ -217,7 +217,7 @@ public class AsyncPriorityLock
     {
         lock (this)
         {
-            _locksHeld = 0;
+            _locksHeld++;
             ReleaseWaiters();
         }
     }

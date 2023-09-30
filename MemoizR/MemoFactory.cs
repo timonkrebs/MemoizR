@@ -61,7 +61,7 @@ public class MemoFactory
         }
     }
 
-    public MemoizR<T> CreateMemoizR<T>(Func<T> fn, string label = "Label", Func<T?, T?, bool>? equals = null)
+    public MemoizR<T> CreateMemoizR<T>(Func<Task<T>> fn, string label = "Label", Func<T?, T?, bool>? equals = null)
     {
         return new MemoizR<T>(fn, context, label, equals);
     }

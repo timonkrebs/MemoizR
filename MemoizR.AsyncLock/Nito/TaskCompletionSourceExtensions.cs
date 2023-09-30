@@ -21,7 +21,7 @@ public static class TaskCompletionSourceExtensions
             throw new ArgumentNullException(nameof(task));
 
         if (task.IsFaulted)
-            return @this.TrySetException(task.Exception.InnerExceptions);
+            return @this.TrySetException(task.Exception!.InnerExceptions);
         if (task.IsCanceled)
         {
             try
@@ -55,7 +55,7 @@ public static class TaskCompletionSourceExtensions
             throw new ArgumentNullException(nameof(resultFunc));
 
         if (task.IsFaulted)
-            return @this.TrySetException(task.Exception.InnerExceptions);
+            return @this.TrySetException(task.Exception!.InnerExceptions);
         if (task.IsCanceled)
         {
             try

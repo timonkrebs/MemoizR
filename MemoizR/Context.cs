@@ -1,8 +1,10 @@
+using MemoizR.AsyncLock;
+
 namespace MemoizR;
 
 public class Context
 {
-    internal ReaderWriterLockSlim contextLock = new ReaderWriterLockSlim(LockRecursionPolicy.SupportsRecursion);
+    internal AsyncPriorityLock contextLock = new AsyncPriorityLock();
     internal int reactionIndex = 0;
 
     /** current capture context for identifying sources (other memoizR elements)
