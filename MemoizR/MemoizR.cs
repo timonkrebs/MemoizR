@@ -69,7 +69,11 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR
         {
             foreach (var source in Sources)
             {
-                await (source as IMemoizR)!.UpdateIfNecessary(); // updateIfNecessary() can change state
+                if (source is IMemoizR memoizR)
+                {
+                    await memoizR.UpdateIfNecessary(); // updateIfNecessary() can change state
+                }
+
                 if (State == CacheState.CacheDirty)
                 {
                     // Stop the loop here so we won't trigger updates on other parents unnecessarily
