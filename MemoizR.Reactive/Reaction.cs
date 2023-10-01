@@ -4,6 +4,7 @@ public sealed class Reaction : SignalHandlR, IMemoizR
 {
     private CacheState State { get; set; } = CacheState.CacheClean;
     private Func<Task> fn;
+    private Random rand = new();
 
     CacheState IMemoizR.State { get => State; set => State = value; }
 
@@ -14,10 +15,7 @@ public sealed class Reaction : SignalHandlR, IMemoizR
         this.label = label;
 
         // The reaction must be initialized to build the Sources
-        using(context.contextLock.WriterLock(-1))
-        {
-            Update().Wait();
-        }
+        Update().Wait();
     }
 
     /** update() if dirty, or a parent turns out to be dirty. */
@@ -120,14 +118,32 @@ public sealed class Reaction : SignalHandlR, IMemoizR
         return UpdateIfNecessary();
     }
 
-    internal async Task Stale(CacheState state)
+    internal Task Stale(CacheState state)
     {
-        using( await context.contextLock.WriterLockAsync(context.reactionIndex))
+        int lockScope = context.asyncLocalScope.Value;
+
+        lock (this)
         {
             State = state;
-            await UpdateIfNecessary();
         }
-        return;
+
+        Task.Run(async () =>
+        {
+            if (context.CurrentReaction == null)
+            {
+                lock (context)
+                {
+                    lockScope = rand.Next();
+                    context.asyncLocalScope.Value = lockScope;
+                }
+            }
+            using (await context.contextLock.WriterLockAsync(lockScope))
+            {
+                await UpdateIfNecessary();
+            }
+        });
+
+        return Task.CompletedTask;
     }
 
     Task IMemoizR.Stale(CacheState state)

@@ -265,20 +265,20 @@ public sealed class ConcurrentMapReduce<T> : SignalHandlR, IMemoizR
         return UpdateIfNecessary();
     }
 
-    internal Task Stale(CacheState state)
+    internal async Task Stale(CacheState state)
     {
         if (state <= State)
         {
-            return Task.CompletedTask;
+            return;
         }
 
         State = state;
 
         for (int i = 0; i < Observers.Length; i++)
         {
-            Observers[i].Stale(CacheState.CacheCheck);
+            await Observers[i].Stale(CacheState.CacheCheck);
         }
-        return Task.CompletedTask;
+        return;
     }
 
     Task IMemoizR.Stale(CacheState state)

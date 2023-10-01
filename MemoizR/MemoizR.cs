@@ -3,6 +3,7 @@ namespace MemoizR;
 public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR
 {
     private CacheState State { get; set; } = CacheState.CacheClean;
+    private Random rand = new();
     private Func<Task<T>> fn;
 
     CacheState IMemoizR.State { get => State; set => State = value; }
@@ -21,13 +22,15 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR
             return value;
         }
 
-        int lockScope = context.reactionIndex;
+        int lockScope = context.asyncLocalScope.Value;
+
+        // Current Reaction is null if it gets called manually
         if (context.CurrentReaction == null)
         {
-            lock (this)
+            lock (context)
             {
-                // Must be done with asyncLocal storage
-                lockScope = context.reactionIndex++;
+                lockScope = rand.Next();
+                context.asyncLocalScope.Value = lockScope;
             }
         }
 
@@ -195,20 +198,20 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR
         return UpdateIfNecessary();
     }
 
-    internal Task Stale(CacheState state)
+    internal async Task Stale(CacheState state)
     {
         if (state <= State)
         {
-            return Task.CompletedTask;
+            return;
         }
 
         State = state;
 
         for (int i = 0; i < Observers.Length; i++)
         {
-            Observers[i].Stale(CacheState.CacheCheck);
+            await Observers[i].Stale(CacheState.CacheCheck);
         }
-        return Task.CompletedTask;
+        return;
     }
 
     Task IMemoizR.Stale(CacheState state)

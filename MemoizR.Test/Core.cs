@@ -53,7 +53,7 @@ public class Core
         var v1 = f.CreateSignal(1);
         Assert.Equal(1, await v1.Get());
 
-        var m1 = f.CreateMemoizR(async() =>
+        var m1 = f.CreateMemoizR(async () =>
         {
             invocations++;
             return await v1.Get();
@@ -78,18 +78,18 @@ public class Core
         var v1 = f.CreateSignal(1, "v1");
         Assert.Equal(1, await v1.Get());
 
-        var m1 = f.CreateMemoizR(async() => await v1.Get(), "m1");
+        var m1 = f.CreateMemoizR(async () => await v1.Get(), "m1");
         Assert.Equal(1, await m1.Get());
         Assert.Equal(1, await m1.Get());
 
-        var m2 = f.CreateMemoizR(async() => await v1.Get() * 2, "m2");
+        var m2 = f.CreateMemoizR(async () => await v1.Get() * 2, "m2");
         Assert.Equal(2, await m2.Get());
         Assert.Equal(2, await m2.Get());
 
-        var m3 = f.CreateMemoizR(async() => await m1.Get() + await m2.Get(), "m3");
+        var m3 = f.CreateMemoizR(async () => await m1.Get() + await m2.Get(), "m3");
 
         await v1.Set(2);
-
+        
         Assert.Equal(6, await m3.Get());
         Assert.Equal(6, await m3.Get());
         Assert.Equal(2, await v1.Get());
@@ -107,19 +107,19 @@ public class Core
         var f = new MemoFactory();
         var v1 = f.CreateSignal(1, "v1");
         var invocationsM1 = 0;
-        var m1 = f.CreateMemoizR(async() =>
+        var m1 = f.CreateMemoizR(async () =>
         {
             invocationsM1++;
             return await v1.Get();
         }, "m1");
         var invocationsM2 = 0;
-        var m2 = f.CreateMemoizR(async() =>
+        var m2 = f.CreateMemoizR(async () =>
         {
             invocationsM2++;
             return await v1.Get() * 2;
         }, "m2");
         var invocationsM3 = 0;
-        var m3 = f.CreateMemoizR(async() =>
+        var m3 = f.CreateMemoizR(async () =>
         {
             invocationsM3++;
             return await m1.Get() + await m2.Get();
@@ -161,19 +161,19 @@ public class Core
         var v1 = f.CreateSignal(1, "v1");
         var v2 = f.CreateSignal(1, "v2");
         var invocationsM1 = 0;
-        var m1 = f.CreateMemoizR(async() =>
+        var m1 = f.CreateMemoizR(async () =>
         {
             invocationsM1++;
             return await v1.Get();
         }, "m1");
         var invocationsM2 = 0;
-        var m2 = f.CreateMemoizR(async() =>
+        var m2 = f.CreateMemoizR(async () =>
         {
             invocationsM2++;
             return await v2.Get() * 2;
         }, "m2");
         var invocationsM3 = 0;
-        var m3 = f.CreateMemoizR(async() =>
+        var m3 = f.CreateMemoizR(async () =>
         {
             invocationsM3++;
             return await m1.Get() + await m2.Get();
@@ -217,7 +217,7 @@ public class Core
 
         await v1.Set(2);
 
-        var m1 = f.CreateMemoizR(async() => await v1.Get() * 2);
+        var m1 = f.CreateMemoizR(async () => await v1.Get() * 2);
 
         var t1 = Task.Run(async () =>
         {
@@ -247,9 +247,9 @@ public class Core
         var f = new MemoFactory();
         var v1 = f.CreateEagerRelativeSignal(1);
 
-        var m1 = f.CreateMemoizR(async() => await v1.Get() * 2);
+        var m1 = f.CreateMemoizR(async () => await v1.Get() * 2);
 
-        var t1 = Task.Run(async() =>
+        var t1 = Task.Run(async () =>
         {
             for (int i = 0; i < 1000; i++)
             {
@@ -257,7 +257,7 @@ public class Core
             }
         });
 
-        var t2 = Task.Run(async() =>
+        var t2 = Task.Run(async () =>
         {
             for (int i = 0; i < 1000; i++)
             {
@@ -281,7 +281,7 @@ public class Core
         var v1 = f.CreateSignal(1);
 
         // Create a memoized computation 'm1' that depends on 'v1'
-        var m1 = f.CreateMemoizR(async() => await v1.Get() * 2);
+        var m1 = f.CreateMemoizR(async () => await v1.Get() * 2);
 
         // Check the initial value of 'm1'
         Assert.Equal(2, await m1.Get());
@@ -305,7 +305,7 @@ public class Core
 
         var invocationCount = 0;
         // Create a memoized computation 'm1' that depends on 'v1'
-        var m1 = f.CreateMemoizR(async() =>
+        var m1 = f.CreateMemoizR(async () =>
         {
             invocationCount++;
             return await v1.Get() * 2;
@@ -331,7 +331,7 @@ public class Core
 
         var invocationCount = 0;
         // Create a memoized computation 'm1' that depends on 'v1'
-        var m1 = f.CreateMemoizR(async() =>
+        var m1 = f.CreateMemoizR(async () =>
         {
             invocationCount++;
             return await v1.Get() * 2;
@@ -343,7 +343,7 @@ public class Core
         await v1.Set(2);
         for (var i = 0; i < 100; i++)
         {
-            tasks.Add(Task.Run(async() => await m1.Get()));
+            tasks.Add(Task.Run(async () => await m1.Get()));
         }
 
         // Wait for all tasks to complete
@@ -364,7 +364,7 @@ public class Core
 
         var invocationCount = 0;
         // Create a memoized computation 'm1' that depends on 'v1'
-        var m1 = f.CreateMemoizR(async() =>
+        var m1 = f.CreateMemoizR(async () =>
         {
             invocationCount++;
             return await v1.Get() * 2;
@@ -374,7 +374,7 @@ public class Core
         var tasks = new List<Task>();
         for (var i = 0; i < 10000; i++)
         {
-            tasks.Add(Task.Run(async() => await v1.Set(x => x + 2)));
+            tasks.Add(Task.Run(async () => await v1.Set(x => x + 2)));
         }
 
         // Wait for all tasks to complete
@@ -399,8 +399,8 @@ public class Core
         var v2 = f.CreateSignal(1);
 
         // Create a memoized computation 'm1' for each signal
-        var m1 = f.CreateMemoizR(async() => await v1.Get() * 2);
-        var m2 = f.CreateMemoizR(async() => await v2.Get() * 2);
+        var m1 = f.CreateMemoizR(async () => await v1.Get() * 2);
+        var m2 = f.CreateMemoizR(async () => await v2.Get() * 2);
 
         // Check if 'm1' and 'm2' are equal due to the same input signals
         Assert.Equal(await m1.Get(), await m2.Get());

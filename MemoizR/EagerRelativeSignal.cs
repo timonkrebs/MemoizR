@@ -24,7 +24,7 @@ public sealed class EagerRelativeSignal<T> : MemoHandlR<T>
             for (int i = 0; i < Observers.Length; i++)
             {
                 var observer = Observers[i];
-                observer.Stale(CacheState.CacheDirty);
+                await observer.Stale(CacheState.CacheDirty);
             }
         }
     }
@@ -39,7 +39,7 @@ public sealed class EagerRelativeSignal<T> : MemoHandlR<T>
         // The naming of the lock could be confusing because Set must be locked by WriteLock.
         // Only one thread should evaluate the graph at a time. otherwise the context could get messed up.
         // This should lead to perf gains because memoization can be utilized more efficiently.
-        using( await context.contextLock.WriterLockAsync(context.reactionIndex))
+        using( await context.contextLock.WriterLockAsync(context.asyncLocalScope.Value))
         {
             var hasCurrentGets = context.CurrentGets == null || context.CurrentGets.Length == 0;
             var currentSourceEqualsThis = context.CurrentReaction?.Sources?.Length > 0
