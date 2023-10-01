@@ -78,7 +78,6 @@ public sealed class ConcurrentMapReduce<T> : SignalHandlR, IMemoizR
     private IEnumerable<Func<T>> fns;
     private readonly Func<T, T, T>? reduce;
     private T? value = default;
-    private Random rand = new();
 
     CacheState IMemoizR.State { get => State; set => State = value; }
 
@@ -97,22 +96,10 @@ public sealed class ConcurrentMapReduce<T> : SignalHandlR, IMemoizR
             return value;
         }
 
-        int lockScope = context.asyncLocalScope.Value;
-
-        // Current Reaction is null if it gets called manually
-        if (context.CurrentReaction == null)
-        {
-            lock (context)
-            {
-                lockScope = rand.Next();
-                context.asyncLocalScope.Value = lockScope;
-            }
-        }
-
         // The naming of the lock could be confusing because Set must be locked by WriteLock.
         // Only one thread should evaluate the graph at a time. otherwise the context could get messed up.
         // This should lead to perf gains because memoization can be utilized more efficiently.
-        using (await context.contextLock.WriterLockAsync(lockScope))
+        using (await context.contextLock.WriterLockAsync())
         {
             // if someone else did read the graph while this thread was blocekd it could be that this is already Clean
             if (State == CacheState.CacheClean && context.CurrentReaction == null)
@@ -138,18 +125,18 @@ public sealed class ConcurrentMapReduce<T> : SignalHandlR, IMemoizR
                 }
             }
 
-            UpdateIfNecessary();
+            await UpdateIfNecessary();
         }
 
         return value;
     }
 
     /** update() if dirty, or a parent turns out to be dirty. */
-    internal Task UpdateIfNecessary()
+    internal async Task UpdateIfNecessary()
     {
         if (State == CacheState.CacheClean)
         {
-            return Task.CompletedTask;
+            return;
         }
 
         // If we are potentially dirty, see if we have a parent who has actually changed value
@@ -157,7 +144,7 @@ public sealed class ConcurrentMapReduce<T> : SignalHandlR, IMemoizR
         {
             foreach (var source in Sources)
             {
-                (source as IMemoizR)?.UpdateIfNecessary(); // updateIfNecessary() can change state
+                await (source as IMemoizR)!.UpdateIfNecessary(); // updateIfNecessary() can change state
                 if (State == CacheState.CacheDirty)
                 {
                     // Stop the loop here so we won't trigger updates on other parents unnecessarily
@@ -171,12 +158,11 @@ public sealed class ConcurrentMapReduce<T> : SignalHandlR, IMemoizR
         // If we were already dirty or marked dirty by the step above, update.
         if (State == CacheState.CacheDirty)
         {
-            return Update();
+            await Update();
         }
 
         // By now, we're clean
         State = CacheState.CacheClean;
-        return Task.CompletedTask;
     }
 
     /** run the computation fn, updating the cached value */

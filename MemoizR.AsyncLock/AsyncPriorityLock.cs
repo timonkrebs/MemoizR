@@ -17,6 +17,9 @@ public class AsyncPriorityLock
     /// </summary>
     private int _locksHeld;
     private int lockScope;
+    private Random rand = new();
+    static AsyncLocal<int> _asyncLocalScope = new AsyncLocal<int>();
+
 
     /// <summary>
     /// Applies a continuation to the task that will call <see cref="ReleaseWaiters"/> if the task is canceled. This method may not be called while holding the sync lock.
@@ -133,8 +136,13 @@ public class AsyncPriorityLock
     /// </summary>
     /// <param name="cancellationToken">The cancellation token used to cancel the lock. If this is already set, then this method will attempt to take the lock immediately (succeeding if the lock is currently available).</param>
     /// <returns>A disposable that releases the lock when disposed.</returns>
-    public AwaitableDisposable<IDisposable> WriterLockAsync(CancellationToken cancellationToken, int lockScope)
+    public AwaitableDisposable<IDisposable> WriterLockAsync(CancellationToken cancellationToken)
     {
+        var lockScope = _asyncLocalScope.Value;
+        if(lockScope == 0){
+            lockScope = rand.Next();
+            _asyncLocalScope.Value = lockScope;
+        }
         return new AwaitableDisposable<IDisposable>(RequestWriterLockAsync(cancellationToken, lockScope));
     }
 
@@ -142,9 +150,9 @@ public class AsyncPriorityLock
     /// Asynchronously acquires the lock as a writer. Returns a disposable that releases the lock when disposed.
     /// </summary>
     /// <returns>A disposable that releases the lock when disposed.</returns>
-    public AwaitableDisposable<IDisposable> WriterLockAsync(int lockScope)
+    public AwaitableDisposable<IDisposable> WriterLockAsync()
     {
-        return WriterLockAsync(CancellationToken.None, lockScope);
+        return WriterLockAsync(CancellationToken.None);
     }
 
     /// <summary>
@@ -152,18 +160,18 @@ public class AsyncPriorityLock
     /// </summary>
     /// <param name="cancellationToken">The cancellation token used to cancel the lock. If this is already set, then this method will attempt to take the lock immediately (succeeding if the lock is currently available).</param>
     /// <returns>A disposable that releases the lock when disposed.</returns>
-    public IDisposable WriterLock(CancellationToken cancellationToken, int lockScope)
+    public IDisposable WriterLock(CancellationToken cancellationToken)
     {
-        return RequestWriterLockAsync(cancellationToken, lockScope).GetAwaiter().GetResult();
+        return RequestWriterLockAsync(cancellationToken, Thread.CurrentThread.ManagedThreadId).GetAwaiter().GetResult();
     }
 
     /// <summary>
     /// Asynchronously acquires the lock as a writer. Returns a disposable that releases the lock when disposed. This method may block the calling thread.
     /// </summary>
     /// <returns>A disposable that releases the lock when disposed.</returns>
-    public IDisposable WriterLock(int lockScope)
+    public IDisposable WriterLock()
     {
-        return WriterLock(CancellationToken.None, lockScope);
+        return WriterLock(CancellationToken.None);
     }
 
     /// <summary>

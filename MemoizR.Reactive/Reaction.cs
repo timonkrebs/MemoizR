@@ -4,7 +4,6 @@ public sealed class Reaction : SignalHandlR, IMemoizR
 {
     private CacheState State { get; set; } = CacheState.CacheClean;
     private Func<Task> fn;
-    private Random rand = new();
 
     CacheState IMemoizR.State { get => State; set => State = value; }
 
@@ -19,11 +18,11 @@ public sealed class Reaction : SignalHandlR, IMemoizR
     }
 
     /** update() if dirty, or a parent turns out to be dirty. */
-    internal Task UpdateIfNecessary()
+    internal async Task UpdateIfNecessary()
     {
         if (State == CacheState.CacheClean)
         {
-            return Task.CompletedTask;
+            return;
         }
 
         // If we are potentially dirty, see if we have a parent who has actually changed value
@@ -31,7 +30,7 @@ public sealed class Reaction : SignalHandlR, IMemoizR
         {
             foreach (var source in Sources)
             {
-                (source as IMemoizR)?.UpdateIfNecessary(); // updateIfNecessary() can change state
+                await (source as IMemoizR)!.UpdateIfNecessary(); // updateIfNecessary() can change state
                 if (State == CacheState.CacheDirty)
                 {
                     // Stop the loop here so we won't trigger updates on other parents unnecessarily
@@ -45,12 +44,11 @@ public sealed class Reaction : SignalHandlR, IMemoizR
         // If we were already dirty or marked dirty by the step above, update.
         if (State == CacheState.CacheDirty)
         {
-            return Update();
+            await Update();
         }
 
         // By now, we're clean
         State = CacheState.CacheClean;
-        return Task.CompletedTask;
     }
 
     /** run the computation fn, updating the cached value */
@@ -127,17 +125,10 @@ public sealed class Reaction : SignalHandlR, IMemoizR
             State = state;
         }
 
+        // This is a hack and should be fixed! 
         Task.Run(async () =>
         {
-            if (context.CurrentReaction == null)
-            {
-                lock (context)
-                {
-                    lockScope = rand.Next();
-                    context.asyncLocalScope.Value = lockScope;
-                }
-            }
-            using (await context.contextLock.WriterLockAsync(lockScope))
+            using (await context.contextLock.WriterLockAsync())
             {
                 await UpdateIfNecessary();
             }
