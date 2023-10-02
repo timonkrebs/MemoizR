@@ -8,7 +8,7 @@ public sealed class StructuredJob<T>
     private List<Task> tasks = new List<Task>();
     private CancellationTokenSource cancellationTokenSource;
     private readonly Func<T, T, T> reduce;
-    private T aggregate;
+    private T? aggregate;
 
     public StructuredJob(IEnumerable<Func<T>> fns, Func<T, T, T> reduce, T aggregate = default)
     {

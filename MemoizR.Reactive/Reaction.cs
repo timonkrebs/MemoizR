@@ -120,25 +120,14 @@ public sealed class Reaction : SignalHandlR, IMemoizR
         return UpdateIfNecessary();
     }
 
-    internal Task Stale(CacheState state)
+    internal async Task Stale(CacheState state)
     {
-        int lockScope = context.asyncLocalScope.Value;
-
-        lock (this)
+        using (await context.contextLock.WriterLockAsync())
         {
             State = state;
+            await UpdateIfNecessary();
         }
-
-        // This is a hack and should be fixed! 
-        Task.Run(async () =>
-        {
-            using (await context.contextLock.WriterLockAsync())
-            {
-                await UpdateIfNecessary();
-            }
-        });
-
-        return Task.CompletedTask;
+        return;
     }
 
     Task IMemoizR.Stale(CacheState state)

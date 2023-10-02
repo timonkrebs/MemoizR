@@ -15,10 +15,11 @@ public class AsyncPriorityLock
     /// <summary>
     /// Number of lowerlevel locks held; negative if higherlevel lock are held; 0 if no locks are held.
     /// </summary>
-    private int _locksHeld;
+    private int locksHeld;
+    private int upgradedLocksHeld;
     private int lockScope;
     private Random rand = new();
-    static AsyncLocal<int> _asyncLocalScope = new AsyncLocal<int>();
+    private static AsyncLocal<int> asyncLocalScope = new AsyncLocal<int>();
 
 
     /// <summary>
@@ -27,10 +28,7 @@ public class AsyncPriorityLock
     /// <param name="task">The task to observe for cancellation.</param>
     private void ReleaseWaitersWhenCanceled(Task task)
     {
-        task.ContinueWith(t =>
-        {
-            lock (this) { ReleaseWaiters(); }
-        }, CancellationToken.None, TaskContinuationOptions.OnlyOnCanceled | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+        task.ContinueWith(t => { lock (this) { ReleaseWaiters(); } }, CancellationToken.None, TaskContinuationOptions.OnlyOnCanceled | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
     }
 
     /// <summary>
@@ -43,9 +41,9 @@ public class AsyncPriorityLock
         lock (this)
         {
             // If the lock is available or in read mode and there are no waiting writers, upgradeable readers, or upgrading readers, take it immediately.
-            if (_locksHeld >= 0 && higherlevel.IsEmpty)
+            if (locksHeld >= 0 && higherlevel.IsEmpty && upgradedLocksHeld == 0)
             {
-                ++_locksHeld;
+                ++locksHeld;
                 return Task.FromResult<IDisposable>(new ReaderKey(this));
             }
             else
@@ -105,17 +103,24 @@ public class AsyncPriorityLock
         lock (this)
         {
             // If the lock is available, take it immediately.
-            if (_locksHeld == 0)
+            if (locksHeld == 0)
             {
-                _locksHeld = -1;
+                locksHeld = -1;
 #pragma warning disable CA2000 // Dispose objects before losing scope
                 ret = Task.FromResult<IDisposable>(new WriterKey(this));
 #pragma warning restore CA2000 // Dispose objects before losing scope
                 this.lockScope = lockScope;
             }
-            else if (_locksHeld < 0 && this.lockScope == lockScope)
+            else if (locksHeld == 1 && this.lockScope == lockScope)
             {
-                --_locksHeld;
+                this.upgradedLocksHeld++;
+#pragma warning disable CA2000 // Dispose objects before losing scope
+                ret = Task.FromResult<IDisposable>(new WriterKey(this));
+#pragma warning restore CA2000 // Dispose objects before losing scope
+            }
+            else if (locksHeld < 0 && this.lockScope == lockScope)
+            {
+                --locksHeld;
 #pragma warning disable CA2000 // Dispose objects before losing scope
                 ret = Task.FromResult<IDisposable>(new WriterKey(this));
 #pragma warning restore CA2000 // Dispose objects before losing scope
@@ -138,10 +143,11 @@ public class AsyncPriorityLock
     /// <returns>A disposable that releases the lock when disposed.</returns>
     public AwaitableDisposable<IDisposable> WriterLockAsync(CancellationToken cancellationToken)
     {
-        var lockScope = _asyncLocalScope.Value;
-        if(lockScope == 0){
+        var lockScope = asyncLocalScope.Value;
+        if (lockScope == 0)
+        {
             lockScope = rand.Next();
-            _asyncLocalScope.Value = lockScope;
+            asyncLocalScope.Value = lockScope;
         }
         return new AwaitableDisposable<IDisposable>(RequestWriterLockAsync(cancellationToken, lockScope));
     }
@@ -179,15 +185,15 @@ public class AsyncPriorityLock
     /// </summary>
     private void ReleaseWaiters()
     {
-        if (_locksHeld == -1)
+        if (locksHeld == -1)
             return;
 
         // Give priority to writers, then readers.
         if (!higherlevel.IsEmpty)
         {
-            if (_locksHeld == 0)
+            if (locksHeld == 0)
             {
-                --_locksHeld;
+                --locksHeld;
 #pragma warning disable CA2000 // Dispose objects before losing scope
                 higherlevel.Dequeue(new WriterKey(this));
 #pragma warning restore CA2000 // Dispose objects before losing scope
@@ -201,7 +207,7 @@ public class AsyncPriorityLock
 #pragma warning disable CA2000 // Dispose objects before losing scope
                 lowerlevel.Dequeue(new ReaderKey(this));
 #pragma warning restore CA2000 // Dispose objects before losing scope
-                ++_locksHeld;
+                ++locksHeld;
             }
         }
     }
@@ -213,7 +219,7 @@ public class AsyncPriorityLock
     {
         lock (this)
         {
-            --_locksHeld;
+            --locksHeld;
             ReleaseWaiters();
         }
     }
@@ -225,7 +231,14 @@ public class AsyncPriorityLock
     {
         lock (this)
         {
-            _locksHeld++;
+            if (upgradedLocksHeld > 0)
+            {
+                upgradedLocksHeld--;
+            }
+            else
+            {
+                locksHeld++;
+            }
             ReleaseWaiters();
         }
     }

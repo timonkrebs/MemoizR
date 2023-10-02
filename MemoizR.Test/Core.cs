@@ -15,7 +15,7 @@ public class Core
         Assert.Equal(2, await v1.Get());
         Assert.Equal(2, await v1.Get());
 
-        var m1 = f.CreateMemoizR(async () => 3);
+        var m1 = f.CreateMemoizR(() => Task.FromResult(3));
 
         Assert.Equal(3, await m1.Get());
         Assert.Equal(3, await m1.Get());
