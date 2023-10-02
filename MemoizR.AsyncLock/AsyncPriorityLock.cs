@@ -111,8 +111,11 @@ public class AsyncPriorityLock
 #pragma warning restore CA2000 // Dispose objects before losing scope
                 this.lockScope = lockScope;
             }
-            else if (locksHeld == 1 && this.lockScope == lockScope)
+            else if (locksHeld > 0 && (this.lockScope == lockScope || this.lockScope == 0))
             {
+                if(upgradedLocksHeld == 0){
+                    this.lockScope = lockScope;
+                }
                 this.upgradedLocksHeld++;
 #pragma warning disable CA2000 // Dispose objects before losing scope
                 ret = Task.FromResult<IDisposable>(new WriterKey(this));
@@ -199,6 +202,14 @@ public class AsyncPriorityLock
 #pragma warning restore CA2000 // Dispose objects before losing scope
                 return;
             }
+            /* there probably should be something like:
+             else if(upgradedLocksHeld > 0 && lockscope == ???){
+++upgradedLocksHeld;
+#pragma warning disable CA2000 // Dispose objects before losing scope
+                higherlevel.Dequeue(new WriterKey(this));
+#pragma warning restore CA2000 // Dispose objects before losing scope
+                return;
+            }*/
         }
         else
         {
