@@ -4,7 +4,6 @@ namespace MemoizR.Test;
 
 public class Reactive
 {
-    /*
     [Fact]
     public async Task TestReactive()
     {
@@ -49,6 +48,7 @@ public class Reactive
         Assert.Equal(2, invocations);
     }
 
+    /*
     [Fact]
     public async Task TestThreadSafety()
     {

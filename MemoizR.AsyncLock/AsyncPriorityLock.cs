@@ -113,7 +113,8 @@ public class AsyncPriorityLock
             }
             else if (locksHeld > 0 && (this.lockScope == lockScope || this.lockScope == 0))
             {
-                if(upgradedLocksHeld == 0){
+                if (upgradedLocksHeld == 0)
+                {
                     this.lockScope = lockScope;
                 }
                 this.upgradedLocksHeld++;
@@ -251,6 +252,10 @@ public class AsyncPriorityLock
                 locksHeld++;
             }
             ReleaseWaiters();
+            if (locksHeld == 0)
+            {
+                lockScope = 0;
+            }
         }
     }
 

@@ -23,7 +23,7 @@ public sealed class StructuredJob<T>
         lock (this)
         {
             this.tasks.AddRange(fns
-            .Select(async x => Task.Run(() =>
+            .Select(x => Task.Run(() =>
                 {
                     lock (fns)
                     {
