@@ -7,10 +7,10 @@ public sealed class StructuredJob<T>
     private IEnumerable<Func<T>> fns;
     private List<Task> tasks = new List<Task>();
     private CancellationTokenSource cancellationTokenSource;
-    private readonly Func<T, T, T> reduce;
+    private readonly Func<T, T, T?> reduce;
     private T? aggregate;
 
-    public StructuredJob(IEnumerable<Func<T>> fns, Func<T, T, T> reduce, T aggregate = default)
+    public StructuredJob(IEnumerable<Func<T>> fns, Func<T, T, T?> reduce, T? aggregate)
     {
         this.fns = fns;
         this.reduce = reduce;
@@ -27,14 +27,14 @@ public sealed class StructuredJob<T>
                 {
                     lock (fns)
                     {
-                        aggregate = reduce(x(), aggregate);
+                        aggregate = reduce(x(), aggregate!);
                     }
                 }, cancellationTokenSource.Token)
             ));
         }
     }
 
-    public Task<T> Run()
+    public Task<T?> Run()
     {
         try
         {
@@ -48,7 +48,7 @@ public sealed class StructuredJob<T>
         }
     }
 
-    private async Task<T> WaitAll()
+    private async Task<T?> WaitAll()
     {
         if (!this.tasks.Any()) return aggregate;
         List<Task> tasks;
@@ -184,7 +184,7 @@ public sealed class ConcurrentMapReduce<T> : SignalHandlR, IMemoizR
 
         try
         {
-            value = await new StructuredJob<T>(fns, reduce).Run();
+            value = await new StructuredJob<T>(fns, reduce!, default).Run();
 
             // if the sources have changed, update source & observer links
             if (context.CurrentGets.Length > 0)
