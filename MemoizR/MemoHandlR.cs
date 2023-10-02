@@ -6,7 +6,7 @@ public abstract class SignalHandlR : IMemoHandlR
     internal IMemoizR[] Observers { get; set; } = Array.Empty<IMemoizR>(); // nodes that have us as sources (down links)
 
     internal Context context;
-    
+
     IMemoHandlR[] IMemoHandlR.Sources { get => Sources; set => Sources = value; }
     IMemoizR[] IMemoHandlR.Observers { get => Observers; set => Observers = value; }
 

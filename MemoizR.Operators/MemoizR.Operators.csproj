@@ -1,6 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <ItemGroup>
     <ProjectReference Include="..\MemoizR\MemoizR.csproj" />
+    <ProjectReference Include="..\MemoizR.Reactive\MemoizR.Reactive.csproj" />
   </ItemGroup>
 
   <PropertyGroup>
