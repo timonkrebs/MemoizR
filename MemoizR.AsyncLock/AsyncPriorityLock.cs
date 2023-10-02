@@ -190,7 +190,7 @@ public class AsyncPriorityLock
     private void ReleaseWaiters()
     {
         if (locksHeld < 0) return;
-        
+
         if (!lowerlevel.IsEmpty && locksHeld >= 0)
         {
             while (!lowerlevel.IsEmpty)
@@ -233,15 +233,20 @@ public class AsyncPriorityLock
             if (upgradedLocksHeld > 0)
             {
                 upgradedLocksHeld--;
+                if (upgradedLocksHeld == 0)
+                {
+                    lockScope = 0;
+                }
             }
             else
             {
                 locksHeld++;
+                if (locksHeld == 0)
+                {
+                    lockScope = 0;
+                }
             }
-            if (locksHeld == 0)
-            {
-                lockScope = 0;
-            }
+
             ReleaseWaiters();
         }
     }
