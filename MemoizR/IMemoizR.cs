@@ -2,9 +2,9 @@ namespace MemoizR;
 
 internal interface IMemoizR : IMemoHandlR
 {
-    void UpdateIfNecessary();
+    Task UpdateIfNecessary();
 
     CacheState State { get; set; }
 
-    void Stale(CacheState state);
+    Task Stale(CacheState state);
 }

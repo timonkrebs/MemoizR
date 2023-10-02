@@ -1,32 +1,24 @@
 ﻿namespace MemoizR.Reactive;
 
-public sealed class Reaction<T> : MemoHandlR<T>, IMemoizR
+public sealed class Reaction : SignalHandlR, IMemoizR
 {
     private CacheState State { get; set; } = CacheState.CacheClean;
-    private Func<T?> fn;
+    private Func<Task> fn;
 
     CacheState IMemoizR.State { get => State; set => State = value; }
 
-    internal Reaction(Func<T> fn, Context context, string label = "Label", Func<T?, T?, bool>? equals = null) : base(context, equals)
+    internal Reaction(Func<Task> fn, Context context, string label = "Label") : base(context)
     {
         this.fn = fn;
         this.State = CacheState.CacheDirty;
         this.label = label;
 
         // The reaction must be initialized to build the Sources
-        context.contextLock.EnterWriteLock();
-        try
-        {
-            Update();
-        }
-        finally
-        {
-            context.contextLock.ExitWriteLock();
-        }
+        Update().Wait();
     }
 
     /** update() if dirty, or a parent turns out to be dirty. */
-    internal void UpdateIfNecessary()
+    internal async Task UpdateIfNecessary()
     {
         if (State == CacheState.CacheClean)
         {
@@ -38,7 +30,11 @@ public sealed class Reaction<T> : MemoHandlR<T>, IMemoizR
         {
             foreach (var source in Sources)
             {
-                (source as IMemoizR)?.UpdateIfNecessary(); // updateIfNecessary() can change state
+                if (source is IMemoizR memoizR)
+                {
+                    await memoizR.UpdateIfNecessary(); // updateIfNecessary() can change state
+                }
+
                 if (State == CacheState.CacheDirty)
                 {
                     // Stop the loop here so we won't trigger updates on other parents unnecessarily
@@ -52,7 +48,7 @@ public sealed class Reaction<T> : MemoHandlR<T>, IMemoizR
         // If we were already dirty or marked dirty by the step above, update.
         if (State == CacheState.CacheDirty)
         {
-            Update();
+            await Update();
         }
 
         // By now, we're clean
@@ -60,10 +56,8 @@ public sealed class Reaction<T> : MemoHandlR<T>, IMemoizR
     }
 
     /** run the computation fn, updating the cached value */
-    private void Update()
+    private async Task Update()
     {
-        var oldValue = value;
-
         /* Evalute the reactive function body, dynamically capturing any other reactives used */
         var prevReaction = context.CurrentReaction;
         var prevGets = context.CurrentGets;
@@ -75,7 +69,7 @@ public sealed class Reaction<T> : MemoHandlR<T>, IMemoizR
 
         try
         {
-            fn();
+            await fn();
 
             // if the Sources have changed, update source & observer links
             if (context.CurrentGets.Length > 0)
@@ -121,28 +115,23 @@ public sealed class Reaction<T> : MemoHandlR<T>, IMemoizR
         State = CacheState.CacheClean;
     }
 
-    void IMemoizR.UpdateIfNecessary()
+    Task IMemoizR.UpdateIfNecessary()
     {
-        UpdateIfNecessary();
+        return UpdateIfNecessary();
     }
 
-    internal void Stale(CacheState state)
+    internal async Task Stale(CacheState state)
     {
-        context.contextLock.EnterWriteLock();
-        try
+        using (await context.contextLock.HigherPrioLockAsync())
         {
             State = state;
-            UpdateIfNecessary();
-        }
-        finally
-        {
-            context.contextLock.ExitWriteLock();
+            await UpdateIfNecessary();
         }
         return;
     }
 
-    void IMemoizR.Stale(CacheState state)
+    Task IMemoizR.Stale(CacheState state)
     {
-        Stale(state);
+        return Stale(state);
     }
 }

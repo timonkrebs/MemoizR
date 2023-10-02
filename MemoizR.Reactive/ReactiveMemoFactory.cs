@@ -5,8 +5,8 @@ public class ReactiveMemoFactory : MemoFactory
 {
     public ReactiveMemoFactory(string? contextKey = null) : base(contextKey) { }
 
-    public Reaction<T> CreateReaction<T>(Func<T> fn, string label = "Label", Func<T?, T?, bool>? equals = null)
+    public Reaction CreateReaction(Func<Task> fn, string label = "Label")
     {
-        return new Reaction<T>(fn, context, label, equals);
+        return new Reaction(fn, context, label);
     }
 }

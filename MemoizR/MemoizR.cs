@@ -3,18 +3,18 @@ namespace MemoizR;
 public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR
 {
     private CacheState State { get; set; } = CacheState.CacheClean;
-    private Func<T?> fn;
+    private Func<Task<T>> fn;
 
     CacheState IMemoizR.State { get => State; set => State = value; }
 
-    internal MemoizR(Func<T> fn, Context context, string label = "Label", Func<T?, T?, bool>? equals = null) : base(context, equals)
+    internal MemoizR(Func<Task<T>> fn, Context context, string label = "Label", Func<T?, T?, bool>? equals = null) : base(context, equals)
     {
         this.fn = fn;
         this.State = CacheState.CacheDirty;
         this.label = label;
     }
 
-    public T? Get()
+    public async Task<T?> Get()
     {
         if (State == CacheState.CacheClean && context.CurrentReaction == null)
         {
@@ -24,8 +24,7 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR
         // The naming of the lock could be confusing because Set must be locked by WriteLock.
         // Only one thread should evaluate the graph at a time. otherwise the context could get messed up.
         // This should lead to perf gains because memoization can be utilized more efficiently.
-        context.contextLock.EnterWriteLock();
-        try
+        using (await context.contextLock.HigherPrioLockAsync())
         {
             // if someone else did read the graph while this thread was blocekd it could be that this is already Clean
             if (State == CacheState.CacheClean && context.CurrentReaction == null)
@@ -51,18 +50,14 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR
                 }
             }
 
-            UpdateIfNecessary();
-        }
-        finally
-        {
-            context.contextLock.ExitWriteLock();
+            await UpdateIfNecessary();
         }
 
         return value;
     }
 
     /** update() if dirty, or a parent turns out to be dirty. */
-    internal void UpdateIfNecessary()
+    internal async Task UpdateIfNecessary()
     {
         if (State == CacheState.CacheClean)
         {
@@ -74,7 +69,11 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR
         {
             foreach (var source in Sources)
             {
-                (source as IMemoizR)?.UpdateIfNecessary(); // updateIfNecessary() can change state
+                if (source is IMemoizR memoizR)
+                {
+                    await memoizR.UpdateIfNecessary(); // updateIfNecessary() can change state
+                }
+
                 if (State == CacheState.CacheDirty)
                 {
                     // Stop the loop here so we won't trigger updates on other parents unnecessarily
@@ -88,7 +87,7 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR
         // If we were already dirty or marked dirty by the step above, update.
         if (State == CacheState.CacheDirty)
         {
-            Update();
+            await Update();
         }
 
         // By now, we're clean
@@ -96,7 +95,7 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR
     }
 
     /** run the computation fn, updating the cached value */
-    private void Update()
+    private async Task Update()
     {
         var oldValue = value;
 
@@ -111,7 +110,7 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR
 
         try
         {
-            value = fn();
+            value = await fn();
 
             // if the sources have changed, update source & observer links
             if (context.CurrentGets.Length > 0)
@@ -184,12 +183,12 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR
         }
     }
 
-    void IMemoizR.UpdateIfNecessary()
+    Task IMemoizR.UpdateIfNecessary()
     {
-        UpdateIfNecessary();
+        return UpdateIfNecessary();
     }
 
-    internal void Stale(CacheState state)
+    internal async Task Stale(CacheState state)
     {
         if (state <= State)
         {
@@ -200,12 +199,13 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR
 
         for (int i = 0; i < Observers.Length; i++)
         {
-            Observers[i].Stale(CacheState.CacheCheck);
+            await Observers[i].Stale(CacheState.CacheCheck);
         }
+        return;
     }
 
-    void IMemoizR.Stale(CacheState state)
+    Task IMemoizR.Stale(CacheState state)
     {
-        Stale(state);
+        return Stale(state);
     }
 }
