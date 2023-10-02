@@ -122,7 +122,7 @@ public sealed class Reaction : SignalHandlR, IMemoizR
 
     internal async Task Stale(CacheState state)
     {
-        using (await context.contextLock.WriterLockAsync())
+        using (await context.contextLock.HigherPrioLockAsync())
         {
             State = state;
             await UpdateIfNecessary();
