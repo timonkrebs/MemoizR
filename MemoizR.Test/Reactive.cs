@@ -4,6 +4,7 @@ namespace MemoizR.Test;
 
 public class Reactive
 {
+    
     [Fact]
     public async Task TestReactive()
     {
@@ -15,8 +16,6 @@ public class Reactive
         var m1 = f.CreateReaction(async() => await v1.Get());
 
         await v1.Set(2);
-
-        await Task.Delay(100); // has to wait for reaction
     }
 
     [Fact]
@@ -37,18 +36,13 @@ public class Reactive
 
         await v1.Set(2);
 
-        await Task.Delay(100); // has to wait for reaction
-
         Assert.Equal(2, invocations);
 
         await v1.Set(2);
 
-         await Task.Delay(100); 
-
         Assert.Equal(2, invocations);
     }
 
-    /*
     [Fact]
     public async Task TestThreadSafety()
     {
@@ -141,5 +135,4 @@ public class Reactive
         // This is not completely reliable because if all the set are evaluated tawait he gets trigger again because how the readwrite lock works
         Assert.InRange(invocationCount, 21, 30);
     }
-    */
 }

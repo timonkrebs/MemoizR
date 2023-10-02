@@ -189,30 +189,9 @@ public class AsyncPriorityLock
     /// </summary>
     private void ReleaseWaiters()
     {
-        if (locksHeld == -1)
-            return;
-
-        // Give priority to writers, then readers.
-        if (!higherlevel.IsEmpty)
-        {
-            if (locksHeld == 0)
-            {
-                --locksHeld;
-#pragma warning disable CA2000 // Dispose objects before losing scope
-                higherlevel.Dequeue(new WriterKey(this));
-#pragma warning restore CA2000 // Dispose objects before losing scope
-                return;
-            }
-            /* there probably should be something like:
-             else if(upgradedLocksHeld > 0 && lockscope == ???){
-++upgradedLocksHeld;
-#pragma warning disable CA2000 // Dispose objects before losing scope
-                higherlevel.Dequeue(new WriterKey(this));
-#pragma warning restore CA2000 // Dispose objects before losing scope
-                return;
-            }*/
-        }
-        else
+        if (locksHeld < 0) return;
+        
+        if (!lowerlevel.IsEmpty && locksHeld >= 0)
         {
             while (!lowerlevel.IsEmpty)
             {
@@ -221,6 +200,14 @@ public class AsyncPriorityLock
 #pragma warning restore CA2000 // Dispose objects before losing scope
                 ++locksHeld;
             }
+        }
+        else if (!higherlevel.IsEmpty)
+        {
+            --locksHeld;
+#pragma warning disable CA2000 // Dispose objects before losing scope
+            higherlevel.Dequeue(new WriterKey(this));
+#pragma warning restore CA2000 // Dispose objects before losing scope
+            return;
         }
     }
 
@@ -251,11 +238,11 @@ public class AsyncPriorityLock
             {
                 locksHeld++;
             }
-            ReleaseWaiters();
             if (locksHeld == 0)
             {
                 lockScope = 0;
             }
+            ReleaseWaiters();
         }
     }
 
