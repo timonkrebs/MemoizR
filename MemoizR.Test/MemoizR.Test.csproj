@@ -25,6 +25,7 @@
   <ItemGroup>
     <ProjectReference Include="..\MemoizR\MemoizR.csproj" />
     <ProjectReference Include="..\MemoizR.Reactive\MemoizR.Reactive.csproj" />
+    <ProjectReference Include="..\MemoizR.StructuredConcurrency\MemoizR.StructuredConcurrency.csproj" />
   </ItemGroup>
 
 </Project>

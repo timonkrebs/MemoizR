@@ -10,7 +10,7 @@ public static class PipeExtensionMethods
         return new MemoizR<T?>(async () =>
         {
             await Task.Delay(time.Milliseconds);
-            return handlr.Get();
+            return await handlr.Get();
         }
         , handlr.context, "Delay");
     }
@@ -21,14 +21,13 @@ public static class PipeExtensionMethods
         var now = DateTime.UtcNow;
         var cancel = new CancellationTokenSource();
         var s = new Signal<T?>(handlr.value, handlr.context, "Debounce");
-        new Reaction<T>(async () =>
+        new Reaction(async () =>
         {
-            var value = handlr.Get();
+            var value = await handlr.Get();
             cancel.Cancel();
             cancel = new CancellationTokenSource();
             await Task.Delay(time.Milliseconds, cancel.Token);
-            s.Set(value);
-            return value;
+            await s.Set(value);
         }, handlr.context);
 
         return new MemoizR<T?>(s.Get, handlr.context, "DebounceSignal");

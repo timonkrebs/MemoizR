@@ -21,7 +21,7 @@ public abstract class SignalHandlR : IMemoHandlR
 public abstract class MemoHandlR<T> : SignalHandlR
 {
     protected Func<T?, T?, bool> equals;
-    protected T? value = default;
+    internal T? value = default;
 
     internal MemoHandlR(Context context, Func<T?, T?, bool>? equals) : base(context)
     {
