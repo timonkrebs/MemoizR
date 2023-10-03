@@ -12,6 +12,7 @@ EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MemoizR.StructuredConcurrency", "MemoizR.StructuredConcurrency\MemoizR.StructuredConcurrency.csproj", "{565C60BC-380D-4E30-B621-A31C5E229A7F}"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MemoizR.AsyncLock", "MemoizR.AsyncLock\MemoizR.AsyncLock.csproj", "{412EE767-E418-4103-B4B1-4D61A2D91D13}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MemoizR.Operators", "MemoizR.Operators\MemoizR.Operators.csproj", "{BDAA9F47-92C8-4806-861D-17D0717BBFD9}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -42,5 +43,9 @@ Global
 		{412EE767-E418-4103-B4B1-4D61A2D91D13}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{412EE767-E418-4103-B4B1-4D61A2D91D13}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{412EE767-E418-4103-B4B1-4D61A2D91D13}.Release|Any CPU.Build.0 = Release|Any CPU
+		{BDAA9F47-92C8-4806-861D-17D0717BBFD9}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{BDAA9F47-92C8-4806-861D-17D0717BBFD9}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{BDAA9F47-92C8-4806-861D-17D0717BBFD9}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{BDAA9F47-92C8-4806-861D-17D0717BBFD9}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 EndGlobal

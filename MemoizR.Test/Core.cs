@@ -1,4 +1,3 @@
-using MemoizR;
 namespace MemoizR.Test;
 
 public class Core

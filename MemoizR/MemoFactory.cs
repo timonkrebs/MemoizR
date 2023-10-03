@@ -66,9 +66,9 @@ public class MemoFactory
         return new MemoizR<T>(fn, context, label, equals);
     }
 
-    public Signal<T> CreateSignal<T>(T value, string label = "Label", Func<T?, T?, bool>? equals = null)
+    public Signal<T> CreateSignal<T>(T value, string label = "Label")
     {
-        return new Signal<T>(value, context, label, equals);
+        return new Signal<T>(value, context, label);
     }
 
     public EagerRelativeSignal<T> CreateEagerRelativeSignal<T>(T value, string label = "Label")

@@ -46,7 +46,8 @@ public class Reactive
     public async Task TestThreadSafety()
     {
         // Create a MemoFactory instance
-        var f = new ReactiveMemoFactory();
+        var f = new MemoFactory();
+        var rf = new ReactiveMemoFactory();
 
         // Create a signal 'v1' with an initial value of 1
         var v1 = f.CreateSignal(4);
@@ -57,7 +58,7 @@ public class Reactive
 
 
         var result = 0;
-        var r1 = f.CreateReaction(async() =>
+        var r1 = rf.CreateReaction(async() =>
         {
             invocationCount++;
             result = await m1.Get();
@@ -99,7 +100,8 @@ public class Reactive
     public async Task TestThreadSafety2()
     {
         // Create a MemoFactory instance
-        var f = new ReactiveMemoFactory();
+        var f = new MemoFactory();
+        var rf = new ReactiveMemoFactory();
 
         // Create a signal 'v1' with an initial value of 1
         var v1 = f.CreateSignal(4);
@@ -108,7 +110,7 @@ public class Reactive
         // Create a memoized computation 'm1' that depends on 'v1'
         var m1 = f.CreateMemoizR(async() => await v1.Get() * 2);
 
-        var r1 = f.CreateReaction(async() =>
+        var r1 = rf.CreateReaction(async() =>
         {
             invocationCount++;
             await m1.Get();
