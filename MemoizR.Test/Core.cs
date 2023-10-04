@@ -74,21 +74,21 @@ public class Core
     public async Task TestDiamond()
     {
         var f = new MemoFactory();
-        var v1 = f.CreateSignal(1, "v1");
+        var v1 = f.CreateSignal("v1", 1);
         Assert.Equal(1, await v1.Get());
 
-        var m1 = f.CreateMemoizR(async () => await v1.Get(), "m1");
+        var m1 = f.CreateMemoizR("m1", async () => await v1.Get());
         Assert.Equal(1, await m1.Get());
         Assert.Equal(1, await m1.Get());
 
-        var m2 = f.CreateMemoizR(async () => await v1.Get() * 2, "m2");
+        var m2 = f.CreateMemoizR("m2", async () => await v1.Get() * 2);
         Assert.Equal(2, await m2.Get());
         Assert.Equal(2, await m2.Get());
 
-        var m3 = f.CreateMemoizR(async () => await m1.Get() + await m2.Get(), "m3");
+        var m3 = f.CreateMemoizR("m3", async () => await m1.Get() + await m2.Get());
 
         await v1.Set(2);
-        
+
         Assert.Equal(6, await m3.Get());
         Assert.Equal(6, await m3.Get());
         Assert.Equal(2, await v1.Get());
@@ -104,25 +104,25 @@ public class Core
     public async Task TestDiamondInvocations()
     {
         var f = new MemoFactory();
-        var v1 = f.CreateSignal(1, "v1");
+        var v1 = f.CreateSignal("v1", 1);
         var invocationsM1 = 0;
-        var m1 = f.CreateMemoizR(async () =>
+        var m1 = f.CreateMemoizR("m1", async () =>
         {
             invocationsM1++;
             return await v1.Get();
-        }, "m1");
+        });
         var invocationsM2 = 0;
-        var m2 = f.CreateMemoizR(async () =>
+        var m2 = f.CreateMemoizR("m2", async () =>
         {
             invocationsM2++;
             return await v1.Get() * 2;
-        }, "m2");
+        });
         var invocationsM3 = 0;
-        var m3 = f.CreateMemoizR(async () =>
+        var m3 = f.CreateMemoizR("m3", async () =>
         {
             invocationsM3++;
             return await m1.Get() + await m2.Get();
-        }, "m3");
+        });
 
         await v1.Set(2);
 
@@ -157,26 +157,26 @@ public class Core
     public async Task TestTwoSourcesInvocations()
     {
         var f = new MemoFactory();
-        var v1 = f.CreateSignal(1, "v1");
-        var v2 = f.CreateSignal(1, "v2");
+        var v1 = f.CreateSignal("v1", 1);
+        var v2 = f.CreateSignal("v2", 1);
         var invocationsM1 = 0;
-        var m1 = f.CreateMemoizR(async () =>
+        var m1 = f.CreateMemoizR("m1", async () =>
         {
             invocationsM1++;
             return await v1.Get();
-        }, "m1");
+        });
         var invocationsM2 = 0;
-        var m2 = f.CreateMemoizR(async () =>
+        var m2 = f.CreateMemoizR("m2", async () =>
         {
             invocationsM2++;
             return await v2.Get() * 2;
-        }, "m2");
+        });
         var invocationsM3 = 0;
-        var m3 = f.CreateMemoizR(async () =>
+        var m3 = f.CreateMemoizR("m3", async () =>
         {
             invocationsM3++;
             return await m1.Get() + await m2.Get();
-        }, "m3");
+        });
 
         Assert.Equal(0, invocationsM1);
         Assert.Equal(0, invocationsM2);
