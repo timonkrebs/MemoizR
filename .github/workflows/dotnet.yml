@@ -13,6 +13,7 @@ jobs:
   build:
 
     runs-on: ubuntu-latest
+    timeout-minutes: 1
 
     steps:
     - uses: actions/checkout@v3
@@ -26,4 +27,4 @@ jobs:
       run: dotnet build --no-restore
     - name: Test
       run: dotnet test --no-build --verbosity normal
-      timeout-minute: 1
+      
