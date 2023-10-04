@@ -22,15 +22,15 @@ public class StructuredConcurrency
 
         var c1 = fsc.CreateConcurrentMapReduce(
             (val, agg) => agg - val,
-            () => v1.Get(),
-            () => Task.FromResult(3));
+            _ => v1.Get(),
+            _ => Task.FromResult(3));
 
         Assert.Equal(-6, await c1.Get());
         Assert.Equal(-6, await c1.Get());
 
         var c2 = fsc.CreateConcurrentMapReduce(
-            () => v1.Get(),
-            () => c1.Get());
+            _ => v1.Get(),
+            _ => c1.Get());
 
         Assert.Equal(-3, await c2.Get());
     }

@@ -4,6 +4,7 @@ public sealed class Reaction : SignalHandlR, IMemoizR
 {
     private CacheState State { get; set; } = CacheState.CacheClean;
     private Func<Task> fn;
+    private bool isPaused;
 
     CacheState IMemoizR.State { get => State; set => State = value; }
 
@@ -15,6 +16,17 @@ public sealed class Reaction : SignalHandlR, IMemoizR
 
         // The reaction must be initialized to build the Sources
         Update().Wait();
+    }
+
+    public void Pause()
+    {
+        this.isPaused = true;
+    }
+
+    public Task Resume()
+    {
+        this.isPaused = false;
+        return UpdateIfNecessary();
     }
 
     /** update() if dirty, or a parent turns out to be dirty. */
@@ -69,7 +81,14 @@ public sealed class Reaction : SignalHandlR, IMemoizR
 
         try
         {
-            await fn();
+            if (!isPaused)
+            {
+                await fn();
+            }
+            else
+            {
+                State = CacheState.CacheDirty;
+            }
 
             // if the Sources have changed, update source & observer links
             if (context.CurrentGets.Length > 0)

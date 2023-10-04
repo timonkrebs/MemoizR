@@ -3,16 +3,18 @@ namespace MemoizR.StructuredConcurrency;
 public sealed class ConcurrentMapReduce<T> : SignalHandlR, IMemoizR
 {
     private CacheState State { get; set; } = CacheState.CacheClean;
-    private IReadOnlyCollection<Func<Task<T>>> fns;
-    private readonly Func<T, T, T> reduce;
+    private IReadOnlyCollection<Func<CancellationToken, Task<T>>> fns;
+    private readonly Func<T, T, T?> reduce;
+    private readonly CancellationTokenSource cancellationTokenSource;
     private T? value = default;
 
     CacheState IMemoizR.State { get => State; set => State = value; }
 
-    internal ConcurrentMapReduce(IReadOnlyCollection<Func<Task<T>>> fns, Func<T, T, T> reduce, Context context, string label = "Label") : base(context)
+    internal ConcurrentMapReduce(IReadOnlyCollection<Func<CancellationToken, Task<T>>> fns, Func<T, T, T?> reduce, Context context, CancellationTokenSource cancellationTokenSource, string label = "Label") : base(context)
     {
         this.fns = fns;
         this.reduce = reduce;
+        this.cancellationTokenSource = cancellationTokenSource;
         this.State = CacheState.CacheDirty;
         this.label = label;
     }
@@ -113,7 +115,7 @@ public sealed class ConcurrentMapReduce<T> : SignalHandlR, IMemoizR
 
         try
         {
-            value = await new StructuredJob<T>(fns, reduce, default).Run();
+            value = await new StructuredReduceJob<T>(fns, reduce, cancellationTokenSource).Run();
 
             // if the sources have changed, update source & observer links
             if (context.CurrentGets.Length > 0)
