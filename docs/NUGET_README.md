@@ -43,27 +43,27 @@ Here's a simple example of using MemoizR:
 ```csharp
 var f = new MemoFactory();
 var v1 = f.CreateSignal(1, "v1");
-var m1 = f.CreateMemoizR(() => v1.Get(), "m1");
-var m2 = f.CreateMemoizR(() => v1.Get() * 2, "m2");
-var m3 = f.CreateMemoizR(() => m1.Get() + m2.Get(), "m3");
+var m1 = f.CreateMemoizR(async() => await v1.Get(), "m1");
+var m2 = f.CreateMemoizR(async() => await v1.Get() * 2, "m2");
+var m3 = f.CreateMemoizR(async() => await m1.Get() + await m2.Get(), "m3");
 
 // Get Values
-m3.Get(); // Calculates m1 + 2 * m1 => (1 + 2 * 1) = 3
+await m3.Get(); // Calculates m1 + 2 * m1 => (1 + 2 * 1) = 3
 
 // Change
-v1.Set(2); // Setting v1 does not trigger the evaluation of the graph
-m3.Get(); // Calculates m1 + 2 * m1 => (1 + 2 * 2) = 6
-m3.Get(); // No operation, result remains 6
+await v1.Set(2); // Setting v1 does not trigger the evaluation of the graph
+await m3.Get(); // Calculates m1 + 2 * m1 => (1 + 2 * 2) = 6
+await m3.Get(); // No operation, result remains 6
 
-v1.Set(3); // Setting v1 does not trigger the evaluation of the graph
-v1.Set(2); // Setting v1 does not trigger the evaluation of the graph
-m3.Get(); // No operation, result remains 6 (because the last time the graph was evaluated, v1 was already 2)
+await v1.Set(3); // Setting v1 does not trigger the evaluation of the graph
+await v1.Set(2); // Setting v1 does not trigger the evaluation of the graph
+await m3.Get(); // No operation, result remains 6 (because the last time the graph was evaluated, v1 was already 2)
 ```
 
 MemoizR can also handle scenarios where the graph is not stable at runtime, making it adaptable to changing dependencies.
 
 ```cs
-var m3 = f.CreateMemoizR(() => v1.Get() ? m1.Get() : m2.Get());
+var m3 = f.CreateMemoizR(async() => await v1.Get() ? await m1.Get() : await m2.Get());
 ```
 
 ## Get Started with MemoizR

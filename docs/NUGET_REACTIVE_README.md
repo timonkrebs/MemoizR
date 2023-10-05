@@ -12,7 +12,7 @@ You can use MemoizR.Reactive to create reactive data flows easily:
 ```csharp
 var f = new MemoFactory();
 var v1 = f.CreateSignal(1, "v1");
-var m1 = f.CreateMemoizR(() => v1.Get(), "m1");
-var m2 = f.CreateMemoizR(() => v1.Get() * 2, "m2");
-var r1 = f.CreateReaction(() => m1.Get() + m2.Get(), "r1");
+var m1 = f.CreateMemoizR(async() => await v1.Get(), "m1");
+var m2 = f.CreateMemoizR(async() => await v1.Get() * 2, "m2");
+var r1 = f.CreateReaction(async() => await m1.Get() + await m2.Get(), "r1");
 ```
