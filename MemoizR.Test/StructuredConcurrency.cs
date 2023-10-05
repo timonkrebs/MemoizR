@@ -55,4 +55,28 @@ public class StructuredConcurrency
         var e = Assert.Throws<AggregateException>(() => c1.Get().Result);
         Assert.Equal(1, e.InnerExceptions.Count);
     }
+
+    [Fact(Skip = "Blocks Testsuite")]
+    public void TestChildExecutionHandling()
+    {
+        var f = new MemoFactory();
+        var fsc = new StructuredConcurrencyFactory();
+
+        var child1 = fsc.CreateConcurrentMapReduce(
+            async c =>
+            {
+                await Task.Delay(3000);
+                return 3;
+            });
+
+        // all tasks get canceled if one fails
+        var c1 = fsc.CreateConcurrentMapReduce(
+            async c =>
+            {
+                await child1.Get(); // should be waiting for the delay of 3 seconds but does not...
+                return 4;
+            });
+
+        var x = c1.Get().Result;
+    }
 }
