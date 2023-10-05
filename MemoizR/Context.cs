@@ -4,7 +4,7 @@ namespace MemoizR;
 
 public class Context
 {
-    internal AsyncPriorityLock contextLock = new();
+    internal AsyncAsymmetricLock contextLock = new();
 
     /** current capture context for identifying sources (other memoizR elements)
     * - active while evaluating a memoizR function body  */

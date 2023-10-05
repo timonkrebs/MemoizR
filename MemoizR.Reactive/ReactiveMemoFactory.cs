@@ -1,17 +1,19 @@
-namespace MemoizR.Reactive;
-using MemoizR;
-
-public class ReactiveMemoFactory : MemoFactory
+namespace MemoizR.Reactive
 {
-    public ReactiveMemoFactory(string? contextKey = null) : base(contextKey) { }
+    using MemoizR;
 
-    public Reaction CreateReaction(Func<Task> fn)
+    public class ReactiveMemoFactory : MemoFactory
     {
-        return new Reaction(fn, context);
-    }
+        public ReactiveMemoFactory(string? contextKey = null) : base(contextKey) { }
 
-        public Reaction CreateReaction(string label, Func<Task> fn)
-    {
-        return new Reaction(fn, context, label);
+        public Reaction CreateReaction(Func<Task> fn)
+        {
+            return new Reaction(fn, context);
+        }
+
+            public Reaction CreateReaction(string label, Func<Task> fn)
+        {
+            return new Reaction(fn, context, label);
+        }
     }
 }

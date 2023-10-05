@@ -1,26 +1,25 @@
 namespace MemoizR.AsyncLock;
 
-public class AsyncPriorityLock
+public class AsyncAsymmetricLock
 {
     /// <summary>
-    /// The queue of TCSs that other tasks are awaiting to acquire the lock as higherPrio.
+    /// The queue of TCSs that other tasks are awaiting to acquire the lock as upgradeable.
     /// </summary>
-    IAsyncWaitQueue<IDisposable> higherPrio = new DefaultAsyncWaitQueue<IDisposable>();
+    IAsyncWaitQueue<IDisposable> upgradeable = new DefaultAsyncWaitQueue<IDisposable>();
 
     /// <summary>
-    /// The queue of TCSs that other tasks are awaiting to acquire the lock as lowerPrio.
+    /// The queue of TCSs that other tasks are awaiting to acquire the lock as exclusive.
     /// </summary>
-    IAsyncWaitQueue<IDisposable> lowerPrio = new DefaultAsyncWaitQueue<IDisposable>();
+    IAsyncWaitQueue<IDisposable> exclusive = new DefaultAsyncWaitQueue<IDisposable>();
 
     /// <summary>
-    /// Number of lowerPrio locks held; negative if higherPrio lock are held; 0 if no locks are held.
+    /// Number of exclusive locks held; negative if upgradeable lock are held; 0 if no locks are held.
     /// </summary>
     private int locksHeld;
     private int upgradedLocksHeld;
     private int lockScope;
     private Random rand = new();
     private static AsyncLocal<int> asyncLocalScope = new AsyncLocal<int>();
-
 
     /// <summary>
     /// Applies a continuation to the task that will call <see cref="ReleaseWaiters"/> if the task is canceled. This method may not be called while holding the sync lock.
@@ -32,72 +31,76 @@ public class AsyncPriorityLock
     }
 
     /// <summary>
-    /// Asynchronously acquires the lock as a lowerPrio. Returns a disposable that releases the lock when disposed.
+    /// Asynchronously acquires the lock as a exclusive. Returns a disposable that releases the lock when disposed.
     /// </summary>
     /// <param name="cancellationToken">The cancellation token used to cancel the lock. If this is already set, then this method will attempt to take the lock immediately (succeeding if the lock is currently available).</param>
     /// <returns>A disposable that releases the lock when disposed.</returns>
-    private Task<IDisposable> RequestLowerPrioLockAsync(CancellationToken cancellationToken)
+    private Task<IDisposable> RequestExclusiveLockAsync(CancellationToken cancellationToken)
     {
         lock (this)
         {
-            // If the lock is available or in lowerPrio mode and there are no waiting writers, upgradeable lowerPrio, or upgrading lowerPrio, take it immediately.
-            if (locksHeld >= 0 && higherPrio.IsEmpty && upgradedLocksHeld == 0)
+            // If the lock is available or in exclusive mode and there are no waiting upgradeable, or upgrading upgradeable, take it immediately.
+            if (locksHeld >= 0 && upgradeable.IsEmpty && upgradedLocksHeld == 0)
             {
                 ++locksHeld;
-                return Task.FromResult<IDisposable>(new LowerPrioKey(this));
+                return Task.FromResult<IDisposable>(new ExclusivePrioKey(this));
+            }
+            else if (upgradedLocksHeld == 0)
+            {
+                // Wait for the lock to become available or cancellation.
+                return exclusive.Enqueue(this, cancellationToken, 0);
             }
             else
             {
-                // Wait for the lock to become available or cancellation.
-                return lowerPrio.Enqueue(this, cancellationToken, 0);
+                throw new InvalidOperationException("No ");
             }
         }
     }
 
     /// <summary>
-    /// Asynchronously acquires the lock as a lowerPrio. Returns a disposable that releases the lock when disposed.
+    /// Asynchronously acquires the lock as a exclusive. Returns a disposable that releases the lock when disposed.
     /// </summary>
     /// <param name="cancellationToken">The cancellation token used to cancel the lock. If this is already set, then this method will attempt to take the lock immediately (succeeding if the lock is currently available).</param>
     /// <returns>A disposable that releases the lock when disposed.</returns>
-    public AwaitableDisposable<IDisposable> LowerPrioLockAsync(CancellationToken cancellationToken)
+    public AwaitableDisposable<IDisposable> ExclusiveLockAsync(CancellationToken cancellationToken)
     {
-        return new AwaitableDisposable<IDisposable>(RequestLowerPrioLockAsync(cancellationToken));
+        return new AwaitableDisposable<IDisposable>(RequestExclusiveLockAsync(cancellationToken));
     }
 
     /// <summary>
-    /// Asynchronously acquires the lock as a lowerPrio. Returns a disposable that releases the lock when disposed.
+    /// Asynchronously acquires the lock as a exclusive. Returns a disposable that releases the lock when disposed.
     /// </summary>
     /// <returns>A disposable that releases the lock when disposed.</returns>
-    public AwaitableDisposable<IDisposable> LowerPrioLockAsync()
+    public AwaitableDisposable<IDisposable> ExclusiveLockAsync()
     {
-        return LowerPrioLockAsync(CancellationToken.None);
+        return ExclusiveLockAsync(CancellationToken.None);
     }
 
     /// <summary>
-    /// Synchronously acquires the lock as a lowerPrio. Returns a disposable that releases the lock when disposed. This method may block the calling thread.
-    /// </summary>
-    /// <param name="cancellationToken">The cancellation token used to cancel the lock. If this is already set, then this method will attempt to take the lock immediately (succeeding if the lock is currently available).</param>
-    /// <returns>A disposable that releases the lock when disposed.</returns>
-    public IDisposable LowerPrioLock(CancellationToken cancellationToken)
-    {
-        return RequestLowerPrioLockAsync(cancellationToken).GetAwaiter().GetResult();
-    }
-
-    /// <summary>
-    /// Synchronously acquires the lock as a lowerPrio. Returns a disposable that releases the lock when disposed. This method may block the calling thread.
-    /// </summary>
-    /// <returns>A disposable that releases the lock when disposed.</returns>
-    public IDisposable LowerPrioLock()
-    {
-        return LowerPrioLock(CancellationToken.None);
-    }
-
-    /// <summary>
-    /// Asynchronously acquires the lock as a higherPrio. Returns a disposable that releases the lock when disposed.
+    /// Synchronously acquires the lock as a exclusive. Returns a disposable that releases the lock when disposed. This method may block the calling thread.
     /// </summary>
     /// <param name="cancellationToken">The cancellation token used to cancel the lock. If this is already set, then this method will attempt to take the lock immediately (succeeding if the lock is currently available).</param>
     /// <returns>A disposable that releases the lock when disposed.</returns>
-    private Task<IDisposable> RequestHigherPrioLockAsync(CancellationToken cancellationToken, int lockScope)
+    public IDisposable ExclusiveLock(CancellationToken cancellationToken)
+    {
+        return RequestExclusiveLockAsync(cancellationToken).GetAwaiter().GetResult();
+    }
+
+    /// <summary>
+    /// Synchronously acquires the lock as a exclusive. Returns a disposable that releases the lock when disposed. This method may block the calling thread.
+    /// </summary>
+    /// <returns>A disposable that releases the lock when disposed.</returns>
+    public IDisposable ExclusiveLock()
+    {
+        return ExclusiveLock(CancellationToken.None);
+    }
+
+    /// <summary>
+    /// Asynchronously acquires the lock as a upgradeable. Returns a disposable that releases the lock when disposed.
+    /// </summary>
+    /// <param name="cancellationToken">The cancellation token used to cancel the lock. If this is already set, then this method will attempt to take the lock immediately (succeeding if the lock is currently available).</param>
+    /// <returns>A disposable that releases the lock when disposed.</returns>
+    private Task<IDisposable> RequestUpgradeableLockAsync(CancellationToken cancellationToken, int lockScope)
     {
         Task<IDisposable> ret;
         lock (this)
@@ -107,7 +110,7 @@ public class AsyncPriorityLock
             {
                 locksHeld = -1;
 #pragma warning disable CA2000 // Dispose objects before losing scope
-                ret = Task.FromResult<IDisposable>(new HigherPrioKey(this));
+                ret = Task.FromResult<IDisposable>(new UpgradeableKey(this));
 #pragma warning restore CA2000 // Dispose objects before losing scope
                 this.lockScope = lockScope;
             }
@@ -119,20 +122,20 @@ public class AsyncPriorityLock
                 }
                 this.upgradedLocksHeld++;
 #pragma warning disable CA2000 // Dispose objects before losing scope
-                ret = Task.FromResult<IDisposable>(new HigherPrioKey(this));
+                ret = Task.FromResult<IDisposable>(new UpgradeableKey(this));
 #pragma warning restore CA2000 // Dispose objects before losing scope
             }
             else if (locksHeld < 0 && this.lockScope == lockScope)
             {
                 --locksHeld;
 #pragma warning disable CA2000 // Dispose objects before losing scope
-                ret = Task.FromResult<IDisposable>(new HigherPrioKey(this));
+                ret = Task.FromResult<IDisposable>(new UpgradeableKey(this));
 #pragma warning restore CA2000 // Dispose objects before losing scope
             }
             else
             {
                 // Wait for the lock to become available or cancellation.
-                ret = higherPrio.Enqueue(this, cancellationToken, lockScope);
+                ret = upgradeable.Enqueue(this, cancellationToken, lockScope);
             }
         }
 
@@ -141,11 +144,11 @@ public class AsyncPriorityLock
     }
 
     /// <summary>
-    /// Asynchronously acquires the lock as a HigherPrio. Returns a disposable that releases the lock when disposed.
+    /// Asynchronously acquires the lock as a Upgradeable. Returns a disposable that releases the lock when disposed.
     /// </summary>
     /// <param name="cancellationToken">The cancellation token used to cancel the lock. If this is already set, then this method will attempt to take the lock immediately (succeeding if the lock is currently available).</param>
     /// <returns>A disposable that releases the lock when disposed.</returns>
-    public AwaitableDisposable<IDisposable> HigherPrioLockAsync(CancellationToken cancellationToken)
+    public AwaitableDisposable<IDisposable> UpgradeableLockAsync(CancellationToken cancellationToken)
     {
         var lockScope = asyncLocalScope.Value;
         if (lockScope == 0)
@@ -153,35 +156,35 @@ public class AsyncPriorityLock
             lockScope = rand.Next();
             asyncLocalScope.Value = lockScope;
         }
-        return new AwaitableDisposable<IDisposable>(RequestHigherPrioLockAsync(cancellationToken, lockScope));
+        return new AwaitableDisposable<IDisposable>(RequestUpgradeableLockAsync(cancellationToken, lockScope));
     }
 
     /// <summary>
-    /// Asynchronously acquires the lock as a higherPrio. Returns a disposable that releases the lock when disposed.
+    /// Asynchronously acquires the lock as a upgradeable. Returns a disposable that releases the lock when disposed.
     /// </summary>
     /// <returns>A disposable that releases the lock when disposed.</returns>
-    public AwaitableDisposable<IDisposable> HigherPrioLockAsync()
+    public AwaitableDisposable<IDisposable> UpgradeableLockAsync()
     {
-        return HigherPrioLockAsync(CancellationToken.None);
+        return UpgradeableLockAsync(CancellationToken.None);
     }
 
     /// <summary>
-    /// Synchronously acquires the lock as a higherPrio. Returns a disposable that releases the lock when disposed. This method may block the calling thread.
+    /// Synchronously acquires the lock as a upgradeable. Returns a disposable that releases the lock when disposed. This method may block the calling thread.
     /// </summary>
     /// <param name="cancellationToken">The cancellation token used to cancel the lock. If this is already set, then this method will attempt to take the lock immediately (succeeding if the lock is currently available).</param>
     /// <returns>A disposable that releases the lock when disposed.</returns>
-    public IDisposable HigherPrioLock(CancellationToken cancellationToken)
+    public IDisposable UpgradeableLock(CancellationToken cancellationToken)
     {
-        return RequestHigherPrioLockAsync(cancellationToken, Thread.CurrentThread.ManagedThreadId).GetAwaiter().GetResult();
+        return RequestUpgradeableLockAsync(cancellationToken, Thread.CurrentThread.ManagedThreadId).GetAwaiter().GetResult();
     }
 
     /// <summary>
-    /// Asynchronously acquires the lock as a higherPrio. Returns a disposable that releases the lock when disposed. This method may block the calling thread.
+    /// Asynchronously acquires the lock as a upgradeable. Returns a disposable that releases the lock when disposed. This method may block the calling thread.
     /// </summary>
     /// <returns>A disposable that releases the lock when disposed.</returns>
-    public IDisposable HigherPrioLock()
+    public IDisposable UpgradeableLock()
     {
-        return HigherPrioLock(CancellationToken.None);
+        return UpgradeableLock(CancellationToken.None);
     }
 
     /// <summary>
@@ -191,30 +194,30 @@ public class AsyncPriorityLock
     {
         if (locksHeld < 0) return;
 
-        if (!lowerPrio.IsEmpty && locksHeld >= 0)
+        if (!exclusive.IsEmpty && locksHeld >= 0)
         {
-            while (!lowerPrio.IsEmpty)
+            while (!exclusive.IsEmpty)
             {
 #pragma warning disable CA2000 // Dispose objects before losing scope
-                lowerPrio.Dequeue(new LowerPrioKey(this));
+                exclusive.Dequeue(new ExclusivePrioKey(this));
 #pragma warning restore CA2000 // Dispose objects before losing scope
                 ++locksHeld;
             }
         }
-        else if (!higherPrio.IsEmpty)
+        else if (!upgradeable.IsEmpty)
         {
             --locksHeld;
 #pragma warning disable CA2000 // Dispose objects before losing scope
-            higherPrio.Dequeue(new HigherPrioKey(this));
+            upgradeable.Dequeue(new UpgradeableKey(this));
 #pragma warning restore CA2000 // Dispose objects before losing scope
             return;
         }
     }
 
     /// <summary>
-    /// Releases the lock as a lowerPrio.
+    /// Releases the lock as a exclusive.
     /// </summary>
-    internal void ReleaseLowerPrioLock()
+    internal void ReleaseExclusiveLock()
     {
         lock (this)
         {
@@ -224,9 +227,9 @@ public class AsyncPriorityLock
     }
 
     /// <summary>
-    /// Releases the lock as a HigherPrio.
+    /// Releases the lock as a upgradeable.
     /// </summary>
-    internal void ReleaseHigherPrioLock()
+    internal void ReleaseUpgradeableLock()
     {
         lock (this)
         {
@@ -252,46 +255,46 @@ public class AsyncPriorityLock
     }
 
     /// <summary>
-    /// The disposable which releases the lowerPrio lock.
+    /// The disposable which releases the exclusive lock.
     /// </summary>
-    private sealed class LowerPrioKey : IDisposable
+    private sealed class ExclusivePrioKey : IDisposable
     {
-        private readonly AsyncPriorityLock asyncPriorityLock;
+        private readonly AsyncAsymmetricLock asyncPriorityLock;
 
         /// <summary>
         /// Creates the key for a lock.
         /// </summary>
         /// <param name="asyncPriorityLock">The lock to release. May not be <c>null</c>.</param>
-        public LowerPrioKey(AsyncPriorityLock asyncPriorityLock)
+        public ExclusivePrioKey(AsyncAsymmetricLock asyncPriorityLock)
         {
             this.asyncPriorityLock = asyncPriorityLock;
         }
 
         public void Dispose()
         {
-            asyncPriorityLock.ReleaseLowerPrioLock();
+            asyncPriorityLock.ReleaseExclusiveLock();
         }
     }
 
     /// <summary>
-    /// The disposable which releases the higherPrio lock.
+    /// The disposable which releases the upgradeable lock.
     /// </summary>
-    private sealed class HigherPrioKey : IDisposable
+    private sealed class UpgradeableKey : IDisposable
     {
-        private readonly AsyncPriorityLock asyncPriorityLock;
+        private readonly AsyncAsymmetricLock asyncPriorityLock;
 
         /// <summary>
         /// Creates the key for a lock.
         /// </summary>
         /// <param name="asyncPriorityLock">The lock to release. May not be <c>null</c>.</param>
-        public HigherPrioKey(AsyncPriorityLock asyncPriorityLock)
+        public UpgradeableKey(AsyncAsymmetricLock asyncPriorityLock)
         {
             this.asyncPriorityLock = asyncPriorityLock;
         }
 
         public void Dispose()
         {
-            asyncPriorityLock.ReleaseHigherPrioLock();
+            asyncPriorityLock.ReleaseUpgradeableLock();
         }
     }
 }

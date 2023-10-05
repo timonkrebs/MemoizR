@@ -1,8 +1,6 @@
-﻿using MemoizR.Reactive;
+﻿namespace MemoizR.Reactive;
 
-namespace MemoizR.Operators;
-
-public static class PipeExtensionMethods
+public static class SignalOperatorExtensionMethods
 {
     // make sure this blocks not other evaluations of the graph while delaying execution
     public static MemoizR<T?> Delay<T>(this MemoizR<T> handlr, TimeSpan time)
@@ -26,7 +24,7 @@ public static class PipeExtensionMethods
             cancel = new CancellationTokenSource();
             await Task.Delay(time, cancel.Token);
             var value = await handlr.Get();
-            await s.Set(value);
+            var task = s.Set(value);
         }, handlr.context);
 
         return new MemoizR<T?>(s.Get, handlr.context, "DebounceSignal");
