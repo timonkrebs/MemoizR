@@ -4,11 +4,15 @@ public class AsyncAsymmetricLock
 {
     /// <summary>
     /// The queue of TCSs that other tasks are awaiting to acquire the lock as upgradeable.
+    /// Upgradeable can only execute one instance at a time in the locked scope, but allow for recursive entering. https://learn.microsoft.com/en-us/dotnet/api/system.threading.lockrecursionpolicy?view=net-7.0
+    /// They are blocked by exclusive, and one at the time can be upgraded to allow entering exclusive locks.
     /// </summary>
     IAsyncWaitQueue<IDisposable> upgradeable = new DefaultAsyncWaitQueue<IDisposable>();
 
     /// <summary>
     /// The queue of TCSs that other tasks are awaiting to acquire the lock as exclusive.
+    /// Exclusive can not enter upgradeable locks. If they try InvalidOperationException will be thrown, because otherwise it will lead to deadlocks.
+    /// Exclusive can execute with as many other exclusive locks simultaneously.
     /// </summary>
     IAsyncWaitQueue<IDisposable> exclusive = new DefaultAsyncWaitQueue<IDisposable>();
 
@@ -52,7 +56,7 @@ public class AsyncAsymmetricLock
             }
             else
             {
-                throw new InvalidOperationException("No ");
+                throw new InvalidOperationException("No Upgraded Locks can be held when entering Exclusive Lock.");
             }
         }
     }

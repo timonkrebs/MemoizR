@@ -134,19 +134,21 @@
             State = CacheState.CacheClean;
         }
 
-        Task IMemoizR.UpdateIfNecessary()
+        async Task IMemoizR.UpdateIfNecessary()
         {
-            return UpdateIfNecessary();
-        }
 
-        internal async Task Stale(CacheState state)
-        {
             using (await context.contextLock.UpgradeableLockAsync())
             {
-                State = state;
                 await UpdateIfNecessary();
             }
-            return;
+        }
+
+        internal Task Stale(CacheState state)
+        {
+            State = state;
+            _ = UpdateIfNecessary();
+
+            return Task.CompletedTask;
         }
 
         Task IMemoizR.Stale(CacheState state)
