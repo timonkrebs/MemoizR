@@ -13,7 +13,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <PackageReadmeFile>NUGET_REACTIVE_README.md</PackageReadmeFile>
-    <PackageIcon>MemoizR.png</PackageIcon>
+    <PackageIcon>MemoizR-Small.png</PackageIcon>
     <!-- Optional: Publish the repository URL in the built .nupkg (in the NuSpec <Repository> element) -->
     <PublishRepositoryUrl>true</PublishRepositoryUrl>
  
@@ -27,7 +27,7 @@
   </PropertyGroup>
   <ItemGroup>
         <None Include="..\docs\NUGET_REACTIVE_README.md" Pack="true" PackagePath="\"/>
-        <None Include="..\docs\MemoizR.png" Pack="true" PackagePath="\"/>
+        <None Include="..\docs\MemoizR-Small.png" Pack="true" PackagePath="\"/>
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.SourceLink.GitHub" Version="1.1.1" PrivateAssets="All"/>
