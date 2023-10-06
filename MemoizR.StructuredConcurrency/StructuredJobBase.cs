@@ -13,7 +13,7 @@ public abstract class StructuredJobBase<T>
 
     protected abstract void AddConcurrentWork();
 
-    public async Task<T?> Run()
+    public async Task<T> Run()
     {
         try
         {
@@ -25,7 +25,7 @@ public abstract class StructuredJobBase<T>
                 tasks = this.tasks;
             }
             await Task.WhenAll(tasks.ToArray());
-            return result;
+            return result!;
         }
         catch
         {

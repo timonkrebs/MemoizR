@@ -53,20 +53,7 @@ public sealed class Signal<T> : MemoHandlR<T>
         // This should lead to perf gains because memoization can be utilized more efficiently.
         using (await context.contextLock.UpgradeableLockAsync())
         {
-            var hasCurrentGets = context.CurrentGets == null || context.CurrentGets.Length == 0;
-            var currentSourceEqualsThis = context.CurrentReaction?.Sources?.Length > 0
-            && context.CurrentReaction.Sources.Length >= context.CurrentGetsIndex + 1
-            && context.CurrentReaction.Sources[context.CurrentGetsIndex] == (this);
-
-            if (hasCurrentGets && currentSourceEqualsThis)
-            {
-                context.CurrentGetsIndex++;
-            }
-            else
-            {
-                if (!context.CurrentGets!.Any()) context.CurrentGets = new[] { this };
-                else context.CurrentGets = context.CurrentGets!.Union(new[] { this }).ToArray();
-            }
+            context.CheckDependenciesTheSame(this);
         }
 
         return value;

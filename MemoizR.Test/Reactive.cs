@@ -84,8 +84,8 @@ public class Reactive
         // Wait for all tasks to complete
         await Task.WhenAll(tasks);
 
-        Assert.Equal(40, resultM1);
         Assert.Equal(40, await m1.Get());
+        Assert.Equal(40, resultM1);
         Assert.Equal(40, result);
         Assert.Equal(await m1.Get(), result);
 
@@ -131,8 +131,8 @@ public class Reactive
         // Wait for all tasks to complete
         await Task.WhenAll(tasks);
 
-        Assert.Equal(40, resultM1);
         Assert.Equal(40, await m1.Get());
+        Assert.Equal(40, resultM1);
 
         await Task.Delay(100);
 
