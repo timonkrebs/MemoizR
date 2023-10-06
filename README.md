@@ -20,12 +20,12 @@ MemoizR is a Declarative Structured Concurrency implementation for .NET that sim
 > the dynamic structured concurrency part is still being worked on.
 
 Inspired From **Stephen Cleary — Asynchronous streams** https://youtu.be/-Tq4wLyen7Q?si=-dR4cHAutod6i0VG&t=715
-| compared to      | which is     | Signals      |    
-| --------         | -------      | -------      |
-| IEnumerable      | synchronous  | asynchronous |
-| Task             | single value | multi value  |
-| Observable       | push based   | push-pull    |  
-| IAsyncEnumerable | pull based   | push-pull    |
+| compared to      | which is     | MemoizR/Signals |
+| --------         | -------      | -------         |
+| IEnumerable      | synchronous  | asynchronous    |
+| Task             | single value | multi value     |
+| Observable       | push based   | push-pull       |
+| IAsyncEnumerable | pull based   | push-pull       |
 
 ## Key Features
 - **Dynamic Lazy Memoization**: MemoizR introduces the concept of dynamic lazy memoization, allowing you to calculate values only when they are needed and not already calculated.
@@ -39,17 +39,37 @@ Inspired From **Stephen Cleary — Asynchronous streams** https://youtu.be/-Tq4w
 - Also from various other sources, VHDL for synchronization, ReactiveX (https://reactivex.io/), structured concurrency (https://github.com/StephenCleary/StructuredConcurrency, https://vorpus.org/blog/notes-on-structured-concurrency-or-go-statement-considered-harmful/) and many more.
 - Special thanks to @mfp22 for the idea of signal operators, which got me started with this library.
 
-## Getting Started
-Here's a basic example of how to use MemoizR:
+## Similarities to ReactiveX Dataflow and Advantages of MemoizR
+
+MemoizR shares some similarities with the Dataflow library in terms of handling concurrency and managing data flows. 
+However, MemoizR offers several advantages, such as implicit Join and LinkTo, which make it a powerful choice for managing concurrent operations and reactive data flows.
+
+### Dataflow Paradigm
+
+Both MemoizR and the Dataflow library are designed to handle concurrent operations and data flow in a structured manner. 
+They provide abstractions for defining tasks, dependencies, and synchronization, making it easier to manage complex concurrency scenarios.
+
+### Implicit Join
+
+One key advantage of MemoizR is its implicit Join mechanism. In Dataflow, you often need to explicitly define Join blocks to synchronize and combine data from multiple sources. In MemoizR, this synchronization happens automatically when you define dependencies between signals, memos, and reactions. For example:
 
 ```csharp
+// Setup
 var f = new MemoFactory();
 var v1 = f.CreateSignal(1, "v1");
 var m1 = f.CreateMemoizR(async() => await v1.Get(), "m1");
 var m2 = f.CreateMemoizR(async() => await v1.Get() * 2, "m2");
 var m3 = f.CreateMemoizR(async() => await m1.Get() + await m2.Get(), "m3");
+```
+In this code, r1 automatically depends on the results of m1 and m2, and their values are synchronized without the need for explicit Join blocks.
 
-// Get Values
+### Implicit LinkTo
+MemoizR also provides implicit LinkTo functionality. While in Dataflow, you typically use the LinkTo method to connect dataflow blocks, MemoizR handles the linking of dependencies automatically based on your code's structure. This simplifies the setup and maintenance of data flow relationships.
+
+## Usage
+
+```cs
+// Get Value manually
 await m3.Get(); // Calculates m1 + 2 * m1 => (1 + 2 * 1) = 3
 
 // Change
@@ -68,6 +88,11 @@ MemoizR can also handle dynamic changes in the graph, making it suitable for sce
 ```cs
 var m3 = f.CreateMemoizR(async() => await v1.Get() ? await m1.Get() : await m2.Get());
 ```
+
+## Declarative Structured Concurrency
+MemoizR's declarative structured concurrency model enhances maintainability, error handling, and cancellation of complex concurrency use cases. It allows you to set up and manage concurrency in a clear and structured way, making your code easier to understand and maintain.
+
+In summary, MemoizR offers a powerful and intuitive approach to managing concurrency and reactive data flows, with features like implicit Join and LinkTo that simplify your code and improve maintainability. It also draws inspiration from ReactiveX, making it a versatile choice for reactive programming scenarios.
 
 ## Reactivity
 You can use MemoizR to create reactive data flows easily:
