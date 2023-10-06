@@ -22,7 +22,7 @@ With MemoizR, you can create a dependency graph that performs dynamic lazy memoi
 
 MemoizR draws inspiration from various sources:
 
-- **Dynamic Lazy Memoization**:  (https://github.com/modderme123/reactively)
+- **Dynamic Lazy Memoization**:  solid (https://github.com/solidjs/signals) / reactively (https://github.com/modderme123/reactively)
 - **Structured Concurrency**: (https://github.com/StephenCleary/StructuredConcurrency, https://vorpus.org/blog/notes-on-structured-concurrency-or-go-statement-considered-harmful/)
 
 ##  Benefits
@@ -64,6 +64,33 @@ MemoizR can also handle scenarios where the graph is not stable at runtime, maki
 
 ```cs
 var m3 = f.CreateMemoizR(async() => await v1.Get() ? await m1.Get() : await m2.Get());
+```
+
+## Declarative Structured Concurrency
+MemoizR's declarative structured concurrency model enhances maintainability, error handling, and cancellation of complex concurrency use cases. It allows you to set up and manage concurrency in a clear and structured way, making your code easier to understand and maintain.
+
+In summary, MemoizR offers a powerful and intuitive approach to managing concurrency and reactive data flows ([Dataflow (Task Parallel Library)](https://learn.microsoft.com/en-us/dotnet/standard/parallel-programming/dataflow-task-parallel-library), [Channels](https://learn.microsoft.com/en-us/dotnet/core/extensions/channels)), with features like implicit Join and LinkTo that simplify your code and improve maintainability. It also draws inspiration from [ReactiveX](https://github.com/dotnet/reactive), making it a versatile choice for reactive programming scenarios but without having to handle subscriptions.
+
+```cs
+var fsc = new StructuredConcurrencyFactory("DSC");
+
+var child1 = fsc.CreateConcurrentMapReduce(
+    async c =>
+    {
+        await Task.Delay(3000);
+        return 3;
+    });
+
+// all tasks get canceled if one fails
+var c1 = fsc.CreateConcurrentMapReduce(
+    async c =>
+    {
+        await child1.Get(); // should be waiting for the delay of 3 seconds but does not...
+        return 4;
+    });
+
+var x = await c1.Get();
+
 ```
 
 ## Get Started with MemoizR
