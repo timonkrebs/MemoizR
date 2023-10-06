@@ -1,7 +1,7 @@
 <h1 align="center">MemoizR</h1>
 
 <p align="center">
-  <img src="docs/MemoizR.png" alt="MemoizR-logo" width="120px" height="120px"/>
+  <img src="docs/MemoizR-Small.png" alt="MemoizR-logo" width="120px" height="120px"/>
   <br>
   <em>MemoizR is a powerful Declarative Structured Concurrency model</em>
   <br>
@@ -19,11 +19,11 @@ MemoizR is a Declarative Structured Concurrency implementation for .NET that sim
 
 > the dynamic structured concurrency part is still being worked on.
 
-Copied From Stephen Cleary — Asynchronous streams https://youtu.be/-Tq4wLyen7Q?si=-dR4cHAutod6i0VG&t=715
-|  Compared to     | which is     | Signals      |    
+Inspired From **Stephen Cleary — Asynchronous streams** https://youtu.be/-Tq4wLyen7Q?si=-dR4cHAutod6i0VG&t=715
+| compared to      | which is     | Signals      |    
 | --------         | -------      | -------      |
-| IEnumerable      | Synchronous  | Asynchronous |
-| Task             | single Value | multi Value  |
+| IEnumerable      | synchronous  | asynchronous |
+| Task             | single value | multi value  |
 | Observable       | push based   | push-pull    |  
 | IAsyncEnumerable | pull based   | push-pull    |
 
