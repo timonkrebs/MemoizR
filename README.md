@@ -35,8 +35,8 @@ Inspired From **Stephen Cleary — Asynchronous streams** https://youtu.be/-Tq4w
 - **Performance Optimization**: Depending on your use case, MemoizR can optimize performance for scenarios with more reads than writes (thanks to memoization) or more writes than reads (using lazy evaluation).
 
 ## Inspiration
-- This implementation draws inspiration from the concepts found in reactively (https://github.com/modderme123/reactively), primarily the concept of dynamic lazy memoization.
-- Also from various other sources, VHDL for synchronization, ReactiveX (https://reactivex.io/), structured concurrency (https://github.com/StephenCleary/StructuredConcurrency, https://vorpus.org/blog/notes-on-structured-concurrency-or-go-statement-considered-harmful/) and many more.
+- This implementation draws inspiration from the concepts found in reactively (https://github.com/modderme123/reactively) / solid (https://github.com/solidjs/signals), primarily the concept of dynamic lazy memoization.
+- Also from various other sources, VHDL for synchronization, ReactiveX (https://reactivex.io/), structured concurrency (https://vorpus.org/blog/notes-on-structured-concurrency-or-go-statement-considered-harmful/, https://github.com/StephenCleary/StructuredConcurrency) and many more.
 - Special thanks to @mfp22 for the idea of signal operators, which got me started with this library.
 
 ## Similarities and Advantages of MemoizR to ReactiveX and Dataflow 
