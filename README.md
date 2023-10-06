@@ -19,6 +19,14 @@ MemoizR is a Declarative Structured Concurrency implementation for .NET that sim
 
 > the dynamic structured concurrency part is still being worked on.
 
+Copied From Stephen Cleary — Asynchronous streams https://youtu.be/-Tq4wLyen7Q?si=-dR4cHAutod6i0VG&t=715
+|  Compared to     | which is     | Signals      |    
+| --------         | -------      | -------      |
+| IEnumerable      | Synchronous  | Asynchronous |
+| Task             | single Value | multi Value  |
+| Observable       | push based   | push-pull    |  
+| IAsyncEnumerable | pull based   | push-pull    |
+
 ## Key Features
 - **Dynamic Lazy Memoization**: MemoizR introduces the concept of dynamic lazy memoization, allowing you to calculate values only when they are needed and not already calculated.
 - **Declarative Structured Concurrency**: This is the most innovation part of this library. it enables easy setup, maintainability, error handling and cancelation of complex concurrency usecases.
