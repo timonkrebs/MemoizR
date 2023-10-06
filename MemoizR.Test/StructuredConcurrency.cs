@@ -6,11 +6,11 @@ namespace MemoizR.Test;
 
 public class StructuredConcurrency
 {
-    [Fact(Skip = "Blocks Testsuite")]
+    [Fact]
     public async Task TestInitialization()
     {
-        var f = new MemoFactory();
-        var fsc = new StructuredConcurrencyFactory();
+        var f = new MemoFactory("DSC");
+        var fsc = new StructuredConcurrencyFactory("DSC");
         var v1 = f.CreateSignal(1);
         Assert.Equal(1, await v1.Get());
         Assert.Equal(1, await v1.Get());
@@ -36,11 +36,11 @@ public class StructuredConcurrency
         Assert.Equal(-3, await c2.Get());
     }
 
-    [Fact(Skip = "Blocks Testsuite", Timeout = 1000)]
+    [Fact(Skip = "", Timeout = 1000)]
     public void TestExceptionHandling()
     {
-        var f = new MemoFactory();
-        var fsc = new StructuredConcurrencyFactory();
+        var f = new MemoFactory("DSC");
+        var fsc = new StructuredConcurrencyFactory("DSC");
 
         // all tasks get canceled if one fails
         var c1 = fsc.CreateConcurrentMapReduce(
@@ -56,11 +56,11 @@ public class StructuredConcurrency
         Assert.Single(e.InnerExceptions);
     }
 
-    [Fact(Skip = "Blocks Testsuite")]
-    public void TestChildExecutionHandling()
+    [Fact(Skip = "to long")]
+    public async Task TestChildExecutionHandling()
     {
-        var f = new MemoFactory();
-        var fsc = new StructuredConcurrencyFactory();
+        var f = new MemoFactory("DSC");
+        var fsc = new StructuredConcurrencyFactory("DSC");
 
         var child1 = fsc.CreateConcurrentMapReduce(
             async c =>
@@ -77,6 +77,6 @@ public class StructuredConcurrency
                 return 4;
             });
 
-        var x = c1.Get().Result;
+        var x = await c1.Get();
     }
 }

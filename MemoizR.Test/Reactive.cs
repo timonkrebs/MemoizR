@@ -7,7 +7,7 @@ public class Reactive
     [Fact]
     public async Task TestReactive()
     {
-        var f = new ReactiveMemoFactory();
+        var f = new ReactiveMemoFactory("reactivity");
         var v1 = f.CreateSignal(1);
         Assert.Equal(1, await v1.Get());
         Assert.Equal(1, await v1.Get());
@@ -21,7 +21,7 @@ public class Reactive
     public async Task TestReactiveInvocations()
     {
         var invocations = 0;
-        var f = new ReactiveMemoFactory();
+        var f = new ReactiveMemoFactory("reactivity");
         var v1 = f.CreateSignal(1);
         Assert.Equal(1, await v1.Get());
 
@@ -42,12 +42,12 @@ public class Reactive
         Assert.Equal(2, invocations);
     }
 
-    [Fact(Skip = "Blocks Testsuite")]
+    [Fact]
     public async Task TestThreadSafety()
     {
         // Create a MemoFactory instance
-        var f = new MemoFactory();
-        var rf = new ReactiveMemoFactory();
+        var f = new MemoFactory("reactivity");
+        var rf = new ReactiveMemoFactory("reactivity");
 
         // Create a signal 'v1' with an initial value of 1
         var v1 = f.CreateSignal(4);
@@ -96,12 +96,12 @@ public class Reactive
         Assert.InRange(invocationCount, 3, 5);
     }
 
-    [Fact(Skip = "Blocks Testsuite")]
+    [Fact]
     public async Task TestThreadSafety2()
     {
         // Create a MemoFactory instance
-        var f = new MemoFactory();
-        var rf = new ReactiveMemoFactory();
+        var f = new MemoFactory("reactivity");
+        var rf = new ReactiveMemoFactory("reactivity");
 
         // Create a signal 'v1' with an initial value of 1
         var v1 = f.CreateSignal(4);

@@ -16,8 +16,9 @@
             this.State = CacheState.CacheDirty;
             this.label = label;
 
+
             // The reaction must be initialized to build the Sources
-            Update().Wait();
+            Update().GetAwaiter().GetResult();    
         }
 
         public void Pause()
