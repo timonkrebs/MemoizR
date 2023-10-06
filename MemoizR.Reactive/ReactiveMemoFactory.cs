@@ -1,31 +1,30 @@
-namespace MemoizR.Reactive
+using MemoizR;
+
+namespace MemoizR.Reactive;
+
+public class ReactiveMemoFactory : MemoFactory
 {
-    using MemoizR;
+    private readonly TaskScheduler? sheduler;
 
-    public class ReactiveMemoFactory : MemoFactory
+    // Constructor for initializing the ReactiveMemoFactory without a specific TaskScheduler.
+    public ReactiveMemoFactory(string? contextKey = null) : base(contextKey) { }
+
+    /// <summary>
+    /// Constructor for initializing the ReactiveMemoFactory with a specific TaskScheduler.
+    /// </summary>
+    /// <param name="sheduler">The TaskScheduler used to run the reaction on. Must not be <c>null</c>.</param>
+    public ReactiveMemoFactory(TaskScheduler sheduler, string? contextKey = null) : base(contextKey)
     {
-        private readonly TaskScheduler? sheduler;
+        this.sheduler = sheduler;
+    }
 
-        public ReactiveMemoFactory(string? contextKey = null) : base(contextKey) { }
+    public Reaction CreateReaction(Func<Task> fn)
+    {
+        return new Reaction(fn, context, sheduler);
+    }
 
-
-        /// <summary>
-        /// Initializes ReactiveMemoFactory with specific TaskScheduler.
-        /// </summary>
-        /// <param name="sheduler">The sheduler used to run the reaction on. This may not be <c>null</c>.</param>
-        public ReactiveMemoFactory(TaskScheduler sheduler, string? contextKey = null) : base(contextKey)
-        {
-            this.sheduler = sheduler;
-        }
-
-        public Reaction CreateReaction(Func<Task> fn)
-        {
-            return new Reaction(fn, context, sheduler);
-        }
-
-        public Reaction CreateReaction(string label, Func<Task> fn)
-        {
-            return new Reaction(fn, context, sheduler, label);
-        }
+    public Reaction CreateReaction(string label, Func<Task> fn)
+    {
+        return new Reaction(fn, context, sheduler, label);
     }
 }

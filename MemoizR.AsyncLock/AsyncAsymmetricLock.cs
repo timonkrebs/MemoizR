@@ -49,14 +49,10 @@ public class AsyncAsymmetricLock
                 ++locksHeld;
                 return Task.FromResult<IDisposable>(new ExclusivePrioKey(this));
             }
-            else if (upgradedLocksHeld == 0)
+            else
             {
                 // Wait for the lock to become available or cancellation.
                 return exclusive.Enqueue(this, cancellationToken, 0);
-            }
-            else
-            {
-                throw new InvalidOperationException("No Upgraded Locks can be held when entering Exclusive Lock.");
             }
         }
     }
@@ -154,12 +150,18 @@ public class AsyncAsymmetricLock
     /// <returns>A disposable that releases the lock when disposed.</returns>
     public AwaitableDisposable<IDisposable> UpgradeableLockAsync(CancellationToken cancellationToken)
     {
-        var lockScope = asyncLocalScope.Value;
-        if (lockScope == 0)
+
+        int lockScope;
+        lock (this)
         {
-            lockScope = rand.Next();
-            asyncLocalScope.Value = lockScope;
+            lockScope = asyncLocalScope.Value;
+            if (lockScope == 0)
+            {
+                lockScope = rand.Next();
+                asyncLocalScope.Value = lockScope;
+            }
         }
+
         return new AwaitableDisposable<IDisposable>(RequestUpgradeableLockAsync(cancellationToken, lockScope));
     }
 
@@ -198,13 +200,14 @@ public class AsyncAsymmetricLock
     {
         if (locksHeld < 0) return;
 
-        if (!exclusive.IsEmpty && locksHeld >= 0)
+        if (!exclusive.IsEmpty && locksHeld >= 0 && upgradedLocksHeld == 0)
         {
             while (!exclusive.IsEmpty)
             {
 #pragma warning disable CA2000 // Dispose objects before losing scope
-                exclusive.Dequeue(new ExclusivePrioKey(this));
+                lockScope = exclusive.Dequeue(new ExclusivePrioKey(this));
 #pragma warning restore CA2000 // Dispose objects before losing scope
+                asyncLocalScope.Value = lockScope;
                 ++locksHeld;
             }
         }
@@ -212,8 +215,9 @@ public class AsyncAsymmetricLock
         {
             --locksHeld;
 #pragma warning disable CA2000 // Dispose objects before losing scope
-            upgradeable.Dequeue(new UpgradeableKey(this));
+            lockScope = upgradeable.Dequeue(new UpgradeableKey(this));
 #pragma warning restore CA2000 // Dispose objects before losing scope
+            asyncLocalScope.Value = lockScope;
             return;
         }
     }

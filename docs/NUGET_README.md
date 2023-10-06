@@ -4,14 +4,6 @@
 
 MemoizR is a powerful Structured Concurrency State implementation designed to simplify and enhance state synchronization across multiple threads in .NET applications. It offers a performant and thread-safe approach to managing concurrency challenges, making it an excellent choice for various scenarios.
 
-Inspired From **Stephen Cleary — Asynchronous streams** https://youtu.be/-Tq4wLyen7Q?si=-dR4cHAutod6i0VG&t=715
-| compared to      | which is     | Signals      |    
-| --------         | -------      | -------      |
-| IEnumerable      | synchronous  | asynchronous |
-| Task             | single value | multi value  |
-| Observable       | push based   | push-pull    |  
-| IAsyncEnumerable | pull based   | push-pull    |
-
 ## Key Advantages
 
 - **Simplicity and Intuitiveness**: MemoizR aims to provide a straightforward and intuitive way to handle concurrency, avoiding the complexities often associated with async/await patterns (e.g. async void, .Wait, not awaiting everything and even .ConfigureAwait) in C#. It offers a more natural approach to managing asynchronous tasks and multithreading.

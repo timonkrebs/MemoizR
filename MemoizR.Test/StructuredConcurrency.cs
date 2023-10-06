@@ -9,8 +9,8 @@ public class StructuredConcurrency
     [Fact]
     public async Task TestInitialization()
     {
-        var f = new MemoFactory("DSC");
-        var fsc = new StructuredConcurrencyFactory("DSC");
+        var f = new MemoFactory();
+        var fsc = new StructuredConcurrencyFactory();
         var v1 = f.CreateSignal(1);
         Assert.Equal(1, await v1.Get());
         Assert.Equal(1, await v1.Get());
@@ -39,8 +39,7 @@ public class StructuredConcurrency
     [Fact(Skip = "", Timeout = 1000)]
     public void TestExceptionHandling()
     {
-        var f = new MemoFactory("DSC");
-        var fsc = new StructuredConcurrencyFactory("DSC");
+        var fsc = new StructuredConcurrencyFactory();
 
         // all tasks get canceled if one fails
         var c1 = fsc.CreateConcurrentMapReduce(
@@ -59,8 +58,7 @@ public class StructuredConcurrency
     [Fact(Skip = "to long")]
     public async Task TestChildExecutionHandling()
     {
-        var f = new MemoFactory("DSC");
-        var fsc = new StructuredConcurrencyFactory("DSC");
+        var fsc = new StructuredConcurrencyFactory();
 
         var child1 = fsc.CreateConcurrentMapReduce(
             async c =>
