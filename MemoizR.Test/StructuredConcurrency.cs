@@ -53,7 +53,7 @@ public class StructuredConcurrency
             _ => throw new SkipException("Test"));
 
         var e = Assert.Throws<AggregateException>(() => c1.Get().Result);
-        Assert.Equal(1, e.InnerExceptions.Count);
+        Assert.Single(e.InnerExceptions);
     }
 
     [Fact(Skip = "Blocks Testsuite")]

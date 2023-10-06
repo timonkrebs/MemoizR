@@ -6,12 +6,10 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 ## [0.1.0] - 2023-10-06
  
 ### Added
-- Made MemoizR async.
 - Added Structured Concurrency primitives
-- 
    
 ### Changed
-- 
+- Made MemoizR async
  
 ### Fixed
 

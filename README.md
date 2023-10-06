@@ -65,7 +65,7 @@ var m3 = f.CreateMemoizR(async() => await v1.Get() ? await m1.Get() : await m2.G
 You can use MemoizR to create reactive data flows easily:
 
 ```csharp
-var f = new MemoFactory();
+var f = new ReactiveMemoFactory();
 var v1 = f.CreateSignal(1, "v1");
 var m1 = f.CreateMemoizR(async() => await v1.Get(), "m1");
 var m2 = f.CreateMemoizR(async() => await v1.Get() * 2, "m2");

@@ -4,13 +4,15 @@
     {
         private CacheState State { get; set; } = CacheState.CacheClean;
         private Func<Task> fn;
+        private readonly TaskScheduler? sheduler;
         private bool isPaused;
 
         CacheState IMemoizR.State { get => State; set => State = value; }
 
-        internal Reaction(Func<Task> fn, Context context, string label = "Label") : base(context)
+        internal Reaction(Func<Task> fn, Context context, TaskScheduler? sheduler = null, string label = "Label") : base(context)
         {
             this.fn = fn;
+            this.sheduler = sheduler;
             this.State = CacheState.CacheDirty;
             this.label = label;
 
@@ -83,7 +85,11 @@
             {
                 if (!isPaused)
                 {
-                    await fn();
+                    var t = sheduler != null 
+                    ? Task.Factory.StartNew(async() => await fn(), CancellationToken.None, TaskCreationOptions.None, sheduler)
+                    : fn();
+
+                    await t;
                 }
                 else
                 {
