@@ -8,8 +8,7 @@
 </p>
 
 
-
-![CI](https://github.com/timonkrebs/MemoizR/workflows/.NET/badge.svg)
+[![.NET](https://github.com/timonkrebs/MemoizR/actions/workflows/dotnet.yml/badge.svg)](https://github.com/timonkrebs/MemoizR/actions/workflows/dotnet.yml)
 [![NuGet](https://img.shields.io/nuget/dt/memoizr.svg)](https://www.nuget.org/packages/memoizr) 
 [![NuGet](https://img.shields.io/nuget/vpre/memoizr.svg)](https://www.nuget.org/packages/memoizr)
 
