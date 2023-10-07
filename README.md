@@ -18,7 +18,7 @@ MemoizR is a Declarative Structured Concurrency implementation for .NET that sim
 
 > the dynamic structured concurrency part is still being worked on.
 
-Inspired From **Stephen Cleary — Asynchronous streams** https://youtu.be/-Tq4wLyen7Q?si=-dR4cHAutod6i0VG&t=715
+Inspired From **Stephen Cleary — Asynchronous streams** https://www.youtube.com/watch?v=-Tq4wLyen7Q&t=706s
 | compared to      | which is     | MemoizR/Signals |
 | --------         | -------      | -------         |
 | IEnumerable      | synchronous  | asynchronous    |
