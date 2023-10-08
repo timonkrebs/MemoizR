@@ -3,7 +3,7 @@
 <p align="center">
   <img src="docs/MemoizR-Small.png" alt="MemoizR-logo" width="120px" height="120px"/>
   <br>
-  <em>MemoizR is a powerful Declarative Structured Concurrency model</em>
+  <em>Streamlined Concurrency</em>
   <br>
 </p>
 
