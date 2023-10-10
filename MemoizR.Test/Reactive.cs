@@ -70,7 +70,7 @@ public class Reactive
             tasks.Add(Task.Run(async () => await v1.Set(i)));
         }
 
-        await Task.Delay(1); // wait for await m1.Get to be able to read
+        await Task.Delay(10); // wait for await m1.Get to be able to read
 
         for (var i = 0; i < 20; i++)
         {
@@ -93,9 +93,8 @@ public class Reactive
 
         await Task.Delay(100);
 
-        // Check if 'r1' was evaluated three times (thread-safe)
         // This is not completely reliable because if all the set are evaluated tawait he gets trigger again because how the readwrite lock works
-        Assert.InRange(invocationCount, 3, 5);
+        Assert.InRange(invocationCount, 2, 3);
     }
 
     [Fact]
@@ -139,8 +138,7 @@ public class Reactive
 
         await Task.Delay(100);
 
-        // Check if 'r1' was evaluated 22 times (thread-safe)
         // This is not completely reliable because if all the set are evaluated tawait he gets trigger again because how the readwrite lock works
-        Assert.InRange(invocationCount, 1, 30);
+        Assert.InRange(invocationCount, 20, 22);
     }
 }

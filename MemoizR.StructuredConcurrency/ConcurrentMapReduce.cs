@@ -34,6 +34,7 @@ public sealed class ConcurrentMapReduce<T> : SignalHandlR, IMemoizR
             // if someone else did read the graph while this thread was blocekd it could be that this is already Clean
             if (State == CacheState.CacheClean && context.CurrentReaction == null)
             {
+                Thread.MemoryBarrier();
                 return value;
             }
 
@@ -45,6 +46,7 @@ public sealed class ConcurrentMapReduce<T> : SignalHandlR, IMemoizR
             await UpdateIfNecessary();
         }
 
+        Thread.MemoryBarrier();
         return value;
     }
 

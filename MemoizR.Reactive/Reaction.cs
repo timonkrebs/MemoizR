@@ -72,6 +72,12 @@ public sealed class Reaction : SignalHandlR, IMemoizR
     // Update the cached value by running the computation.
     private async Task Update()
     {
+        if (isPaused)
+        {
+            State = CacheState.CacheDirty;
+            return;
+        }
+        
         // Evaluate the reactive function body, dynamically capturing any other reactives used.
         var prevReaction = context.CurrentReaction;
         var prevGets = context.CurrentGets;
@@ -94,6 +100,7 @@ public sealed class Reaction : SignalHandlR, IMemoizR
             else
             {
                 State = CacheState.CacheDirty;
+                return;
             }
 
             // If the Sources have changed, update source & observer links.

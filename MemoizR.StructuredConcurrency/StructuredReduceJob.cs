@@ -1,6 +1,4 @@
-﻿using System.Collections.Concurrent;
-
-namespace MemoizR.StructuredConcurrency;
+﻿namespace MemoizR.StructuredConcurrency;
 
 public sealed class StructuredReduceJob<T> : StructuredJobBase<T>
 {

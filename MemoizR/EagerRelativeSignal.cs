@@ -13,12 +13,14 @@ public sealed class EagerRelativeSignal<T> : MemoHandlR<T>
         // The naming of the lock could be confusing because Set must be locked by ReadLock.
         // There can be multiple threads updating the CacheState at the same time but no reads should be possible while in the process.
         // Must be Upgradeable because it could change to "Writeble-Lock" if something synchronously reactive is listening.
-        using(await context.contextLock.ExclusiveLockAsync())
+        using (await context.contextLock.ExclusiveLockAsync())
         {
             // only updating the value should be locked
             lock (this)
             {
+                Thread.MemoryBarrier();
                 value = fn(value);
+                Thread.MemoryBarrier();
             }
 
             for (int i = 0; i < Observers.Length; i++)
@@ -33,17 +35,19 @@ public sealed class EagerRelativeSignal<T> : MemoHandlR<T>
     {
         if (context.CurrentReaction == null)
         {
+            Thread.MemoryBarrier();
             return value;
         }
 
         // The naming of the lock could be confusing because Set must be locked by WriteLock.
         // Only one thread should evaluate the graph at a time. otherwise the context could get messed up.
         // This should lead to perf gains because memoization can be utilized more efficiently.
-        using( await context.contextLock.UpgradeableLockAsync())
+        using (await context.contextLock.UpgradeableLockAsync())
         {
             context.CheckDependenciesTheSame(this);
         }
 
+        Thread.MemoryBarrier();
         return value;
     }
 }

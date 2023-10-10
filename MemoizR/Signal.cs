@@ -30,7 +30,9 @@ public sealed class Signal<T> : MemoHandlR<T>
             // only updating the value should be locked
             lock (this)
             {
+                Thread.MemoryBarrier();
                 this.value = value;
+                Thread.MemoryBarrier();
             }
 
             for (int i = 0; i < Observers.Length; i++)
@@ -45,6 +47,7 @@ public sealed class Signal<T> : MemoHandlR<T>
     {
         if (context.CurrentReaction == null)
         {
+            Thread.MemoryBarrier();
             return value;
         }
 
@@ -56,6 +59,7 @@ public sealed class Signal<T> : MemoHandlR<T>
             context.CheckDependenciesTheSame(this);
         }
 
+        Thread.MemoryBarrier();
         return value;
     }
 }
