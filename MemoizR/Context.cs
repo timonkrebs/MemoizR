@@ -1,4 +1,4 @@
-using MemoizR.AsyncLock;
+using MemoizR.StructuredAsyncLock;
 
 namespace MemoizR;
 

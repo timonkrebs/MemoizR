@@ -1,4 +1,4 @@
-namespace MemoizR.AsyncLock;
+namespace MemoizR.StructuredAsyncLock;
 
 public class AsyncAsymmetricLock
 {

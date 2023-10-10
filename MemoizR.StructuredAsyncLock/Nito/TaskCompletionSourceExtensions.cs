@@ -1,4 +1,4 @@
-namespace MemoizR.AsyncLock;
+namespace MemoizR.StructuredAsyncLock;
 
 /// <summary>
 /// Provides extension methods for <see cref="TaskCompletionSource{TResult}"/>.

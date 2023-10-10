@@ -11,7 +11,7 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MemoizR.Reactive", "MemoizR
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MemoizR.StructuredConcurrency", "MemoizR.StructuredConcurrency\MemoizR.StructuredConcurrency.csproj", "{565C60BC-380D-4E30-B621-A31C5E229A7F}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MemoizR.AsyncLock", "MemoizR.AsyncLock\MemoizR.AsyncLock.csproj", "{412EE767-E418-4103-B4B1-4D61A2D91D13}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MemoizR.StructuredAsyncLock", "MemoizR.StructuredAsyncLock\MemoizR.StructuredAsyncLock.csproj", "{412EE767-E418-4103-B4B1-4D61A2D91D13}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution

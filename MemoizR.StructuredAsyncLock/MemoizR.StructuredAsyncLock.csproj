@@ -1,18 +1,13 @@
 <Project Sdk="Microsoft.NET.Sdk">
-  
-  <ItemGroup>
-    <ProjectReference Include="..\MemoizR.StructuredAsyncLock\MemoizR.StructuredAsyncLock.csproj" />
-  </ItemGroup>
-
   <PropertyGroup>
     <TargetFramework>net7.0</TargetFramework>
-    <PackageId>MemoizR</PackageId>
+    <PackageId>MemoizR.StructuredAsyncLock</PackageId>
     <Version>0.0.5</Version>
     <Authors>Timon Krebs</Authors>
     <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <PackageReadmeFile>NUGET_README.md</PackageReadmeFile>
+    <PackageReadmeFile>NUGET_ASYNC_LOCK_README.md</PackageReadmeFile>
     <PackageIcon>MemoizR-Small.png</PackageIcon>
     <!-- Optional: Publish the repository URL in the built .nupkg (in the NuSpec <Repository> element) -->
     <PublishRepositoryUrl>true</PublishRepositoryUrl>
@@ -26,10 +21,12 @@
     <PackageTags>Memoization, StructuredConcurrency, Structured Concurrency, Graph, Dependency, Dependencies, Dynamic, Dynamic Dependencies, Concurrency, Lazy, Resolve, Perf, Performance, Parallel, Parallel Computing, Sync, Synchronization, State, State Synchronization</PackageTags>
   </PropertyGroup>
   <ItemGroup>
-        <None Include="..\docs\NUGET_README.md" Pack="true" PackagePath="\" />
+        <None Include="..\docs\NUGET_ASYNC_LOCK_README.md" Pack="true" PackagePath="\" />
         <None Include="..\docs\MemoizR-Small.png" Pack="true" PackagePath="\" />
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.SourceLink.GitHub" Version="1.1.1" PrivateAssets="All" />
+    <PackageReference Include="Nito.Collections.Deque" Version="1.1.1" />
   </ItemGroup>
+
 </Project>

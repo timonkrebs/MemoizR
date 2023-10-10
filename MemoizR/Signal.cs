@@ -1,5 +1,3 @@
-using MemoizR.AsyncLock;
-
 namespace MemoizR;
 
 public sealed class Signal<T> : MemoHandlR<T>
