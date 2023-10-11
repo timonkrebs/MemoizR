@@ -24,7 +24,7 @@ public abstract class StructuredJobBase<T>
                 AddConcurrentWork();
                 tasks = this.tasks;
             }
-            await Task.WhenAll(tasks.ToArray());
+            await Task.WhenAll(tasks);
             return result!;
         }
         catch

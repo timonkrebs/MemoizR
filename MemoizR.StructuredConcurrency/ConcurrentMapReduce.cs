@@ -127,7 +127,7 @@ public sealed class ConcurrentMapReduce<T> : SignalHandlR, IMemoizR
                     var source = Sources[i];
                     if (!source.Observers.Any())
                     {
-                        source.Observers = (new[] { this }).ToArray();
+                        source.Observers = new[] { this };
                     }
                     else
                     {

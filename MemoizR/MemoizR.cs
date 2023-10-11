@@ -124,7 +124,7 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR
                     var source = Sources[i];
                     if (!source.Observers.Any())
                     {
-                        source.Observers = (new[] { this }).ToArray();
+                        source.Observers = new[] { this };
                     }
                     else
                     {

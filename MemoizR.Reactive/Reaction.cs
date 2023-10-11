@@ -16,8 +16,7 @@ public sealed class Reaction : SignalHandlR, IMemoizR
         this.State = CacheState.CacheDirty;
         this.label = label;
 
-        // The reaction must be initialized to build the Sources.
-        Update().GetAwaiter().GetResult();
+        _ = Init();
     }
 
     public void Pause()
@@ -29,6 +28,15 @@ public sealed class Reaction : SignalHandlR, IMemoizR
     {
         this.isPaused = false;
         return UpdateIfNecessary();
+    }
+
+    private async Task Init()
+    {
+        using (await context.contextLock.UpgradeableLockAsync())
+        {
+            // The reaction must be initialized to build the Sources.
+            await Update();
+        }
     }
 
     // Update the reaction if dirty, or a parent turns out to be dirty.
@@ -77,7 +85,7 @@ public sealed class Reaction : SignalHandlR, IMemoizR
             State = CacheState.CacheDirty;
             return;
         }
-        
+
         // Evaluate the reactive function body, dynamically capturing any other reactives used.
         var prevReaction = context.CurrentReaction;
         var prevGets = context.CurrentGets;
@@ -91,7 +99,7 @@ public sealed class Reaction : SignalHandlR, IMemoizR
         {
             if (!isPaused)
             {
-                var t = sheduler != null
+                var t = sheduler != null && sheduler.Id != Thread.CurrentThread.ManagedThreadId
                             ? Task.Factory.StartNew(async () => await fn(), CancellationToken.None, TaskCreationOptions.None, sheduler)
                             : fn();
 
@@ -122,7 +130,7 @@ public sealed class Reaction : SignalHandlR, IMemoizR
                     var source = Sources[i];
                     if (!source.Observers.Any())
                     {
-                        source.Observers = (new[] { this }).ToArray();
+                        source.Observers = new[] { this };
                     }
                     else
                     {
