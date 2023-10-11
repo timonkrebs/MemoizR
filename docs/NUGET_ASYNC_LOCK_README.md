@@ -1,6 +1,6 @@
-# MemoizR:AsyncLock
+# MemoizR:StructuredAsyncLock
 
 AsyncAsymmetricLock should only be used in accordance with structured sequential concurrency.
-No Task should be stored in a variable to ensure structured sequential concurrency.
+Every Task must be immediately awaited to ensure structured sequential concurrency.
 
-Otherwise it there will be undefined behaviour.
+Otherwise there will be undefined behaviour.
