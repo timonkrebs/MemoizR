@@ -4,15 +4,15 @@ public sealed class Reaction : SignalHandlR, IMemoizR
 {
     private CacheState State { get; set; } = CacheState.CacheClean;
     private Func<Task> fn;
-    private SynchronizationContext? sheduler;
+    private SynchronizationContext? synchronizationContext;
     private bool isPaused;
 
     CacheState IMemoizR.State { get => State; set => State = value; }
 
-    internal Reaction(Func<Task> fn, Context context, SynchronizationContext? sheduler = null, string label = "Label") : base(context)
+    internal Reaction(Func<Task> fn, Context context, SynchronizationContext? synchronizationContext = null, string label = "Label") : base(context)
     {
         this.fn = fn;
-        this.sheduler = sheduler;
+        this.synchronizationContext = synchronizationContext;
         this.State = CacheState.CacheDirty;
         this.label = label;
 
@@ -34,16 +34,16 @@ public sealed class Reaction : SignalHandlR, IMemoizR
     {
         using (await context.contextLock.UpgradeableLockAsync())
         {
-            var s = sheduler;
+            var temp = synchronizationContext;
             try
             {
-                sheduler = null;
+                synchronizationContext = null;
                 // The reaction must be initialized to build the Sources.
                 await Update();
             }
             finally
             {
-                sheduler = s;
+                synchronizationContext = temp;
             }
         }
     }
@@ -108,19 +108,33 @@ public sealed class Reaction : SignalHandlR, IMemoizR
         {
             if (!isPaused)
             {
-                if (sheduler != null)
+                try
                 {
-                    var tcs = new TaskCompletionSource();
-                    sheduler.Post(async _ =>
+                    if (synchronizationContext != null)
+                    {
+                        var tcs = new TaskCompletionSource();
+                        synchronizationContext.Post(async _ =>
+                        {
+                            try
+                            {
+                                await fn();
+                            }
+                            finally
+                            {
+                                tcs.SetResult();
+                            }
+                        }, null);
+                        await tcs.Task;
+                    }
+                    else
                     {
                         await fn();
-                        tcs.SetResult();
-                    }, null);
-                    await tcs.Task;
+                    }
                 }
-                else
+                catch
                 {
-                    await fn();
+                    State = CacheState.CacheDirty;
+                    return;
                 }
             }
             else
