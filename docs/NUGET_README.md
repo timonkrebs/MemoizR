@@ -42,10 +42,10 @@ Here's a simple example of using MemoizR:
 
 ```csharp
 var f = new MemoFactory();
-var v1 = f.CreateSignal(1, "v1");
-var m1 = f.CreateMemoizR(async() => await v1.Get(), "m1");
-var m2 = f.CreateMemoizR(async() => await v1.Get() * 2, "m2");
-var m3 = f.CreateMemoizR(async() => await m1.Get() + await m2.Get(), "m3");
+var v1 = f.CreateSignal(1);
+var m1 = f.CreateMemoizR(async() => await v1.Get());
+var m2 = f.CreateMemoizR(async() => await v1.Get() * 2);
+var m3 = f.CreateMemoizR(async() => await m1.Get() + await m2.Get());
 
 // Get Values
 await m3.Get(); // Calculates m1 + 2 * m1 => (1 + 2 * 1) = 3

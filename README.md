@@ -59,10 +59,10 @@ One key advantage of MemoizR is its implicit Join mechanism. In Dataflow, you of
 ```csharp
 // Setup
 var f = new MemoFactory();
-var v1 = f.CreateSignal(1, "v1");
-var m1 = f.CreateMemoizR(async() => await v1.Get(), "m1");
-var m2 = f.CreateMemoizR(async() => await v1.Get() * 2, "m2");
-var m3 = f.CreateMemoizR(async() => await m1.Get() + await m2.Get(), "m3");
+var v1 = f.CreateSignal(1);
+var m1 = f.CreateMemoizR(async() => await v1.Get());
+var m2 = f.CreateMemoizR(async() => await v1.Get() * 2);
+var m3 = f.CreateMemoizR(async() => await m1.Get() + await m2.Get());
 ```
 In this code, r1 automatically depends on the results of m1 and m2, and their values are synchronized without the need for explicit Join blocks.
 
@@ -124,8 +124,8 @@ You can use MemoizR to create reactive data flows easily:
 
 ```csharp
 var f = new ReactiveMemoFactory();
-var v1 = f.CreateSignal(1, "v1");
-var m1 = f.CreateMemoizR(async() => await v1.Get(), "m1");
-var m2 = f.CreateMemoizR(async() => await v1.Get() * 2, "m2");
-var r1 = f.CreateReaction(async() => await m1.Get() + await m2.Get(), "r1");
+var v1 = f.CreateSignal(1);
+var m1 = f.CreateMemoizR(async() => await v1.Get());
+var m2 = f.CreateMemoizR(async() => await v1.Get() * 2);
+var r1 = f.CreateReaction(async() => await m1.Get() + await m2.Get());
 ```

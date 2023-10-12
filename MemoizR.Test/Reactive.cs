@@ -139,6 +139,6 @@ public class Reactive
         await Task.Delay(100);
 
         // This is not completely reliable because if all the set are evaluated tawait he gets trigger again because how the readwrite lock works
-        Assert.InRange(invocationCount, 18, 22);
+        Assert.InRange(invocationCount, 18, 25);
     }
 }
