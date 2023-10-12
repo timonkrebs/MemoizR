@@ -33,7 +33,6 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR
                 Thread.MemoryBarrier();
                 return value;
             }
-
             
             if (context.CurrentReaction != null)
             {

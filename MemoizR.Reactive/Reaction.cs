@@ -4,12 +4,12 @@ public sealed class Reaction : SignalHandlR, IMemoizR
 {
     private CacheState State { get; set; } = CacheState.CacheClean;
     private Func<Task> fn;
-    private readonly TaskScheduler? sheduler;
+    private SynchronizationContext? sheduler;
     private bool isPaused;
 
     CacheState IMemoizR.State { get => State; set => State = value; }
 
-    internal Reaction(Func<Task> fn, Context context, TaskScheduler? sheduler = null, string label = "Label") : base(context)
+    internal Reaction(Func<Task> fn, Context context, SynchronizationContext? sheduler = null, string label = "Label") : base(context)
     {
         this.fn = fn;
         this.sheduler = sheduler;
@@ -34,8 +34,17 @@ public sealed class Reaction : SignalHandlR, IMemoizR
     {
         using (await context.contextLock.UpgradeableLockAsync())
         {
-            // The reaction must be initialized to build the Sources.
-            await Update();
+            var s = sheduler;
+            try
+            {
+                sheduler = null;
+                // The reaction must be initialized to build the Sources.
+                await Update();
+            }
+            finally
+            {
+                sheduler = s;
+            }
         }
     }
 
@@ -99,11 +108,20 @@ public sealed class Reaction : SignalHandlR, IMemoizR
         {
             if (!isPaused)
             {
-                var t = sheduler != null && sheduler.Id != Thread.CurrentThread.ManagedThreadId
-                            ? Task.Factory.StartNew(async () => await fn(), CancellationToken.None, TaskCreationOptions.None, sheduler)
-                            : fn();
-
-                await t;
+                if (sheduler != null)
+                {
+                    var tcs = new TaskCompletionSource();
+                    sheduler.Post(async _ =>
+                    {
+                        await fn();
+                        tcs.SetResult();
+                    }, null);
+                    await tcs.Task;
+                }
+                else
+                {
+                    await fn();
+                }
             }
             else
             {

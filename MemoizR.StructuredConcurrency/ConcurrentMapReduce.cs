@@ -23,6 +23,7 @@ public sealed class ConcurrentMapReduce<T> : SignalHandlR, IMemoizR
     {
         if (State == CacheState.CacheClean && context.CurrentReaction == null)
         {
+            Thread.MemoryBarrier();
             return value;
         }
 
