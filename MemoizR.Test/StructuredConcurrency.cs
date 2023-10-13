@@ -57,7 +57,7 @@ public class StructuredConcurrency
     [Fact(Skip = "to long")]
     public async Task TestChildExecutionHandling()
     {
-        var f = new MemoFactory();
+        var f = new MemoFactory("concurrent");
 
         var child1 = f.CreateConcurrentMapReduce(
             async c =>
