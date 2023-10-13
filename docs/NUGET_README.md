@@ -86,6 +86,16 @@ var c1 = f.CreateConcurrentMapReduce(
     async c =>
     {
         await child1.Get(); // should be waiting for the delay of 3 seconds but does not...
+
+        // Any group work can kick off other group work.
+        await Task.WhenAll(Enumerable.Range(1, 10)
+            .Select(x => f.CreateConcurrentMapReduce(
+                async c =>
+                {
+                    await Task.Delay(3000);
+                    return x;
+                }).Get()));
+        
         return 4;
     });
 
