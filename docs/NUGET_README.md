@@ -6,7 +6,9 @@ MemoizR is a powerful Structured Concurrency State implementation designed to si
 
 ## Key Advantages
 
-- **Simplicity and Intuitiveness**: MemoizR aims to provide a straightforward and intuitive way to handle concurrency, avoiding the complexities often associated with async/await patterns (e.g. async void, .Wait, not awaiting everything and even .ConfigureAwait) in C#. It offers a more natural approach to managing asynchronous tasks and multithreading.
+- **Simplicity**: MemoizR aims to provide a straightforward and intuitive way to handle concurrency, avoiding the complexities often associated with async/await patterns (e.g. async void, .Wait, not awaiting everything and even .ConfigureAwait) in C#. It offers a more natural approach to managing asynchronous tasks and multithreading.
+
+- **Declarative Structured Concurrency**: This represents the most innovative aspect of this library, allowing for straightforward configuration, effortless maintenance, robust error handling, and seamless cancellation of intricate concurrency scenarios. Moreover, there's potential for even greater benefits on the horizon, such as concurrent resource management. All of this within the framework of an intuitive mental model for tackling complex concurrent systems.
 
 - **Scalability**: This concurrency model has the potential for expansion into distributed setups, similar to the actor model. It can help you build scalable and distributed systems with ease.
 
