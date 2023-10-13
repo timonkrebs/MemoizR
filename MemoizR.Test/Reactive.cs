@@ -7,7 +7,7 @@ public class Reactive
     [Fact]
     public async Task TestReactive()
     {
-        var f = new ReactiveMemoFactory("reactivity");
+        var f = new MemoFactory("reactivity");
         var v1 = f.CreateSignal(1);
         Assert.Equal(1, await v1.Get());
         Assert.Equal(1, await v1.Get());
@@ -21,7 +21,7 @@ public class Reactive
     public async Task TestReactiveInvocations()
     {
         var invocations = 0;
-        var f = new ReactiveMemoFactory("reactivity");
+        var f = new MemoFactory("reactivity");
         var v1 = f.CreateSignal(1);
         Assert.Equal(1, await v1.Get());
 
@@ -47,7 +47,6 @@ public class Reactive
     {
         // Create a MemoFactory instance
         var f = new MemoFactory("reactivity");
-        var rf = new ReactiveMemoFactory("reactivity");
 
         // Create a signal 'v1' with an initial value of 1
         var v1 = f.CreateSignal(4);
@@ -58,7 +57,7 @@ public class Reactive
 
 
         var result = 0;
-        var r1 = rf.CreateReaction(async() =>
+        var r1 = f.CreateReaction(async() =>
         {
             invocationCount++;
             result = await m1.Get();
@@ -102,7 +101,6 @@ public class Reactive
     {
         // Create a MemoFactory instance
         var f = new MemoFactory("reactivity");
-        var rf = new ReactiveMemoFactory("reactivity");
 
         // Create a signal 'v1' with an initial value of 1
         var v1 = f.CreateSignal(4);
@@ -111,7 +109,7 @@ public class Reactive
         // Create a memoized computation 'm1' that depends on 'v1'
         var m1 = f.CreateMemoizR(async() => await v1.Get() * 2);
 
-        var r1 = rf.CreateReaction(async() =>
+        var r1 = f.CreateReaction(async() =>
         {
             invocationCount++;
             await m1.Get();

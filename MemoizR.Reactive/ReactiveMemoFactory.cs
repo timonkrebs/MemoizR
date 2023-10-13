@@ -1,30 +1,33 @@
-using MemoizR;
-
 namespace MemoizR.Reactive;
 
-public class ReactiveMemoFactory : MemoFactory
+public static class ReactiveMemoFactory
 {
-    private readonly SynchronizationContext? synchronizationContext;
+    private static Dictionary<MemoFactory, SynchronizationContext> synchronizationContexts = new Dictionary<MemoFactory, SynchronizationContext>();
 
-    // Constructor for initializing the ReactiveMemoFactory.
-    public ReactiveMemoFactory(string? contextKey = null) : base(contextKey) { }
-
-    /// <summary>
-    /// Constructor for initializing the ReactiveMemoFactory with a specific SynchronizationContext.
-    /// </summary>
-    /// <param name="synchronizationContext">The SynchronizationContext used to run the reaction on. Must not be <c>null</c>.</param>
-    public ReactiveMemoFactory(SynchronizationContext synchronizationContext, string? contextKey = null) : base(contextKey)
+    public static MemoFactory AddSynchronizationContext(this MemoFactory memoFactory, SynchronizationContext synchronizationContext)
     {
-        this.synchronizationContext = synchronizationContext;
+        lock (memoFactory)
+        {
+            synchronizationContexts.Add(memoFactory, synchronizationContext);
+            return memoFactory;
+        }
     }
 
-    public Reaction CreateReaction(Func<Task> fn)
+    public static Reaction CreateReaction(this MemoFactory memoFactory, Func<Task> fn)
     {
-        return new Reaction(fn, context, synchronizationContext);
+        lock (memoFactory)
+        {
+            synchronizationContexts.TryGetValue(memoFactory, out var synchronizationContext);
+            return new Reaction(fn, memoFactory.context, synchronizationContext);
+        }
     }
 
-    public Reaction CreateReaction(string label, Func<Task> fn)
+    public static Reaction CreateReaction(this MemoFactory memoFactory, string label, Func<Task> fn)
     {
-        return new Reaction(fn, context, synchronizationContext, label);
+        lock (memoFactory)
+        {
+            synchronizationContexts.TryGetValue(memoFactory, out var synchronizationContext);
+            return new Reaction(fn, memoFactory.context, synchronizationContext, label);
+        }
     }
 }

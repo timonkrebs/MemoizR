@@ -1,11 +1,11 @@
 using MemoizR;
 
-public class MemoFactory
+public abstract class BaseMemoFactory
 {
     internal static Dictionary<string, WeakReference<Context>> CONTEXTS = new Dictionary<string, WeakReference<Context>>();
     internal Context context;
 
-    public MemoFactory(string? contextKey = null)
+    public BaseMemoFactory(string? contextKey = null)
     {
         lock (CONTEXTS)
         {
@@ -60,6 +60,11 @@ public class MemoFactory
             }
         }
     }
+}
+
+public class MemoFactory : BaseMemoFactory
+{
+    public MemoFactory(string? contextKey = null) : base(contextKey) { }
 
     public MemoizR<T> CreateMemoizR<T>(Func<Task<T>> fn)
     {

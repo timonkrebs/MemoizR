@@ -98,9 +98,9 @@ MemoizR's declarative structured concurrency model enhances maintainability, err
 In summary, MemoizR offers a powerful and intuitive approach to managing concurrency and reactive data flows ([Dataflow (Task Parallel Library)](https://learn.microsoft.com/en-us/dotnet/standard/parallel-programming/dataflow-task-parallel-library), [Channels](https://learn.microsoft.com/en-us/dotnet/core/extensions/channels)), with features like implicit Join and LinkTo that simplify your code and improve maintainability. It also draws inspiration from [ReactiveX](https://github.com/dotnet/reactive), making it a versatile choice for reactive programming scenarios but without having to handle subscriptions.
 
 ```cs
-var fsc = new StructuredConcurrencyFactory("DSC");
+var f = new MemoFactory("DSC");
 
-var child1 = fsc.CreateConcurrentMapReduce(
+var child1 = f.CreateConcurrentMapReduce(
     async c =>
     {
         await Task.Delay(3000);
@@ -108,7 +108,7 @@ var child1 = fsc.CreateConcurrentMapReduce(
     });
 
 // all tasks get canceled if one fails
-var c1 = fsc.CreateConcurrentMapReduce(
+var c1 = f.CreateConcurrentMapReduce(
     async c =>
     {
         await child1.Get(); // should be waiting for the delay of 3 seconds but does not...
@@ -123,7 +123,7 @@ var x = await c1.Get();
 You can use MemoizR to create reactive data flows easily:
 
 ```csharp
-var f = new ReactiveMemoFactory();
+var f = new MemoFactory();
 var v1 = f.CreateSignal(1);
 var m1 = f.CreateMemoizR(async() => await v1.Get());
 var m2 = f.CreateMemoizR(async() => await v1.Get() * 2);
