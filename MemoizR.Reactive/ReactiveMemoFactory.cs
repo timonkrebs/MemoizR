@@ -2,13 +2,13 @@ namespace MemoizR.Reactive;
 
 public static class ReactiveMemoFactory
 {
-    private static Dictionary<MemoFactory, SynchronizationContext> synchronizationContexts = new Dictionary<MemoFactory, SynchronizationContext>();
+    private static readonly Dictionary<MemoFactory, SynchronizationContext> SynchronizationContexts = new ();
 
     public static MemoFactory AddSynchronizationContext(this MemoFactory memoFactory, SynchronizationContext synchronizationContext)
     {
         lock (memoFactory)
         {
-            synchronizationContexts.Add(memoFactory, synchronizationContext);
+            SynchronizationContexts.Add(memoFactory, synchronizationContext);
             return memoFactory;
         }
     }
@@ -17,8 +17,8 @@ public static class ReactiveMemoFactory
     {
         lock (memoFactory)
         {
-            synchronizationContexts.TryGetValue(memoFactory, out var synchronizationContext);
-            return new Reaction(fn, memoFactory.context, synchronizationContext);
+            SynchronizationContexts.TryGetValue(memoFactory, out var synchronizationContext);
+            return new Reaction(fn, memoFactory.Context, synchronizationContext);
         }
     }
 
@@ -26,8 +26,8 @@ public static class ReactiveMemoFactory
     {
         lock (memoFactory)
         {
-            synchronizationContexts.TryGetValue(memoFactory, out var synchronizationContext);
-            return new Reaction(fn, memoFactory.context, synchronizationContext, label);
+            SynchronizationContexts.TryGetValue(memoFactory, out var synchronizationContext);
+            return new Reaction(fn, memoFactory.Context, synchronizationContext, label);
         }
     }
 }

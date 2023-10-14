@@ -1,24 +1,22 @@
-
 using System.Numerics;
-using MemoizR.StructuredConcurrency;
 
-namespace MemoizR.Reactive;
+namespace MemoizR.StructuredConcurrency;
 public static class StructuredConcurrencyFactory
 {
-    private static Dictionary<MemoFactory, CancellationTokenSource> cancellationTokenSources = new Dictionary<MemoFactory, CancellationTokenSource>();
+    private static readonly Dictionary<MemoFactory, CancellationTokenSource> CancellationTokenSources = new ();
 
     public static ConcurrentMapReduce<T> CreateConcurrentMapReduce<T>(this MemoFactory memoFactory, params Func<CancellationToken, Task<T>>[] fns) where T : INumber<T>
     {
         lock (memoFactory)
         {
-            if (cancellationTokenSources.TryGetValue(memoFactory, out var cancellationTokenSource))
+            if (CancellationTokenSources.TryGetValue(memoFactory, out var cancellationTokenSource))
             {
-                return new ConcurrentMapReduce<T>(fns, (v, a) => v + a, memoFactory.context, cancellationTokenSource);
+                return new ConcurrentMapReduce<T>(fns, (v, a) => v + a, memoFactory.Context, cancellationTokenSource);
             }
 
             var cts = new CancellationTokenSource();
-            cancellationTokenSources.Add(memoFactory, cts);
-            return new ConcurrentMapReduce<T>(fns, (v, a) => v + a, memoFactory.context, cts);
+            CancellationTokenSources.Add(memoFactory, cts);
+            return new ConcurrentMapReduce<T>(fns, (v, a) => v + a, memoFactory.Context, cts);
         }
     }
 
@@ -26,14 +24,14 @@ public static class StructuredConcurrencyFactory
     {
         lock (memoFactory)
         {
-            if (cancellationTokenSources.TryGetValue(memoFactory, out var cancellationTokenSource))
+            if (CancellationTokenSources.TryGetValue(memoFactory, out var cancellationTokenSource))
             {
-                return new ConcurrentMapReduce<T>(fns, reduce, memoFactory.context, cancellationTokenSource);
+                return new ConcurrentMapReduce<T>(fns, reduce, memoFactory.Context, cancellationTokenSource);
             }
 
             var cts = new CancellationTokenSource();
-            cancellationTokenSources.Add(memoFactory, cts);
-            return new ConcurrentMapReduce<T>(fns, reduce, memoFactory.context, cts);
+            CancellationTokenSources.Add(memoFactory, cts);
+            return new ConcurrentMapReduce<T>(fns, reduce, memoFactory.Context, cts);
         }
     }
 
@@ -41,14 +39,14 @@ public static class StructuredConcurrencyFactory
     {
         lock (memoFactory)
         {
-            if (cancellationTokenSources.TryGetValue(memoFactory, out var cancellationTokenSource))
+            if (CancellationTokenSources.TryGetValue(memoFactory, out var cancellationTokenSource))
             {
-                return new ConcurrentMapReduce<T>(fns, (v, a) => v + a, memoFactory.context, cancellationTokenSource, label);
+                return new ConcurrentMapReduce<T>(fns, (v, a) => v + a, memoFactory.Context, cancellationTokenSource, label);
             }
 
             var cts = new CancellationTokenSource();
-            cancellationTokenSources.Add(memoFactory, cts);
-            return new ConcurrentMapReduce<T>(fns, (v, a) => v + a, memoFactory.context, cts, label);
+            CancellationTokenSources.Add(memoFactory, cts);
+            return new ConcurrentMapReduce<T>(fns, (v, a) => v + a, memoFactory.Context, cts, label);
         }
     }
 
@@ -56,14 +54,14 @@ public static class StructuredConcurrencyFactory
     {
         lock (memoFactory)
         {
-            if (cancellationTokenSources.TryGetValue(memoFactory, out var cancellationTokenSource))
+            if (CancellationTokenSources.TryGetValue(memoFactory, out var cancellationTokenSource))
             {
-                return new ConcurrentMapReduce<T>(fns, reduce, memoFactory.context, cancellationTokenSource, label);
+                return new ConcurrentMapReduce<T>(fns, reduce, memoFactory.Context, cancellationTokenSource, label);
             }
 
             var cts = new CancellationTokenSource();
-            cancellationTokenSources.Add(memoFactory, cts);
-            return new ConcurrentMapReduce<T>(fns, reduce, memoFactory.context, cts, label);
+            CancellationTokenSources.Add(memoFactory, cts);
+            return new ConcurrentMapReduce<T>(fns, reduce, memoFactory.Context, cts, label);
         }
     }
 }

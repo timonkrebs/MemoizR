@@ -1,6 +1,6 @@
 using System.Runtime.CompilerServices;
 
-namespace MemoizR.StructuredAsyncLock;
+namespace MemoizR.StructuredAsyncLock.Nito;
 
 /// <summary>
 /// An awaitable wrapper around a task whose result is disposable. The wrapper is not disposable, so this prevents usage errors like "using (MyAsync())" when the appropriate usage should be "using (await MyAsync())".

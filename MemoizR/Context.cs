@@ -4,7 +4,7 @@ namespace MemoizR;
 
 public class Context
 {
-    internal AsyncAsymmetricLock contextLock = new();
+    internal AsyncAsymmetricLock ContextLock = new();
 
     /** current capture context for identifying sources (other memoizR elements)
     * - active while evaluating a memoizR function body  */
@@ -14,10 +14,10 @@ public class Context
 
     internal void CheckDependenciesTheSame(IMemoHandlR memoHandlR)
     {
-        var hasCurrentGets = CurrentGets == null || CurrentGets.Length == 0;
+        var hasCurrentGets = CurrentGets.Length == 0;
         
         var hasEnoughSources = CurrentReaction?.Sources?.Length > 0 && CurrentReaction.Sources.Length >= CurrentGetsIndex + 1;
-        var currentSourceEqualsThis = hasEnoughSources && CurrentReaction!.Sources[CurrentGetsIndex] == memoHandlR;
+        var currentSourceEqualsThis = hasEnoughSources && CurrentReaction!.Sources?[CurrentGetsIndex] == memoHandlR;
 
         if (hasCurrentGets && currentSourceEqualsThis)
         {
@@ -25,8 +25,9 @@ public class Context
         }
         else
         {
-            if (!CurrentGets!.Any()) CurrentGets = new[] { memoHandlR };
-            else CurrentGets = CurrentGets!.Union(new[] { memoHandlR }).ToArray();
+            CurrentGets = !CurrentGets.Any() 
+                ? new[] { memoHandlR } 
+                : CurrentGets.Union(new[] { memoHandlR }).ToArray();
         }
     }
 }

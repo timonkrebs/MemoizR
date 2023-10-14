@@ -16,12 +16,12 @@ public sealed class ConcurrentMapReduce<T> : SignalHandlR, IMemoizR
         this.reduce = reduce;
         this.cancellationTokenSource = cancellationTokenSource;
         this.State = CacheState.CacheDirty;
-        this.label = label;
+        this.Label = label;
     }
 
     public async Task<T?> Get()
     {
-        if (State == CacheState.CacheClean && context.CurrentReaction == null)
+        if (State == CacheState.CacheClean && Context.CurrentReaction == null)
         {
             Thread.MemoryBarrier();
             return value;
@@ -30,18 +30,18 @@ public sealed class ConcurrentMapReduce<T> : SignalHandlR, IMemoizR
         // The naming of the lock could be confusing because Set must be locked by WriteLock.
         // Only one thread should evaluate the graph at a time. otherwise the context could get messed up.
         // This should lead to perf gains because memoization can be utilized more efficiently.
-        using (await context.contextLock.UpgradeableLockAsync())
+        using (await Context.ContextLock.UpgradeableLockAsync())
         {
             // if someone else did read the graph while this thread was blocekd it could be that this is already Clean
-            if (State == CacheState.CacheClean && context.CurrentReaction == null)
+            if (State == CacheState.CacheClean && Context.CurrentReaction == null)
             {
                 Thread.MemoryBarrier();
                 return value;
             }
 
-            if (context.CurrentReaction != null)
+            if (Context.CurrentReaction != null)
             {
-                context.CheckDependenciesTheSame(this);
+                Context.CheckDependenciesTheSame(this);
             }
 
             await UpdateIfNecessary();
@@ -94,69 +94,63 @@ public sealed class ConcurrentMapReduce<T> : SignalHandlR, IMemoizR
     {
         var oldValue = value;
 
-        /* Evalute the reactive function body, dynamically capturing any other reactives used */
-        var prevReaction = context.CurrentReaction;
-        var prevGets = context.CurrentGets;
-        var prevIndex = context.CurrentGetsIndex;
+        /* Evaluate the reactive function body, dynamically capturing any other reactives used */
+        var prevReaction = Context.CurrentReaction;
+        var prevGets = Context.CurrentGets;
+        var prevIndex = Context.CurrentGetsIndex;
 
-        context.CurrentReaction = this;
-        context.CurrentGets = Array.Empty<MemoHandlR<object>>();
-        context.CurrentGetsIndex = 0;
+        Context.CurrentReaction = this;
+        Context.CurrentGets = Array.Empty<IMemoHandlR>();
+        Context.CurrentGetsIndex = 0;
 
         try
         {
             value = await new StructuredReduceJob<T>(fns, reduce, cancellationTokenSource).Run();
 
             // if the sources have changed, update source & observer links
-            if (context.CurrentGets.Length > 0)
+            if (Context.CurrentGets.Length > 0)
             {
                 // remove all old Sources' .observers links to us
-                RemoveParentObservers(context.CurrentGetsIndex);
+                RemoveParentObservers(Context.CurrentGetsIndex);
                 // update source up links
-                if (Sources.Any() && context.CurrentGetsIndex > 0)
+                if (Sources.Any() && Context.CurrentGetsIndex > 0)
                 {
-                    Sources = Sources.Take(context.CurrentGetsIndex).Union(context.CurrentGets).ToArray();
+                    Sources = Sources.Take(Context.CurrentGetsIndex).Union(Context.CurrentGets).ToArray();
                 }
                 else
                 {
-                    Sources = context.CurrentGets;
+                    Sources = Context.CurrentGets;
                 }
 
-                for (var i = context.CurrentGetsIndex; i < Sources.Length; i++)
+                for (var i = Context.CurrentGetsIndex; i < Sources.Length; i++)
                 {
                     // Add ourselves to the end of the parent .observers array
                     var source = Sources[i];
-                    if (!source.Observers.Any())
-                    {
-                        source.Observers = new[] { this };
-                    }
-                    else
-                    {
-                        source.Observers = source.Observers.Union((new[] { this })).ToArray();
-                    }
+                    source.Observers = !source.Observers.Any() 
+                        ? new IMemoizR[] { this } 
+                        : source.Observers.Union((new[] { this })).ToArray();
                 }
             }
-            else if (Sources.Any() && context.CurrentGetsIndex < Sources.Length)
+            else if (Sources.Any() && Context.CurrentGetsIndex < Sources.Length)
             {
                 // remove all old Sources' .observers links to us
-                RemoveParentObservers(context.CurrentGetsIndex);
-                Sources = Sources.Take(context.CurrentGetsIndex).ToArray();
+                RemoveParentObservers(Context.CurrentGetsIndex);
+                Sources = Sources.Take(Context.CurrentGetsIndex).ToArray();
             }
         }
         finally
         {
-            context.CurrentGets = prevGets;
-            context.CurrentReaction = prevReaction;
-            context.CurrentGetsIndex = prevIndex;
+            Context.CurrentGets = prevGets;
+            Context.CurrentReaction = prevReaction;
+            Context.CurrentGetsIndex = prevIndex;
         }
 
         // handles diamond depenendencies if we're the parent of a diamond.
         if (Observers.Length > 0)
         {
             // We've changed value, so mark our children as dirty so they'll reevaluate
-            for (int i = 0; i < Observers.Length; i++)
+            foreach (var observer in Observers)
             {
-                var observer = Observers[i];
                 observer.State = CacheState.CacheDirty;
             }
         }
@@ -173,7 +167,7 @@ public sealed class ConcurrentMapReduce<T> : SignalHandlR, IMemoizR
         {
             var source = Sources[i]; // We don't actually delete Sources here because we're replacing the entire array soon
             var swap = Array.FindIndex(source.Observers, (v) => v.Equals(this));
-            source.Observers![swap] = source.Observers![source.Observers!.Length - 1];
+            source.Observers[swap] = source.Observers[source.Observers!.Length - 1];
             source.Observers = source.Observers.SkipLast(1).ToArray();
         }
     }
@@ -192,11 +186,10 @@ public sealed class ConcurrentMapReduce<T> : SignalHandlR, IMemoizR
 
         State = state;
 
-        for (int i = 0; i < Observers.Length; i++)
+        foreach (var observer in Observers)
         {
-            await Observers[i].Stale(CacheState.CacheCheck);
+            await observer.Stale(CacheState.CacheCheck);
         }
-        return;
     }
 
     Task IMemoizR.Stale(CacheState state)

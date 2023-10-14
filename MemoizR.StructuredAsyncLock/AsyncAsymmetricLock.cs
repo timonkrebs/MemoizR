@@ -1,20 +1,22 @@
+using MemoizR.StructuredAsyncLock.Nito;
+
 namespace MemoizR.StructuredAsyncLock;
 
-public class AsyncAsymmetricLock
+public sealed class AsyncAsymmetricLock
 {
     /// <summary>
     /// The queue of TCSs that other tasks are awaiting to acquire the lock as upgradeable.
     /// Upgradeable can only execute one instance at a time in the locked scope, but allow for recursive entering. https://learn.microsoft.com/en-us/dotnet/api/system.threading.lockrecursionpolicy?view=net-7.0
     /// They are blocked by exclusive, and one at the time can be upgraded to allow entering exclusive locks.
     /// </summary>
-    IAsyncWaitQueue<IDisposable> upgradeable = new DefaultAsyncWaitQueue<IDisposable>();
+    readonly IAsyncWaitQueue<IDisposable> upgradeable = new DefaultAsyncWaitQueue<IDisposable>();
 
     /// <summary>
     /// The queue of TCSs that other tasks are awaiting to acquire the lock as exclusive.
     /// Exclusive can not enter upgradeable locks. If they try InvalidOperationException will be thrown, because otherwise it will lead to deadlocks.
     /// Exclusive can execute with as many other exclusive locks simultaneously.
     /// </summary>
-    IAsyncWaitQueue<IDisposable> exclusive = new DefaultAsyncWaitQueue<IDisposable>();
+    readonly IAsyncWaitQueue<IDisposable> exclusive = new DefaultAsyncWaitQueue<IDisposable>();
 
     /// <summary>
     /// Number of exclusive locks held; negative if upgradeable lock are held; 0 if no locks are held.
@@ -22,8 +24,8 @@ public class AsyncAsymmetricLock
     private int locksHeld;
     private int upgradedLocksHeld;
     private int lockScope;
-    private Random rand = new();
-    private static AsyncLocal<int> asyncLocalScope = new AsyncLocal<int>();
+    private readonly Random rand = new();
+    private static readonly AsyncLocal<int> AsyncLocalScope = new ();
 
     /// <summary>
     /// Applies a continuation to the task that will call <see cref="ReleaseWaiters"/> if the task is canceled. This method may not be called while holding the sync lock.
@@ -31,7 +33,7 @@ public class AsyncAsymmetricLock
     /// <param name="task">The task to observe for cancellation.</param>
     private void ReleaseWaitersWhenCanceled(Task task)
     {
-        task.ContinueWith(t => { lock (this) { ReleaseWaiters(); } }, CancellationToken.None, TaskContinuationOptions.OnlyOnCanceled | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+        task.ContinueWith(_ => { lock (this) { ReleaseWaiters(); } }, CancellationToken.None, TaskContinuationOptions.OnlyOnCanceled | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
     }
 
     /// <summary>
@@ -150,15 +152,14 @@ public class AsyncAsymmetricLock
     /// <returns>A disposable that releases the lock when disposed.</returns>
     public AwaitableDisposable<IDisposable> UpgradeableLockAsync(CancellationToken cancellationToken)
     {
-
         int lockScope;
         lock (this)
         {
-            lockScope = asyncLocalScope.Value;
+            lockScope = AsyncLocalScope.Value;
             if (lockScope == 0)
             {
                 lockScope = rand.Next();
-                asyncLocalScope.Value = lockScope;
+                AsyncLocalScope.Value = lockScope;
             }
         }
 
@@ -207,7 +208,7 @@ public class AsyncAsymmetricLock
 #pragma warning disable CA2000 // Dispose objects before losing scope
                 lockScope = exclusive.Dequeue(new ExclusivePrioKey(this));
 #pragma warning restore CA2000 // Dispose objects before losing scope
-                asyncLocalScope.Value = lockScope;
+                AsyncLocalScope.Value = lockScope;
                 ++locksHeld;
             }
         }
@@ -217,8 +218,7 @@ public class AsyncAsymmetricLock
 #pragma warning disable CA2000 // Dispose objects before losing scope
             lockScope = upgradeable.Dequeue(new UpgradeableKey(this));
 #pragma warning restore CA2000 // Dispose objects before losing scope
-            asyncLocalScope.Value = lockScope;
-            return;
+            AsyncLocalScope.Value = lockScope;
         }
     }
 

@@ -1,5 +1,4 @@
-using MemoizR.Reactive;
-
+using MemoizR.StructuredConcurrency;
 using Xunit.Sdk;
 
 namespace MemoizR.Test;
@@ -48,10 +47,13 @@ public class StructuredConcurrency
                 await Task.Delay(3000, c);
                 return 4;
             },
-            _ => throw new SkipException("Test"));
+            async _ =>
+            {
+                await Task.Delay(5000);
+                throw new SkipException("Test");
+            });
 
-        var e = Assert.Throws<AggregateException>(() => c1.Get().Result);
-        Assert.Single(e.InnerExceptions);
+        Assert.Throws<Exception>(() => c1.Get().GetAwaiter().GetResult());
     }
 
     [Fact(Skip = "to long")]

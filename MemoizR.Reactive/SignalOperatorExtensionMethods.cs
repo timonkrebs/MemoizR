@@ -10,14 +10,14 @@ public static class SignalOperatorExtensionMethods
             await Task.Delay(time);
             return await handlr.Get();
         }
-        , handlr.context, "Delay");
+        , handlr.Context, "Delay");
     }
 
     // make sure this blocks not other evaluations of the graph while delaying execution
     public static MemoizR<T?> Debounce<T>(this MemoizR<T> handlr, TimeSpan time)
     {
         var cancel = new CancellationTokenSource();
-        var s = new Signal<T?>(handlr.value, handlr.context, "Debounce");
+        var s = new Signal<T?>(handlr.Value, handlr.Context, "Debounce");
         new Reaction(async () =>
         {
             cancel.Cancel();
@@ -25,8 +25,8 @@ public static class SignalOperatorExtensionMethods
             await Task.Delay(time, cancel.Token);
             var value = await handlr.Get();
             var task = s.Set(value);
-        }, handlr.context);
+        }, handlr.Context);
 
-        return new MemoizR<T?>(s.Get, handlr.context, "DebounceSignal");
+        return new MemoizR<T?>(s.Get, handlr.Context, "DebounceSignal");
     }
 }

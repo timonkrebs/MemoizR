@@ -1,9 +1,9 @@
-namespace MemoizR.StructuredAsyncLock;
+namespace MemoizR.StructuredAsyncLock.Nito;
 
 /// <summary>
 /// Provides extension methods for <see cref="TaskCompletionSource{TResult}"/>.
 /// </summary>
-public static class TaskCompletionSourceExtensions
+internal static class TaskCompletionSourceExtensions
 {
     /// <summary>
     /// Attempts to complete a <see cref="TaskCompletionSource{TResult}"/>, propagating the completion of <paramref name="task"/>.

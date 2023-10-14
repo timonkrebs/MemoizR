@@ -1,7 +1,7 @@
 using System.Diagnostics;
 using Nito.Collections;
 
-namespace MemoizR.StructuredAsyncLock;
+namespace MemoizR.StructuredAsyncLock.Nito;
 
 /// <summary>
 /// A collection of cancelable <see cref="TaskCompletionSource{T}"/> instances. Implementations must assume the caller is holding a lock.

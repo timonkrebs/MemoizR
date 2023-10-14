@@ -14,7 +14,7 @@ public sealed class Reaction : SignalHandlR, IMemoizR
         this.fn = fn;
         this.synchronizationContext = synchronizationContext;
         this.State = CacheState.CacheDirty;
-        this.label = label;
+        this.Label = label;
 
         _ = Init();
     }
@@ -32,7 +32,7 @@ public sealed class Reaction : SignalHandlR, IMemoizR
 
     private async Task Init()
     {
-        using (await context.contextLock.UpgradeableLockAsync())
+        using (await Context.ContextLock.UpgradeableLockAsync())
         {
             var temp = synchronizationContext;
             try
@@ -96,13 +96,13 @@ public sealed class Reaction : SignalHandlR, IMemoizR
         }
 
         // Evaluate the reactive function body, dynamically capturing any other reactives used.
-        var prevReaction = context.CurrentReaction;
-        var prevGets = context.CurrentGets;
-        var prevIndex = context.CurrentGetsIndex;
+        var prevReaction = Context.CurrentReaction;
+        var prevGets = Context.CurrentGets;
+        var prevIndex = Context.CurrentGetsIndex;
 
-        context.CurrentReaction = this;
-        context.CurrentGets = Array.Empty<MemoHandlR<object>>();
-        context.CurrentGetsIndex = 0;
+        Context.CurrentReaction = this;
+        Context.CurrentGets = Array.Empty<IMemoHandlR>();
+        Context.CurrentGetsIndex = 0;
 
         try
         {
@@ -113,7 +113,8 @@ public sealed class Reaction : SignalHandlR, IMemoizR
                     if (synchronizationContext != null)
                     {
                         var tcs = new TaskCompletionSource();
-                        synchronizationContext.Post(async _ =>
+
+                        async void SendOrPostCallback(object? _)
                         {
                             try
                             {
@@ -123,7 +124,9 @@ public sealed class Reaction : SignalHandlR, IMemoizR
                             {
                                 tcs.SetResult();
                             }
-                        }, null);
+                        }
+
+                        synchronizationContext.Post(SendOrPostCallback, null);
                         await tcs.Task;
                     }
                     else
@@ -144,42 +147,37 @@ public sealed class Reaction : SignalHandlR, IMemoizR
             }
 
             // If the Sources have changed, update source & observer links.
-            if (context.CurrentGets.Length > 0)
+            if (Context.CurrentGets.Length > 0)
             {
                 // Update source up links.
-                if (Sources.Any() && context.CurrentGetsIndex > 0)
+                if (Sources.Any() && Context.CurrentGetsIndex > 0)
                 {
-                    Sources = Sources.Take(context.CurrentGetsIndex).Union(context.CurrentGets).ToArray();
+                    Sources = Sources.Take(Context.CurrentGetsIndex).Union(Context.CurrentGets).ToArray();
                 }
                 else
                 {
-                    Sources = context.CurrentGets;
+                    Sources = Context.CurrentGets;
                 }
 
-                for (var i = context.CurrentGetsIndex; i < Sources.Length; i++)
+                for (var i = Context.CurrentGetsIndex; i < Sources.Length; i++)
                 {
                     // Add ourselves to the end of the parent .observers array.
                     var source = Sources[i];
-                    if (!source.Observers.Any())
-                    {
-                        source.Observers = new[] { this };
-                    }
-                    else
-                    {
-                        source.Observers = source.Observers.Union((new[] { this })).ToArray();
-                    }
+                    source.Observers = !source.Observers.Any() 
+                        ? new IMemoizR[] { this } 
+                        : source.Observers.Union((new[] { this })).ToArray();
                 }
             }
-            else if (Sources.Any() && context.CurrentGetsIndex < Sources.Length)
+            else if (Sources.Any() && Context.CurrentGetsIndex < Sources.Length)
             {
-                Sources = Sources.Take(context.CurrentGetsIndex).ToArray();
+                Sources = Sources.Take(Context.CurrentGetsIndex).ToArray();
             }
         }
         finally
         {
-            context.CurrentGets = prevGets;
-            context.CurrentReaction = prevReaction;
-            context.CurrentGetsIndex = prevIndex;
+            Context.CurrentGets = prevGets;
+            Context.CurrentReaction = prevReaction;
+            Context.CurrentGetsIndex = prevIndex;
         }
 
         // We've rerun with the latest values from all of our Sources.
@@ -189,7 +187,7 @@ public sealed class Reaction : SignalHandlR, IMemoizR
 
     async Task IMemoizR.UpdateIfNecessary()
     {
-        using (await context.contextLock.UpgradeableLockAsync())
+        using (await Context.ContextLock.UpgradeableLockAsync())
         {
             await UpdateIfNecessary();
         }
