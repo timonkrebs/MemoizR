@@ -47,9 +47,9 @@ public class StructuredConcurrency
                 await Task.Delay(3000, c);
                 return 4;
             },
-            async _ =>
+            async c =>
             {
-                await Task.Delay(5000);
+                await Task.Delay(5000, c);
                 throw new SkipException("Test");
             });
 
