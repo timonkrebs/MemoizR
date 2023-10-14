@@ -1,4 +1,6 @@
-namespace MemoizR.Reactive;
+using MemoizR.Reactive;
+
+namespace MemoizR;
 
 public static class ReactiveMemoFactory
 {

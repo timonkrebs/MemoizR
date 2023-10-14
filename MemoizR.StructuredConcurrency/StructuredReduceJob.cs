@@ -2,8 +2,8 @@
 
 public sealed class StructuredReduceJob<T> : StructuredJobBase<T>
 {
-    private IReadOnlyCollection<Func<CancellationToken, Task<T>>> fns;
-    private CancellationTokenSource cancellationTokenSource;
+    private readonly IReadOnlyCollection<Func<CancellationToken, Task<T>>> fns;
+    private readonly CancellationTokenSource cancellationTokenSource;
     private readonly Func<T, T, T?> reduce;
 
     public StructuredReduceJob(IReadOnlyCollection<Func<CancellationToken, Task<T>>> fns, Func<T, T, T?> reduce, CancellationTokenSource cancellationTokenSource)

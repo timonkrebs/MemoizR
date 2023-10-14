@@ -2,9 +2,9 @@
 
 public sealed class StructuredRaceJob<T> : StructuredJobBase<T>
 {
-    private IReadOnlyCollection<Func<CancellationToken, Task<T>>> fns;
-    private CancellationTokenSource innerCancellationTokenSource = new CancellationTokenSource();
-    private CancellationTokenSource groupCancellationTokenSource;
+    private readonly IReadOnlyCollection<Func<CancellationToken, Task<T>>> fns;
+    private readonly CancellationTokenSource innerCancellationTokenSource;
+    private readonly CancellationTokenSource groupCancellationTokenSource;
 
     public StructuredRaceJob(IReadOnlyCollection<Func<CancellationToken, Task<T>>> fns, CancellationTokenSource cancellationTokenSource)
     : base(cancellationTokenSource.Token)

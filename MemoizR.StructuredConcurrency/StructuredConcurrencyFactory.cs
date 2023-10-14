@@ -1,6 +1,7 @@
 using System.Numerics;
+using MemoizR.StructuredConcurrency;
 
-namespace MemoizR.StructuredConcurrency;
+namespace MemoizR;
 public static class StructuredConcurrencyFactory
 {
     private static readonly Dictionary<MemoFactory, CancellationTokenSource> CancellationTokenSources = new ();
