@@ -65,4 +65,64 @@ public static class StructuredConcurrencyFactory
             return new ConcurrentMapReduce<T>(fns, reduce, memoFactory.Context, cts, label);
         }
     }
+
+    public static ConcurrentRace<T> CreateConcurrentRace<T>(this MemoFactory memoFactory, params Func<CancellationToken, Task<T>>[] fns)
+    {
+        lock (memoFactory)
+        {
+            if (CancellationTokenSources.TryGetValue(memoFactory, out var cancellationTokenSource))
+            {
+                return new ConcurrentRace<T>(fns, memoFactory.Context, cancellationTokenSource);
+            }
+
+            var cts = new CancellationTokenSource();
+            CancellationTokenSources.Add(memoFactory, cts);
+            return new ConcurrentRace<T>(fns, memoFactory.Context, cts);
+        }
+    }
+
+    public static ConcurrentRace<T> CreateConcurrentRace<T>(this MemoFactory memoFactory, string label, params Func<CancellationToken, Task<T>>[] fns) where T : INumber<T>
+    {
+        lock (memoFactory)
+        {
+            if (CancellationTokenSources.TryGetValue(memoFactory, out var cancellationTokenSource))
+            {
+                return new ConcurrentRace<T>(fns, memoFactory.Context, cancellationTokenSource, label);
+            }
+
+            var cts = new CancellationTokenSource();
+            CancellationTokenSources.Add(memoFactory, cts);
+            return new ConcurrentRace<T>(fns, memoFactory.Context, cts, label);
+        }
+    }
+
+        public static ConcurrentMap<T> CreateConcurrentMap<T>(this MemoFactory memoFactory, params Func<CancellationToken, Task<T>>[] fns)
+    {
+        lock (memoFactory)
+        {
+            if (CancellationTokenSources.TryGetValue(memoFactory, out var cancellationTokenSource))
+            {
+                return new ConcurrentMap<T>(fns, memoFactory.Context, cancellationTokenSource);
+            }
+
+            var cts = new CancellationTokenSource();
+            CancellationTokenSources.Add(memoFactory, cts);
+            return new ConcurrentMap<T>(fns, memoFactory.Context, cts);
+        }
+    }
+
+    public static ConcurrentMap<T> CreateConcurrentMap<T>(this MemoFactory memoFactory, string label, params Func<CancellationToken, Task<T>>[] fns) where T : INumber<T>
+    {
+        lock (memoFactory)
+        {
+            if (CancellationTokenSources.TryGetValue(memoFactory, out var cancellationTokenSource))
+            {
+                return new ConcurrentMap<T>(fns, memoFactory.Context, cancellationTokenSource, label);
+            }
+
+            var cts = new CancellationTokenSource();
+            CancellationTokenSources.Add(memoFactory, cts);
+            return new ConcurrentMap<T>(fns, memoFactory.Context, cts, label);
+        }
+    }
 }
