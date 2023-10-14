@@ -27,7 +27,6 @@ public sealed class ConcurrentMapReduce<T> : SignalHandlR, IMemoizR
             return value;
         }
 
-        // The naming of the lock could be confusing because Set must be locked by WriteLock.
         // Only one thread should evaluate the graph at a time. otherwise the context could get messed up.
         // This should lead to perf gains because memoization can be utilized more efficiently.
         using (await Context.ContextLock.UpgradeableLockAsync())

@@ -82,6 +82,55 @@ public class StructuredConcurrency
         Assert.Equal(1, await c1.Get());
     }
 
+    [Fact]
+    public async Task TestMultipleMapHandling()
+    {
+        var f = new MemoFactory("concurrent");
+        var v1 = f.CreateSignal(1);
+        var v2 = f.CreateSignal(2);
+        var v3 = f.CreateSignal(3);
+
+        // all tasks get canceled if one fails
+        var c1 = f.CreateConcurrentMap(
+            async c =>
+            {
+                await Task.Delay(2);
+                return await v1.Get();
+            },
+            async c =>
+            {
+                await Task.Delay(2);
+                return await v2.Get();
+            },
+            async c =>
+            {
+                await Task.Delay(2);
+                return await v3.Get();
+            });
+
+        var invocations = 0;
+        f.CreateReaction(async () =>
+        {
+            invocations++;
+            var x = await c1.Get();
+        });
+        await Task.Delay(100);
+        Assert.Equal(1, invocations);
+
+        await v1.Set(4);
+        await Task.Delay(100);
+        Assert.Equal(2, invocations);
+
+        await v2.Set(5);
+        await Task.Delay(100);
+        Assert.Equal(3, invocations);
+
+        await v3.Set(6);
+        await Task.Delay(100);
+        Assert.Equal(4, invocations);
+    }
+
+
     [Fact(Skip = "to long")]
     public async Task TestChildExecutionHandling()
     {
