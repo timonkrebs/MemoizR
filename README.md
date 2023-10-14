@@ -28,7 +28,7 @@ Inspired From **Stephen Cleary — Asynchronous streams** https://www.youtube.co
 
 ## Key Features
 - **Dynamic Lazy Memoization**: MemoizR introduces the concept of dynamic lazy memoization, allowing you to calculate values only when they are needed and not already calculated.
-- **Declarative Structured Concurrency**: This is the most innovation part of this library. it enables easy setup, maintainability, error handling and cancelation of complex concurrency usecases.
+- **Declarative Structured Concurrency**: This represents the most innovative aspect of this library, allowing for straightforward configuration, effortless maintenance, robust error handling, and seamless cancellation of intricate concurrency scenarios. Moreover, there's potential for even greater benefits on the horizon, such as concurrent resource management. All of this within the framework of an intuitive mental model for tackling complex concurrent systems.
 - **Dependency Graph**: It enables you to build a dependency graph of your data, ensuring that only necessary computations are performed.
 - **Automatic Synchronization**: MemoizR handles synchronization, making it easy to work with hard-to-concurrently-synchronize state.
 - **Performance Optimization**: Depending on your use case, MemoizR can optimize performance for scenarios with more reads than writes (thanks to memoization) or more writes than reads (using lazy evaluation).

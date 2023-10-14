@@ -18,9 +18,10 @@ var r1 = f.CreateReaction(async() => await m1.Get() + await m2.Get());
 ```
 
 ```csharp
+
 // The following example uses the TaskScheduler.FromCurrentSynchronizationContext method in a Windows Presentation Foundation (WPF) app to schedule
 // https://learn.microsoft.com/en-us/dotnet/api/system.threading.tasks.taskscheduler?view=net-7.0#specifying-a-synchronization-context
-var UISyncContext = TaskScheduler.FromCurrentSynchronizationContext();
+var UISyncContext = SynchronizationContext.Current;
 var f = new MemoFactory();
 f.AddSynchronizationContext(UISyncContext);
 
