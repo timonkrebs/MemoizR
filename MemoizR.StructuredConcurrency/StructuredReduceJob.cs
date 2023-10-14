@@ -27,6 +27,7 @@ public sealed class StructuredReduceJob<T> : StructuredJobBase<T>
                         result = reduce(r, result!);
                     }
                 }
+                catch (TaskCanceledException) { }
                 catch
                 {
                     cancellationTokenSource.Cancel();

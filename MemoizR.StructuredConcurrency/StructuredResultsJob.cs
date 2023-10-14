@@ -24,6 +24,7 @@ public sealed class StructuredResultsJob<T> : StructuredJobBase<BlockingCollecti
                 {
                     result!.Add(await x(cancellationTokenSource.Token));
                 }
+                catch (TaskCanceledException) { }
                 catch
                 {
                     cancellationTokenSource.Cancel();

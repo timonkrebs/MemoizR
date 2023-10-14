@@ -18,20 +18,23 @@ public sealed class StructuredRaceJob<T> : StructuredJobBase<T>
     protected override void AddConcurrentWork()
     {
         this.tasks.AddRange(fns
-        .Select(async x => await Task.Run(async () =>
+        .Select(async x =>
+        {
+            await Task.Run(async () =>
             {
                 try
                 {
                     result = await x(innerCancellationTokenSource.Token);
                     innerCancellationTokenSource.Cancel();
                 }
+                catch (TaskCanceledException) { }
                 catch
                 {
                     groupCancellationTokenSource.Cancel();
                     throw;
                 }
-
-            }, innerCancellationTokenSource.Token)
+            }, innerCancellationTokenSource.Token);
+        }
         ));
     }
 }

@@ -92,8 +92,6 @@ public sealed class ConcurrentMapReduce<T> : SignalHandlR, IMemoizR
     /** run the computation fn, updating the cached value */
     private async Task Update()
     {
-        var oldValue = value;
-
         /* Evaluate the reactive function body, dynamically capturing any other reactives used */
         var prevReaction = Context.CurrentReaction;
         var prevGets = Context.CurrentGets;

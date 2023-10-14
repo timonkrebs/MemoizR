@@ -34,10 +34,10 @@ public class StructuredConcurrency
         Assert.Equal(-3, await c2.Get());
     }
 
-    [Fact(Skip = "", Timeout = 1000)]
+    [Fact(Timeout = 1000)]
     public void TestExceptionHandling()
     {
-        var f = new MemoFactory();
+        var f = new MemoFactory("concurrent");
 
         // all tasks get canceled if one fails
         var c1 = f.CreateConcurrentMapReduce(
@@ -54,6 +54,32 @@ public class StructuredConcurrency
             });
 
         Assert.Throws<Exception>(() => c1.Get().GetAwaiter().GetResult());
+    }
+
+    [Fact(Timeout = 1000)]
+    public async Task TestRaceHandling()
+    {
+        var f = new MemoFactory("concurrent");
+
+        // all tasks get canceled if one fails
+        var c1 = f.CreateConcurrentRace(
+            async c =>
+            {
+                await Task.Delay(100, c);
+                return 1;
+            },
+            async c =>
+            {
+                await Task.Delay(3000, c);
+                return 2;
+            },
+            async c =>
+            {
+                await Task.Delay(5000, c);
+                return 3;
+            });
+
+        Assert.Equal(1, await c1.Get());
     }
 
     [Fact(Skip = "to long")]

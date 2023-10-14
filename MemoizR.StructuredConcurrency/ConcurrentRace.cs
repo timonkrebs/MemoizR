@@ -23,7 +23,6 @@ public sealed class ConcurrentRace<T> : SignalHandlR, IMemoizR
         // This should lead to perf gains because memoization can be utilized more efficiently.
         using (await Context.ContextLock.UpgradeableLockAsync())
         {
-
             await Update();
         }
 
@@ -34,8 +33,6 @@ public sealed class ConcurrentRace<T> : SignalHandlR, IMemoizR
     /** run the computation fn, updating the cached value */
     private async Task Update()
     {
-        var oldValue = value;
-
         /* Evaluate the reactive function body, dynamically capturing any other reactives used */
         var prevReaction = Context.CurrentReaction;
         var prevGets = Context.CurrentGets;
@@ -52,18 +49,6 @@ public sealed class ConcurrentRace<T> : SignalHandlR, IMemoizR
             // if the sources have changed, update source & observer links
             if (Context.CurrentGets.Length > 0)
             {
-                // remove all old Sources' .observers links to us
-                RemoveParentObservers(Context.CurrentGetsIndex);
-                // update source up links
-                if (Sources.Any() && Context.CurrentGetsIndex > 0)
-                {
-                    Sources = Sources.Take(Context.CurrentGetsIndex).Union(Context.CurrentGets).ToArray();
-                }
-                else
-                {
-                    Sources = Context.CurrentGets;
-                }
-
                 for (var i = Context.CurrentGetsIndex; i < Sources.Length; i++)
                 {
                     // Add ourselves to the end of the parent .observers array
@@ -72,12 +57,6 @@ public sealed class ConcurrentRace<T> : SignalHandlR, IMemoizR
                         ? new IMemoizR[] { this } 
                         : source.Observers.Union((new[] { this })).ToArray();
                 }
-            }
-            else if (Sources.Any() && Context.CurrentGetsIndex < Sources.Length)
-            {
-                // remove all old Sources' .observers links to us
-                RemoveParentObservers(Context.CurrentGetsIndex);
-                Sources = Sources.Take(Context.CurrentGetsIndex).ToArray();
             }
         }
         finally
@@ -95,22 +74,6 @@ public sealed class ConcurrentRace<T> : SignalHandlR, IMemoizR
             {
                 observer.State = CacheState.CacheDirty;
             }
-        }
-
-        // We've rerun with the latest values from all of our Sources.
-        // This means that we no longer need to update until a signal changes
-        State = CacheState.CacheClean;
-    }
-
-    private void RemoveParentObservers(int index)
-    {
-        if (!Sources.Any()) return;
-        for (var i = index; i < Sources.Length; i++)
-        {
-            var source = Sources[i]; // We don't actually delete Sources here because we're replacing the entire array soon
-            var swap = Array.FindIndex(source.Observers, (v) => v.Equals(this));
-            source.Observers[swap] = source.Observers[source.Observers!.Length - 1];
-            source.Observers = source.Observers.SkipLast(1).ToArray();
         }
     }
 
