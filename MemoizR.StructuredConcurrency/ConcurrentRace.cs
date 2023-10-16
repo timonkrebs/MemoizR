@@ -23,7 +23,7 @@ public sealed class ConcurrentRace<T> : SignalHandlR, IMemoizR
     {
         // Only one thread should evaluate the graph at a time. otherwise the context could get messed up.
         // This should lead to perf gains because memoization can be utilized more efficiently.
-        using (await Context.ContextLock.UpgradeableLockAsync())
+        using (await Context.ContextLock.UpgradeableLockAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10)))
         {
             await Update();
         }

@@ -25,7 +25,7 @@ public sealed class AsyncAsymmetricLock
     private int upgradedLocksHeld;
     private int lockScope;
     private readonly Random rand = new();
-    private static readonly AsyncLocal<int> AsyncLocalScope = new ();
+    private static readonly AsyncLocal<int> AsyncLocalScope = new();
 
     /// <summary>
     /// Applies a continuation to the task that will call <see cref="ReleaseWaiters"/> if the task is canceled. This method may not be called while holding the sync lock.
@@ -54,6 +54,7 @@ public sealed class AsyncAsymmetricLock
             if (locksHeld >= 0 && upgradeable.IsEmpty && upgradedLocksHeld == 0)
             {
                 ++locksHeld;
+                this.lockScope = lockScope;
                 return Task.FromResult<IDisposable>(new ExclusivePrioKey(this));
             }
             else
@@ -80,9 +81,9 @@ public sealed class AsyncAsymmetricLock
                 lockScope = rand.Next(1, int.MaxValue);
                 AsyncLocalScope.Value = lockScope;
             }
-        }
 
-        return new AwaitableDisposable<IDisposable>(RequestExclusiveLockAsync(cancellationToken, lockScope));
+            return new AwaitableDisposable<IDisposable>(RequestExclusiveLockAsync(cancellationToken, lockScope));
+        }
     }
 
     /// <summary>
@@ -101,7 +102,10 @@ public sealed class AsyncAsymmetricLock
     /// <returns>A disposable that releases the lock when disposed.</returns>
     public IDisposable ExclusiveLock(CancellationToken cancellationToken)
     {
-        return RequestExclusiveLockAsync(cancellationToken, Environment.CurrentManagedThreadId).GetAwaiter().GetResult();
+        lock (this)
+        {
+            return RequestExclusiveLockAsync(cancellationToken, Thread.CurrentThread.ManagedThreadId).GetAwaiter().GetResult();
+        }
     }
 
     /// <summary>
@@ -173,9 +177,10 @@ public sealed class AsyncAsymmetricLock
                 lockScope = rand.Next(1, int.MaxValue);
                 AsyncLocalScope.Value = lockScope;
             }
-        }
 
-        return new AwaitableDisposable<IDisposable>(RequestUpgradeableLockAsync(cancellationToken, lockScope));
+
+            return new AwaitableDisposable<IDisposable>(RequestUpgradeableLockAsync(cancellationToken, lockScope));
+        }
     }
 
     /// <summary>
@@ -194,7 +199,10 @@ public sealed class AsyncAsymmetricLock
     /// <returns>A disposable that releases the lock when disposed.</returns>
     public IDisposable UpgradeableLock(CancellationToken cancellationToken)
     {
-        return RequestUpgradeableLockAsync(cancellationToken, Environment.CurrentManagedThreadId).GetAwaiter().GetResult();
+        lock (this)
+        {
+            return RequestUpgradeableLockAsync(cancellationToken, Thread.CurrentThread.ManagedThreadId).GetAwaiter().GetResult();
+        }
     }
 
     /// <summary>
@@ -211,8 +219,26 @@ public sealed class AsyncAsymmetricLock
     /// </summary>
     private void ReleaseWaiters()
     {
+        if (upgradeable.Dequeue(new UpgradeableKey(this), lockScope)) {
+            this.upgradedLocksHeld++;
+            return;
+        }
+        if (exclusive.Dequeue(new ExclusivePrioKey(this), lockScope)) {
+            this.locksHeld++;
+            return;
+        }
+
         if (!exclusive.IsEmpty && locksHeld >= 0 && upgradedLocksHeld == 0)
         {
+            if (!upgradeable.IsEmpty)
+            {
+                lockScope = exclusive.Dequeue(new ExclusivePrioKey(this));
+#pragma warning restore CA2000 // Dispose objects before losing scope
+                AsyncLocalScope.Value = lockScope;
+                ++locksHeld;
+                return;
+            }
+
             while (!exclusive.IsEmpty)
             {
 #pragma warning disable CA2000 // Dispose objects before losing scope

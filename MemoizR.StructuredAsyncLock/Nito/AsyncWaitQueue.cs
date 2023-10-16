@@ -26,6 +26,8 @@ internal interface IAsyncWaitQueue<T>
     /// <param name="result">The result used to complete the wait queue entry. If this isn't needed, use <c>default(T)</c>.</param>
     int Dequeue(T? result = default);
 
+    bool Dequeue(T? result, int lockScope);
+
     /// <summary>
     /// Removes all entries in the wait queue and completes them. The task continuations for the completed tasks must be executed asynchronously.
     /// </summary>
@@ -107,9 +109,9 @@ internal sealed class DefaultAsyncWaitQueue<T> : IAsyncWaitQueue<T>
     int IAsyncWaitQueue<T>.Dequeue(T? result)
     {
         var res = _queue.RemoveFromFront();
-        
+
         res.Item1.TrySetResult(result!);
-        
+
         return res.Item2;
     }
 
@@ -118,6 +120,19 @@ internal sealed class DefaultAsyncWaitQueue<T> : IAsyncWaitQueue<T>
         foreach (var source in _queue)
             source.Item1.TrySetResult(result!);
         _queue.Clear();
+    }
+
+    bool IAsyncWaitQueue<T>.Dequeue(T? result, int lockScope)
+    {
+        var x = _queue.FirstOrDefault(x => x.Item2 == lockScope);
+        if (x == default)
+        {
+            return false;
+        }
+        
+        x.Item1.TrySetResult(result!);
+        _queue.RemoveRange(_queue.IndexOf(x), 1);
+        return true;
     }
 
     bool IAsyncWaitQueue<T>.TryCancel(Task task, CancellationToken cancellationToken)

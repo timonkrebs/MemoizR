@@ -82,7 +82,7 @@ public class StructuredConcurrency
         Assert.Equal(1, await c1.Get());
     }
 
-    [Fact]
+    [Fact(Timeout = 1000)]
     public async Task TestMultipleMapHandling()
     {
         var f = new MemoFactory("concurrent").DisableSaveMode();

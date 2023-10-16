@@ -16,7 +16,7 @@ public sealed class Reaction : SignalHandlR, IMemoizR
         this.State = CacheState.CacheDirty;
         this.Label = label;
 
-        _ = Init();
+        Init().GetAwaiter().GetResult();
     }
 
     public void Pause()
@@ -32,7 +32,7 @@ public sealed class Reaction : SignalHandlR, IMemoizR
 
     private async Task Init()
     {
-        using (await Context.ContextLock.UpgradeableLockAsync())
+        using (await Context.ContextLock.UpgradeableLockAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10)))
         {
             var temp = synchronizationContext;
             try
@@ -163,8 +163,8 @@ public sealed class Reaction : SignalHandlR, IMemoizR
                 {
                     // Add ourselves to the end of the parent .observers array.
                     var source = Sources[i];
-                    source.Observers = !source.Observers.Any() 
-                        ? new IMemoizR[] { this } 
+                    source.Observers = !source.Observers.Any()
+                        ? new IMemoizR[] { this }
                         : source.Observers.Union((new[] { this })).ToArray();
                 }
             }
@@ -193,12 +193,13 @@ public sealed class Reaction : SignalHandlR, IMemoizR
         }
     }
 
-    internal Task Stale(CacheState state)
+    internal async Task Stale(CacheState state)
     {
-        State = state;
-        _ = UpdateIfNecessary();
-
-        return Task.CompletedTask;
+        using (await Context.ContextLock.UpgradeableLockAsync())
+        {
+            State = state;
+            await UpdateIfNecessary();
+        }
     }
 
     Task IMemoizR.Stale(CacheState state)
