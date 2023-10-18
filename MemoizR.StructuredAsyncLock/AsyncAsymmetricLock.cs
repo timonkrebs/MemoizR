@@ -155,7 +155,7 @@ public sealed class AsyncAsymmetricLock
             lockScope = AsyncLocalScope.Value;
             if (lockScope == 0)
             {
-                lockScope = rand.Next();
+                lockScope = rand.Next(1, int.MaxValue);
                 AsyncLocalScope.Value = lockScope;
             }
         }
