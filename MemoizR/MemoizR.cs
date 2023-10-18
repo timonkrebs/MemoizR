@@ -9,6 +9,10 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR
 
     internal MemoizR(Func<Task<T>> fn, Context context, string label = "Label", Func<T?, T?, bool>? equals = null) : base(context, equals)
     {
+        if(context.saveMode){
+            fn().GetAwaiter().GetResult();
+        }
+        
         this.fn = fn;
         this.State = CacheState.CacheDirty;
         this.Label = label;

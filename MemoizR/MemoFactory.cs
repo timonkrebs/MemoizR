@@ -5,6 +5,8 @@ public abstract class BaseMemoFactory
     internal static Dictionary<string, WeakReference<Context>> CONTEXTS = new Dictionary<string, WeakReference<Context>>();
     internal Context Context;
 
+    public void DisableSaveMode() => Context.saveMode = false;
+
     protected BaseMemoFactory(string? contextKey = null)
     {
         lock (CONTEXTS)
