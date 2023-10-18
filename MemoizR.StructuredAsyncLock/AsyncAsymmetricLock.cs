@@ -105,16 +105,16 @@ public sealed class AsyncAsymmetricLock
     private Task<IDisposable> RequestUpgradeableLockAsync(CancellationToken cancellationToken, int lockScope)
     {
         Task<IDisposable> ret;
+
         lock (this)
         {
-            // If the lock is available, take it immediately.
+            var canAcquireLock = false;
+
             if (locksHeld == 0)
             {
                 locksHeld = -1;
-#pragma warning disable CA2000 // Dispose objects before losing scope
-                ret = Task.FromResult<IDisposable>(new UpgradeableKey(this));
-#pragma warning restore CA2000 // Dispose objects before losing scope
                 this.lockScope = lockScope;
+                canAcquireLock = true;
             }
             else if (locksHeld > 0 && (this.lockScope == lockScope || this.lockScope == 0))
             {
@@ -122,28 +122,25 @@ public sealed class AsyncAsymmetricLock
                 {
                     this.lockScope = lockScope;
                 }
-                this.upgradedLocksHeld++;
-#pragma warning disable CA2000 // Dispose objects before losing scope
-                ret = Task.FromResult<IDisposable>(new UpgradeableKey(this));
-#pragma warning restore CA2000 // Dispose objects before losing scope
+
+                upgradedLocksHeld++;
+                canAcquireLock = true;
             }
             else if (locksHeld < 0 && this.lockScope == lockScope)
             {
                 --locksHeld;
-#pragma warning disable CA2000 // Dispose objects before losing scope
-                ret = Task.FromResult<IDisposable>(new UpgradeableKey(this));
-#pragma warning restore CA2000 // Dispose objects before losing scope
+                canAcquireLock = true;
             }
-            else
-            {
-                // Wait for the lock to become available or cancellation.
-                ret = upgradeable.Enqueue(this, cancellationToken, lockScope);
-            }
-        }
 
-        ReleaseWaitersWhenCanceled(ret);
-        return ret;
+            ret = canAcquireLock
+                ? Task.FromResult<IDisposable>(new UpgradeableKey(this))
+                : upgradeable.Enqueue(this, cancellationToken, lockScope);
+
+            ReleaseWaitersWhenCanceled(ret);
+            return ret;
+        }
     }
+
 
     /// <summary>
     /// Asynchronously acquires the lock as a Upgradeable. Returns a disposable that releases the lock when disposed.
@@ -158,7 +155,7 @@ public sealed class AsyncAsymmetricLock
             lockScope = AsyncLocalScope.Value;
             if (lockScope == 0)
             {
-                lockScope = rand.Next();
+                lockScope = rand.Next(1, int.MaxValue);
                 AsyncLocalScope.Value = lockScope;
             }
         }
