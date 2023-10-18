@@ -38,6 +38,7 @@ public class StructuredConcurrency
     public void TestExceptionHandling()
     {
         var f = new MemoFactory("concurrent");
+        f.DisableSaveMode();
 
         // all tasks get canceled if one fails
         var c1 = f.CreateConcurrentMapReduce(
@@ -86,6 +87,7 @@ public class StructuredConcurrency
     public async Task TestMultipleMapHandling()
     {
         var f = new MemoFactory("concurrent");
+        f.DisableSaveMode();
         var v1 = f.CreateSignal(1);
         var v2 = f.CreateSignal(2);
         var v3 = f.CreateSignal(3);
