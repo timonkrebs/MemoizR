@@ -1,5 +1,3 @@
-using MemoizR.Reactive;
-
 namespace MemoizR.Test;
 
 public class Reactive

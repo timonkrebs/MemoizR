@@ -21,11 +21,11 @@ public sealed class AsyncAsymmetricLock
     /// <summary>
     /// Number of exclusive locks held; negative if upgradeable lock are held; 0 if no locks are held.
     /// </summary>
-    private int locksHeld;
-    private int upgradedLocksHeld;
-    private int lockScope;
+    private volatile int locksHeld;
+    private volatile int upgradedLocksHeld;
+    private volatile int lockScope;
     private readonly Random rand = new();
-    private static readonly AsyncLocal<int> AsyncLocalScope = new ();
+    private static readonly AsyncLocal<int> AsyncLocalScope = new();
 
     /// <summary>
     /// Applies a continuation to the task that will call <see cref="ReleaseWaiters"/> if the task is canceled. This method may not be called while holding the sync lock.
@@ -51,9 +51,10 @@ public sealed class AsyncAsymmetricLock
         lock (this)
         {
             // If the lock is available or in exclusive mode and there are no waiting upgradeable, or upgrading upgradeable, take it immediately.
-            if (locksHeld >= 0 && upgradeable.IsEmpty && upgradedLocksHeld == 0)
+            if ((locksHeld >= 0 && upgradeable.IsEmpty && upgradedLocksHeld == 0))
             {
-                ++locksHeld;
+                Interlocked.Increment(ref locksHeld);
+                this.lockScope = lockScope;
                 return Task.FromResult<IDisposable>(new ExclusivePrioKey(this));
             }
             else
@@ -81,7 +82,6 @@ public sealed class AsyncAsymmetricLock
                 AsyncLocalScope.Value = lockScope;
             }
         }
-
         return new AwaitableDisposable<IDisposable>(RequestExclusiveLockAsync(cancellationToken, lockScope));
     }
 
@@ -128,7 +128,7 @@ public sealed class AsyncAsymmetricLock
 
             if (locksHeld == 0)
             {
-                locksHeld = -1;
+                Interlocked.Decrement(ref locksHeld);
                 this.lockScope = lockScope;
                 canAcquireLock = true;
             }
@@ -139,12 +139,12 @@ public sealed class AsyncAsymmetricLock
                     this.lockScope = lockScope;
                 }
 
-                upgradedLocksHeld++;
+                Interlocked.Increment(ref upgradedLocksHeld);
                 canAcquireLock = true;
             }
             else if (locksHeld < 0 && this.lockScope == lockScope)
             {
-                --locksHeld;
+                Interlocked.Decrement(ref locksHeld);
                 canAcquireLock = true;
             }
 
@@ -155,7 +155,6 @@ public sealed class AsyncAsymmetricLock
             return ret;
         }
     }
-
 
     /// <summary>
     /// Asynchronously acquires the lock as a Upgradeable. Returns a disposable that releases the lock when disposed.
@@ -174,7 +173,6 @@ public sealed class AsyncAsymmetricLock
                 AsyncLocalScope.Value = lockScope;
             }
         }
-
         return new AwaitableDisposable<IDisposable>(RequestUpgradeableLockAsync(cancellationToken, lockScope));
     }
 
@@ -213,22 +211,31 @@ public sealed class AsyncAsymmetricLock
     {
         if (!exclusive.IsEmpty && locksHeld >= 0 && upgradedLocksHeld == 0)
         {
+            if (!upgradeable.IsEmpty)
+            {
+                lockScope = exclusive.Dequeue(new ExclusivePrioKey(this));
+#pragma warning restore CA2000 // Dispose objects before losing scope
+                AsyncLocalScope.Value = lockScope;
+                Interlocked.Increment(ref locksHeld);
+                return;
+            }
+
             while (!exclusive.IsEmpty)
             {
 #pragma warning disable CA2000 // Dispose objects before losing scope
                 lockScope = exclusive.Dequeue(new ExclusivePrioKey(this));
 #pragma warning restore CA2000 // Dispose objects before losing scope
                 AsyncLocalScope.Value = lockScope;
-                ++locksHeld;
+                Interlocked.Increment(ref locksHeld);
             }
         }
         else if (!upgradeable.IsEmpty)
         {
-            --locksHeld;
 #pragma warning disable CA2000 // Dispose objects before losing scope
             lockScope = upgradeable.Dequeue(new UpgradeableKey(this));
 #pragma warning restore CA2000 // Dispose objects before losing scope
             AsyncLocalScope.Value = lockScope;
+            Interlocked.Decrement(ref locksHeld);
         }
     }
 
@@ -239,7 +246,7 @@ public sealed class AsyncAsymmetricLock
     {
         lock (this)
         {
-            --locksHeld;
+            Interlocked.Decrement(ref locksHeld);
             ReleaseWaiters();
         }
     }
@@ -253,7 +260,7 @@ public sealed class AsyncAsymmetricLock
         {
             if (upgradedLocksHeld > 0)
             {
-                upgradedLocksHeld--;
+                Interlocked.Decrement(ref upgradedLocksHeld);
                 if (upgradedLocksHeld == 0 && locksHeld == 0)
                 {
                     lockScope = 0;
@@ -261,7 +268,7 @@ public sealed class AsyncAsymmetricLock
             }
             else
             {
-                locksHeld++;
+                Interlocked.Increment(ref locksHeld);
                 if (locksHeld == 0)
                 {
                     lockScope = 0;
