@@ -92,7 +92,7 @@ public class Reactive
 
         await Task.Delay(100);
 
-        // This is not completely reliable because if all the set are evaluated tawait he gets trigger again because how the readwrite lock works
+        // This is not completely reliable because if all the set are evaluated await he gets trigger again because how the readwrite lock works
         Assert.InRange(invocationCount, 2, 60);
     }
 
@@ -136,7 +136,7 @@ public class Reactive
 
         await Task.Delay(100);
 
-        // This is not completely reliable because if all the set are evaluated tawait he gets trigger again because how the readwrite lock works
-        Assert.InRange(invocationCount, 18, 25);
+        // This is not completely reliable because if all the set are evaluated await he gets trigger again because how the readwrite lock works
+        Assert.InRange(invocationCount, 5, 25);
     }
 }

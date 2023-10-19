@@ -33,7 +33,12 @@ public sealed class AsyncAsymmetricLock
     /// <param name="task">The task to observe for cancellation.</param>
     private void ReleaseWaitersWhenCanceled(Task task)
     {
-        task.ContinueWith(_ => { lock (this) { ReleaseWaiters(); } }, CancellationToken.None, TaskContinuationOptions.OnlyOnCanceled | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+        task.ContinueWith(_ => {
+            lock (this)
+            {
+                ReleaseWaiters();
+            }
+        }, CancellationToken.None, TaskContinuationOptions.OnlyOnCanceled | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
     }
 
     /// <summary>
@@ -41,7 +46,7 @@ public sealed class AsyncAsymmetricLock
     /// </summary>
     /// <param name="cancellationToken">The cancellation token used to cancel the lock. If this is already set, then this method will attempt to take the lock immediately (succeeding if the lock is currently available).</param>
     /// <returns>A disposable that releases the lock when disposed.</returns>
-    private Task<IDisposable> RequestExclusiveLockAsync(CancellationToken cancellationToken)
+    private Task<IDisposable> RequestExclusiveLockAsync(CancellationToken cancellationToken, int lockScope)
     {
         lock (this)
         {
@@ -54,7 +59,7 @@ public sealed class AsyncAsymmetricLock
             else
             {
                 // Wait for the lock to become available or cancellation.
-                return exclusive.Enqueue(this, cancellationToken, 0);
+                return exclusive.Enqueue(this, cancellationToken, lockScope);
             }
         }
     }
@@ -66,7 +71,18 @@ public sealed class AsyncAsymmetricLock
     /// <returns>A disposable that releases the lock when disposed.</returns>
     public AwaitableDisposable<IDisposable> ExclusiveLockAsync(CancellationToken cancellationToken)
     {
-        return new AwaitableDisposable<IDisposable>(RequestExclusiveLockAsync(cancellationToken));
+        int lockScope;
+        lock (this)
+        {
+            lockScope = AsyncLocalScope.Value;
+            if (lockScope == 0)
+            {
+                lockScope = rand.Next(1, int.MaxValue);
+                AsyncLocalScope.Value = lockScope;
+            }
+        }
+
+        return new AwaitableDisposable<IDisposable>(RequestExclusiveLockAsync(cancellationToken, lockScope));
     }
 
     /// <summary>
@@ -85,7 +101,7 @@ public sealed class AsyncAsymmetricLock
     /// <returns>A disposable that releases the lock when disposed.</returns>
     public IDisposable ExclusiveLock(CancellationToken cancellationToken)
     {
-        return RequestExclusiveLockAsync(cancellationToken).GetAwaiter().GetResult();
+        return RequestExclusiveLockAsync(cancellationToken, Environment.CurrentManagedThreadId).GetAwaiter().GetResult();
     }
 
     /// <summary>
@@ -135,7 +151,6 @@ public sealed class AsyncAsymmetricLock
             ret = canAcquireLock
                 ? Task.FromResult<IDisposable>(new UpgradeableKey(this))
                 : upgradeable.Enqueue(this, cancellationToken, lockScope);
-
             ReleaseWaitersWhenCanceled(ret);
             return ret;
         }
@@ -179,7 +194,7 @@ public sealed class AsyncAsymmetricLock
     /// <returns>A disposable that releases the lock when disposed.</returns>
     public IDisposable UpgradeableLock(CancellationToken cancellationToken)
     {
-        return RequestUpgradeableLockAsync(cancellationToken, Thread.CurrentThread.ManagedThreadId).GetAwaiter().GetResult();
+        return RequestUpgradeableLockAsync(cancellationToken, Environment.CurrentManagedThreadId).GetAwaiter().GetResult();
     }
 
     /// <summary>
@@ -196,8 +211,6 @@ public sealed class AsyncAsymmetricLock
     /// </summary>
     private void ReleaseWaiters()
     {
-        if (locksHeld < 0) return;
-
         if (!exclusive.IsEmpty && locksHeld >= 0 && upgradedLocksHeld == 0)
         {
             while (!exclusive.IsEmpty)
@@ -241,7 +254,7 @@ public sealed class AsyncAsymmetricLock
             if (upgradedLocksHeld > 0)
             {
                 upgradedLocksHeld--;
-                if (upgradedLocksHeld == 0)
+                if (upgradedLocksHeld == 0 && locksHeld == 0)
                 {
                     lockScope = 0;
                 }
@@ -254,7 +267,6 @@ public sealed class AsyncAsymmetricLock
                     lockScope = 0;
                 }
             }
-
             ReleaseWaiters();
         }
     }
