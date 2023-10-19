@@ -51,7 +51,7 @@ public sealed class AsyncAsymmetricLock
         lock (this)
         {
             // If the lock is available or in exclusive mode and there are no waiting upgradeable, or upgrading upgradeable, take it immediately.
-            if ((locksHeld >= 0 && upgradeable.IsEmpty && upgradedLocksHeld == 0))
+            if (locksHeld >= 0 && upgradeable.IsEmpty && upgradedLocksHeld == 0)
             {
                 Interlocked.Increment(ref locksHeld);
                 this.lockScope = lockScope;
@@ -132,7 +132,7 @@ public sealed class AsyncAsymmetricLock
                 this.lockScope = lockScope;
                 canAcquireLock = true;
             }
-            else if (locksHeld > 0 && (this.lockScope == lockScope || this.lockScope == 0))
+            else if (locksHeld > 0 && this.lockScope == lockScope)
             {
                 if (upgradedLocksHeld == 0)
                 {
@@ -228,6 +228,7 @@ public sealed class AsyncAsymmetricLock
                 AsyncLocalScope.Value = lockScope;
                 Interlocked.Increment(ref locksHeld);
             }
+            AsyncLocalScope.Value = 0;
         }
         else if (!upgradeable.IsEmpty)
         {
