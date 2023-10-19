@@ -48,7 +48,7 @@ public class Core
     public async Task TestComputedInvocations()
     {
         var invocations = 0;
-        var f = new MemoFactory();
+        var f = new MemoFactory().DisableSaveMode();
         var v1 = f.CreateSignal(1);
         Assert.Equal(1, await v1.Get());
 
@@ -103,7 +103,7 @@ public class Core
     [Fact]
     public async Task TestDiamondInvocations()
     {
-        var f = new MemoFactory();
+        var f = new MemoFactory().DisableSaveMode();
         var v1 = f.CreateSignal("v1", 1);
         var invocationsM1 = 0;
         var m1 = f.CreateMemoizR("m1", async () =>
@@ -156,7 +156,7 @@ public class Core
     [Fact]
     public async Task TestTwoSourcesInvocations()
     {
-        var f = new MemoFactory();
+        var f = new MemoFactory().DisableSaveMode();
         var v1 = f.CreateSignal("v1", 1);
         var v2 = f.CreateSignal("v2", 1);
         var invocationsM1 = 0;
@@ -195,6 +195,11 @@ public class Core
         Assert.Equal(1, invocationsM3);
 
         await v1.Set(3);
+
+        Assert.Equal(1, invocationsM1);
+        Assert.Equal(1, invocationsM2);
+        Assert.Equal(1, invocationsM3);
+
         var r2 = await m3.Get();
 
         Assert.Equal(2, invocationsM1);
@@ -296,8 +301,7 @@ public class Core
     public async Task TestCaching()
     {
         // Create a MemoFactory instance
-        var f = new MemoFactory();
-
+        var f = new MemoFactory().DisableSaveMode();
 
         // Create a signal 'v1' with an initial value of 1
         var v1 = f.CreateSignal(1);
@@ -323,7 +327,7 @@ public class Core
     public async Task TestThreadSafety()
     {
         // Create a MemoFactory instance
-        var f = new MemoFactory();
+        var f = new MemoFactory().DisableSaveMode();
 
         // Create a signal 'v1' with an initial value of 1
         var v1 = f.CreateSignal(1);
@@ -356,7 +360,7 @@ public class Core
     public async Task TestRelativeThreadSafety()
     {
         // Create a MemoFactory instance
-        var f = new MemoFactory();
+        var f = new MemoFactory().DisableSaveMode();
 
         // Create a signal 'v1' with an initial value of 1
         var v1 = f.CreateEagerRelativeSignal(1);

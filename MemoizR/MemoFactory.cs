@@ -1,11 +1,17 @@
 namespace MemoizR;
 
-public abstract class BaseMemoFactory
+public sealed class MemoFactory
 {
     internal static Dictionary<string, WeakReference<Context>> CONTEXTS = new Dictionary<string, WeakReference<Context>>();
     internal Context Context;
 
-    protected BaseMemoFactory(string? contextKey = null)
+    public MemoFactory DisableSaveMode()
+    {
+        Context.saveMode = false;
+        return this;
+    }
+
+    public MemoFactory(string? contextKey = null)
     {
         lock (CONTEXTS)
         {
@@ -60,11 +66,6 @@ public abstract class BaseMemoFactory
             }
         }
     }
-}
-
-public class MemoFactory : BaseMemoFactory
-{
-    public MemoFactory(string? contextKey = null) : base(contextKey) { }
 
     public MemoizR<T> CreateMemoizR<T>(Func<Task<T>> fn)
     {

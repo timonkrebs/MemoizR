@@ -11,6 +11,9 @@ public sealed class ConcurrentMap<T> : SignalHandlR, IMemoizR
 
     internal ConcurrentMap(IReadOnlyCollection<Func<CancellationToken, Task<T>>> fns, Context context, CancellationTokenSource cancellationTokenSource, string label = "Label") : base(context)
     {
+        if(context.saveMode){
+            Task.WaitAll(fns.Select(x => x(CancellationToken.None)).ToArray());
+        }
         this.fns = fns;
         this.cancellationTokenSource = cancellationTokenSource;
         this.State = CacheState.CacheDirty;
