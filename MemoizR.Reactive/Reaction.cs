@@ -195,11 +195,8 @@ public sealed class Reaction : SignalHandlR, IMemoizR
 
     internal async Task Stale(CacheState state)
     {
-        using (await Context.ContextLock.UpgradeableLockAsync())
-        {
-            State = state;
-            await UpdateIfNecessary();
-        }
+        State = state;
+        await UpdateIfNecessary();
     }
 
     Task IMemoizR.Stale(CacheState state)

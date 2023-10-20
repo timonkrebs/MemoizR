@@ -33,7 +33,8 @@ public sealed class AsyncAsymmetricLock
     /// <param name="task">The task to observe for cancellation.</param>
     private void ReleaseWaitersWhenCanceled(Task task)
     {
-        task.ContinueWith(_ => {
+        task.ContinueWith(_ =>
+        {
             lock (this)
             {
                 ReleaseWaiters();
@@ -100,7 +101,7 @@ public sealed class AsyncAsymmetricLock
     /// <param name="cancellationToken">The cancellation token used to cancel the lock. If this is already set, then this method will attempt to take the lock immediately (succeeding if the lock is currently available).</param>
     /// <returns>A disposable that releases the lock when disposed.</returns>
     public IDisposable ExclusiveLock(CancellationToken cancellationToken)
-    { 
+    {
         return RequestExclusiveLockAsync(cancellationToken, Environment.CurrentManagedThreadId).GetAwaiter().GetResult();
     }
 
@@ -192,7 +193,7 @@ public sealed class AsyncAsymmetricLock
     /// <returns>A disposable that releases the lock when disposed.</returns>
     public IDisposable UpgradeableLock(CancellationToken cancellationToken)
     {
-            return RequestUpgradeableLockAsync(cancellationToken, Environment.CurrentManagedThreadId).GetAwaiter().GetResult();
+        return RequestUpgradeableLockAsync(cancellationToken, Environment.CurrentManagedThreadId).GetAwaiter().GetResult();
     }
 
     /// <summary>
@@ -209,6 +210,19 @@ public sealed class AsyncAsymmetricLock
     /// </summary>
     private void ReleaseWaiters()
     {
+
+        if (locksHeld >= 0 && upgradedLocksHeld == 0 && exclusive.Dequeue(new ExclusivePrioKey(this), this.lockScope))
+        {
+            Interlocked.Increment(ref locksHeld);
+            return;
+        }
+
+        if (locksHeld <= 0 && upgradedLocksHeld == 0 && upgradeable.Dequeue(new UpgradeableKey(this), this.lockScope))
+        {
+            Interlocked.Decrement(ref locksHeld);
+            return;
+        }
+
         if (!exclusive.IsEmpty && locksHeld >= 0 && upgradedLocksHeld == 0)
         {
             if (!upgradeable.IsEmpty)
