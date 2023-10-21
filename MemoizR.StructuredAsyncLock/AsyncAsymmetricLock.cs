@@ -237,6 +237,9 @@ public sealed class AsyncAsymmetricLock
 #pragma warning restore CA2000 // Dispose objects before losing scope
             AsyncLocalScope.Value = lockScope;
             Interlocked.Decrement(ref locksHeld);
+        }else if (!exclusive.IsEmpty && locksHeld == 0 && upgradedLocksHeld == 0)
+        {
+            throw new InvalidOperationException();
         }
     }
 
