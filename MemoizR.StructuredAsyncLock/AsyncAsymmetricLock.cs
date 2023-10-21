@@ -120,8 +120,6 @@ public sealed class AsyncAsymmetricLock
     /// <returns>A disposable that releases the lock when disposed.</returns>
     private Task<IDisposable> RequestUpgradeableLockAsync(CancellationToken cancellationToken, int lockScope)
     {
-        Task<IDisposable> ret;
-
         lock (this)
         {
             var canAcquireLock = false;
@@ -134,11 +132,6 @@ public sealed class AsyncAsymmetricLock
             }
             else if (locksHeld > 0 && this.lockScope == lockScope)
             {
-                if (upgradedLocksHeld == 0)
-                {
-                    this.lockScope = lockScope;
-                }
-
                 Interlocked.Increment(ref upgradedLocksHeld);
                 canAcquireLock = true;
             }
@@ -148,7 +141,7 @@ public sealed class AsyncAsymmetricLock
                 canAcquireLock = true;
             }
 
-            ret = canAcquireLock
+            var ret = canAcquireLock
                 ? Task.FromResult<IDisposable>(new UpgradeableKey(this))
                 : upgradeable.Enqueue(this, cancellationToken, lockScope);
             ReleaseWaitersWhenCanceled(ret);
@@ -230,14 +223,14 @@ public sealed class AsyncAsymmetricLock
             }
             AsyncLocalScope.Value = 0;
         }
-        else if (!upgradeable.IsEmpty)
+        else if (!upgradeable.IsEmpty && locksHeld == 0 && upgradedLocksHeld == 0)
         {
 #pragma warning disable CA2000 // Dispose objects before losing scope
             lockScope = upgradeable.Dequeue(new UpgradeableKey(this));
 #pragma warning restore CA2000 // Dispose objects before losing scope
             AsyncLocalScope.Value = lockScope;
             Interlocked.Decrement(ref locksHeld);
-        }else if (!exclusive.IsEmpty && locksHeld == 0 && upgradedLocksHeld == 0)
+        }else if ((!upgradeable.IsEmpty || !exclusive.IsEmpty) && locksHeld == 0 && upgradedLocksHeld == 0)
         {
             throw new InvalidOperationException();
         }
@@ -319,7 +312,7 @@ public sealed class AsyncAsymmetricLock
         {
             this.asyncPriorityLock = asyncPriorityLock;
         }
-
+        
         public void Dispose()
         {
             asyncPriorityLock.ReleaseUpgradeableLock();

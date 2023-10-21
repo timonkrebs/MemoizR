@@ -1,3 +1,5 @@
+using System.Data;
+
 namespace MemoizR.StructuredConcurrency;
 
 public sealed class ConcurrentMap<T> : SignalHandlR, IMemoizR
@@ -82,6 +84,8 @@ public sealed class ConcurrentMap<T> : SignalHandlR, IMemoizR
             await Update();
         }
 
+        if (State == CacheState.Evaluating && Context.saveMode) throw new EvaluateException("Cyclic behavior detected");
+
         // By now, we're clean
         State = CacheState.CacheClean;
     }
@@ -100,8 +104,10 @@ public sealed class ConcurrentMap<T> : SignalHandlR, IMemoizR
 
         try
         {
+            State = CacheState.Evaluating;
             value = await new StructuredResultsJob<T>(fns, cancellationTokenSource).Run();
-
+            State = CacheState.CacheClean;
+            
             // if the sources have changed, update source & observer links
             if (Context.CurrentGets.Length > 0)
             {

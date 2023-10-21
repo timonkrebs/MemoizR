@@ -16,7 +16,7 @@ public sealed class Reaction : SignalHandlR, IMemoizR
         this.State = CacheState.CacheDirty;
         this.Label = label;
 
-        Init().GetAwaiter().GetResult();
+        Task.Run(async() => await Init()).GetAwaiter().GetResult();
     }
 
     public void Pause()

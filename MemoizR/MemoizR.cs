@@ -1,3 +1,5 @@
+using System.Data;
+
 namespace MemoizR;
 
 public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR
@@ -83,6 +85,8 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR
             await Update();
         }
 
+        if (State == CacheState.Evaluating && Context.saveMode) throw new EvaluateException("Cyclic behavior detected");
+
         // By now, we're clean
         State = CacheState.CacheClean;
     }
@@ -103,7 +107,9 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR
 
         try
         {
+            State = CacheState.Evaluating;
             Value = await fn();
+            State = CacheState.CacheClean;
 
             // if the sources have changed, update source & observer links
             if (Context.CurrentGets.Length > 0)

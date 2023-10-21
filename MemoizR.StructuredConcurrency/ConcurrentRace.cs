@@ -1,3 +1,5 @@
+using System.Data;
+
 namespace MemoizR.StructuredConcurrency;
 
 public sealed class ConcurrentRace<T> : SignalHandlR, IMemoizR
@@ -35,6 +37,8 @@ public sealed class ConcurrentRace<T> : SignalHandlR, IMemoizR
     /** run the computation fn, updating the cached value */
     private async Task Update()
     {
+        if (State == CacheState.Evaluating && Context.saveMode) throw new EvaluateException("Cyclic behavior detected");
+
         /* Evaluate the reactive function body, dynamically capturing any other reactives used */
         var prevReaction = Context.CurrentReaction;
         var prevGets = Context.CurrentGets;
@@ -46,7 +50,9 @@ public sealed class ConcurrentRace<T> : SignalHandlR, IMemoizR
 
         try
         {
+            State = CacheState.Evaluating;
             value = await new StructuredRaceJob<T>(fns, cancellationTokenSource).Run();
+            State = CacheState.CacheClean;
 
             // if the sources have changed, update source & observer links
             if (Context.CurrentGets.Length > 0)

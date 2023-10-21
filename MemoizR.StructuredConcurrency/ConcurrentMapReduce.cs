@@ -1,3 +1,5 @@
+using System.Data;
+
 namespace MemoizR.StructuredConcurrency;
 
 public sealed class ConcurrentMapReduce<T> : SignalHandlR, IMemoizR
@@ -12,7 +14,8 @@ public sealed class ConcurrentMapReduce<T> : SignalHandlR, IMemoizR
 
     internal ConcurrentMapReduce(IReadOnlyCollection<Func<CancellationToken, Task<T>>> fns, Func<T, T, T?> reduce, Context context, CancellationTokenSource cancellationTokenSource, string label = "Label") : base(context)
     {
-        if(context.saveMode){
+        if(context.saveMode)
+        {
             Task.WaitAll(fns.Select(x => x(CancellationToken.None)).ToArray());
         }
         this.fns = fns;
@@ -87,6 +90,8 @@ public sealed class ConcurrentMapReduce<T> : SignalHandlR, IMemoizR
             await Update();
         }
 
+        if (State == CacheState.Evaluating && Context.saveMode) throw new EvaluateException("Cyclic behavior detected");
+
         // By now, we're clean
         State = CacheState.CacheClean;
     }
@@ -105,8 +110,10 @@ public sealed class ConcurrentMapReduce<T> : SignalHandlR, IMemoizR
 
         try
         {
+            State = CacheState.Evaluating;
             value = await new StructuredReduceJob<T>(fns, reduce, cancellationTokenSource).Run();
-
+            State = CacheState.CacheClean;
+            
             // if the sources have changed, update source & observer links
             if (Context.CurrentGets.Length > 0)
             {

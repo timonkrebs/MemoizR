@@ -5,9 +5,9 @@ public sealed class MemoFactory
     internal static Dictionary<string, WeakReference<Context>> CONTEXTS = new Dictionary<string, WeakReference<Context>>();
     internal Context Context;
 
-    public MemoFactory DisableSaveMode()
+    public MemoFactory EnableSaveMode()
     {
-        Context.saveMode = false;
+        Context.saveMode = true;
         return this;
     }
 
