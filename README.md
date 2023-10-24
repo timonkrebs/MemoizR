@@ -129,3 +129,8 @@ var m1 = f.CreateMemoizR(async() => await v1.Get());
 var m2 = f.CreateMemoizR(async() => await v1.Get() * 2);
 var r1 = f.CreateReaction(async() => await m1.Get() + await m2.Get());
 ```
+
+## Test it
+
+https://dotnetfiddle.net/Nd0JQo
+<iframe width="100%" height="475" src="https://dotnetfiddle.net/Widget/Nd0JQo" frameborder="0"></iframe>
