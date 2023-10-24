@@ -119,17 +119,17 @@ public class StructuredConcurrency
 
         await v1.Set(4);
         await Task.Delay(100);
-        Assert.Equal(4, x.First(x => x == 4));
+        Assert.Equal(4, x.Single(x => x == 4));
         Assert.Equal(2, invocations);
 
         await v2.Set(5);
         await Task.Delay(100);
-        Assert.Equal(5, x.First(x => x == 5));
+        Assert.Equal(5, x.Single(x => x == 5));
         Assert.Equal(3, invocations);
 
         await v3.Set(6);
         await Task.Delay(100);
-        Assert.Equal(6, x.First(x => x == 6));
+        Assert.Equal(6, x.Single(x => x == 6));
         Assert.Equal(4, invocations);
     }
 

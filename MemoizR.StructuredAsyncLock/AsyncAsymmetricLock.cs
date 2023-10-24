@@ -206,30 +206,29 @@ public sealed class AsyncAsymmetricLock
         {
             if (!upgradeable.IsEmpty)
             {
+                Interlocked.Increment(ref locksHeld);
                 lockScope = exclusive.Dequeue(new ExclusivePrioKey(this));
 #pragma warning restore CA2000 // Dispose objects before losing scope
                 AsyncLocalScope.Value = lockScope;
-                Interlocked.Increment(ref locksHeld);
                 return;
             }
 
             while (!exclusive.IsEmpty)
             {
+                Interlocked.Increment(ref locksHeld);
 #pragma warning disable CA2000 // Dispose objects before losing scope
                 lockScope = exclusive.Dequeue(new ExclusivePrioKey(this));
 #pragma warning restore CA2000 // Dispose objects before losing scope
-                AsyncLocalScope.Value = lockScope;
-                Interlocked.Increment(ref locksHeld);
             }
             AsyncLocalScope.Value = 0;
         }
         else if (!upgradeable.IsEmpty && locksHeld == 0 && upgradedLocksHeld == 0)
         {
+            Interlocked.Decrement(ref locksHeld);
 #pragma warning disable CA2000 // Dispose objects before losing scope
             lockScope = upgradeable.Dequeue(new UpgradeableKey(this));
 #pragma warning restore CA2000 // Dispose objects before losing scope
             AsyncLocalScope.Value = lockScope;
-            Interlocked.Decrement(ref locksHeld);
         }else if ((!upgradeable.IsEmpty || !exclusive.IsEmpty) && locksHeld == 0 && upgradedLocksHeld == 0)
         {
             throw new InvalidOperationException();

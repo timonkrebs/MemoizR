@@ -13,7 +13,8 @@ public sealed class ConcurrentRace<T> : SignalHandlR, IMemoizR
 
     internal ConcurrentRace(IReadOnlyCollection<Func<CancellationToken, Task<T>>> fns, Context context, CancellationTokenSource cancellationTokenSource, string label = "Label") : base(context)
     {
-        if(context.saveMode){
+        if (context.saveMode)
+        {
             Task.WaitAll(fns.Select(x => x(CancellationToken.None)).ToArray());
         }
         this.fns = fns;
@@ -61,8 +62,8 @@ public sealed class ConcurrentRace<T> : SignalHandlR, IMemoizR
                 {
                     // Add ourselves to the end of the parent .observers array
                     var source = Sources[i];
-                    source.Observers = !source.Observers.Any() 
-                        ? new IMemoizR[] { this } 
+                    source.Observers = !source.Observers.Any()
+                        ? new IMemoizR[] { this }
                         : source.Observers.Union((new[] { this })).ToArray();
                 }
             }
@@ -85,9 +86,12 @@ public sealed class ConcurrentRace<T> : SignalHandlR, IMemoizR
         }
     }
 
-    Task IMemoizR.UpdateIfNecessary()
+    async Task IMemoizR.UpdateIfNecessary()
     {
-        return Update();
+        using (await Context.ContextLock.UpgradeableLockAsync())
+        {
+            await Update();
+        }
     }
 
     Task IMemoizR.Stale(CacheState state)

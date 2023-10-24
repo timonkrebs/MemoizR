@@ -13,7 +13,8 @@ public sealed class ConcurrentMap<T> : SignalHandlR, IMemoizR
 
     internal ConcurrentMap(IReadOnlyCollection<Func<CancellationToken, Task<T>>> fns, Context context, CancellationTokenSource cancellationTokenSource, string label = "Label") : base(context)
     {
-        if(context.saveMode){
+        if (context.saveMode)
+        {
             Task.WaitAll(fns.Select(x => x(CancellationToken.None)).ToArray());
         }
         this.fns = fns;
@@ -107,7 +108,6 @@ public sealed class ConcurrentMap<T> : SignalHandlR, IMemoizR
             State = CacheState.Evaluating;
             value = await new StructuredResultsJob<T>(fns, cancellationTokenSource).Run();
             State = CacheState.CacheClean;
-            
             // if the sources have changed, update source & observer links
             if (Context.CurrentGets.Length > 0)
             {
@@ -127,8 +127,8 @@ public sealed class ConcurrentMap<T> : SignalHandlR, IMemoizR
                 {
                     // Add ourselves to the end of the parent .observers array
                     var source = Sources[i];
-                    source.Observers = !source.Observers.Any() 
-                        ? new IMemoizR[] { this } 
+                    source.Observers = !source.Observers.Any()
+                        ? new IMemoizR[] { this }
                         : source.Observers.Union((new[] { this })).ToArray();
                 }
             }
@@ -138,6 +138,7 @@ public sealed class ConcurrentMap<T> : SignalHandlR, IMemoizR
                 RemoveParentObservers(Context.CurrentGetsIndex);
                 Sources = Sources.Take(Context.CurrentGetsIndex).ToArray();
             }
+
         }
         finally
         {
@@ -173,9 +174,12 @@ public sealed class ConcurrentMap<T> : SignalHandlR, IMemoizR
         }
     }
 
-    Task IMemoizR.UpdateIfNecessary()
+    async Task IMemoizR.UpdateIfNecessary()
     {
-        return UpdateIfNecessary();
+        using (await Context.ContextLock.UpgradeableLockAsync())
+        {
+            await UpdateIfNecessary();
+        }
     }
 
     internal async Task Stale(CacheState state)
