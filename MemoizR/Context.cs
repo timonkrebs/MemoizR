@@ -8,27 +8,30 @@ public class Context
 
     /** current capture context for identifying sources (other memoizR elements)
     * - active while evaluating a memoizR function body  */
-    internal IMemoHandlR? CurrentReaction = null;
-    internal IMemoHandlR[] CurrentGets = Array.Empty<IMemoHandlR>();
-    internal int CurrentGetsIndex;
+    internal volatile IMemoHandlR? CurrentReaction = null;
+    internal volatile IMemoHandlR[] CurrentGets = Array.Empty<IMemoHandlR>();
+    internal volatile int CurrentGetsIndex;
     internal bool saveMode = false;
 
     internal void CheckDependenciesTheSame(IMemoHandlR memoHandlR)
     {
-        var hasCurrentGets = CurrentGets.Length == 0;
-        
-        var hasEnoughSources = CurrentReaction?.Sources?.Length > 0 && CurrentReaction.Sources.Length >= CurrentGetsIndex + 1;
-        var currentSourceEqualsThis = hasEnoughSources && CurrentReaction!.Sources?[CurrentGetsIndex] == memoHandlR;
+        lock (this)
+        {
+            var hasCurrentGets = CurrentGets.Length == 0;
 
-        if (hasCurrentGets && currentSourceEqualsThis)
-        {
-            CurrentGetsIndex++;
-        }
-        else
-        {
-            CurrentGets = !CurrentGets.Any() 
-                ? new[] { memoHandlR } 
-                : CurrentGets.Union(new[] { memoHandlR }).ToArray();
+            var hasEnoughSources = CurrentReaction?.Sources?.Length > 0 && CurrentReaction.Sources.Length >= CurrentGetsIndex + 1;
+            var currentSourceEqualsThis = hasEnoughSources && CurrentReaction!.Sources?[CurrentGetsIndex] == memoHandlR;
+
+            if (hasCurrentGets && currentSourceEqualsThis)
+            {
+                Interlocked.Increment(ref CurrentGetsIndex);
+            }
+            else
+            {
+                CurrentGets = !CurrentGets.Any()
+                    ? new[] { memoHandlR }
+                    : CurrentGets.Union(new[] { memoHandlR }).ToArray();
+            }
         }
     }
 }
