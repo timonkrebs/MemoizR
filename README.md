@@ -1,7 +1,7 @@
 <h1 align="center">MemoizR</h1>
 
 <p align="center">
-  <img src="docs/MemoizR-Small.png" alt="MemoizR-logo" width="120px" height="120px"/>
+  <img src="docs/MemoizR.png" alt="MemoizR-logo" width="120px" height="120px"/>
   <br>
   <em>Streamlined Concurrency</em>
   <br>
