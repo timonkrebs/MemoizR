@@ -14,10 +14,6 @@ public sealed class ConcurrentMapReduce<T> : SignalHandlR, IMemoizR
 
     internal ConcurrentMapReduce(IReadOnlyCollection<Func<CancellationToken, Task<T>>> fns, Func<T, T, T?> reduce, Context context, CancellationTokenSource cancellationTokenSource, string label = "Label") : base(context)
     {
-        if (context.saveMode)
-        {
-            Task.WaitAll(fns.Select(x => x(CancellationToken.None)).ToArray());
-        }
         this.fns = fns;
         this.reduce = reduce;
         this.cancellationTokenSource = cancellationTokenSource;
@@ -90,7 +86,7 @@ public sealed class ConcurrentMapReduce<T> : SignalHandlR, IMemoizR
             await Update();
         }
 
-        if (State == CacheState.Evaluating && Context.saveMode) throw new EvaluateException("Cyclic behavior detected");
+        if (State == CacheState.Evaluating) throw new InvalidOperationException("Cyclic behavior detected");
 
         // By now, we're clean
         State = CacheState.CacheClean;
@@ -173,7 +169,7 @@ public sealed class ConcurrentMapReduce<T> : SignalHandlR, IMemoizR
         for (var i = index; i < Sources.Length; i++)
         {
             var source = Sources[i]; // We don't actually delete Sources here because we're replacing the entire array soon
-            var swap = Array.FindIndex(source.Observers, (v) => v.Equals(this));
+            var swap = Array.FindIndex(source.Observers, v => v.Equals(this));
             source.Observers[swap] = source.Observers[source.Observers!.Length - 1];
             source.Observers = source.Observers.SkipLast(1).ToArray();
         }

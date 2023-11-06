@@ -11,7 +11,6 @@ public class Context
     internal volatile IMemoHandlR? CurrentReaction = null;
     internal volatile IMemoHandlR[] CurrentGets = Array.Empty<IMemoHandlR>();
     internal volatile int CurrentGetsIndex;
-    internal bool saveMode = false;
 
     internal void CheckDependenciesTheSame(IMemoHandlR memoHandlR)
     {

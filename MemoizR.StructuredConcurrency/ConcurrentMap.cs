@@ -13,10 +13,6 @@ public sealed class ConcurrentMap<T> : SignalHandlR, IMemoizR
 
     internal ConcurrentMap(IReadOnlyCollection<Func<CancellationToken, Task<T>>> fns, Context context, CancellationTokenSource cancellationTokenSource, string label = "Label") : base(context)
     {
-        if (context.saveMode)
-        {
-            Task.WaitAll(fns.Select(x => x(CancellationToken.None)).ToArray());
-        }
         this.fns = fns;
         this.cancellationTokenSource = cancellationTokenSource;
         this.State = CacheState.CacheDirty;
@@ -37,6 +33,7 @@ public sealed class ConcurrentMap<T> : SignalHandlR, IMemoizR
             // if someone else did read the graph while this thread was blocekd it could be that this is already Clean
             if (State == CacheState.CacheClean && Context.CurrentReaction == null)
             {
+                Thread.MemoryBarrier();
                 return value;
             }
 
@@ -48,6 +45,7 @@ public sealed class ConcurrentMap<T> : SignalHandlR, IMemoizR
             await UpdateIfNecessary();
         }
 
+        Thread.MemoryBarrier();
         return value;
     }
 
@@ -85,7 +83,7 @@ public sealed class ConcurrentMap<T> : SignalHandlR, IMemoizR
             await Update();
         }
 
-        if (State == CacheState.Evaluating && Context.saveMode) throw new EvaluateException("Cyclic behavior detected");
+        if (State == CacheState.Evaluating) throw new InvalidOperationException("Cyclic behavior detected");
 
         // By now, we're clean
         State = CacheState.CacheClean;
@@ -94,7 +92,7 @@ public sealed class ConcurrentMap<T> : SignalHandlR, IMemoizR
     /** run the computation fn, updating the cached value */
     private async Task Update()
     {
-        /* Evalute the reactive function body, dynamically capturing any other reactives used */
+        /* Evaluate the reactive function body, dynamically capturing any other reactives used */
         var prevReaction = Context.CurrentReaction;
         var prevGets = Context.CurrentGets;
         var prevIndex = Context.CurrentGetsIndex;
@@ -138,7 +136,6 @@ public sealed class ConcurrentMap<T> : SignalHandlR, IMemoizR
                 RemoveParentObservers(Context.CurrentGetsIndex);
                 Sources = Sources.Take(Context.CurrentGetsIndex).ToArray();
             }
-
         }
         finally
         {

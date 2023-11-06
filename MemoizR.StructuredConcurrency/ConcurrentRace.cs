@@ -13,10 +13,6 @@ public sealed class ConcurrentRace<T> : SignalHandlR, IMemoizR
 
     internal ConcurrentRace(IReadOnlyCollection<Func<CancellationToken, Task<T>>> fns, Context context, CancellationTokenSource cancellationTokenSource, string label = "Label") : base(context)
     {
-        if (context.saveMode)
-        {
-            Task.WaitAll(fns.Select(x => x(CancellationToken.None)).ToArray());
-        }
         this.fns = fns;
         this.cancellationTokenSource = cancellationTokenSource;
         this.Label = label;
@@ -38,7 +34,7 @@ public sealed class ConcurrentRace<T> : SignalHandlR, IMemoizR
     /** run the computation fn, updating the cached value */
     private async Task Update()
     {
-        if (State == CacheState.Evaluating && Context.saveMode) throw new EvaluateException("Cyclic behavior detected");
+        if (State == CacheState.Evaluating) throw new InvalidOperationException("Cyclic behavior detected");
 
         /* Evaluate the reactive function body, dynamically capturing any other reactives used */
         var prevReaction = Context.CurrentReaction;

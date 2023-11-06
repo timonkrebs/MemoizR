@@ -10,11 +10,7 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR
     CacheState IMemoizR.State { get => State; set => State = value; }
 
     internal MemoizR(Func<Task<T>> fn, Context context, string label = "Label", Func<T?, T?, bool>? equals = null) : base(context, equals)
-    {
-        if(context.saveMode){
-            fn().GetAwaiter().GetResult();
-        }
-        
+    {    
         this.fn = fn;
         this.State = CacheState.CacheDirty;
         this.Label = label;
@@ -85,7 +81,7 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR
             await Update();
         }
 
-        if (State == CacheState.Evaluating && Context.saveMode) throw new EvaluateException("Cyclic behavior detected");
+        if (State == CacheState.Evaluating) throw new InvalidOperationException("Cyclic behavior detected");
 
         // By now, we're clean
         State = CacheState.CacheClean;
