@@ -79,7 +79,7 @@ var f = new MemoFactory("DSC");
 var child1 = f.CreateConcurrentMapReduce(
     async c =>
     {
-        await Task.Delay(3000);
+        await Task.Delay(3000, c.Token);
         return 3;
     });
 
@@ -87,16 +87,16 @@ var child1 = f.CreateConcurrentMapReduce(
 var c1 = f.CreateConcurrentMapReduce(
     async c =>
     {
-        await child1.Get(); // should be waiting for the delay of 3 seconds but does not...
+        await child1.Get(c);
 
         // Any group work can kick off other group work.
         await Task.WhenAll(Enumerable.Range(1, 10)
             .Select(x => f.CreateConcurrentMapReduce(
                 async c =>
                 {
-                    await Task.Delay(3000);
+                    await Task.Delay(3000, c.Token);
                     return x;
-                }).Get()));
+                }).Get(c)));
         
         return 4;
     });

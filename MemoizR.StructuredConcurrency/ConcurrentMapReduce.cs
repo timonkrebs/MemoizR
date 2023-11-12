@@ -5,24 +5,29 @@ namespace MemoizR.StructuredConcurrency;
 public sealed class ConcurrentMapReduce<T> : SignalHandlR, IMemoizR
 {
     private CacheState State { get; set; } = CacheState.CacheClean;
-    private IReadOnlyCollection<Func<CancellationToken, Task<T>>> fns;
+    private IReadOnlyCollection<Func<CancellationTokenSource, Task<T>>> fns;
     private readonly Func<T, T, T?> reduce;
-    private readonly CancellationTokenSource cancellationTokenSource;
+    private CancellationTokenSource? cancellationTokenSource;
     private T? value = default;
 
     CacheState IMemoizR.State { get => State; set => State = value; }
 
-    internal ConcurrentMapReduce(IReadOnlyCollection<Func<CancellationToken, Task<T>>> fns, Func<T, T, T?> reduce, Context context, CancellationTokenSource cancellationTokenSource, string label = "Label") : base(context)
+    internal ConcurrentMapReduce(IReadOnlyCollection<Func<CancellationTokenSource, Task<T>>> fns, Func<T, T, T?> reduce, Context context, string label = "Label") : base(context)
     {
         this.fns = fns;
         this.reduce = reduce;
-        this.cancellationTokenSource = cancellationTokenSource;
         this.State = CacheState.CacheDirty;
         this.Label = label;
     }
 
-    public async Task<T?> Get()
+    public Task<T?> Get()
     {
+        return Get(new CancellationTokenSource());
+    }
+
+    public async Task<T?> Get(CancellationTokenSource cancellationTokenSource)
+    {
+        this.cancellationTokenSource = cancellationTokenSource;
         if (State == CacheState.CacheClean && Context.CurrentReaction == null)
         {
             Thread.MemoryBarrier();
@@ -107,7 +112,7 @@ public sealed class ConcurrentMapReduce<T> : SignalHandlR, IMemoizR
         try
         {
             State = CacheState.Evaluating;
-            value = await new StructuredReduceJob<T>(fns, reduce, cancellationTokenSource).Run();
+            value = await new StructuredReduceJob<T>(fns, reduce, cancellationTokenSource!).Run();
             State = CacheState.CacheClean;
 
             // if the sources have changed, update source & observer links

@@ -5,22 +5,27 @@ namespace MemoizR.StructuredConcurrency;
 public sealed class ConcurrentMap<T> : SignalHandlR, IMemoizR
 {
     private CacheState State { get; set; } = CacheState.CacheClean;
-    private IReadOnlyCollection<Func<CancellationToken, Task<T>>> fns;
-    private readonly CancellationTokenSource cancellationTokenSource;
+    private IReadOnlyCollection<Func<CancellationTokenSource, Task<T>>> fns;
+    private CancellationTokenSource? cancellationTokenSource;
     private IEnumerable<T?> value = new List<T>();
 
     CacheState IMemoizR.State { get => State; set => State = value; }
 
-    internal ConcurrentMap(IReadOnlyCollection<Func<CancellationToken, Task<T>>> fns, Context context, CancellationTokenSource cancellationTokenSource, string label = "Label") : base(context)
+    internal ConcurrentMap(IReadOnlyCollection<Func<CancellationTokenSource, Task<T>>> fns, Context context, string label = "Label") : base(context)
     {
         this.fns = fns;
-        this.cancellationTokenSource = cancellationTokenSource;
         this.State = CacheState.CacheDirty;
         this.Label = label;
     }
 
-    public async Task<IEnumerable<T?>> Get()
+    public Task<IEnumerable<T?>> Get()
     {
+        return Get(new CancellationTokenSource());
+    }
+
+    public async Task<IEnumerable<T?>> Get(CancellationTokenSource cancellationTokenSource)
+    {
+        this.cancellationTokenSource = cancellationTokenSource;
         if (State == CacheState.CacheClean && Context.CurrentReaction == null)
         {
             return value;
@@ -104,7 +109,7 @@ public sealed class ConcurrentMap<T> : SignalHandlR, IMemoizR
         try
         {
             State = CacheState.Evaluating;
-            value = await new StructuredResultsJob<T>(fns, cancellationTokenSource).Run();
+            value = await new StructuredResultsJob<T>(fns, cancellationTokenSource!).Run();
             State = CacheState.CacheClean;
             // if the sources have changed, update source & observer links
             if (Context.CurrentGets.Length > 0)

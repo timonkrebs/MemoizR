@@ -5,21 +5,26 @@ namespace MemoizR.StructuredConcurrency;
 public sealed class ConcurrentRace<T> : SignalHandlR, IMemoizR
 {
     private CacheState State { get; set; } = CacheState.CacheDirty;
-    private IReadOnlyCollection<Func<CancellationToken, Task<T>>> fns;
-    private readonly CancellationTokenSource cancellationTokenSource;
+    private IReadOnlyCollection<Func<CancellationTokenSource, Task<T>>> fns;
+    private CancellationTokenSource? cancellationTokenSource;
     private T? value = default;
 
     CacheState IMemoizR.State { get => State; set => State = value; }
 
-    internal ConcurrentRace(IReadOnlyCollection<Func<CancellationToken, Task<T>>> fns, Context context, CancellationTokenSource cancellationTokenSource, string label = "Label") : base(context)
+    internal ConcurrentRace(IReadOnlyCollection<Func<CancellationTokenSource, Task<T>>> fns, Context context, string label = "Label") : base(context)
     {
         this.fns = fns;
-        this.cancellationTokenSource = cancellationTokenSource;
         this.Label = label;
     }
 
-    public async Task<T?> Get()
+    public Task<T?> Get()
     {
+        return Get(new CancellationTokenSource());
+    }
+
+    public async Task<T?> Get(CancellationTokenSource cancellationTokenSource)
+    {
+        this.cancellationTokenSource = cancellationTokenSource;
         // Only one thread should evaluate the graph at a time. otherwise the context could get messed up.
         // This should lead to perf gains because memoization can be utilized more efficiently.
         using (await Context.ContextLock.UpgradeableLockAsync())
@@ -48,7 +53,7 @@ public sealed class ConcurrentRace<T> : SignalHandlR, IMemoizR
         try
         {
             State = CacheState.Evaluating;
-            value = await new StructuredRaceJob<T>(fns, cancellationTokenSource).Run();
+            value = await new StructuredRaceJob<T>(fns, cancellationTokenSource!).Run();
             State = CacheState.CacheClean;
 
             // if the sources have changed, update source & observer links

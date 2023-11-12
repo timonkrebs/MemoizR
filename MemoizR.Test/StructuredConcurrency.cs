@@ -43,12 +43,12 @@ public class StructuredConcurrency
             _ => throw new Exception(),
             async c =>
             {
-                await Task.Delay(3000, c);
+                await Task.Delay(3000, c.Token);
                 return 4;
             },
             async c =>
             {
-                await Task.Delay(5000, c);
+                await Task.Delay(5000, c.Token);
                 throw new SkipException("Test");
             });
 
@@ -64,17 +64,17 @@ public class StructuredConcurrency
         var c1 = f.CreateConcurrentRace(
             async c =>
             {
-                await Task.Delay(100, c);
+                await Task.Delay(100, c.Token);
                 return 1;
             },
             async c =>
             {
-                await Task.Delay(3000, c);
+                await Task.Delay(3000, c.Token);
                 return 2;
             },
             async c =>
             {
-                await Task.Delay(5000, c);
+                await Task.Delay(5000, c.Token);
                 return 3;
             });
 
@@ -133,6 +133,32 @@ public class StructuredConcurrency
         Assert.Equal(4, invocations);
     }
 
+    [Fact(Skip = "to long")]
+    public async Task TestChildExecptionCancelationHandling()
+    {
+        var f = new MemoFactory("concurrent");
+
+        var child1 = f.CreateConcurrentMapReduce(
+            async c =>
+            {
+                throw new Exception();
+                return 3;
+            });
+
+        // all tasks get canceled if one fails
+        var c1 = f.CreateConcurrentMapReduce(
+            async c =>
+            {
+                await child1.Get(c);
+                return 4;
+            },
+            async _ => {
+                await Task.Delay(1000);
+                return 2;
+            });
+
+        Assert.Throws<Exception>(() => c1.Get().GetAwaiter().GetResult());// should wait for 1 second
+    }
 
     [Fact(Skip = "to long")]
     public async Task TestChildExecutionHandling()
@@ -150,10 +176,14 @@ public class StructuredConcurrency
         var c1 = f.CreateConcurrentMapReduce(
             async c =>
             {
-                await child1.Get(); // should be waiting for the delay of 3 seconds but does not...
+                await child1.Get();
                 return 4;
+            },
+            async c => {
+                await Task.Delay(2000, c.Token);
+                return 2;
             });
 
-        var x = await c1.Get();
+        var x = await c1.Get(); // should take 3 seconds
     }
 }

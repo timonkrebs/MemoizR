@@ -4,10 +4,10 @@ namespace MemoizR.StructuredConcurrency;
 
 public sealed class StructuredResultsJob<T> : StructuredJobBase<BlockingCollection<T>>
 {
-    private readonly IReadOnlyCollection<Func<CancellationToken, Task<T>>> fns;
+    private readonly IReadOnlyCollection<Func<CancellationTokenSource, Task<T>>> fns;
     private readonly CancellationTokenSource cancellationTokenSource;
 
-    public StructuredResultsJob(IReadOnlyCollection<Func<CancellationToken, Task<T>>> fns, CancellationTokenSource cancellationTokenSource)
+    public StructuredResultsJob(IReadOnlyCollection<Func<CancellationTokenSource, Task<T>>> fns, CancellationTokenSource cancellationTokenSource)
     : base(cancellationTokenSource.Token)
     {
         this.fns = fns;
@@ -22,7 +22,7 @@ public sealed class StructuredResultsJob<T> : StructuredJobBase<BlockingCollecti
             {
                 try
                 {
-                    result!.Add(await x(cancellationTokenSource.Token));
+                    result!.Add(await x(cancellationTokenSource));
                 }
                 catch (TaskCanceledException) { }
                 catch

@@ -29,6 +29,14 @@ public abstract class StructuredJobBase<T>
         }
         catch
         {
+            foreach (var t in tasks)
+            {
+                try
+                {
+                    await t;
+                }
+                finally { }
+            }
             cancellationTokenSource.Cancel();
             throw;
         }

@@ -2,11 +2,11 @@
 
 public sealed class StructuredRaceJob<T> : StructuredJobBase<T>
 {
-    private readonly IReadOnlyCollection<Func<CancellationToken, Task<T>>> fns;
+    private readonly IReadOnlyCollection<Func<CancellationTokenSource, Task<T>>> fns;
     private readonly CancellationTokenSource innerCancellationTokenSource;
     private readonly CancellationTokenSource groupCancellationTokenSource;
 
-    public StructuredRaceJob(IReadOnlyCollection<Func<CancellationToken, Task<T>>> fns, CancellationTokenSource cancellationTokenSource)
+    public StructuredRaceJob(IReadOnlyCollection<Func<CancellationTokenSource, Task<T>>> fns, CancellationTokenSource cancellationTokenSource)
     : base(cancellationTokenSource.Token)
     {
         this.fns = fns;
@@ -24,7 +24,7 @@ public sealed class StructuredRaceJob<T> : StructuredJobBase<T>
             {
                 try
                 {
-                    result = await x(innerCancellationTokenSource.Token);
+                    result = await x(innerCancellationTokenSource);
                     innerCancellationTokenSource.Cancel();
                 }
                 catch (TaskCanceledException) { }
