@@ -63,7 +63,8 @@ public sealed class Reaction : SignalHandlR, IMemoizR
             {
                 if (source is IMemoizR memoizR)
                 {
-                    await memoizR.UpdateIfNecessary(); // updateIfNecessary() can change state.
+                    
+                    await memoizR.UpdateIfNecessary().ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing); // updateIfNecessary() can change state.
                 }
 
                 if (State == CacheState.CacheDirty)

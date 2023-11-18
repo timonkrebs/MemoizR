@@ -28,7 +28,7 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR
         // This should lead to perf gains because memoization can be utilized more efficiently.
         using (await Context.ContextLock.UpgradeableLockAsync())
         {
-            // if someone else did read the graph while this thread was blocekd it could be that this is already Clean
+            // if someone else did read the graph while this thread was blocked it could be that this is already Clean
             if (State == CacheState.CacheClean && Context.CurrentReaction == null)
             {
                 Thread.MemoryBarrier();
@@ -62,7 +62,7 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR
             {
                 if (source is IMemoizR memoizR)
                 {
-                    await memoizR.UpdateIfNecessary(); // updateIfNecessary() can change state
+                    await memoizR.UpdateIfNecessary().ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing); // updateIfNecessary() can change state
                 }
 
                 if (State == CacheState.CacheDirty)
@@ -126,7 +126,7 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR
                 {
                     // Add ourselves to the end of the parent .observers array
                     var source = Sources[i];
-                    source.Observers = !source.Observers.Any() 
+                    source.Observers = !source.Observers.Any()
                         ? [this] 
                         : [..source.Observers, this];
                 }
