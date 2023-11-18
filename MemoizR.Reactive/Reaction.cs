@@ -2,6 +2,7 @@
 
 public sealed class Reaction : SignalHandlR, IMemoizR
 {
+    private CancellationTokenSource? cts;
     private CacheState State { get; set; } = CacheState.CacheClean;
     private Func<Task> fn;
     private SynchronizationContext? synchronizationContext;
@@ -63,7 +64,6 @@ public sealed class Reaction : SignalHandlR, IMemoizR
             {
                 if (source is IMemoizR memoizR)
                 {
-                    
                     await memoizR.UpdateIfNecessary().ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing); // updateIfNecessary() can change state.
                 }
 
@@ -197,7 +197,13 @@ public sealed class Reaction : SignalHandlR, IMemoizR
     internal Task Stale(CacheState state)
     {
         State = state;
-        _ = UpdateIfNecessary();
+        cts?.Cancel();
+        cts = new ();
+        Task.Run(async() =>
+        {
+            Task.Delay(10, cts.Token);
+            await UpdateIfNecessary().ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
+        }, cts.Token);
 
         return Task.CompletedTask;
     }
