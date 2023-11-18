@@ -8,7 +8,6 @@ public sealed class StructuredResultsJob<T> : StructuredJobBase<BlockingCollecti
     private readonly CancellationTokenSource cancellationTokenSource;
 
     public StructuredResultsJob(IReadOnlyCollection<Func<CancellationTokenSource, Task<T>>> fns, CancellationTokenSource cancellationTokenSource)
-    : base(cancellationTokenSource.Token)
     {
         this.fns = fns;
         this.result = new BlockingCollection<T>(fns.Count);

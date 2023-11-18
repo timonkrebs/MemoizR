@@ -7,7 +7,6 @@ public sealed class StructuredReduceJob<T> : StructuredJobBase<T>
     private readonly Func<T, T, T?> reduce;
 
     public StructuredReduceJob(IReadOnlyCollection<Func<CancellationTokenSource, Task<T>>> fns, Func<T, T, T?> reduce, CancellationTokenSource cancellationTokenSource)
-    : base(cancellationTokenSource.Token)
     {
         this.fns = fns;
         this.reduce = reduce;

@@ -7,7 +7,6 @@ public sealed class StructuredRaceJob<T> : StructuredJobBase<T>
     private readonly CancellationTokenSource groupCancellationTokenSource;
 
     public StructuredRaceJob(IReadOnlyCollection<Func<CancellationTokenSource, Task<T>>> fns, CancellationTokenSource cancellationTokenSource)
-    : base(cancellationTokenSource.Token)
     {
         this.fns = fns;
         this.result = default;

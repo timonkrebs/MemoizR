@@ -52,7 +52,7 @@ public class StructuredConcurrency
                 throw new SkipException("Test");
             });
 
-        Assert.Throws<Exception>(() => c1.Get().GetAwaiter().GetResult());
+        Assert.Throws<AggregateException>(() => c1.Get().GetAwaiter().GetResult());
     }
 
     [Fact(Timeout = 1000)]
@@ -133,7 +133,7 @@ public class StructuredConcurrency
         Assert.Equal(4, invocations);
     }
 
-    [Fact(Skip = "to long")]
+    [Fact]
     public async Task TestChildExecptionCancelationHandling()
     {
         var f = new MemoFactory("concurrent");
@@ -141,7 +141,7 @@ public class StructuredConcurrency
         var child1 = f.CreateConcurrentMapReduce(
             async c =>
             {
-                throw new Exception();
+                await Task.Delay(2000, c.Token);
                 return 3;
             });
 
@@ -152,12 +152,16 @@ public class StructuredConcurrency
                 await child1.Get(c);
                 return 4;
             },
-            async _ => {
-                await Task.Delay(1000);
+            async c => {
+                await Task.Delay(5000, c.Token);
+                return 2;
+            },
+            async c => {
+                throw new Exception();
                 return 2;
             });
 
-        Assert.Throws<Exception>(() => c1.Get().GetAwaiter().GetResult());// should wait for 1 second
+        await Assert.ThrowsAsync<AggregateException>(c1.Get);
     }
 
     [Fact(Skip = "to long")]

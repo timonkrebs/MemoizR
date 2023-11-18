@@ -3,13 +3,7 @@
 public abstract class StructuredJobBase<T>
 {
     protected List<Task> tasks = new List<Task>();
-    private CancellationTokenSource cancellationTokenSource;
     protected T? result;
-
-    public StructuredJobBase(CancellationToken? cancellationToken = null)
-    {
-        cancellationTokenSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken ?? new CancellationToken());
-    }
 
     protected abstract void AddConcurrentWork();
 
@@ -24,14 +18,17 @@ public abstract class StructuredJobBase<T>
                 AddConcurrentWork();
                 tasks = this.tasks;
             }
+
             await Task.WhenAll(tasks);
             return result!;
         }
         catch
         {
-            await Task.WhenAll(tasks).ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
-            
-            cancellationTokenSource.Cancel();
+            var t = Task.WhenAll(tasks);
+            await t.ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
+            if(t.Exception != null) {
+                throw t.Exception;
+            }
             throw;
         }
     }
