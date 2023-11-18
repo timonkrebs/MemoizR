@@ -28,8 +28,8 @@ public class Context
             else
             {
                 CurrentGets = !CurrentGets.Any()
-                    ? new[] { memoHandlR }
-                    : CurrentGets.Union(new[] { memoHandlR }).ToArray();
+                    ? [memoHandlR] 
+                    : [..CurrentGets,  memoHandlR];
             }
         }
     }

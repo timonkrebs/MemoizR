@@ -101,7 +101,7 @@ public sealed class Reaction : SignalHandlR, IMemoizR
         var prevIndex = Context.CurrentGetsIndex;
 
         Context.CurrentReaction = this;
-        Context.CurrentGets = Array.Empty<IMemoHandlR>();
+        Context.CurrentGets = [];
         Context.CurrentGetsIndex = 0;
 
         try
@@ -152,7 +152,7 @@ public sealed class Reaction : SignalHandlR, IMemoizR
                 // Update source up links.
                 if (Sources.Any() && Context.CurrentGetsIndex > 0)
                 {
-                    Sources = Sources.Take(Context.CurrentGetsIndex).Union(Context.CurrentGets).ToArray();
+                    Sources = [..Sources.Take(Context.CurrentGetsIndex), ..Context.CurrentGets];
                 }
                 else
                 {
@@ -164,13 +164,13 @@ public sealed class Reaction : SignalHandlR, IMemoizR
                     // Add ourselves to the end of the parent .observers array.
                     var source = Sources[i];
                     source.Observers = !source.Observers.Any() 
-                        ? new IMemoizR[] { this } 
-                        : source.Observers.Union((new[] { this })).ToArray();
+                        ? [this] 
+                        : [..source.Observers, this];
                 }
             }
             else if (Sources.Any() && Context.CurrentGetsIndex < Sources.Length)
             {
-                Sources = Sources.Take(Context.CurrentGetsIndex).ToArray();
+                Sources = [..Sources.Take(Context.CurrentGetsIndex)];
             }
         }
         finally

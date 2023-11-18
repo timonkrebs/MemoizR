@@ -98,7 +98,7 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR
         var prevIndex = Context.CurrentGetsIndex;
 
         Context.CurrentReaction = this;
-        Context.CurrentGets = Array.Empty<IMemoHandlR>();
+        Context.CurrentGets = [];
         Context.CurrentGetsIndex = 0;
 
         try
@@ -115,7 +115,7 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR
                 // update source up links
                 if (Sources.Any() && Context.CurrentGetsIndex > 0)
                 {
-                    Sources = Sources.Take(Context.CurrentGetsIndex).Union(Context.CurrentGets).ToArray();
+                    Sources = [..Sources.Take(Context.CurrentGetsIndex), ..Context.CurrentGets];
                 }
                 else
                 {
@@ -127,15 +127,15 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR
                     // Add ourselves to the end of the parent .observers array
                     var source = Sources[i];
                     source.Observers = !source.Observers.Any() 
-                        ? new IMemoizR[] { this } 
-                        : source.Observers.Union((new[] { this })).ToArray();
+                        ? [this] 
+                        : [..source.Observers, this];
                 }
             }
             else if (Sources.Any() && Context.CurrentGetsIndex < Sources.Length)
             {
                 // remove all old Sources' .observers links to us
                 RemoveParentObservers(Context.CurrentGetsIndex);
-                Sources = Sources.Take(Context.CurrentGetsIndex).ToArray();
+                Sources = [..Sources.Take(Context.CurrentGetsIndex)];
             }
         }
         finally
@@ -168,7 +168,7 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR
             var source = Sources[i]; // We don't actually delete Sources here because we're replacing the entire array soon
             var swap = Array.FindIndex(source.Observers, v => v.Equals(this));
             source.Observers[swap] = source.Observers[source.Observers!.Length - 1];
-            source.Observers = source.Observers.SkipLast(1).ToArray();
+            source.Observers = [..source.Observers.SkipLast(1)];
         }
     }
 

@@ -47,7 +47,7 @@ public sealed class ConcurrentRace<T> : SignalHandlR, IMemoizR
         var prevIndex = Context.CurrentGetsIndex;
 
         Context.CurrentReaction = this;
-        Context.CurrentGets = Array.Empty<IMemoHandlR>();
+        Context.CurrentGets = [];
         Context.CurrentGetsIndex = 0;
 
         try
@@ -64,8 +64,8 @@ public sealed class ConcurrentRace<T> : SignalHandlR, IMemoizR
                     // Add ourselves to the end of the parent .observers array
                     var source = Sources[i];
                     source.Observers = !source.Observers.Any()
-                        ? new IMemoizR[] { this }
-                        : source.Observers.Union((new[] { this })).ToArray();
+                        ? [this]
+                        : [..source.Observers, this];
                 }
             }
         }
