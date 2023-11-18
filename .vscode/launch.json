@@ -9,7 +9,7 @@
             "type": "coreclr",
             "request": "launch",
             "preLaunchTask": "build",
-            "program": "${workspaceFolder}/MemoizR.Test/bin/Debug/net7.0/MemoizR.Test.dll",
+            "program": "${workspaceFolder}/MemoizR.Test/bin/Debug/net8.0/MemoizR.Test.dll",
             "args": [],
             "cwd": "${workspaceFolder}/MemoizR.Test",
             "console": "internalConsole",
