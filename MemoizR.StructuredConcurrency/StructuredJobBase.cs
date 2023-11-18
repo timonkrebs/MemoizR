@@ -29,11 +29,8 @@ public abstract class StructuredJobBase<T>
         }
         catch
         {
-            foreach (var t in tasks)
-            {
-                
-                await t.ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
-            }
+            await Task.WhenAll(tasks).ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
+            
             cancellationTokenSource.Cancel();
             throw;
         }
