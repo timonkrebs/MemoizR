@@ -201,7 +201,7 @@ public sealed class Reaction : SignalHandlR, IMemoizR
         cts = new ();
         Task.Run(async() =>
         {
-            Task.Delay(10, cts.Token);
+            await Task.Delay(10, cts.Token);
             await UpdateIfNecessary().ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
         }, cts.Token);
 

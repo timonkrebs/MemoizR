@@ -1,5 +1,3 @@
-using System.Data;
-
 namespace MemoizR;
 
 public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR

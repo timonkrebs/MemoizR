@@ -156,9 +156,8 @@ public class StructuredConcurrency
                 await Task.Delay(5000, c.Token);
                 return 2;
             },
-            async c => {
+            c => {
                 throw new Exception();
-                return 2;
             });
 
         await Assert.ThrowsAsync<AggregateException>(c1.Get);

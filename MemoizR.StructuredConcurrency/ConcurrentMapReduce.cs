@@ -1,5 +1,3 @@
-using System.Data;
-
 namespace MemoizR.StructuredConcurrency;
 
 public sealed class ConcurrentMapReduce<T> : SignalHandlR, IMemoizR
@@ -20,6 +18,10 @@ public sealed class ConcurrentMapReduce<T> : SignalHandlR, IMemoizR
         this.Label = label;
     }
 
+    public void Cancel(){
+        cancellationTokenSource?.Cancel();
+    }
+
     public Task<T?> Get()
     {
         return Get(new CancellationTokenSource());
@@ -27,6 +29,7 @@ public sealed class ConcurrentMapReduce<T> : SignalHandlR, IMemoizR
 
     public async Task<T?> Get(CancellationTokenSource cancellationTokenSource)
     {
+        Cancel();
         this.cancellationTokenSource = cancellationTokenSource;
         if (State == CacheState.CacheClean && Context.CurrentReaction == null)
         {
@@ -206,5 +209,10 @@ public sealed class ConcurrentMapReduce<T> : SignalHandlR, IMemoizR
     Task IMemoizR.Stale(CacheState state)
     {
         return Stale(state);
+    }
+
+    ~ConcurrentMapReduce()
+    {
+        Cancel();
     }
 }

@@ -1,5 +1,3 @@
-using System.Data;
-
 namespace MemoizR.StructuredConcurrency;
 
 public sealed class ConcurrentRace<T> : SignalHandlR, IMemoizR
@@ -17,6 +15,11 @@ public sealed class ConcurrentRace<T> : SignalHandlR, IMemoizR
         this.Label = label;
     }
 
+    public void Cancel()
+    {
+        cancellationTokenSource?.Cancel();
+    }
+
     public Task<T?> Get()
     {
         return Get(new CancellationTokenSource());
@@ -24,6 +27,7 @@ public sealed class ConcurrentRace<T> : SignalHandlR, IMemoizR
 
     public async Task<T?> Get(CancellationTokenSource cancellationTokenSource)
     {
+        Cancel();
         this.cancellationTokenSource = cancellationTokenSource;
         // Only one thread should evaluate the graph at a time. otherwise the context could get messed up.
         // This should lead to perf gains because memoization can be utilized more efficiently.
@@ -98,5 +102,10 @@ public sealed class ConcurrentRace<T> : SignalHandlR, IMemoizR
     Task IMemoizR.Stale(CacheState state)
     {
         return Task.CompletedTask;
+    }
+
+    ~ConcurrentRace()
+    {
+        Cancel();
     }
 }
