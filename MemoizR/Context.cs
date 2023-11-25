@@ -9,7 +9,7 @@ public class Context
     /** current capture context for identifying sources (other memoizR elements)
     * - active while evaluating a memoizR function body  */
     internal volatile IMemoHandlR? CurrentReaction = null;
-    internal volatile IMemoHandlR[] CurrentGets = Array.Empty<IMemoHandlR>();
+    internal volatile IMemoHandlR[] CurrentGets = [];
     internal volatile int CurrentGetsIndex;
 
     internal void CheckDependenciesTheSame(IMemoHandlR memoHandlR)
