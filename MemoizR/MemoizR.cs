@@ -161,12 +161,9 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR
     private void RemoveParentObservers(int index)
     {
         if (!Sources.Any()) return;
-        for (var i = index; i < Sources.Length; i++)
+        foreach (var source in Sources)
         {
-            var source = Sources[i]; // We don't actually delete Sources here because we're replacing the entire array soon
-            var swap = Array.FindIndex(source.Observers, v => v.Equals(this));
-            source.Observers[swap] = source.Observers[source.Observers!.Length - 1];
-            source.Observers = [..source.Observers.SkipLast(1)];
+            source.Observers = [..source.Observers.Where(x => x != this)];
         }
     }
 
