@@ -150,6 +150,8 @@ public sealed class Reaction : SignalHandlR, IMemoizR
             // If the Sources have changed, update source & observer links.
             if (Context.CurrentGets.Length > 0)
             {
+                // remove all old Sources' .observers links to us
+                RemoveParentObservers(Context.CurrentGetsIndex);
                 // Update source up links.
                 if (Sources.Any() && Context.CurrentGetsIndex > 0)
                 {
@@ -171,6 +173,8 @@ public sealed class Reaction : SignalHandlR, IMemoizR
             }
             else if (Sources.Any() && Context.CurrentGetsIndex < Sources.Length)
             {
+                // remove all old Sources' .observers links to us
+                RemoveParentObservers(Context.CurrentGetsIndex);
                 Sources = [..Sources.Take(Context.CurrentGetsIndex)];
             }
         }
@@ -184,6 +188,15 @@ public sealed class Reaction : SignalHandlR, IMemoizR
         // We've rerun with the latest values from all of our Sources.
         // This means that we no longer need to update until a signal changes.
         State = CacheState.CacheClean;
+    }
+
+    public void RemoveParentObservers(int index)
+    {
+        if (!Sources.Any()) return;
+        foreach (var source in Sources)
+        {
+            source.Observers = [..source.Observers.Where(x => x != this)];
+        }
     }
 
     async Task IMemoizR.UpdateIfNecessary()
