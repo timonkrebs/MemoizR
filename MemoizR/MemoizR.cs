@@ -161,7 +161,7 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR
     private void RemoveParentObservers(int index)
     {
         if (!Sources.Any()) return;
-        foreach (var source in Sources)
+        foreach (var source in Sources.Skip(index))
         {
             source.Observers = [..source.Observers.Where(x => x != this)];
         }

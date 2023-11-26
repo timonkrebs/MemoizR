@@ -1,6 +1,6 @@
 ﻿namespace MemoizR.Reactive;
 
-public sealed class Reaction : SignalHandlR, IMemoizR
+public sealed class Reaction : SignalHandlR, IMemoizR, IDisposable
 {
     private CancellationTokenSource? cts;
     private CacheState State { get; set; } = CacheState.CacheClean;
@@ -29,6 +29,11 @@ public sealed class Reaction : SignalHandlR, IMemoizR
     {
         this.isPaused = false;
         return UpdateIfNecessary();
+    }
+
+    private void Dispose()
+    {
+        RemoveParentObservers(0);
     }
 
     private async Task Init()
@@ -190,10 +195,10 @@ public sealed class Reaction : SignalHandlR, IMemoizR
         State = CacheState.CacheClean;
     }
 
-    public void RemoveParentObservers(int index)
+    private void RemoveParentObservers(int index)
     {
         if (!Sources.Any()) return;
-        foreach (var source in Sources)
+        foreach (var source in Sources.Skip(index))
         {
             source.Observers = [..source.Observers.Where(x => x != this)];
         }
@@ -224,5 +229,10 @@ public sealed class Reaction : SignalHandlR, IMemoizR
     Task IMemoizR.Stale(CacheState state)
     {
         return Stale(state);
+    }
+
+    void IDisposable.Dispose()
+    {
+        Dispose();
     }
 }
