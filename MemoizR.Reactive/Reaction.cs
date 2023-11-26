@@ -31,7 +31,7 @@ public sealed class Reaction : SignalHandlR, IMemoizR, IDisposable
         return UpdateIfNecessary();
     }
 
-    private void Dispose()
+    public void Dispose()
     {
         RemoveParentObservers(0);
     }
@@ -229,10 +229,5 @@ public sealed class Reaction : SignalHandlR, IMemoizR, IDisposable
     Task IMemoizR.Stale(CacheState state)
     {
         return Stale(state);
-    }
-
-    void IDisposable.Dispose()
-    {
-        Dispose();
     }
 }
