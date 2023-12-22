@@ -14,7 +14,7 @@
 
 > "The world is still short on languages that deal super elegantly and inherently and intuitively with concurrency" **Mads Torgersen** Lead Designer of C# (https://www.youtube.com/watch?v=Nuw3afaXLUc&t=4402s)
 
-MemoizR is a Declarative Structured Concurrency implementation for .NET that simplifies and enhances errorhandling, maintainability and state synchronization across multiple threads. It provides a maintainable and efficient way to manage concurrency, making it suitable for both simple and complex multi-threaded scenarios.
+MemoizR is a Declarative Structured Concurrency implementation for .NET that simplifies and enhances error handling, maintainability and state synchronization across multiple threads. It provides a maintainable and efficient way to manage concurrency, making it suitable for both simple and complex multi-threaded scenarios.
 
 > the dynamic structured concurrency part is still being worked on.
 
