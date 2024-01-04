@@ -18,7 +18,8 @@ public sealed class ConcurrentMapReduce<T> : SignalHandlR, IMemoizR
         this.Label = label;
     }
 
-    public void Cancel(){
+    public void Cancel()
+    {
         cancellationTokenSource?.Cancel();
     }
 
@@ -148,6 +149,10 @@ public sealed class ConcurrentMapReduce<T> : SignalHandlR, IMemoizR
                 RemoveParentObservers(Context.CurrentGetsIndex);
                 Sources = [..Sources.Take(Context.CurrentGetsIndex)];
             }
+        }
+        catch (TaskCanceledException)
+        {
+            State = CacheState.CacheCheck;
         }
         finally
         {

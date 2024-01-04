@@ -73,6 +73,10 @@ public sealed class ConcurrentRace<T> : SignalHandlR, IMemoizR
                 }
             }
         }
+        catch (TaskCanceledException)
+        {
+            State = CacheState.CacheCheck;
+        }
         finally
         {
             Context.CurrentGets = prevGets;
