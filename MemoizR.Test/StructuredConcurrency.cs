@@ -114,23 +114,41 @@ public class StructuredConcurrency
             invocations++;
             x = await c1.Get();
         });
+
         await Task.Delay(100);
         Assert.Equal(1, invocations);
 
         await v1.Set(4);
         await Task.Delay(100);
         Assert.Equal(4, x.Single(x => x == 4));
+        Assert.Equal(4, x.ElementAt(0));
         Assert.Equal(2, invocations);
 
         await v2.Set(5);
         await Task.Delay(100);
         Assert.Equal(5, x.Single(x => x == 5));
+        Assert.Equal(5, x.ElementAt(1));
         Assert.Equal(3, invocations);
 
         await v3.Set(6);
         await Task.Delay(100);
         Assert.Equal(6, x.Single(x => x == 6));
+        Assert.Equal(6, x.ElementAt(2));
         Assert.Equal(4, invocations);
+
+        // If canceled nothing should change
+        await v2.Set(7);
+        c1.Cancel();
+        await Task.Delay(100);
+        Assert.Equal(5, x.Single(x => x == 5));
+        Assert.Equal(5, x.ElementAt(1));
+        Assert.Equal(5, invocations); // invocation must happen for every set call because it triggers evaluation 
+
+        // cancellation should not disable reactivity
+        await v2.Set(8);
+        await Task.Delay(100);
+        Assert.Equal(8, x.Single(x => x == 8));
+        Assert.Equal(8, x.ElementAt(1));
     }
 
     [Fact]
@@ -152,11 +170,13 @@ public class StructuredConcurrency
                 await child1.Get(c);
                 return 4;
             },
-            async c => {
+            async c =>
+            {
                 await Task.Delay(5000, c.Token);
                 return 2;
             },
-            c => {
+            c =>
+            {
                 throw new Exception();
             });
 
@@ -182,7 +202,8 @@ public class StructuredConcurrency
                 await child1.Get();
                 return 4;
             },
-            async c => {
+            async c =>
+            {
                 await Task.Delay(2000, c.Token);
                 return 2;
             });

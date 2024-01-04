@@ -2,7 +2,7 @@
 
 namespace MemoizR.StructuredConcurrency;
 
-public sealed class StructuredResultsJob<T> : StructuredJobBase<BlockingCollection<T>>
+public sealed class StructuredResultsJob<T> : StructuredJobBase<T[]>
 {
     private readonly IReadOnlyCollection<Func<CancellationTokenSource, Task<T>>> fns;
     private readonly CancellationTokenSource cancellationTokenSource;
@@ -10,18 +10,18 @@ public sealed class StructuredResultsJob<T> : StructuredJobBase<BlockingCollecti
     public StructuredResultsJob(IReadOnlyCollection<Func<CancellationTokenSource, Task<T>>> fns, CancellationTokenSource cancellationTokenSource)
     {
         this.fns = fns;
-        this.result = new BlockingCollection<T>(fns.Count);
+        this.result = new T[fns.Count];
         this.cancellationTokenSource = cancellationTokenSource;
     }
 
     protected override void AddConcurrentWork()
     {
         this.tasks.AddRange(fns
-        .Select(async x => await Task.Run(async () =>
+        .Select(async (x, i) => await Task.Run(async () =>
             {
                 try
                 {
-                    result!.Add(await x(cancellationTokenSource));
+                    result![i] = await x(cancellationTokenSource);
                 }
                 catch
                 {
