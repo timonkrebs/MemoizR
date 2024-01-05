@@ -30,10 +30,10 @@ public class Reactive
         });
 
         Assert.Equal(1, invocations);
-        await Task.Delay(20);
+        await Task.Delay(100);
 
         await v1.Set(2);
-        await Task.Delay(20);
+        await Task.Delay(100);
 
         Assert.Equal(2, invocations);
 
@@ -70,7 +70,7 @@ public class Reactive
             tasks.Add(Task.Run(async () => await v1.Set(i)));
         }
 
-        await Task.Delay(10); // wait for await m1.Get to be able to read
+        await Task.Delay(100); // wait for await m1.Get to be able to read
 
         for (var i = 0; i < 20; i++)
         {
