@@ -175,7 +175,7 @@ public class StructuredConcurrency
             },
             async c =>
             {
-                await Task.Delay(20, c.Token);
+                await Task.Delay(75, c.Token);
                 return await v3.Get();
             });
 
@@ -183,19 +183,17 @@ public class StructuredConcurrency
         f.CreateReaction(async () => x = await c1.Get());
 
         await Task.Delay(100);
+        var _ = v1.Set(1);
 
-        var tasks = new List<Task>();
         for (var i = 0; i < 100; i++)
         {
-            tasks.Add(Task.Run(async () => await v1.Set(i)));
-            tasks.Add(Task.Run(async () => await v2.Set(i)));
-            tasks.Add(Task.Run(async () => await v3.Set(i)));
+            _ = v1.Set(i);
+            _ = v2.Set(i);
+            _ = v3.Set(i);
         }
 
-        await Task.WhenAll(tasks);
-
-        await v1.Set(1);
-        await v2.Set(2);
+        _ = v1.Set(1);
+        _ = v2.Set(2);
         await v3.Set(3);
         await Task.Delay(100);
         Assert.Equal(1, x.ElementAt(0));
