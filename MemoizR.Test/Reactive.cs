@@ -64,25 +64,20 @@ public class Reactive
             result = await m1.Get();
         });
 
-        var tasks = new List<Task>();
+        var _ = v1.Set(1000);
         for (var i = 0; i < 100; i++)
         {
-            tasks.Add(Task.Run(async () => await v1.Set(i)));
+            _ = v1.Set(i);
         }
 
-        await Task.Delay(100); // wait for await m1.Get to be able to read
-
-        for (var i = 0; i < 20; i++)
+        for (var i = 0; i < 21; i++)
         {
-            tasks.Add(Task.Run(async() => await v1.Set(i)));
-            tasks.Add(Task.Run(async () => await v1.Set(i)));
+            _ = v1.Set(i);
+            _ = v1.Set(i);
         }
 
         var resultM1 = 0;
-        tasks.Add(Task.Run(async() => resultM1 = await m1.Get()));
-
-        // Wait for all tasks to complete
-        await Task.WhenAll(tasks);
+        _ = Task.Run(async() => resultM1 = await m1.Get());
 
         await Task.Delay(100);
 
