@@ -125,4 +125,6 @@ var r1 = f.CreateReaction(async() => await m1.Get() + await m2.Get());
 
 ## Test it
 
-https://dotnetfiddle.net/Widget/Nd0JQo
+https://dotnetfiddle.net/Widget/Vrbwam
+
+Example From: [Khalid Abuhakmeh](https://khalidabuhakmeh.com/memoizr-declarative-structured-concurrency-for-csharp#conclusion)

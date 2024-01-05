@@ -108,3 +108,9 @@ var x = await c1.Get();
 ## Get Started with MemoizR
 
 Start using MemoizR to simplify and optimize concurrency management in your .NET applications. Enjoy a cleaner, and more efficient approach to handling concurrency challenges.
+
+## Test it
+
+https://dotnetfiddle.net/Widget/Vrbwam
+
+Example From: [Khalid Abuhakmeh](https://khalidabuhakmeh.com/memoizr-declarative-structured-concurrency-for-csharp#conclusion)
