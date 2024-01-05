@@ -52,26 +52,19 @@ There are no explicit subscriptions to manage. Instead, MemoizR's dependencies a
 Both MemoizR and the Dataflow library are designed to handle concurrent operations and data flow in a structured manner. 
 They provide abstractions for defining tasks, dependencies, and synchronization, making it easier to manage complex concurrency scenarios.
 
-### Implicit Join
-
-One key advantage of MemoizR is its implicit Join mechanism. In Dataflow, you often need to explicitly define Join blocks to synchronize and combine data from multiple sources. In MemoizR, this synchronization happens automatically when you define dependencies between signals, memos, and reactions. For example:
-
-```csharp
-// Setup
-var f = new MemoFactory();
-var v1 = f.CreateSignal(1);
-var m1 = f.CreateMemoizR(async() => await v1.Get());
-var m2 = f.CreateMemoizR(async() => await v1.Get() * 2);
-var m3 = f.CreateMemoizR(async() => await m1.Get() + await m2.Get());
-```
-In this code, r1 automatically depends on the results of m1 and m2, and their values are synchronized without the need for explicit Join blocks.
-
 ### Implicit LinkTo
 MemoizR also provides implicit LinkTo functionality. While in Dataflow, you typically use the LinkTo method to connect dataflow blocks, MemoizR handles the linking of dependencies automatically based on your code's structure. This simplifies the setup and maintenance of data flow relationships.
 
 ## Usage
 
 ```cs
+// Setup
+var f = new MemoFactory();
+var v1 = f.CreateSignal(1);
+var m1 = f.CreateMemoizR(async() => await v1.Get());
+var m2 = f.CreateMemoizR(async() => await v1.Get() * 2);
+var m3 = f.CreateMemoizR(async() => await m1.Get() + await m2.Get());
+
 // Get Value manually
 await m3.Get(); // Calculates m1 + 2 * m1 => (1 + 2 * 1) = 3
 

@@ -260,7 +260,6 @@ public class StructuredConcurrency
                 return 3;
             });
 
-        // all tasks get canceled if one fails
         var c1 = f.CreateConcurrentMapReduce(
             async c =>
             {
