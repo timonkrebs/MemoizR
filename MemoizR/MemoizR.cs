@@ -8,7 +8,7 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR
     CacheState IMemoizR.State { get => State; set => State = value; }
 
     internal MemoizR(Func<Task<T>> fn, Context context, string label = "Label", Func<T?, T?, bool>? equals = null) : base(context, equals)
-    {    
+    {
         this.fn = fn;
         this.State = CacheState.CacheDirty;
         this.Label = label;
@@ -32,7 +32,7 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR
                 Thread.MemoryBarrier();
                 return Value;
             }
-            
+
             if (Context.CurrentReaction != null)
             {
                 Context.CheckDependenciesTheSame(this);
@@ -113,7 +113,7 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR
                 // update source up links
                 if (Sources.Any() && Context.CurrentGetsIndex > 0)
                 {
-                    Sources = [..Sources.Take(Context.CurrentGetsIndex), ..Context.CurrentGets];
+                    Sources = [.. Sources.Take(Context.CurrentGetsIndex), .. Context.CurrentGets];
                 }
                 else
                 {
@@ -125,15 +125,15 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR
                     // Add ourselves to the end of the parent .observers array
                     var source = Sources[i];
                     source.Observers = !source.Observers.Any()
-                        ? [this] 
-                        : [..source.Observers, this];
+                        ? [new WeakReference<IMemoizR>(this)]
+                        : [.. source.Observers, new WeakReference<IMemoizR>(this)];
                 }
             }
             else if (Sources.Any() && Context.CurrentGetsIndex < Sources.Length)
             {
                 // remove all old Sources' .observers links to us
                 RemoveParentObservers(Context.CurrentGetsIndex);
-                Sources = [..Sources.Take(Context.CurrentGetsIndex)];
+                Sources = [.. Sources.Take(Context.CurrentGetsIndex)];
             }
         }
         finally
@@ -149,7 +149,10 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR
             // We've changed value, so mark our children as dirty so they'll reevaluate
             foreach (var observer in Observers)
             {
-                observer.State = CacheState.CacheDirty;
+                if (observer.TryGetTarget(out var o))
+                {
+                    o.State = CacheState.CacheDirty;
+                }
             }
         }
 
@@ -163,7 +166,7 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR
         if (!Sources.Any()) return;
         foreach (var source in Sources.Skip(index))
         {
-            source.Observers = [..source.Observers.Where(x => x != this)];
+            source.Observers = [.. source.Observers.Where(x => x.TryGetTarget(out var o) ? o != this : false)];
         }
     }
 
@@ -185,7 +188,10 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR
 
         foreach (var observer in Observers)
         {
-            await observer.Stale(CacheState.CacheCheck);
+            if (observer.TryGetTarget(out var o))
+            {
+                await o.Stale(CacheState.CacheCheck);
+            }
         }
     }
 

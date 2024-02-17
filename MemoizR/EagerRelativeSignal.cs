@@ -24,8 +24,10 @@ public sealed class EagerRelativeSignal<T> : MemoHandlR<T>
 
             for (int i = 0; i < Observers.Length; i++)
             {
-                var observer = Observers[i];
-                await observer.Stale(CacheState.CacheDirty);
+                if (Observers[i].TryGetTarget(out var o))
+                {
+                    await o.Stale(CacheState.CacheDirty);
+                }
             }
         }
     }

@@ -3,12 +3,12 @@ namespace MemoizR;
 public abstract class SignalHandlR : IMemoHandlR
 {
     internal IMemoHandlR[] Sources { get; set; } = []; // sources in reference order, not deduplicated (up links)
-    internal IMemoizR[] Observers { get; set; } = []; // nodes that have us as sources (down links)
+    internal WeakReference<IMemoizR>[] Observers { get; set; } = []; // nodes that have us as sources (down links)
 
     internal Context Context;
 
     IMemoHandlR[] IMemoHandlR.Sources { get => Sources; set => Sources = value; }
-    IMemoizR[] IMemoHandlR.Observers { get => Observers; set => Observers = value; }
+    WeakReference<IMemoizR>[] IMemoHandlR.Observers { get => Observers; set => Observers = value; }
 
     protected string? Label;
 

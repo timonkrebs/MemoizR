@@ -123,7 +123,7 @@ public sealed class ConcurrentMap<T> : SignalHandlR, IMemoizR
                 // update source up links
                 if (Sources.Any() && Context.CurrentGetsIndex > 0)
                 {
-                    Sources = [..Sources.Take(Context.CurrentGetsIndex), ..Context.CurrentGets];
+                    Sources = [.. Sources.Take(Context.CurrentGetsIndex), .. Context.CurrentGets];
                 }
                 else
                 {
@@ -135,15 +135,15 @@ public sealed class ConcurrentMap<T> : SignalHandlR, IMemoizR
                     // Add ourselves to the end of the parent .observers array
                     var source = Sources[i];
                     source.Observers = !source.Observers.Any()
-                        ? [this]
-                        : [..source.Observers, this];
+                        ? [new WeakReference<IMemoizR>(this)]
+                        : [.. source.Observers, new WeakReference<IMemoizR>(this)];
                 }
             }
             else if (Sources.Any() && Context.CurrentGetsIndex < Sources.Length)
             {
                 // remove all old Sources' .observers links to us
                 RemoveParentObservers(Context.CurrentGetsIndex);
-                Sources = [..Sources.Take(Context.CurrentGetsIndex)];
+                Sources = [.. Sources.Take(Context.CurrentGetsIndex)];
             }
         }
         catch (TaskCanceledException)
@@ -163,7 +163,10 @@ public sealed class ConcurrentMap<T> : SignalHandlR, IMemoizR
             // We've changed value, so mark our children as dirty so they'll reevaluate
             foreach (var observer in Observers)
             {
-                observer.State = CacheState.CacheDirty;
+                if (observer.TryGetTarget(out var o))
+                {
+                    o.State = CacheState.CacheDirty;
+                }
             }
         }
 
@@ -177,7 +180,7 @@ public sealed class ConcurrentMap<T> : SignalHandlR, IMemoizR
         if (!Sources.Any()) return;
         foreach (var source in Sources.Skip(index))
         {
-            source.Observers = [..source.Observers.Where(x => x != this)];
+            source.Observers = [.. source.Observers.Where(x => x.TryGetTarget(out var o) ? o != this : false)];
         }
     }
 
@@ -200,7 +203,10 @@ public sealed class ConcurrentMap<T> : SignalHandlR, IMemoizR
 
         foreach (var observer in Observers)
         {
-            await observer.Stale(CacheState.CacheCheck);
+            if (observer.TryGetTarget(out var o))
+            {
+                await o.Stale(CacheState.CacheCheck);
+            }
         }
     }
 

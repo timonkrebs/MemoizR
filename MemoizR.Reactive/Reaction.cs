@@ -17,7 +17,7 @@ public sealed class Reaction : SignalHandlR, IMemoizR, IDisposable
         this.State = CacheState.CacheDirty;
         this.Label = label;
 
-        Task.Run(async() => await Init()).GetAwaiter().GetResult();
+        Task.Run(async () => await Init()).GetAwaiter().GetResult();
     }
 
     public void Pause()
@@ -160,7 +160,7 @@ public sealed class Reaction : SignalHandlR, IMemoizR, IDisposable
                 // Update source up links.
                 if (Sources.Any() && Context.CurrentGetsIndex > 0)
                 {
-                    Sources = [..Sources.Take(Context.CurrentGetsIndex), ..Context.CurrentGets];
+                    Sources = [.. Sources.Take(Context.CurrentGetsIndex), .. Context.CurrentGets];
                 }
                 else
                 {
@@ -171,16 +171,16 @@ public sealed class Reaction : SignalHandlR, IMemoizR, IDisposable
                 {
                     // Add ourselves to the end of the parent .observers array.
                     var source = Sources[i];
-                    source.Observers = !source.Observers.Any() 
-                        ? [this] 
-                        : [..source.Observers, this];
+                    source.Observers = !source.Observers.Any()
+                        ? [new WeakReference<IMemoizR>(this)]
+                        : [.. source.Observers, new WeakReference<IMemoizR>(this)];
                 }
             }
             else if (Sources.Any() && Context.CurrentGetsIndex < Sources.Length)
             {
                 // remove all old Sources' .observers links to us
                 RemoveParentObservers(Context.CurrentGetsIndex);
-                Sources = [..Sources.Take(Context.CurrentGetsIndex)];
+                Sources = [.. Sources.Take(Context.CurrentGetsIndex)];
             }
         }
         finally
@@ -200,7 +200,7 @@ public sealed class Reaction : SignalHandlR, IMemoizR, IDisposable
         if (!Sources.Any()) return;
         foreach (var source in Sources.Skip(index))
         {
-            source.Observers = [..source.Observers.Where(x => x != this)];
+            source.Observers = [.. source.Observers.Where(x => x.TryGetTarget(out var o) ? o != this : false)];
         }
     }
 
@@ -214,10 +214,11 @@ public sealed class Reaction : SignalHandlR, IMemoizR, IDisposable
 
     internal Task Stale(CacheState state)
     {
+        // Add Scheduling
         State = state;
         cts?.Cancel();
-        cts = new ();
-        Task.Run(async() =>
+        cts = new();
+        Task.Run(async () =>
         {
             await Task.Delay(10, cts.Token);
             await UpdateIfNecessary().ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);

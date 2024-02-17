@@ -68,8 +68,8 @@ public sealed class ConcurrentRace<T> : SignalHandlR, IMemoizR
                     // Add ourselves to the end of the parent .observers array
                     var source = Sources[i];
                     source.Observers = !source.Observers.Any()
-                        ? [this]
-                        : [..source.Observers, this];
+                        ? [new WeakReference<IMemoizR>(this)]
+                        : [.. source.Observers, new WeakReference<IMemoizR>(this)];
                 }
             }
         }
@@ -90,7 +90,10 @@ public sealed class ConcurrentRace<T> : SignalHandlR, IMemoizR
             // We've changed value, so mark our children as dirty so they'll reevaluate
             foreach (var observer in Observers)
             {
-                observer.State = CacheState.CacheDirty;
+                if (observer.TryGetTarget(out var o))
+                {
+                    o.State = CacheState.CacheDirty;
+                }
             }
         }
     }
