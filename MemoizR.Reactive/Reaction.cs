@@ -212,7 +212,7 @@ public sealed class Reaction : SignalHandlR, IMemoizR, IDisposable
         }
     }
 
-    internal Task Stale(CacheState state)
+    internal ValueTask Stale(CacheState state)
     {
         // Add Scheduling
         State = state;
@@ -224,10 +224,10 @@ public sealed class Reaction : SignalHandlR, IMemoizR, IDisposable
             await UpdateIfNecessary().ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
         }, cts.Token);
 
-        return Task.CompletedTask;
+        return ValueTask.CompletedTask;
     }
 
-    Task IMemoizR.Stale(CacheState state)
+    ValueTask IMemoizR.Stale(CacheState state)
     {
         return Stale(state);
     }

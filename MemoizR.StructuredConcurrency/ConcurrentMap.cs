@@ -192,7 +192,7 @@ public sealed class ConcurrentMap<T> : SignalHandlR, IMemoizR
         }
     }
 
-    internal async Task Stale(CacheState state)
+    internal async ValueTask Stale(CacheState state)
     {
         if (state <= State)
         {
@@ -210,7 +210,7 @@ public sealed class ConcurrentMap<T> : SignalHandlR, IMemoizR
         }
     }
 
-    Task IMemoizR.Stale(CacheState state)
+    ValueTask IMemoizR.Stale(CacheState state)
     {
         return Stale(state);
     }

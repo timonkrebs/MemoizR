@@ -106,9 +106,9 @@ public sealed class ConcurrentRace<T> : SignalHandlR, IMemoizR
         }
     }
 
-    Task IMemoizR.Stale(CacheState state)
+    ValueTask IMemoizR.Stale(CacheState state)
     {
-        return Task.CompletedTask;
+        return ValueTask.CompletedTask;
     }
 
     ~ConcurrentRace()

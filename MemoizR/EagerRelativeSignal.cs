@@ -32,7 +32,7 @@ public sealed class EagerRelativeSignal<T> : MemoHandlR<T>
         }
     }
 
-    public async Task<T?> Get()
+    public async ValueTask<T?> Get()
     {
         if (Context.CurrentReaction == null)
         {

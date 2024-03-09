@@ -177,7 +177,7 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR
             await UpdateIfNecessary();
         }
     }
-    internal async Task Stale(CacheState state)
+    internal async ValueTask Stale(CacheState state)
     {
         if (state <= State)
         {
@@ -195,7 +195,7 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR
         }
     }
 
-    Task IMemoizR.Stale(CacheState state)
+    ValueTask IMemoizR.Stale(CacheState state)
     {
         return Stale(state);
     }
