@@ -216,7 +216,7 @@ public class StructuredConcurrency
         Assert.Equal(6, x.ElementAt(2));
     }
 
-    [Fact]
+    [Fact(Timeout = 1000)]
     public async Task TestChildExecptionCancelationHandling()
     {
         var f = new MemoFactory("concurrent");
