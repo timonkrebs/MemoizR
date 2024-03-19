@@ -1,6 +1,6 @@
 namespace MemoizR;
 
-public sealed class Signal<T> : MemoHandlR<T>
+public sealed class Signal<T> : MemoHandlR<T>, IStateGetR<T?>
 {
     internal Signal(T value, Context context, string label = "Label", Func<T?, T?, bool>? equals = null) : base(context, equals)
     {
@@ -43,6 +43,11 @@ public sealed class Signal<T> : MemoHandlR<T>
                 }
             }
         }
+    }
+
+    public async Task<T?> Get(CancellationTokenSource cancellationTokenSource){
+        await Task.Delay(0, cancellationTokenSource.Token);
+        return await Get();
     }
 
     public async Task<T?> Get()

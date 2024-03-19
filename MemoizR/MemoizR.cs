@@ -1,6 +1,6 @@
 namespace MemoizR;
 
-public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR
+public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR, IStateGetR<T>
 {
     private CacheState State { get; set; } = CacheState.CacheClean;
     private Func<Task<T>> fn;
@@ -14,7 +14,13 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR
         this.Label = label;
     }
 
-    public async Task<T?> Get()
+    public async Task<T> Get(CancellationTokenSource cancellationTokenSource)
+    {
+        await Task.Delay(0, cancellationTokenSource.Token);
+        return await Get();
+    }
+
+    public async Task<T> Get()
     {
         if (State == CacheState.CacheClean && Context.CurrentReaction == null)
         {

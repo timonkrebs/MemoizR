@@ -6,7 +6,7 @@ public sealed class ConcurrentMapReduce<T> : SignalHandlR, IMemoizR
     private IReadOnlyCollection<Func<CancellationTokenSource, Task<T>>> fns;
     private readonly Func<T, T, T?> reduce;
     private CancellationTokenSource? cancellationTokenSource;
-    private T? value = default;
+    private T value = default!;
 
     CacheState IMemoizR.State { get => State; set => State = value; }
 
@@ -23,12 +23,12 @@ public sealed class ConcurrentMapReduce<T> : SignalHandlR, IMemoizR
         cancellationTokenSource?.Cancel();
     }
 
-    public Task<T?> Get()
+    public Task<T> Get()
     {
         return Get(new CancellationTokenSource());
     }
 
-    public async Task<T?> Get(CancellationTokenSource cancellationTokenSource)
+    public async Task<T> Get(CancellationTokenSource cancellationTokenSource)
     {
         Cancel();
         this.cancellationTokenSource = cancellationTokenSource;

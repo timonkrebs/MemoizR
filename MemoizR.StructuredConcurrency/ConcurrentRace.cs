@@ -1,11 +1,11 @@
 namespace MemoizR.StructuredConcurrency;
 
-public sealed class ConcurrentRace<T> : SignalHandlR, IMemoizR
+public sealed class ConcurrentRace<T> : SignalHandlR, IMemoizR, IStateGetR<T>
 {
     private CacheState State { get; set; } = CacheState.CacheDirty;
     private IReadOnlyCollection<Func<CancellationTokenSource, Task<T>>> fns;
-    private CancellationTokenSource? cancellationTokenSource;
-    private T? value = default;
+    private CancellationTokenSource? cancellationTokenSource = new();
+    private T value = default!;
 
     CacheState IMemoizR.State { get => State; set => State = value; }
 
@@ -18,14 +18,16 @@ public sealed class ConcurrentRace<T> : SignalHandlR, IMemoizR
     public void Cancel()
     {
         cancellationTokenSource?.Cancel();
+        cancellationTokenSource?.Dispose();
+        cancellationTokenSource = new();
     }
 
-    public Task<T?> Get()
+    public Task<T> Get()
     {
         return Get(new CancellationTokenSource());
     }
 
-    public async Task<T?> Get(CancellationTokenSource cancellationTokenSource)
+    public async Task<T> Get(CancellationTokenSource cancellationTokenSource)
     {
         Cancel();
         this.cancellationTokenSource = cancellationTokenSource;
@@ -113,6 +115,7 @@ public sealed class ConcurrentRace<T> : SignalHandlR, IMemoizR
 
     ~ConcurrentRace()
     {
-        Cancel();
+        cancellationTokenSource?.Cancel();
+        cancellationTokenSource?.Dispose();
     }
 }

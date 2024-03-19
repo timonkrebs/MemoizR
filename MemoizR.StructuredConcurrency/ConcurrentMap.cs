@@ -5,7 +5,7 @@ public sealed class ConcurrentMap<T> : SignalHandlR, IMemoizR
     private CacheState State { get; set; } = CacheState.CacheClean;
     private IReadOnlyCollection<Func<CancellationTokenSource, Task<T>>> fns;
     private CancellationTokenSource? cancellationTokenSource;
-    private IEnumerable<T?> value = new List<T>();
+    private IEnumerable<T> value = new List<T>();
 
     CacheState IMemoizR.State { get => State; set => State = value; }
 
@@ -21,12 +21,12 @@ public sealed class ConcurrentMap<T> : SignalHandlR, IMemoizR
         cancellationTokenSource?.Cancel();
     }
 
-    public Task<IEnumerable<T?>> Get()
+    public Task<IEnumerable<T>> Get()
     {
         return Get(new CancellationTokenSource());
     }
 
-    public async Task<IEnumerable<T?>> Get(CancellationTokenSource cancellationTokenSource)
+    public async Task<IEnumerable<T>> Get(CancellationTokenSource cancellationTokenSource)
     {
         Cancel();
         this.cancellationTokenSource = cancellationTokenSource;

@@ -1,6 +1,6 @@
 namespace MemoizR;
 
-public sealed class EagerRelativeSignal<T> : MemoHandlR<T>
+public sealed class EagerRelativeSignal<T> : MemoHandlR<T>, IStateGetR<T>
 {
     internal EagerRelativeSignal(T value, Context context, string label = "Label") : base(context, null)
     {
@@ -8,7 +8,7 @@ public sealed class EagerRelativeSignal<T> : MemoHandlR<T>
         this.Label = label;
     }
 
-    public async Task Set(Func<T?, T> fn)
+    public async Task Set(Func<T, T> fn)
     {
         // There can be multiple threads updating the CacheState at the same time but no reads should be possible while in the process.
         // Must be Upgradeable because it could change to "Writeble-Lock" if something synchronously reactive is listening.
@@ -32,7 +32,13 @@ public sealed class EagerRelativeSignal<T> : MemoHandlR<T>
         }
     }
 
-    public async Task<T?> Get()
+    public async Task<T> Get(CancellationTokenSource cancellationTokenSource)
+    {
+        await Task.Delay(0, cancellationTokenSource.Token);
+        return await Get();
+    }
+
+    public async Task<T> Get()
     {
         if (Context.CurrentReaction == null)
         {

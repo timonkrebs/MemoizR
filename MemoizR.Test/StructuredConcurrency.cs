@@ -109,7 +109,7 @@ public class StructuredConcurrency
 
         var invocations = 0;
         var x = await c1.Get();
-        f.CreateReaction(async () =>
+        f.CreateAdvancedReaction(async _ =>
         {
             invocations++;
             x = await c1.Get();
@@ -180,7 +180,7 @@ public class StructuredConcurrency
             });
 
         var x = await c1.Get();
-        f.CreateReaction(async () => x = await c1.Get());
+        f.CreateAdvancedReaction(async _ => x = await c1.Get());
 
         await Task.Delay(100);
         var _ = v1.Set(1);
