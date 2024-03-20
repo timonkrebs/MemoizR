@@ -9,21 +9,21 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
 
     CacheState IMemoizR.State { get => State; set => State = value; }
 
-    internal ReactionBase(Context context, SynchronizationContext? synchronizationContext = null, string label = "Label") : base(context)
+    internal ReactionBase(Context context, SynchronizationContext? synchronizationContext = null) 
+    : base(context)
     {
         this.synchronizationContext = synchronizationContext;
         this.State = CacheState.CacheDirty;
-        this.Label = label;
     }
 
     public void Pause()
     {
-        this.isPaused = true;
+        isPaused = true;
     }
 
     public Task Resume()
     {
-        this.isPaused = false;
+        isPaused = false;
         return UpdateIfNecessary();
     }
 

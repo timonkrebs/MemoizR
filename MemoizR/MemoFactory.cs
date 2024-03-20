@@ -68,7 +68,10 @@ public sealed class MemoFactory
 
     public MemoizR<T> CreateMemoizR<T>(string label, Func<Task<T>> fn, Func<T?, T?, bool>? equals = null)
     {
-        return new MemoizR<T>(fn, Context, label, equals);
+        return new MemoizR<T>(fn, Context, equals)
+        {
+            Label = label
+        };
     }
 
     public Signal<T> CreateSignal<T>(T value)
@@ -78,7 +81,10 @@ public sealed class MemoFactory
 
     public Signal<T> CreateSignal<T>(string label, T value)
     {
-        return new Signal<T>(value, Context, label);
+        return new Signal<T>(value, Context)
+        {
+            Label = label
+        };
     }
 
     public EagerRelativeSignal<T> CreateEagerRelativeSignal<T>(T value)
@@ -88,6 +94,9 @@ public sealed class MemoFactory
 
     public EagerRelativeSignal<T> CreateEagerRelativeSignal<T>(string label, T value)
     {
-        return new EagerRelativeSignal<T>(value, Context, label);
+        return new EagerRelativeSignal<T>(value, Context)
+        {
+            Label = label
+        };
     }
 }

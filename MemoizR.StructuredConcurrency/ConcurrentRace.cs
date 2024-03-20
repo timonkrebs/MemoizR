@@ -9,17 +9,14 @@ public sealed class ConcurrentRace<T> : SignalHandlR, IMemoizR, IStateGetR<T>
 
     CacheState IMemoizR.State { get => State; set => State = value; }
 
-    internal ConcurrentRace(IReadOnlyCollection<Func<CancellationTokenSource, Task<T>>> fns, Context context, string label = "Label") : base(context)
+    internal ConcurrentRace(IReadOnlyCollection<Func<CancellationTokenSource, Task<T>>> fns, Context context) : base(context)
     {
         this.fns = fns;
-        this.Label = label;
     }
 
     public void Cancel()
     {
         cancellationTokenSource?.Cancel();
-        cancellationTokenSource?.Dispose();
-        cancellationTokenSource = new();
     }
 
     public Task<T> Get()
@@ -115,7 +112,6 @@ public sealed class ConcurrentRace<T> : SignalHandlR, IMemoizR, IStateGetR<T>
 
     ~ConcurrentRace()
     {
-        cancellationTokenSource?.Cancel();
-        cancellationTokenSource?.Dispose();
+        Cancel();
     }
 }

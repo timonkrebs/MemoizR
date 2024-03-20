@@ -7,11 +7,10 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR, IStateGetR<T>
 
     CacheState IMemoizR.State { get => State; set => State = value; }
 
-    internal MemoizR(Func<Task<T>> fn, Context context, string label = "Label", Func<T?, T?, bool>? equals = null) : base(context, equals)
+    internal MemoizR(Func<Task<T>> fn, Context context, Func<T?, T?, bool>? equals = null) : base(context, equals)
     {
         this.fn = fn;
         this.State = CacheState.CacheDirty;
-        this.Label = label;
     }
 
     public async Task<T> Get(CancellationTokenSource cancellationTokenSource)

@@ -16,12 +16,18 @@ public static class StructuredConcurrencyFactory
 
     public static ConcurrentMapReduce<T> CreateConcurrentMapReduce<T>(this MemoFactory memoFactory, string label, params Func<CancellationTokenSource, Task<T>>[] fns) where T : INumber<T>
     {
-        return new ConcurrentMapReduce<T>(fns, (v, a) => v + a, memoFactory.Context, label);
+        return new ConcurrentMapReduce<T>(fns, (v, a) => v + a, memoFactory.Context)
+        {
+            Label = label
+        };
     }
 
     public static ConcurrentMapReduce<T> CreateConcurrentMapReduce<T>(this MemoFactory memoFactory, string label, Func<T, T?, T> reduce, params Func<CancellationTokenSource, Task<T>>[] fns)
     {
-        return new ConcurrentMapReduce<T>(fns, reduce, memoFactory.Context, label);
+        return new ConcurrentMapReduce<T>(fns, reduce, memoFactory.Context)
+        {
+            Label = label
+        };
     }
 
     public static ConcurrentRace<T> CreateConcurrentRace<T>(this MemoFactory memoFactory, params Func<CancellationTokenSource, Task<T>>[] fns)
@@ -31,7 +37,10 @@ public static class StructuredConcurrencyFactory
 
     public static ConcurrentRace<T> CreateConcurrentRace<T>(this MemoFactory memoFactory, string label, params Func<CancellationTokenSource, Task<T>>[] fns) where T : INumber<T>
     {
-        return new ConcurrentRace<T>(fns, memoFactory.Context, label);
+        return new ConcurrentRace<T>(fns, memoFactory.Context)
+        {
+            Label = label
+        };
     }
 
     public static ConcurrentMap<T> CreateConcurrentMap<T>(this MemoFactory memoFactory, params Func<CancellationTokenSource, Task<T>>[] fns)
@@ -42,6 +51,9 @@ public static class StructuredConcurrencyFactory
 
     public static ConcurrentMap<T> CreateConcurrentMap<T>(this MemoFactory memoFactory, string label, params Func<CancellationTokenSource, Task<T>>[] fns) where T : INumber<T>
     {
-        return new ConcurrentMap<T>(fns, memoFactory.Context, label);
+        return new ConcurrentMap<T>(fns, memoFactory.Context)
+        {
+            Label = label
+        };
     }
 }

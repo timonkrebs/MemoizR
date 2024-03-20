@@ -8,9 +8,8 @@ public sealed class Reaction<T> : ReactionBase
     internal Reaction(IStateGetR<T> memo, 
     Action<T> action, 
     Context context, 
-    SynchronizationContext? synchronizationContext = null, 
-    string label = "Label")
-    : base(context, synchronizationContext, label)
+    SynchronizationContext? synchronizationContext = null)
+    : base(context, synchronizationContext)
     {
         this.memo = memo;
         this.action = action;
@@ -36,9 +35,8 @@ public sealed class Reaction<T1, T2> : ReactionBase
     IStateGetR<T2> memo2, 
     Action<T1, T2> action, 
     Context context, 
-    SynchronizationContext? synchronizationContext = null, 
-    string label = "Label")
-    : base(context, synchronizationContext, label)
+    SynchronizationContext? synchronizationContext = null)
+    : base(context, synchronizationContext)
     {
         this.memo1 = memo1;
         this.memo2 = memo2;
@@ -70,9 +68,8 @@ public sealed class Reaction<T1, T2, T3> : ReactionBase
                       IStateGetR<T3> memo3,
                       Action<T1, T2, T3> action,
                       Context context,
-                      SynchronizationContext? synchronizationContext = null,
-                      string label = "Label")
-        : base(context, synchronizationContext, label)
+                      SynchronizationContext? synchronizationContext = null)
+        : base(context, synchronizationContext)
     {
         this.memo1 = memo1;
         this.memo2 = memo2;
@@ -107,9 +104,8 @@ public sealed class Reaction<T1, T2, T3, T4> : ReactionBase
                       IStateGetR<T4> memo4,
                       Action<T1, T2, T3, T4> action,
                       Context context,
-                      SynchronizationContext? synchronizationContext = null,
-                      string label = "Label")
-        : base(context, synchronizationContext, label)
+                      SynchronizationContext? synchronizationContext = null)
+        : base(context, synchronizationContext)
     {
         this.memo1 = memo1;
         this.memo2 = memo2;
@@ -131,8 +127,6 @@ public sealed class Reaction<T1, T2, T3, T4> : ReactionBase
     }
 }
 
-// Classes for 5 to 10 memos follow the same pattern, adding memo fields and corresponding actions
-
 // Class for 5 memos
 public sealed class Reaction<T1, T2, T3, T4, T5> : ReactionBase
 {
@@ -150,9 +144,8 @@ public sealed class Reaction<T1, T2, T3, T4, T5> : ReactionBase
                       IStateGetR<T5> memo5,
                       Action<T1, T2, T3, T4, T5> action,
                       Context context,
-                      SynchronizationContext? synchronizationContext = null,
-                      string label = "Label")
-        : base(context, synchronizationContext, label)
+                      SynchronizationContext? synchronizationContext = null)
+        : base(context, synchronizationContext)
     {
         this.memo1 = memo1;
         this.memo2 = memo2;
@@ -195,9 +188,8 @@ public sealed class Reaction<T1, T2, T3, T4, T5, T6> : ReactionBase
                       IStateGetR<T6> memo6,
                       Action<T1, T2, T3, T4, T5, T6> action,
                       Context context,
-                      SynchronizationContext? synchronizationContext = null,
-                      string label = "Label")
-        : base(context, synchronizationContext, label)
+                      SynchronizationContext? synchronizationContext = null)
+        : base(context, synchronizationContext)
     {
         this.memo1 = memo1;
         this.memo2 = memo2;
@@ -223,8 +215,6 @@ public sealed class Reaction<T1, T2, T3, T4, T5, T6> : ReactionBase
     }
 }
 
-// Classes for 7 to 10 memos follow the same pattern, adding memo fields and corresponding actions
-
 // Class for 7 memos
 public sealed class Reaction<T1, T2, T3, T4, T5, T6, T7> : ReactionBase
 {
@@ -246,9 +236,8 @@ public sealed class Reaction<T1, T2, T3, T4, T5, T6, T7> : ReactionBase
                       IStateGetR<T7> memo7,
                       Action<T1, T2, T3, T4, T5, T6, T7> action,
                       Context context,
-                      SynchronizationContext? synchronizationContext = null,
-                      string label = "Label")
-        : base(context, synchronizationContext, label)
+                      SynchronizationContext? synchronizationContext = null)
+        : base(context, synchronizationContext)
     {
         this.memo1 = memo1;
         this.memo2 = memo2;
@@ -299,9 +288,8 @@ public sealed class Reaction<T1, T2, T3, T4, T5, T6, T7, T8> : ReactionBase
                       IStateGetR<T8> memo8,
                       Action<T1, T2, T3, T4, T5, T6, T7, T8> action,
                       Context context,
-                      SynchronizationContext? synchronizationContext = null,
-                      string label = "Label")
-        : base(context, synchronizationContext, label)
+                      SynchronizationContext? synchronizationContext = null)
+        : base(context, synchronizationContext)
     {
         this.memo1 = memo1;
         this.memo2 = memo2;
@@ -331,8 +319,6 @@ public sealed class Reaction<T1, T2, T3, T4, T5, T6, T7, T8> : ReactionBase
     }
 }
 
-// Classes for 9 and 10 memos follow the same pattern, adding memo fields and corresponding actions
-
 // Class for 9 memos
 public sealed class Reaction<T1, T2, T3, T4, T5, T6, T7, T8, T9> : ReactionBase
 {
@@ -358,9 +344,8 @@ public sealed class Reaction<T1, T2, T3, T4, T5, T6, T7, T8, T9> : ReactionBase
                       IStateGetR<T9> memo9,
                       Action<T1, T2, T3, T4, T5, T6, T7, T8, T9> action,
                       Context context,
-                      SynchronizationContext? synchronizationContext = null,
-                      string label = "Label")
-        : base(context, synchronizationContext, label)
+                      SynchronizationContext? synchronizationContext = null)
+        : base(context, synchronizationContext)
     {
         this.memo1 = memo1;
         this.memo2 = memo2;
@@ -419,9 +404,8 @@ public sealed class Reaction<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10> : Reaction
                       IStateGetR<T10> memo10,
                       Action<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10> action,
                       Context context,
-                      SynchronizationContext? synchronizationContext = null,
-                      string label = "Label")
-        : base(context, synchronizationContext, label)
+                      SynchronizationContext? synchronizationContext = null)
+        : base(context, synchronizationContext)
     {
         this.memo1 = memo1;
         this.memo2 = memo2;

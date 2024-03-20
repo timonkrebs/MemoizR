@@ -10,12 +10,11 @@ public sealed class ConcurrentMapReduce<T> : SignalHandlR, IMemoizR
 
     CacheState IMemoizR.State { get => State; set => State = value; }
 
-    internal ConcurrentMapReduce(IReadOnlyCollection<Func<CancellationTokenSource, Task<T>>> fns, Func<T, T, T?> reduce, Context context, string label = "Label") : base(context)
+    internal ConcurrentMapReduce(IReadOnlyCollection<Func<CancellationTokenSource, Task<T>>> fns, Func<T, T, T?> reduce, Context context) : base(context)
     {
         this.fns = fns;
         this.reduce = reduce;
         this.State = CacheState.CacheDirty;
-        this.Label = label;
     }
 
     public void Cancel()

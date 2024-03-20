@@ -2,10 +2,9 @@ namespace MemoizR;
 
 public sealed class EagerRelativeSignal<T> : MemoHandlR<T>, IStateGetR<T>
 {
-    internal EagerRelativeSignal(T value, Context context, string label = "Label") : base(context, null)
+    internal EagerRelativeSignal(T value, Context context) : base(context, null)
     {
         this.Value = value;
-        this.Label = label;
     }
 
     public async Task Set(Func<T, T> fn)

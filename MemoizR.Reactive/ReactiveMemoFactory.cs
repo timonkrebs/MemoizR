@@ -29,7 +29,10 @@ public static class ReactiveMemoFactory
         lock (memoFactory)
         {
             SynchronizationContexts.TryGetValue(memoFactory, out var synchronizationContext);
-            return new Reaction<T>(memo, action, memoFactory.Context, synchronizationContext, label);
+            return new Reaction<T>(memo, action, memoFactory.Context, synchronizationContext)
+            {
+                Label = label
+            };
         }
     }
 
@@ -48,7 +51,10 @@ public static class ReactiveMemoFactory
         lock (memoFactory)
         {
             SynchronizationContexts.TryGetValue(memoFactory, out var synchronizationContext);
-            return new Reaction<T1, T2>(memo1, memo2, action, memoFactory.Context, synchronizationContext, label);
+            return new Reaction<T1, T2>(memo1, memo2, action, memoFactory.Context, synchronizationContext)
+            {
+                Label = label
+            };
         }
     }
 
@@ -67,7 +73,10 @@ public static class ReactiveMemoFactory
         lock (memoFactory)
         {
             SynchronizationContexts.TryGetValue(memoFactory, out var synchronizationContext);
-            return new Reaction<T1, T2, T3>(memo1, memo2, memo3, action, memoFactory.Context, synchronizationContext, label);
+            return new Reaction<T1, T2, T3>(memo1, memo2, memo3, action, memoFactory.Context, synchronizationContext)
+            {
+                Label = label
+            };
         }
     }
 
@@ -86,7 +95,10 @@ public static class ReactiveMemoFactory
         lock (memoFactory)
         {
             SynchronizationContexts.TryGetValue(memoFactory, out var synchronizationContext);
-            return new Reaction<T1, T2, T3, T4>(memo1, memo2, memo3, memo4, action, memoFactory.Context, synchronizationContext, label);
+            return new Reaction<T1, T2, T3, T4>(memo1, memo2, memo3, memo4, action, memoFactory.Context, synchronizationContext)
+            {
+                Label = label
+            };
         }
     }
 
@@ -105,7 +117,10 @@ public static class ReactiveMemoFactory
         lock (memoFactory)
         {
             SynchronizationContexts.TryGetValue(memoFactory, out var synchronizationContext);
-            return new Reaction<T1, T2, T3, T4, T5>(memo1, memo2, memo3, memo4, memo5, action, memoFactory.Context, synchronizationContext, label);
+            return new Reaction<T1, T2, T3, T4, T5>(memo1, memo2, memo3, memo4, memo5, action, memoFactory.Context, synchronizationContext)
+            {
+                Label = label
+            };
         }
     }
 
@@ -124,7 +139,10 @@ public static class ReactiveMemoFactory
         lock (memoFactory)
         {
             SynchronizationContexts.TryGetValue(memoFactory, out var synchronizationContext);
-            return new Reaction<T1, T2, T3, T4, T5, T6>(memo1, memo2, memo3, memo4, memo5, memo6, action, memoFactory.Context, synchronizationContext, label);
+            return new Reaction<T1, T2, T3, T4, T5, T6>(memo1, memo2, memo3, memo4, memo5, memo6, action, memoFactory.Context, synchronizationContext)
+            {
+                Label = label
+            };
         }
     }
 
@@ -143,7 +161,10 @@ public static class ReactiveMemoFactory
         lock (memoFactory)
         {
             SynchronizationContexts.TryGetValue(memoFactory, out var synchronizationContext);
-            return new Reaction<T1, T2, T3, T4, T5, T6, T7>(memo1, memo2, memo3, memo4, memo5, memo6, memo7, action, memoFactory.Context, synchronizationContext, label);
+            return new Reaction<T1, T2, T3, T4, T5, T6, T7>(memo1, memo2, memo3, memo4, memo5, memo6, memo7, action, memoFactory.Context, synchronizationContext)
+            {
+                Label = label
+            };
         }
     }
 
@@ -162,11 +183,14 @@ public static class ReactiveMemoFactory
         lock (memoFactory)
         {
             SynchronizationContexts.TryGetValue(memoFactory, out var synchronizationContext);
-            return new Reaction<T1, T2, T3, T4, T5, T6, T7, T8>(memo1, memo2, memo3, memo4, memo5, memo6, memo7, memo8, action, memoFactory.Context, synchronizationContext, label);
+            return new Reaction<T1, T2, T3, T4, T5, T6, T7, T8>(memo1, memo2, memo3, memo4, memo5, memo6, memo7, memo8, action, memoFactory.Context, synchronizationContext)
+            {
+                Label = label
+            };
         }
     }
 
-// 9 memos
+    // 9 memos
     public static Reaction<T1, T2, T3, T4, T5, T6, T7, T8, T9> CreateReaction<T1, T2, T3, T4, T5, T6, T7, T8, T9>(this MemoFactory memoFactory, IStateGetR<T1> memo1, IStateGetR<T2> memo2, IStateGetR<T3> memo3, IStateGetR<T4> memo4, IStateGetR<T5> memo5, IStateGetR<T6> memo6, IStateGetR<T7> memo7, IStateGetR<T8> memo8, IStateGetR<T9> memo9, Action<T1, T2, T3, T4, T5, T6, T7, T8, T9> action)
     {
         lock (memoFactory)
@@ -181,7 +205,10 @@ public static class ReactiveMemoFactory
         lock (memoFactory)
         {
             SynchronizationContexts.TryGetValue(memoFactory, out var synchronizationContext);
-            return new Reaction<T1, T2, T3, T4, T5, T6, T7, T8, T9>(memo1, memo2, memo3, memo4, memo5, memo6, memo7, memo8, memo9, action, memoFactory.Context, synchronizationContext, label);
+            return new Reaction<T1, T2, T3, T4, T5, T6, T7, T8, T9>(memo1, memo2, memo3, memo4, memo5, memo6, memo7, memo8, memo9, action, memoFactory.Context, synchronizationContext)
+            {
+                Label = label
+            };
         }
     }
 
@@ -200,7 +227,10 @@ public static class ReactiveMemoFactory
         lock (memoFactory)
         {
             SynchronizationContexts.TryGetValue(memoFactory, out var synchronizationContext);
-            return new Reaction<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10>(memo1, memo2, memo3, memo4, memo5, memo6, memo7, memo8, memo9, memo10, action, memoFactory.Context, synchronizationContext, label);
+            return new Reaction<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10>(memo1, memo2, memo3, memo4, memo5, memo6, memo7, memo8, memo9, memo10, action, memoFactory.Context, synchronizationContext)
+            {
+                Label = label
+            };
         }
     }
 
@@ -218,7 +248,10 @@ public static class ReactiveMemoFactory
         lock (memoFactory)
         {
             SynchronizationContexts.TryGetValue(memoFactory, out var synchronizationContext);
-            return new AdvancedReaction(fn, memoFactory.Context, synchronizationContext, label);
+            return new AdvancedReaction(fn, memoFactory.Context, synchronizationContext)
+            {
+                Label = label
+            };
         }
     }
 }

@@ -6,9 +6,8 @@ public sealed class AdvancedReaction : ReactionBase
 
     internal AdvancedReaction(Func<CancellationTokenSource, Task> fn,
     Context context,
-    SynchronizationContext? synchronizationContext = null,
-    string label = "Label")
-    : base(context, synchronizationContext, label)
+    SynchronizationContext? synchronizationContext = null)
+    : base(context, synchronizationContext)
     {
         this.fn = fn;
 
