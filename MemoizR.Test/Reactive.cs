@@ -10,7 +10,8 @@ public class Reactive
         Assert.Equal(1, await v1.Get());
         Assert.Equal(1, await v1.Get());
 
-        var m1 = f.CreateAdvancedReaction(v1.Get);
+        var m1 = f.BuildReaction()
+        .CreateAdvancedReaction(v1.Get);
 
         await v1.Set(2);
     }
@@ -23,7 +24,8 @@ public class Reactive
         var v1 = f.CreateSignal(1);
         Assert.Equal(1, await v1.Get());
 
-        var m1 = f.CreateAdvancedReaction(async c =>
+        var m1 = f.BuildReaction()
+        .CreateAdvancedReaction(async c =>
         {
             invocations++;
             await v1.Get(c);
@@ -54,11 +56,12 @@ public class Reactive
 
         var invocationCount = 0;
         // Create a memoized computation 'm1' that depends on 'v1'
-        var m1 = f.CreateMemoizR(async() => await v1.Get() * 2);
+        var m1 = f.CreateMemoizR(async () => await v1.Get() * 2);
 
 
         var result = 0;
-        var r1 = f.CreateAdvancedReaction(async c =>
+        var r1 = f.BuildReaction()
+        .CreateAdvancedReaction(async c =>
         {
             invocationCount++;
             result = await m1.Get(c);
@@ -77,7 +80,7 @@ public class Reactive
         }
 
         var resultM1 = 0;
-        _ = Task.Run(async() => resultM1 = await m1.Get());
+        _ = Task.Run(async () => resultM1 = await m1.Get());
 
         await Task.Delay(100);
 
@@ -103,9 +106,10 @@ public class Reactive
 
         var invocationCount = 0;
         // Create a memoized computation 'm1' that depends on 'v1'
-        var m1 = f.CreateMemoizR(async() => await v1.Get() * 2);
+        var m1 = f.CreateMemoizR(async () => await v1.Get() * 2);
 
-        var r1 = f.CreateAdvancedReaction(async _ =>
+        var r1 = f.BuildReaction()
+        .CreateAdvancedReaction(async _ =>
         {
             invocationCount++;
             await m1.Get();
@@ -114,14 +118,14 @@ public class Reactive
         var tasks = new List<Task>();
         for (var i = 0; i < 20; i++)
         {
-            tasks.Add(Task.Run(async() => await v1.Set(i)));
+            tasks.Add(Task.Run(async () => await v1.Set(i)));
             await Task.Delay(1);
-            tasks.Add(Task.Run(async() => await v1.Set(i)));
+            tasks.Add(Task.Run(async () => await v1.Set(i)));
         }
 
         await Task.Delay(1);
         var resultM1 = 0;
-        tasks.Add(Task.Run(async() => resultM1 = await m1.Get()));
+        tasks.Add(Task.Run(async () => resultM1 = await m1.Get()));
 
         // Wait for all tasks to complete
         await Task.WhenAll(tasks);

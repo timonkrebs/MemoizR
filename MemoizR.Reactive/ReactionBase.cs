@@ -7,6 +7,8 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
     private SynchronizationContext? synchronizationContext;
     private bool isPaused;
 
+    public TimeSpan DebounceTime { private get; init; }
+
     CacheState IMemoizR.State { get => State; set => State = value; }
 
     internal ReactionBase(Context context, SynchronizationContext? synchronizationContext = null) 
@@ -220,7 +222,7 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
         cts = new();
         Task.Run(async () =>
         {
-            await Task.Delay(10, cts.Token);
+            await Task.Delay(DebounceTime, cts.Token);
             await UpdateIfNecessary().ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
         }, cts.Token);
 

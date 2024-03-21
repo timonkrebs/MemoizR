@@ -5,9 +5,9 @@ public sealed class Reaction<T> : ReactionBase
     private readonly IStateGetR<T> memo;
     private readonly Action<T> action;
 
-    internal Reaction(IStateGetR<T> memo, 
-    Action<T> action, 
-    Context context, 
+    internal Reaction(IStateGetR<T> memo,
+    Action<T> action,
+    Context context,
     SynchronizationContext? synchronizationContext = null)
     : base(context, synchronizationContext)
     {
@@ -23,8 +23,6 @@ public sealed class Reaction<T> : ReactionBase
     }
 }
 
-
-// Class for 2 memos
 public sealed class Reaction<T1, T2> : ReactionBase
 {
     private readonly IStateGetR<T1> memo1;
@@ -32,9 +30,9 @@ public sealed class Reaction<T1, T2> : ReactionBase
     private readonly Action<T1, T2> action;
 
     internal Reaction(IStateGetR<T1> memo1,
-    IStateGetR<T2> memo2, 
-    Action<T1, T2> action, 
-    Context context, 
+    IStateGetR<T2> memo2,
+    Action<T1, T2> action,
+    Context context,
     SynchronizationContext? synchronizationContext = null)
     : base(context, synchronizationContext)
     {
@@ -49,13 +47,11 @@ public sealed class Reaction<T1, T2> : ReactionBase
     {
         var task1 = memo1.Get(cts);
         var task2 = memo2.Get(cts);
-        Task[] tasks = [task1,task2];
-        await Task.WhenAll(tasks);
+        await Task.WhenAll(task1, task2);
         action(task1.Result, task2.Result);
     }
 }
 
-// Class for 3 memos
 public sealed class Reaction<T1, T2, T3> : ReactionBase
 {
     private readonly IStateGetR<T1> memo1;
@@ -89,7 +85,6 @@ public sealed class Reaction<T1, T2, T3> : ReactionBase
     }
 }
 
-// Class for 4 memos
 public sealed class Reaction<T1, T2, T3, T4> : ReactionBase
 {
     private readonly IStateGetR<T1> memo1;
@@ -127,7 +122,6 @@ public sealed class Reaction<T1, T2, T3, T4> : ReactionBase
     }
 }
 
-// Class for 5 memos
 public sealed class Reaction<T1, T2, T3, T4, T5> : ReactionBase
 {
     private readonly IStateGetR<T1> memo1;
@@ -169,7 +163,6 @@ public sealed class Reaction<T1, T2, T3, T4, T5> : ReactionBase
     }
 }
 
-// Class for 6 memos
 public sealed class Reaction<T1, T2, T3, T4, T5, T6> : ReactionBase
 {
     private readonly IStateGetR<T1> memo1;
@@ -215,7 +208,6 @@ public sealed class Reaction<T1, T2, T3, T4, T5, T6> : ReactionBase
     }
 }
 
-// Class for 7 memos
 public sealed class Reaction<T1, T2, T3, T4, T5, T6, T7> : ReactionBase
 {
     private readonly IStateGetR<T1> memo1;
@@ -265,7 +257,6 @@ public sealed class Reaction<T1, T2, T3, T4, T5, T6, T7> : ReactionBase
     }
 }
 
-// Class for 8 memos
 public sealed class Reaction<T1, T2, T3, T4, T5, T6, T7, T8> : ReactionBase
 {
     private readonly IStateGetR<T1> memo1;
@@ -319,7 +310,6 @@ public sealed class Reaction<T1, T2, T3, T4, T5, T6, T7, T8> : ReactionBase
     }
 }
 
-// Class for 9 memos
 public sealed class Reaction<T1, T2, T3, T4, T5, T6, T7, T8, T9> : ReactionBase
 {
     private readonly IStateGetR<T1> memo1;
@@ -377,7 +367,6 @@ public sealed class Reaction<T1, T2, T3, T4, T5, T6, T7, T8, T9> : ReactionBase
     }
 }
 
-// Class for 10 memos
 public sealed class Reaction<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10> : ReactionBase
 {
     private readonly IStateGetR<T1> memo1;

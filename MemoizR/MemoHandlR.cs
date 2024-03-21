@@ -10,7 +10,7 @@ public abstract class SignalHandlR : IMemoHandlR
     IMemoHandlR[] IMemoHandlR.Sources { get => Sources; set => Sources = value; }
     WeakReference<IMemoizR>[] IMemoHandlR.Observers { get => Observers; set => Observers = value; }
 
-    public string? Label { get; init; } = "Label";
+    public string Label { get; init; } = "Label";
 
     internal SignalHandlR(Context context)
     {
