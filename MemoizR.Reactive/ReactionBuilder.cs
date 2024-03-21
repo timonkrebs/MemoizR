@@ -5,19 +5,14 @@ public sealed class ReactionBuilder
     private readonly MemoFactory memoFactory;
     private readonly SynchronizationContext? synchronizationContext;
 
-    private string label = "Reaction";
+    private string label;
     private TimeSpan debounceTime = TimeSpan.FromMilliseconds(10);
 
-    public ReactionBuilder(MemoFactory memoFactory, SynchronizationContext? synchronizationContext)
+    public ReactionBuilder(MemoFactory memoFactory, SynchronizationContext? synchronizationContext, string label)
     {
         this.memoFactory = memoFactory;
         this.synchronizationContext = synchronizationContext;
-    }
-
-    public ReactionBuilder AddLabel(string label)
-    {
         this.label = label;
-        return this;
     }
 
     public ReactionBuilder AddDebounceTime(TimeSpan debounceTime)

@@ -3,7 +3,7 @@ namespace MemoizR;
 public sealed class MemoFactory
 {
     internal static Dictionary<string, WeakReference<Context>> CONTEXTS = new Dictionary<string, WeakReference<Context>>();
-    internal Context Context;
+    internal Context Context { get; }
 
     public MemoFactory(string? contextKey = null)
     {
@@ -19,21 +19,21 @@ public sealed class MemoFactory
             {
                 if (weakContext.TryGetTarget(out var context))
                 {
-                    this.Context = context;
+                    Context = context;
                 }
                 else
                 {
-                    this.Context = new Context();
-                    weakContext.SetTarget(this.Context);
+                    Context = new Context();
+                    weakContext.SetTarget(Context);
                 }
             }
             else
             {
-                this.Context = new Context();
-                CONTEXTS.Add(contextKey, new WeakReference<Context>(this.Context));
+                Context = new Context();
+                CONTEXTS.Add(contextKey, new WeakReference<Context>(Context));
             }
 
-            if (this.Context == null)
+            if (Context == null)
             {
                 throw new NullReferenceException("Context can not be null");
             }
@@ -63,7 +63,7 @@ public sealed class MemoFactory
 
     public MemoizR<T> CreateMemoizR<T>(Func<Task<T>> fn)
     {
-        return new MemoizR<T>(fn, Context);
+        return CreateMemoizR("MemoizR", fn);
     }
 
     public MemoizR<T> CreateMemoizR<T>(string label, Func<Task<T>> fn, Func<T?, T?, bool>? equals = null)
@@ -76,7 +76,7 @@ public sealed class MemoFactory
 
     public Signal<T> CreateSignal<T>(T value)
     {
-        return new Signal<T>(value, Context);
+        return CreateSignal("Signal", value);
     }
 
     public Signal<T> CreateSignal<T>(string label, T value)
@@ -89,7 +89,7 @@ public sealed class MemoFactory
 
     public EagerRelativeSignal<T> CreateEagerRelativeSignal<T>(T value)
     {
-        return new EagerRelativeSignal<T>(value, Context);
+        return CreateEagerRelativeSignal("Relative Signal", value);
     }
 
     public EagerRelativeSignal<T> CreateEagerRelativeSignal<T>(string label, T value)

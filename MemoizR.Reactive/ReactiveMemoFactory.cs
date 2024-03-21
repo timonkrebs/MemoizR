@@ -15,9 +15,9 @@ public static class ReactiveMemoFactory
         }
     }
 
-    public static ReactionBuilder BuildReaction(this MemoFactory memoFactory)
+    public static ReactionBuilder BuildReaction(this MemoFactory memoFactory, string label = "Reaction")
     {
         SynchronizationContexts.TryGetValue(memoFactory, out var synchronizationContext);
-        return new ReactionBuilder(memoFactory, synchronizationContext);
+        return new ReactionBuilder(memoFactory, synchronizationContext, label);
     }
 }
