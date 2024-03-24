@@ -1,8 +1,9 @@
-﻿namespace MemoizR.Reactive;
+namespace MemoizR.Reactive;
 
 public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
 {
     private CancellationTokenSource cts = new();
+    private CancellationTokenSource sourceCts = new();
     private CacheState State { get; set; } = CacheState.CacheClean;
     private SynchronizationContext? synchronizationContext;
     private bool isPaused;
@@ -11,7 +12,7 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
 
     CacheState IMemoizR.State { get => State; set => State = value; }
 
-    internal ReactionBase(Context context, SynchronizationContext? synchronizationContext = null) 
+    internal ReactionBase(Context context, SynchronizationContext? synchronizationContext = null)
     : base(context)
     {
         this.synchronizationContext = synchronizationContext;
@@ -31,6 +32,8 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
 
     public void Dispose()
     {
+        Pause();
+        sourceCts.Cancel();
         RemoveParentObservers(0);
     }
 
@@ -116,6 +119,7 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
             {
                 try
                 {
+                    sourceCts = new CancellationTokenSource();
                     if (synchronizationContext != null)
                     {
                         var tcs = new TaskCompletionSource();
@@ -124,7 +128,7 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
                         {
                             try
                             {
-                                await Execute(cts);
+                                await Execute(sourceCts);
                             }
                             catch (Exception e)
                             {
@@ -139,13 +143,13 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
                     }
                     else
                     {
-                        await Execute(cts);
+                        await Execute(sourceCts);
                     }
                 }
                 catch
                 {
                     State = CacheState.CacheDirty;
-                    return;
+                    throw;
                 }
             }
             else
@@ -216,15 +220,16 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
 
     internal Task Stale(CacheState state)
     {
+        // Add thread safety
         // Add Scheduling
         State = state;
         cts?.Cancel();
         cts = new();
         Task.Run(async () =>
-        {
-            await Task.Delay(DebounceTime, cts.Token);
-            await UpdateIfNecessary().ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
-        }, cts.Token);
+            {
+                await Task.Delay(DebounceTime, cts.Token);
+                await UpdateIfNecessary().ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
+            }, cts.Token);
 
         return Task.CompletedTask;
     }

@@ -109,10 +109,10 @@ public class StructuredConcurrency
 
         var invocations = 0;
         var x = await c1.Get();
-        f.BuildReaction().CreateAdvancedReaction(async _ =>
+        f.BuildReaction().CreateReaction(c1, c =>
         {
             invocations++;
-            x = await c1.Get();
+            x = c;
         });
 
         await Task.Delay(100);
@@ -143,7 +143,7 @@ public class StructuredConcurrency
         await Task.Delay(100);
         Assert.Equal(5, x.Single(x => x == 5));
         Assert.Equal(5, x.ElementAt(1));
-        Assert.Equal(5, invocations); // invocation must happen for every set call because it triggers evaluation 
+        Assert.Equal(5, invocations);
 
         // cancellation should not disable reactivity and never get into race conditions
         await v2.Set(7);
@@ -151,9 +151,10 @@ public class StructuredConcurrency
         await Task.Delay(100);
         Assert.Equal(8, x.Single(x => x == 8));
         Assert.Equal(8, x.ElementAt(1));
+        Assert.Equal(6, invocations);
     }
 
-    [Fact]
+    [Fact(Timeout = 1000)]
     public async Task TestThreadSafety()
     {
         var f = new MemoFactory("concurrent");
@@ -180,7 +181,7 @@ public class StructuredConcurrency
             });
 
         var x = await c1.Get();
-        f.BuildReaction().CreateAdvancedReaction(async _ => x = await c1.Get());
+        f.BuildReaction().CreateReaction(c1, c => x = c);
 
         await Task.Delay(100);
         var _ = v1.Set(1);

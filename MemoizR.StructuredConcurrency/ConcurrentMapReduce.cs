@@ -1,6 +1,6 @@
 namespace MemoizR.StructuredConcurrency;
 
-public sealed class ConcurrentMapReduce<T> : SignalHandlR, IMemoizR
+public sealed class ConcurrentMapReduce<T> : SignalHandlR, IMemoizR, IStateGetR<T>
 {
     private CacheState State { get; set; } = CacheState.CacheClean;
     private IReadOnlyCollection<Func<CancellationTokenSource, Task<T>>> fns;
@@ -152,25 +152,27 @@ public sealed class ConcurrentMapReduce<T> : SignalHandlR, IMemoizR
         catch (TaskCanceledException)
         {
             State = CacheState.CacheCheck;
+            throw;
         }
         finally
         {
             Context.CurrentGets = prevGets;
             Context.CurrentReaction = prevReaction;
             Context.CurrentGetsIndex = prevIndex;
-        }
 
-        // handles diamond depenendencies if we're the parent of a diamond.
-        if (Observers.Length > 0)
-        {
-            // We've changed value, so mark our children as dirty so they'll reevaluate
-            foreach (var observer in Observers)
+            // handles diamond depenendencies if we're the parent of a diamond.
+            if (Observers.Length > 0)
             {
-                if (observer.TryGetTarget(out var o))
+                // We've changed value, so mark our children as dirty so they'll reevaluate
+                foreach (var observer in Observers)
                 {
-                    o.State = CacheState.CacheDirty;
+                    if (observer.TryGetTarget(out var o))
+                    {
+                        o.State = CacheState.CacheDirty;
+                    }
                 }
             }
+
         }
 
         // We've rerun with the latest values from all of our Sources.
