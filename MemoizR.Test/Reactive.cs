@@ -11,7 +11,7 @@ public class Reactive
         Assert.Equal(1, await v1.Get());
 
         var m1 = f.BuildReaction()
-        .CreateAdvancedReaction(v1.Get);
+        .CreateReaction(v1, v => { });
 
         await v1.Set(2);
     }
@@ -25,11 +25,7 @@ public class Reactive
         Assert.Equal(1, await v1.Get());
 
         var m1 = f.BuildReaction()
-        .CreateAdvancedReaction(async c =>
-        {
-            invocations++;
-            await v1.Get(c);
-        });
+        .CreateReaction(v1, v => invocations++);
 
         Assert.Equal(1, invocations);
         await Task.Delay(100);
@@ -61,10 +57,10 @@ public class Reactive
 
         var result = 0;
         var r1 = f.BuildReaction()
-        .CreateAdvancedReaction(async c =>
+        .CreateReaction(m1, m =>
         {
             invocationCount++;
-            result = await m1.Get(c);
+            result = m;
         });
 
         var _ = v1.Set(1000);
@@ -108,12 +104,8 @@ public class Reactive
         // Create a memoized computation 'm1' that depends on 'v1'
         var m1 = f.CreateMemoizR(async () => await v1.Get() * 2);
 
-        var r1 = f.BuildReaction()
-        .CreateAdvancedReaction(async _ =>
-        {
-            invocationCount++;
-            await m1.Get();
-        });
+        var r1 = f.BuildReaction().CreateReaction(m1, m => invocationCount++);
+
 
         var tasks = new List<Task>();
         for (var i = 0; i < 20; i++)

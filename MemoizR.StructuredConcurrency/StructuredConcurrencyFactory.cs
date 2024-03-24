@@ -45,7 +45,6 @@ public static class StructuredConcurrencyFactory
 
     public static ConcurrentMap<T> CreateConcurrentMap<T>(this MemoFactory memoFactory, params Func<CancellationTokenSource, Task<T>>[] fns)
     {
-
         return CreateConcurrentMap(memoFactory, "Concurrent Map", fns);
     }
 
