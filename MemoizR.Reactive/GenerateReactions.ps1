@@ -35,7 +35,7 @@ public sealed class Reaction<$genericTypesString> : ReactionBase
     $memoFieldsString
     private readonly Action<$genericTypesString> action;
 
-    internal Reaction($memoParametersString, 
+    internal Reaction($memoParametersString,    
                       Action<$genericTypesString> action, 
                       Context context, 
                       SynchronizationContext? synchronizationContext = null)
@@ -60,8 +60,15 @@ public sealed class Reaction<$genericTypesString> : ReactionBase
     return $class
 }
 
+$classHeader = @"
+namespace MemoizR.Reactive;
+
+"@
+
+Out-File -FilePath .\Reaction.cs -InputObject $classHeader -Encoding ASCII
+
 # Generate classes for reactions with 1 to 10 memos
-for ($i = 1; $i -le 3; $i++) {
+for ($i = 1; $i -le 16; $i++) {
     $classContent = GenerateReactionClass $i
-    Write-Output $classContent
+    Out-File -FilePath .\Reaction.cs -InputObject $classContent -Encoding ASCII -Append
 }
