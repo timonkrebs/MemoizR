@@ -3,7 +3,7 @@ Microsoft Visual Studio Solution File, Format Version 12.00
 # Visual Studio Version 17
 VisualStudioVersion = 17.0.31903.59
 MinimumVisualStudioVersion = 10.0.40219.1
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MemoizR.Test", "MemoizR.Test\MemoizR.Test.csproj", "{7F3936CD-B956-4644-A3F3-64AF0715A2EA}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MemoizR.Tests", "MemoizR.Tests\MemoizR.Tests.csproj", "{7F3936CD-B956-4644-A3F3-64AF0715A2EA}"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MemoizR", "MemoizR\MemoizR.csproj", "{61FC9C4D-083C-4DCD-B6DE-B1B501E62A9C}"
 EndProject

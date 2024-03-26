@@ -1,6 +1,6 @@
 using Xunit.Sdk;
 
-namespace MemoizR.Test;
+namespace MemoizR.Tests;
 
 public class StructuredConcurrency
 {
@@ -176,7 +176,7 @@ public class StructuredConcurrency
             },
             async c =>
             {
-                await Task.Delay(75, c.Token);
+                await Task.Delay(50, c.Token);
                 return await v3.Get();
             });
 
@@ -205,11 +205,15 @@ public class StructuredConcurrency
         await Task.Delay(100);
         Assert.Equal(4, x.Single(x => x == 4));
         Assert.Equal(4, x.ElementAt(0));
+        Assert.Equal(2, x.ElementAt(1));
+        Assert.Equal(3, x.ElementAt(2));
 
         await v2.Set(5);
         await Task.Delay(100);
         Assert.Equal(5, x.Single(x => x == 5));
+        Assert.Equal(4, x.ElementAt(0));
         Assert.Equal(5, x.ElementAt(1));
+        Assert.Equal(3, x.ElementAt(2));
 
         await v3.Set(6);
         await Task.Delay(100);

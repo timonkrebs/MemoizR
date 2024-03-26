@@ -1,4 +1,4 @@
-namespace MemoizR.Test;
+namespace MemoizR.Tests;
 
 public class Core
 {
