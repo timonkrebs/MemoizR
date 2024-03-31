@@ -2,7 +2,7 @@ namespace MemoizR.Tests;
 
 public class Reactive
 {
-    [Fact]
+    [Fact(Timeout = 1000)]
     public async Task TestReactive()
     {
         var f = new MemoFactory("reactivity");
@@ -16,7 +16,7 @@ public class Reactive
         await v1.Set(2);
     }
 
-    [Fact]
+    [Fact(Timeout = 1000)]
     public async Task TestReactiveInvocations()
     {
         var invocations = 0;
@@ -41,7 +41,7 @@ public class Reactive
         Assert.Equal(2, invocations);
     }
 
-    [Fact]
+    [Fact(Timeout = 1000)]
     public async Task TestThreadSafety()
     {
         // Create a MemoFactory instance
@@ -87,11 +87,10 @@ public class Reactive
 
         await Task.Delay(100);
 
-        // This is not completely reliable because if all the set are evaluated await he gets trigger again because how the readwrite lock works
-        Assert.InRange(invocationCount, 2, 60);
+        Assert.Equal(2, invocationCount);
     }
 
-    [Fact]
+    [Fact(Timeout = 1000)]
     public async Task TestThreadSafety2()
     {
         // Create a MemoFactory instance
@@ -127,7 +126,52 @@ public class Reactive
 
         await Task.Delay(100);
 
-        // This is not completely reliable because if all the set are evaluated await he gets trigger again because how the readwrite lock works
-        Assert.InRange(invocationCount, 2, 25);
+        Assert.Equal(2, invocationCount);
+    }
+
+    [Fact(Timeout = 2000)]
+    public async Task TestThreadSafety3()
+    {
+        // Create a MemoFactory instance
+        var f = new MemoFactory("reactivity");
+
+        // Create a signal 'v1' with an initial value of 1
+        var v1 = f.CreateSignal(4);
+
+        var memoInvocationCount = 0;
+        // Create a memoized computation 'm1' that depends on 'v1'
+        var m1 = f.CreateMemoizR(async () =>
+        {
+            memoInvocationCount++;
+            return await v1.Get() * 2;
+        });
+
+        var invocationCountR1 = 0;
+        var r1 = f.BuildReaction().CreateReaction(m1, m => invocationCountR1++);
+        var invocationCountR2 = 0;
+        var r2 = f.BuildReaction().CreateReaction(m1, m => invocationCountR2++);
+
+        var tasks = new List<Task>();
+        for (var i = 0; i < 50; i++)
+        {
+            tasks.Add(Task.Run(async () => await v1.Set(i)));
+            await Task.Delay(25);
+        }
+
+        await Task.Delay(1);
+        var resultM1 = 0;
+        tasks.Add(Task.Run(async () => resultM1 = await m1.Get()));
+
+        // Wait for all tasks to complete
+        await Task.WhenAll(tasks);
+        await Task.Delay(100);
+
+        Assert.Equal(98, await m1.Get());
+        Assert.Equal(98, resultM1);
+
+        await Task.Delay(100);
+
+        Assert.Equivalent(invocationCountR1, invocationCountR2);
+        Assert.Equivalent(invocationCountR2, memoInvocationCount);
     }
 }

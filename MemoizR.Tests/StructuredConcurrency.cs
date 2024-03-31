@@ -253,7 +253,7 @@ public class StructuredConcurrency
         await Assert.ThrowsAsync<AggregateException>(c1.Get);
     }
 
-    [Fact(Skip = "to long")]
+    [Fact(Timeout = 4000)]
     public async Task TestChildExecutionHandling()
     {
         var f = new MemoFactory("concurrent");

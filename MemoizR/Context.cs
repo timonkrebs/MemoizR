@@ -1,10 +1,12 @@
 using MemoizR.StructuredAsyncLock;
+using Nito.AsyncEx;
 
 namespace MemoizR;
 
 public class Context
 {
     internal AsyncAsymmetricLock ContextLock = new();
+    internal AsyncLock Mutex = new AsyncLock();
 
     /** current capture context for identifying sources (other memoizR elements)
     * - active while evaluating a memoizR function body  */

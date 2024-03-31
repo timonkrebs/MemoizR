@@ -221,14 +221,19 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
     internal Task Stale(CacheState state)
     {
         // Add Scheduling
-        lock(this){
+        lock (this)
+        {
             State = state;
             cts?.Cancel();
             cts = new();
             Task.Run(async () =>
                 {
                     await Task.Delay(DebounceTime, cts.Token);
-                    await UpdateIfNecessary().ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
+                    using (await Context.Mutex.LockAsync())
+                    {
+                        await UpdateIfNecessary().ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
+                    }
+
                 }, cts.Token);
 
             return Task.CompletedTask;
