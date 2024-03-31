@@ -90,7 +90,7 @@ public class Reactive
         Assert.Equal(2, invocationCount);
     }
 
-    [Fact(Timeout = 1000)]
+    [Fact(Timeout = 500)]
     public async Task TestThreadSafety2()
     {
         // Create a MemoFactory instance

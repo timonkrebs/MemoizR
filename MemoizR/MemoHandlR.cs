@@ -1,3 +1,5 @@
+using Nito.AsyncEx;
+
 namespace MemoizR;
 
 public abstract class SignalHandlR : IMemoHandlR
@@ -6,6 +8,8 @@ public abstract class SignalHandlR : IMemoHandlR
     internal WeakReference<IMemoizR>[] Observers { get; set; } = []; // nodes that have us as sources (down links)
 
     internal Context Context;
+
+    protected AsyncLock mutex = new AsyncLock();
 
     IMemoHandlR[] IMemoHandlR.Sources { get => Sources; set => Sources = value; }
     WeakReference<IMemoizR>[] IMemoHandlR.Observers { get => Observers; set => Observers = value; }
