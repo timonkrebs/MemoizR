@@ -34,7 +34,7 @@ public class StructuredConcurrency
     }
 
     [Fact(Timeout = 1000)]
-    public void TestExceptionHandling()
+    public async Task TestExceptionHandling()
     {
         var f = new MemoFactory("concurrent");
 
@@ -49,10 +49,10 @@ public class StructuredConcurrency
             async c =>
             {
                 await Task.Delay(5000, c.Token);
-                throw new SkipException("Test");
+                throw new Exception("Test");
             });
 
-        Assert.Throws<AggregateException>(() => c1.Get().GetAwaiter().GetResult());
+        await Assert.ThrowsAsync<AggregateException>(c1.Get);
     }
 
     [Fact(Timeout = 1000)]

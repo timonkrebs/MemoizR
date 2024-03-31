@@ -228,7 +228,12 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
             cts = new();
             Task.Run(async () =>
                 {
-                    await Task.Delay(DebounceTime, cts.Token);
+                    try
+                    {
+                        await Task.Delay(DebounceTime, cts.Token);
+                    }
+                    catch { }
+
                     using (await Context.Mutex.LockAsync())
                     {
                         await UpdateIfNecessary().ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
