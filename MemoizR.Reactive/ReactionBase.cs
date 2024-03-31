@@ -231,14 +231,14 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
                     try
                     {
                         await Task.Delay(DebounceTime, cts.Token);
-                    }
-                    catch { }
 
-                    using (await Context.Mutex.LockAsync())
+                        using (await Context.Mutex.LockAsync())
+                    using (await Context.ContextLock.UpgradeableLockAsync())
                     {
                         await UpdateIfNecessary().ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
                     }
-
+                    }
+                    catch { }
                 }, cts.Token);
 
             return Task.CompletedTask;
