@@ -25,7 +25,6 @@ public sealed class Signal<T> : MemoHandlR<T>, IStateGetR<T?>
                 return;
             }
 
-
             // only updating the value should be locked
             lock (this)
             {

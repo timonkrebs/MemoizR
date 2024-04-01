@@ -120,7 +120,7 @@ var f = new MemoFactory();
 var v1 = f.CreateSignal(1);
 var m1 = f.CreateMemoizR(async() => await v1.Get());
 var m2 = f.CreateMemoizR(async() => await v1.Get() * 2);
-var r1 = f.CreateReaction(async() => await m1.Get() + await m2.Get());
+var r1 = f.CreateReaction(m1, m2, (val1, val2) => val1 + val2);
 ```
 
 ## Test it
