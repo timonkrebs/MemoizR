@@ -1,8 +1,7 @@
-using Xunit.Sdk;
-
 namespace MemoizR.Tests;
 
-public class StructuredConcurrency
+[Collection("Sequential")]
+public class StructuredConcurrencyTests
 {
     [Fact]
     public async Task TestInitialization()

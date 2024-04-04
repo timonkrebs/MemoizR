@@ -6,7 +6,7 @@ namespace MemoizR;
 public class Context
 {
     internal AsyncAsymmetricLock ContextLock = new();
-    internal AsyncLock Mutex = new AsyncLock();
+    internal AsyncLock Mutex = new();
 
     /** current capture context for identifying sources (other memoizR elements)
     * - active while evaluating a memoizR function body  */

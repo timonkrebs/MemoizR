@@ -1,6 +1,6 @@
 namespace MemoizR.Tests;
 
-public class Core
+public class CoreTests
 {
     [Fact]
     public async Task TestInitialization()

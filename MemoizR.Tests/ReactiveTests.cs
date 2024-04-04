@@ -1,6 +1,6 @@
 namespace MemoizR.Tests;
 
-public class Reactive
+public class ReactiveTests
 {
     [Fact(Timeout = 1000)]
     public async Task TestReactive()
