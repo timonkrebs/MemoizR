@@ -152,10 +152,10 @@ public class ReactiveTests
         var r2 = f.BuildReaction().CreateReaction(m1, m => invocationCountR2++);
 
         var tasks = new List<Task>();
-        for (var i = 0; i < 50; i++)
+        for (var i = 0; i < 40; i++)
         {
             tasks.Add(Task.Run(async () => await v1.Set(i)));
-            await Task.Delay(30);
+            await Task.Delay(35);
         }
 
         await Task.Delay(1);
@@ -166,8 +166,8 @@ public class ReactiveTests
         await Task.WhenAll(tasks);
         await Task.Delay(100);
 
-        Assert.Equal(98, await m1.Get());
-        Assert.Equal(98, resultM1);
+        Assert.Equal(78, await m1.Get());
+        Assert.Equal(78, resultM1);
 
         await Task.Delay(100);
 

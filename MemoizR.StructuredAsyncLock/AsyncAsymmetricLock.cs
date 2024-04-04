@@ -51,6 +51,16 @@ public sealed class AsyncAsymmetricLock
     {
         lock (this)
         {
+            if (this.lockScope == lockScope && locksHeld < 0)
+            {
+                throw new InvalidOperationException("Can not aquire recursive exclusive lock in the scope of an upgradeable lock");
+            }
+
+            if (this.lockScope == lockScope && locksHeld > 0)
+            {
+                throw new InvalidOperationException("Can not aquire recursive exclusive locks in the same scope");
+            }
+
             // If the lock is available or in exclusive mode and there are no waiting upgradeable, or upgrading upgradeable, take it immediately.
             if (locksHeld == 0 && upgradeable.IsEmpty && upgradedLocksHeld == 0)
             {

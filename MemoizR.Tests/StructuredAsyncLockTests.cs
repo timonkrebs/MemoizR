@@ -10,7 +10,7 @@ public class AsyncAsymmetricLockTests
     {
         // Arrange
         var asyncLock = new AsyncAsymmetricLock();
-        var cancellationTokenSource = new CancellationTokenSource(TimeSpan.FromMilliseconds(100));
+        var cancellationTokenSource = new CancellationTokenSource();
         Assert.Equal(0, asyncLock.lockScope);
 
         // Act
@@ -23,9 +23,9 @@ public class AsyncAsymmetricLockTests
             Assert.Equal(0, asyncLock.upgradedLocksHeld);
             Assert.NotEqual(0, lockScope);
 
-            await Assert.ThrowsAsync<TaskCanceledException>(async () =>
+            await Assert.ThrowsAsync<InvalidOperationException>(async () =>
             {
-                await asyncLock.ExclusiveLockAsync(cancellationTokenSource.Token);
+                await asyncLock.ExclusiveLockAsync();
             });
         }
     }
@@ -70,7 +70,6 @@ public class AsyncAsymmetricLockTests
     {
         // Arrange
         var asyncLock = new AsyncAsymmetricLock();
-        var cancellationTokenSource = new CancellationTokenSource(TimeSpan.FromMilliseconds(100));
 
         // Act
         using var _ = await asyncLock.UpgradeableLockAsync();
@@ -80,9 +79,9 @@ public class AsyncAsymmetricLockTests
         Assert.Equal(0, asyncLock.upgradedLocksHeld);
         Assert.NotEqual(0, asyncLock.lockScope);
 
-        await Assert.ThrowsAsync<TaskCanceledException>(async () =>
+        await Assert.ThrowsAsync<InvalidOperationException>(async () =>
         {
-            await asyncLock.ExclusiveLockAsync(cancellationTokenSource.Token);
+            await asyncLock.ExclusiveLockAsync();
         });
     }
 
