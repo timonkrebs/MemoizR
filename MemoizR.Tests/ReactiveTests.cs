@@ -155,7 +155,7 @@ public class ReactiveTests
         for (var i = 0; i < 50; i++)
         {
             tasks.Add(Task.Run(async () => await v1.Set(i)));
-            await Task.Delay(25);
+            await Task.Delay(30);
         }
 
         await Task.Delay(1);

@@ -52,7 +52,7 @@ public sealed class AsyncAsymmetricLock
         lock (this)
         {
             // If the lock is available or in exclusive mode and there are no waiting upgradeable, or upgrading upgradeable, take it immediately.
-            if (locksHeld >= 0 && upgradeable.IsEmpty && upgradedLocksHeld == 0)
+            if (locksHeld == 0 && upgradeable.IsEmpty && upgradedLocksHeld == 0)
             {
                 Interlocked.Increment(ref locksHeld);
                 this.lockScope = lockScope;
@@ -203,27 +203,16 @@ public sealed class AsyncAsymmetricLock
     /// </summary>
     private void ReleaseWaiters()
     {
-        if (!exclusive.IsEmpty && locksHeld >= 0 && upgradedLocksHeld == 0)
-        {
-            if (!upgradeable.IsEmpty)
-            {
-                Interlocked.Increment(ref locksHeld);
-                lockScope = exclusive.Dequeue(new ExclusivePrioKey(this));
-                AsyncLocalScope.Value = lockScope;
-                return;
-            }
-
-            while (!exclusive.IsEmpty)
-            {
-                Interlocked.Increment(ref locksHeld);
-                lockScope = exclusive.Dequeue(new ExclusivePrioKey(this));
-            }
-            AsyncLocalScope.Value = 0;
-        }
-        else if (!upgradeable.IsEmpty && locksHeld == 0 && upgradedLocksHeld == 0)
+        if (!upgradeable.IsEmpty && locksHeld == 0 && upgradedLocksHeld == 0)
         {
             Interlocked.Decrement(ref locksHeld);
             lockScope = upgradeable.Dequeue(new UpgradeableKey(this));
+            AsyncLocalScope.Value = lockScope;
+        }
+        else if (!exclusive.IsEmpty && locksHeld == 0 && upgradedLocksHeld == 0)
+        {
+            Interlocked.Increment(ref locksHeld);
+            lockScope = exclusive.Dequeue(new ExclusivePrioKey(this));
             AsyncLocalScope.Value = lockScope;
         }
         else if ((!upgradeable.IsEmpty || !exclusive.IsEmpty) && locksHeld == 0 && upgradedLocksHeld == 0)
