@@ -123,7 +123,7 @@ public class AsyncAsymmetricLockTests
         Assert.NotEqual(0, lockScope);
     }
 
-    [Fact(Timeout = 500)]
+    [Fact(Timeout = 1000)]
     public async Task UpgradeableLock_ThreadSavety()
     {
         // Arrange
@@ -131,16 +131,33 @@ public class AsyncAsymmetricLockTests
 
         Assert.Equal(0, asyncLock.lockScope);
 
-        var task1 = Task.Run(async () => await SimulateReaction(asyncLock));
+        var task1  = SimulateGet(asyncLock);
         await Task.Delay(10);
-        var task2 = Task.Run(async () => await SimulateReaction(asyncLock));
+        var task2 = SimulateReaction(asyncLock);
         await Task.Delay(10);
-        var task3 = Task.Run(async () => await SimulateReaction(asyncLock));
+        var task3 = SimulateGet(asyncLock);
+        await Task.Delay(10);
+        var task4 = Task.Run(async () => await SimulateReaction(asyncLock));
+        var task5 = Task.Run(async () => await SimulateGet(asyncLock));
+        var task6 = Task.Run(async () => await SimulateReaction(asyncLock));
+        var task7 = Task.Run(async () => await SimulateReaction(asyncLock));
 
-        await Task.WhenAll(task1, task2, task3);
+        await Task.WhenAll(task1, task2, task3, task4, task5, task6, task7);
         Assert.Equal(0, asyncLock.locksHeld);
         Assert.Equal(0, asyncLock.upgradedLocksHeld);
         Assert.Equal(0, asyncLock.lockScope);
+    }
+
+    private async Task SimulateGet(AsyncAsymmetricLock asyncLock)
+    {
+        using (var upgradeableDisposable2 = await asyncLock.UpgradeableLockAsync())
+        {
+            Assert.NotNull(upgradeableDisposable2);
+            Assert.Equal(-1, asyncLock.locksHeld);
+            Assert.Equal(0, asyncLock.upgradedLocksHeld);
+            Assert.NotEqual(0, asyncLock.lockScope);
+            await Task.Delay(100);
+        }
     }
 
     private async Task SimulateReaction(AsyncAsymmetricLock asyncLock)

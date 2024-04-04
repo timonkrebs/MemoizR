@@ -61,7 +61,7 @@ public sealed class AsyncAsymmetricLock
                 throw new InvalidOperationException("Can not aquire recursive exclusive locks in the same scope");
             }
 
-            // If the lock is available or in exclusive mode and there are no waiting upgradeable, or upgrading upgradeable, take it immediately.
+            // If the lock is available and there are no waiting upgradeable, or upgrading upgradeable, take it immediately.
             if (locksHeld == 0 && upgradeable.IsEmpty && upgradedLocksHeld == 0)
             {
                 Interlocked.Increment(ref locksHeld);
