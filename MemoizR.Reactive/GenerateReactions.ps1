@@ -44,7 +44,7 @@ public sealed class Reaction<$genericTypesString> : ReactionBase
         $memoArgumentsString;
         this.action = action;
 
-        Task.Run(Init).GetAwaiter().GetResult();
+        Stale(CacheState.CacheCheck);
     }
 
     protected override async Task Execute(CancellationTokenSource cts)

@@ -103,7 +103,6 @@ public class AsyncAsymmetricLockTests
 
         using (var disposable = await asyncLock.UpgradeableLockAsync(cancellationTokenSource.Token))
         {
-            // Assert
             Assert.NotNull(disposable);
             Assert.Equal(1, asyncLock.locksHeld);
             Assert.Equal(1, asyncLock.upgradedLocksHeld);
@@ -150,8 +149,10 @@ public class AsyncAsymmetricLockTests
 
     private async Task SimulateGet(AsyncAsymmetricLock asyncLock)
     {
+        // Act
         using (var upgradeableDisposable2 = await asyncLock.UpgradeableLockAsync())
         {
+            // Assert
             Assert.NotNull(upgradeableDisposable2);
             Assert.Equal(-1, asyncLock.locksHeld);
             Assert.Equal(0, asyncLock.upgradedLocksHeld);
@@ -180,7 +181,6 @@ public class AsyncAsymmetricLockTests
 
             using (var upgradeableDisposable = await asyncLock.UpgradeableLockAsync(cancellationTokenSource.Token))
             {
-                // Assert
                 Assert.NotNull(upgradeableDisposable);
                 Assert.Equal(1, asyncLock.locksHeld);
                 Assert.Equal(1, asyncLock.upgradedLocksHeld);

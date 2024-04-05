@@ -239,7 +239,7 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
                         }
                     }
                     catch { }
-                }, cts.Token);
+                });
 
             return Task.CompletedTask;
         }

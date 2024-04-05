@@ -14,7 +14,7 @@ public sealed class Reaction<T> : ReactionBase
         this.memo = memo;
         this.action = action;
 
-        Task.Run(Init).GetAwaiter().GetResult();
+        Stale(CacheState.CacheDirty);
     }
 
     protected override async Task Execute(CancellationTokenSource cts)
@@ -40,7 +40,7 @@ public sealed class Reaction<T1, T2> : ReactionBase
         this.memo2 = memo2;
         this.action = action;
 
-        Task.Run(Init).GetAwaiter().GetResult();
+        Stale(CacheState.CacheDirty);
     }
 
     protected override async Task Execute(CancellationTokenSource cts)
@@ -72,7 +72,7 @@ public sealed class Reaction<T1, T2, T3> : ReactionBase
         this.memo3 = memo3;
         this.action = action;
 
-        Task.Run(Init).GetAwaiter().GetResult();
+        Stale(CacheState.CacheDirty);
     }
 
     protected override async Task Execute(CancellationTokenSource cts)
@@ -108,7 +108,7 @@ public sealed class Reaction<T1, T2, T3, T4> : ReactionBase
         this.memo4 = memo4;
         this.action = action;
 
-        Task.Run(Init).GetAwaiter().GetResult();
+        Stale(CacheState.CacheDirty);
     }
 
     protected override async Task Execute(CancellationTokenSource cts)
@@ -148,7 +148,7 @@ public sealed class Reaction<T1, T2, T3, T4, T5> : ReactionBase
         this.memo5 = memo5;
         this.action = action;
 
-        Task.Run(Init).GetAwaiter().GetResult();
+        Stale(CacheState.CacheDirty);
     }
 
     protected override async Task Execute(CancellationTokenSource cts)
@@ -192,7 +192,7 @@ public sealed class Reaction<T1, T2, T3, T4, T5, T6> : ReactionBase
         this.memo6 = memo6;
         this.action = action;
 
-        Task.Run(Init).GetAwaiter().GetResult();
+        Stale(CacheState.CacheDirty);
     }
 
     protected override async Task Execute(CancellationTokenSource cts)
@@ -240,7 +240,7 @@ public sealed class Reaction<T1, T2, T3, T4, T5, T6, T7> : ReactionBase
         this.memo7 = memo7;
         this.action = action;
 
-        Task.Run(Init).GetAwaiter().GetResult();
+        Stale(CacheState.CacheDirty);
     }
 
     protected override async Task Execute(CancellationTokenSource cts)
@@ -292,7 +292,7 @@ public sealed class Reaction<T1, T2, T3, T4, T5, T6, T7, T8> : ReactionBase
         this.memo8 = memo8;
         this.action = action;
 
-        Task.Run(Init).GetAwaiter().GetResult();
+        Stale(CacheState.CacheDirty);
     }
 
     protected override async Task Execute(CancellationTokenSource cts)
@@ -348,7 +348,7 @@ public sealed class Reaction<T1, T2, T3, T4, T5, T6, T7, T8, T9> : ReactionBase
         this.memo9 = memo9;
         this.action = action;
 
-        Task.Run(Init).GetAwaiter().GetResult();
+        Stale(CacheState.CacheDirty);
     }
 
     protected override async Task Execute(CancellationTokenSource cts)
@@ -408,7 +408,7 @@ public sealed class Reaction<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10> : Reaction
         this.memo10 = memo10;
         this.action = action;
 
-        Task.Run(Init).GetAwaiter().GetResult();
+        Stale(CacheState.CacheDirty);
     }
 
     protected override async Task Execute(CancellationTokenSource cts)
@@ -472,7 +472,7 @@ public sealed class Reaction<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11> : Rea
         this.memo11 = memo11;
         this.action = action;
 
-        Task.Run(Init).GetAwaiter().GetResult();
+        Stale(CacheState.CacheDirty);
     }
 
     protected override async Task Execute(CancellationTokenSource cts)
@@ -540,7 +540,7 @@ public sealed class Reaction<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12> 
         this.memo12 = memo12;
         this.action = action;
 
-        Task.Run(Init).GetAwaiter().GetResult();
+        Stale(CacheState.CacheDirty);
     }
 
     protected override async Task Execute(CancellationTokenSource cts)
@@ -612,7 +612,7 @@ public sealed class Reaction<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, 
         this.memo13 = memo13;
         this.action = action;
 
-        Task.Run(Init).GetAwaiter().GetResult();
+        Stale(CacheState.CacheDirty);
     }
 
     protected override async Task Execute(CancellationTokenSource cts)
@@ -688,7 +688,7 @@ public sealed class Reaction<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, 
         this.memo14 = memo14;
         this.action = action;
 
-        Task.Run(Init).GetAwaiter().GetResult();
+        Stale(CacheState.CacheDirty);
     }
 
     protected override async Task Execute(CancellationTokenSource cts)
@@ -768,7 +768,7 @@ public sealed class Reaction<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, 
         this.memo15 = memo15;
         this.action = action;
 
-        Task.Run(Init).GetAwaiter().GetResult();
+        Stale(CacheState.CacheDirty);
     }
 
     protected override async Task Execute(CancellationTokenSource cts)
@@ -852,7 +852,7 @@ public sealed class Reaction<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, 
         this.memo16 = memo16;
         this.action = action;
 
-        Task.Run(Init).GetAwaiter().GetResult();
+        Stale(CacheState.CacheDirty);
     }
 
     protected override async Task Execute(CancellationTokenSource cts)
