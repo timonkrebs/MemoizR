@@ -7,22 +7,24 @@ public sealed class Signal<T> : MemoHandlR<T>, IStateGetR<T?>
         this.Value = value;
     }
 
-    public async Task Set(T value)
+    public async Task<Task> Set(T value)
     {
+        List<Task> tasks = [];
         // There can be multiple threads updating the CacheState at the same time but no reads should be possible while in the process.
         // Must be Upgradeable because it could change to "Writeble-Lock" if something synchronously reactive is listening.
         using (await Context.ContextLock.ExclusiveLockAsync())
         {
             if (Equals(this.Value, value))
             {
+                
                 for (int i = 0; i < Observers.Length; i++)
                 {
                     if (Observers[i].TryGetTarget(out var o))
                     {
-                        await o.Stale(CacheState.CacheCheck);
+                        tasks.Add(await o.Stale(CacheState.CacheCheck));
                     }
                 }
-                return;
+                return Task.WhenAll(tasks);
             }
 
             // only updating the value should be locked
@@ -37,9 +39,10 @@ public sealed class Signal<T> : MemoHandlR<T>, IStateGetR<T?>
             {
                 if (Observers[i].TryGetTarget(out var o))
                 {
-                    await o.Stale(CacheState.CacheDirty);
+                    tasks.Add(await o.Stale(CacheState.CacheDirty));
                 }
             }
+            return Task.WhenAll(tasks);
         }
     }
 

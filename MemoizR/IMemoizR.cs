@@ -6,5 +6,5 @@ internal interface IMemoizR : IMemoHandlR
 
     CacheState State { get; set; }
 
-    Task Stale(CacheState state);
+    Task<Task> Stale(CacheState state);
 }

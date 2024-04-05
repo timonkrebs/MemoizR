@@ -211,9 +211,25 @@ public sealed class ConcurrentMap<T> : SignalHandlR, IMemoizR, IStateGetR<IEnume
         }
     }
 
-    Task IMemoizR.Stale(CacheState state)
+    async Task<Task> IMemoizR.Stale(CacheState state)
     {
-        return Stale(state);
+        if (state <= State)
+        {
+            return Task.FromResult(Task.CompletedTask);
+        }
+
+        State = state;
+
+        List<Task> tasks = [];
+        foreach (var observer in Observers)
+        {
+            if (observer.TryGetTarget(out var o))
+            {
+                tasks.Add(await o.Stale(CacheState.CacheCheck));
+            }
+        }
+
+        return Task.FromResult(Task.WhenAll(tasks));
     }
 
     ~ConcurrentMap()

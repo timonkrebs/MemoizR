@@ -77,7 +77,7 @@ public class ReactiveTests
         }
 
         var resultM1 = 0;
-        _ = Task.Run(async () => resultM1 = await m1.Get());
+        var _1 = Task.Run(async () => resultM1 = await m1.Get());
 
         await Task.Delay(100);
 
@@ -156,8 +156,8 @@ public class ReactiveTests
         var tasks = new List<Task>();
         for (var i = 0; i < 40; i++)
         {
-            tasks.Add(Task.Run(async () => await v1.Set(i)));
-            await Task.Delay(35);
+            await Task.Run(async () => await await v1.Set(i));
+            await Task.Delay(20);
         }
 
         await Task.Delay(1);

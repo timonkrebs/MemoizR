@@ -218,7 +218,7 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
         }
     }
 
-    internal Task Stale(CacheState state)
+    internal Task<Task> Stale(CacheState state)
     {
         // Add Scheduling
         lock (this)
@@ -226,7 +226,8 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
             State = state;
             cts?.Cancel();
             cts = new();
-            Task.Run(async () =>
+            
+            return Task.FromResult(Task.Run(async () =>
                 {
                     try
                     {
@@ -239,13 +240,11 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
                         }
                     }
                     catch { }
-                });
-
-            return Task.CompletedTask;
+                }));
         }
     }
 
-    Task IMemoizR.Stale(CacheState state)
+    Task<Task> IMemoizR.Stale(CacheState state)
     {
         return Stale(state);
     }

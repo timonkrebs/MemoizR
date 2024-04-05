@@ -183,25 +183,28 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR, IStateGetR<T>
             await UpdateIfNecessary();
         }
     }
-    internal async Task Stale(CacheState state)
+    internal async Task<Task> Stale(CacheState state)
     {
         if (state <= State)
         {
-            return;
+            return Task.FromResult(Task.CompletedTask);
         }
 
         State = state;
 
+        List<Task> tasks = [];
         foreach (var observer in Observers)
         {
             if (observer.TryGetTarget(out var o))
             {
-                await o.Stale(CacheState.CacheCheck);
+                tasks.Add(await o.Stale(CacheState.CacheCheck));
             }
         }
+
+        return Task.FromResult(Task.WhenAll(tasks));
     }
 
-    Task IMemoizR.Stale(CacheState state)
+    Task<Task> IMemoizR.Stale(CacheState state)
     {
         return Stale(state);
     }
