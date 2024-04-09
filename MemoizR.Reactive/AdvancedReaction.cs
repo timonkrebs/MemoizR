@@ -2,9 +2,9 @@
 
 public sealed class AdvancedReaction : ReactionBase
 {
-    private readonly Func<CancellationTokenSource, Task> fn;
+    private readonly Func<Task> fn;
 
-    internal AdvancedReaction(Func<CancellationTokenSource, Task> fn,
+    internal AdvancedReaction(Func<Task> fn,
     Context context,
     SynchronizationContext? synchronizationContext = null)
     : base(context, synchronizationContext)
@@ -14,8 +14,8 @@ public sealed class AdvancedReaction : ReactionBase
         Task.Run(Init).GetAwaiter().GetResult();
     }
 
-    protected override Task Execute(CancellationTokenSource cts)
+    protected override Task Execute()
     {
-        return fn(cts);
+        return fn();
     }
 }

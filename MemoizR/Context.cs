@@ -14,6 +14,8 @@ public class Context
     internal volatile IMemoHandlR[] CurrentGets = [];
     internal volatile int CurrentGetsIndex;
 
+    public CancellationTokenSource? CancellationTokenSource { get; internal set; }
+
     internal void CheckDependenciesTheSame(IMemoHandlR memoHandlR)
     {
         lock (this)

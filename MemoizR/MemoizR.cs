@@ -3,20 +3,19 @@ namespace MemoizR;
 public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR, IStateGetR<T>
 {
     private CacheState State { get; set; } = CacheState.CacheClean;
-    private Func<Task<T>> fn;
+    private Func<CancellationTokenSource, Task<T>> fn;
 
     CacheState IMemoizR.State { get => State; set => State = value; }
 
-    internal MemoizR(Func<Task<T>> fn, Context context, Func<T?, T?, bool>? equals = null) : base(context, equals)
+    internal MemoizR(Func<CancellationTokenSource, Task<T>> fn, Context context, Func<T?, T?, bool>? equals = null) : base(context, equals)
     {
         this.fn = fn;
         this.State = CacheState.CacheDirty;
     }
 
-    public async Task<T> Get(CancellationTokenSource cancellationTokenSource)
+    private void Cancel()
     {
-        await Task.Delay(0, cancellationTokenSource.Token);
-        return await Get();
+        cancellationTokenSource?.Cancel();
     }
 
     public async Task<T> Get()
@@ -32,6 +31,13 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR, IStateGetR<T>
         using (await mutex.LockAsync())
         using (await Context.ContextLock.UpgradeableLockAsync())
         {
+            if (Context.CancellationTokenSource == null)
+            {
+                Cancel();
+            }
+            isStartingComponent = Context.CancellationTokenSource == null;
+            Context.CancellationTokenSource ??= new CancellationTokenSource();
+            cancellationTokenSource = Context.CancellationTokenSource;
             // if someone else did read the graph while this thread was blocked it could be that this is already Clean
             if (State == CacheState.CacheClean && Context.CurrentReaction == null)
             {
@@ -45,6 +51,11 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR, IStateGetR<T>
             }
 
             await UpdateIfNecessary();
+            if (isStartingComponent)
+            {
+                Context.CancellationTokenSource = null;
+            }
+            isStartingComponent = false;
         }
 
         Thread.MemoryBarrier();
@@ -108,7 +119,7 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR, IStateGetR<T>
         try
         {
             State = CacheState.Evaluating;
-            Value = await fn();
+            Value = await fn(cancellationTokenSource!);
             State = CacheState.CacheClean;
 
             // if the sources have changed, update source & observer links

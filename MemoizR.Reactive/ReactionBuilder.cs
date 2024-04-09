@@ -213,7 +213,7 @@ public sealed class ReactionBuilder
         }
     }
 
-    public AdvancedReaction CreateAdvancedReaction(Func<CancellationTokenSource, Task> fn)
+    public AdvancedReaction CreateAdvancedReaction(Func<Task> fn)
     {
         return new AdvancedReaction(fn, memoFactory.Context, synchronizationContext)
         {

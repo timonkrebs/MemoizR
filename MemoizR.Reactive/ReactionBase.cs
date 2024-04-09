@@ -41,6 +41,9 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
     {
         using (await Context.ContextLock.UpgradeableLockAsync())
         {
+            isStartingComponent = Context.CancellationTokenSource == null;
+            Context.CancellationTokenSource ??= new CancellationTokenSource();
+            cancellationTokenSource = Context.CancellationTokenSource;
             var temp = synchronizationContext;
             try
             {
@@ -51,11 +54,16 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
             finally
             {
                 synchronizationContext = temp;
+                if (isStartingComponent)
+                {
+                    Context.CancellationTokenSource = null;
+                }
+                isStartingComponent = false;
             }
         }
     }
 
-    protected abstract Task Execute(CancellationTokenSource cts);
+    protected abstract Task Execute();
 
     // Update the reaction if dirty, or a parent turns out to be dirty.
     internal async Task UpdateIfNecessary()
@@ -128,7 +136,7 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
                         {
                             try
                             {
-                                await Execute(sourceCts);
+                                await Execute();
                             }
                             catch (Exception e)
                             {
@@ -143,7 +151,7 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
                     }
                     else
                     {
-                        await Execute(sourceCts);
+                        await Execute();
                     }
                 }
                 catch
@@ -235,10 +243,21 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
                         using (await Context.Mutex.LockAsync())
                         using (await Context.ContextLock.UpgradeableLockAsync())
                         {
+                            isStartingComponent = Context.CancellationTokenSource == null;
+                            Context.CancellationTokenSource ??= new CancellationTokenSource();
+                            cancellationTokenSource = Context.CancellationTokenSource;
                             await UpdateIfNecessary().ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
+
                         }
                     }
-                    catch { }
+                    finally
+                    {
+                        if (isStartingComponent)
+                        {
+                            Context.CancellationTokenSource = null;
+                        }
+                        isStartingComponent = false;
+                    }
                 });
 
             return Task.CompletedTask;

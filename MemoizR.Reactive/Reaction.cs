@@ -17,9 +17,9 @@ public sealed class Reaction<T> : ReactionBase
         Stale(CacheState.CacheDirty);
     }
 
-    protected override async Task Execute(CancellationTokenSource cts)
+    protected override async Task Execute()
     {
-        action(await memo.Get(cts));
+        action(await memo.Get());
     }
 }
 
@@ -43,10 +43,10 @@ public sealed class Reaction<T1, T2> : ReactionBase
         Stale(CacheState.CacheDirty);
     }
 
-    protected override async Task Execute(CancellationTokenSource cts)
+    protected override async Task Execute()
     {
-        var task1 = memo1.Get(cts);
-        var task2 = memo2.Get(cts);
+        var task1 = memo1.Get();
+        var task2 = memo2.Get();
         await Task.WhenAll(task1, task2);
         action(await task1, await task2);
     }
@@ -75,11 +75,11 @@ public sealed class Reaction<T1, T2, T3> : ReactionBase
         Stale(CacheState.CacheDirty);
     }
 
-    protected override async Task Execute(CancellationTokenSource cts)
+    protected override async Task Execute()
     {
-        var task1 = memo1.Get(cts);
-        var task2 = memo2.Get(cts);
-        var task3 = memo3.Get(cts);
+        var task1 = memo1.Get();
+        var task2 = memo2.Get();
+        var task3 = memo3.Get();
         await Task.WhenAll(task1, task2, task3);
         action(await task1, await task2, await task3);
     }
@@ -111,12 +111,12 @@ public sealed class Reaction<T1, T2, T3, T4> : ReactionBase
         Stale(CacheState.CacheDirty);
     }
 
-    protected override async Task Execute(CancellationTokenSource cts)
+    protected override async Task Execute()
     {
-        var task1 = memo1.Get(cts);
-        var task2 = memo2.Get(cts);
-        var task3 = memo3.Get(cts);
-        var task4 = memo4.Get(cts);
+        var task1 = memo1.Get();
+        var task2 = memo2.Get();
+        var task3 = memo3.Get();
+        var task4 = memo4.Get();
         await Task.WhenAll(task1, task2, task3, task4);
         action(await task1, await task2, await task3, await task4);
     }
@@ -151,13 +151,13 @@ public sealed class Reaction<T1, T2, T3, T4, T5> : ReactionBase
         Stale(CacheState.CacheDirty);
     }
 
-    protected override async Task Execute(CancellationTokenSource cts)
+    protected override async Task Execute()
     {
-        var task1 = memo1.Get(cts);
-        var task2 = memo2.Get(cts);
-        var task3 = memo3.Get(cts);
-        var task4 = memo4.Get(cts);
-        var task5 = memo5.Get(cts);
+        var task1 = memo1.Get();
+        var task2 = memo2.Get();
+        var task3 = memo3.Get();
+        var task4 = memo4.Get();
+        var task5 = memo5.Get();
         await Task.WhenAll(task1, task2, task3, task4, task5);
         action(await task1, await task2, await task3, await task4, await task5);
     }
@@ -195,14 +195,14 @@ public sealed class Reaction<T1, T2, T3, T4, T5, T6> : ReactionBase
         Stale(CacheState.CacheDirty);
     }
 
-    protected override async Task Execute(CancellationTokenSource cts)
+    protected override async Task Execute()
     {
-        var task1 = memo1.Get(cts);
-        var task2 = memo2.Get(cts);
-        var task3 = memo3.Get(cts);
-        var task4 = memo4.Get(cts);
-        var task5 = memo5.Get(cts);
-        var task6 = memo6.Get(cts);
+        var task1 = memo1.Get();
+        var task2 = memo2.Get();
+        var task3 = memo3.Get();
+        var task4 = memo4.Get();
+        var task5 = memo5.Get();
+        var task6 = memo6.Get();
         await Task.WhenAll(task1, task2, task3, task4, task5, task6);
         action(await task1, await task2, await task3, await task4, await task5, await task6);
     }
@@ -243,15 +243,15 @@ public sealed class Reaction<T1, T2, T3, T4, T5, T6, T7> : ReactionBase
         Stale(CacheState.CacheDirty);
     }
 
-    protected override async Task Execute(CancellationTokenSource cts)
+    protected override async Task Execute()
     {
-        var task1 = memo1.Get(cts);
-        var task2 = memo2.Get(cts);
-        var task3 = memo3.Get(cts);
-        var task4 = memo4.Get(cts);
-        var task5 = memo5.Get(cts);
-        var task6 = memo6.Get(cts);
-        var task7 = memo7.Get(cts);
+        var task1 = memo1.Get();
+        var task2 = memo2.Get();
+        var task3 = memo3.Get();
+        var task4 = memo4.Get();
+        var task5 = memo5.Get();
+        var task6 = memo6.Get();
+        var task7 = memo7.Get();
         await Task.WhenAll(task1, task2, task3, task4, task5, task6, task7);
         action(await task1, await task2, await task3, await task4, await task5, await task6, await task7);
     }
@@ -295,16 +295,16 @@ public sealed class Reaction<T1, T2, T3, T4, T5, T6, T7, T8> : ReactionBase
         Stale(CacheState.CacheDirty);
     }
 
-    protected override async Task Execute(CancellationTokenSource cts)
+    protected override async Task Execute()
     {
-        var task1 = memo1.Get(cts);
-        var task2 = memo2.Get(cts);
-        var task3 = memo3.Get(cts);
-        var task4 = memo4.Get(cts);
-        var task5 = memo5.Get(cts);
-        var task6 = memo6.Get(cts);
-        var task7 = memo7.Get(cts);
-        var task8 = memo8.Get(cts);
+        var task1 = memo1.Get();
+        var task2 = memo2.Get();
+        var task3 = memo3.Get();
+        var task4 = memo4.Get();
+        var task5 = memo5.Get();
+        var task6 = memo6.Get();
+        var task7 = memo7.Get();
+        var task8 = memo8.Get();
         await Task.WhenAll(task1, task2, task3, task4, task5, task6, task7, task8);
         action(await task1, await task2, await task3, await task4, await task5, await task6, await task7, await task8);
     }
@@ -351,17 +351,17 @@ public sealed class Reaction<T1, T2, T3, T4, T5, T6, T7, T8, T9> : ReactionBase
         Stale(CacheState.CacheDirty);
     }
 
-    protected override async Task Execute(CancellationTokenSource cts)
+    protected override async Task Execute()
     {
-        var task1 = memo1.Get(cts);
-        var task2 = memo2.Get(cts);
-        var task3 = memo3.Get(cts);
-        var task4 = memo4.Get(cts);
-        var task5 = memo5.Get(cts);
-        var task6 = memo6.Get(cts);
-        var task7 = memo7.Get(cts);
-        var task8 = memo8.Get(cts);
-        var task9 = memo9.Get(cts);
+        var task1 = memo1.Get();
+        var task2 = memo2.Get();
+        var task3 = memo3.Get();
+        var task4 = memo4.Get();
+        var task5 = memo5.Get();
+        var task6 = memo6.Get();
+        var task7 = memo7.Get();
+        var task8 = memo8.Get();
+        var task9 = memo9.Get();
         await Task.WhenAll(task1, task2, task3, task4, task5, task6, task7, task8, task9);
         action(await task1, await task2, await task3, await task4, await task5, await task6, await task7, await task8, await task9);
     }
@@ -411,18 +411,18 @@ public sealed class Reaction<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10> : Reaction
         Stale(CacheState.CacheDirty);
     }
 
-    protected override async Task Execute(CancellationTokenSource cts)
+    protected override async Task Execute()
     {
-        var task1 = memo1.Get(cts);
-        var task2 = memo2.Get(cts);
-        var task3 = memo3.Get(cts);
-        var task4 = memo4.Get(cts);
-        var task5 = memo5.Get(cts);
-        var task6 = memo6.Get(cts);
-        var task7 = memo7.Get(cts);
-        var task8 = memo8.Get(cts);
-        var task9 = memo9.Get(cts);
-        var task10 = memo10.Get(cts);
+        var task1 = memo1.Get();
+        var task2 = memo2.Get();
+        var task3 = memo3.Get();
+        var task4 = memo4.Get();
+        var task5 = memo5.Get();
+        var task6 = memo6.Get();
+        var task7 = memo7.Get();
+        var task8 = memo8.Get();
+        var task9 = memo9.Get();
+        var task10 = memo10.Get();
         await Task.WhenAll(task1, task2, task3, task4, task5, task6, task7, task8, task9, task10);
         action(await task1, await task2, await task3, await task4, await task5, await task6, await task7, await task8, await task9, await task10);
     }
@@ -475,19 +475,19 @@ public sealed class Reaction<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11> : Rea
         Stale(CacheState.CacheDirty);
     }
 
-    protected override async Task Execute(CancellationTokenSource cts)
+    protected override async Task Execute()
     {
-        var task1 = memo1.Get(cts);
-        var task2 = memo2.Get(cts);
-        var task3 = memo3.Get(cts);
-        var task4 = memo4.Get(cts);
-        var task5 = memo5.Get(cts);
-        var task6 = memo6.Get(cts);
-        var task7 = memo7.Get(cts);
-        var task8 = memo8.Get(cts);
-        var task9 = memo9.Get(cts);
-        var task10 = memo10.Get(cts);
-        var task11 = memo11.Get(cts);
+        var task1 = memo1.Get();
+        var task2 = memo2.Get();
+        var task3 = memo3.Get();
+        var task4 = memo4.Get();
+        var task5 = memo5.Get();
+        var task6 = memo6.Get();
+        var task7 = memo7.Get();
+        var task8 = memo8.Get();
+        var task9 = memo9.Get();
+        var task10 = memo10.Get();
+        var task11 = memo11.Get();
         await Task.WhenAll(task1, task2, task3, task4, task5, task6, task7, task8, task9, task10, task11);
         action(await task1, await task2, await task3, await task4, await task5, await task6, await task7, await task8, await task9, await task10, await task11);
     }
@@ -543,20 +543,20 @@ public sealed class Reaction<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12> 
         Stale(CacheState.CacheDirty);
     }
 
-    protected override async Task Execute(CancellationTokenSource cts)
+    protected override async Task Execute()
     {
-        var task1 = memo1.Get(cts);
-        var task2 = memo2.Get(cts);
-        var task3 = memo3.Get(cts);
-        var task4 = memo4.Get(cts);
-        var task5 = memo5.Get(cts);
-        var task6 = memo6.Get(cts);
-        var task7 = memo7.Get(cts);
-        var task8 = memo8.Get(cts);
-        var task9 = memo9.Get(cts);
-        var task10 = memo10.Get(cts);
-        var task11 = memo11.Get(cts);
-        var task12 = memo12.Get(cts);
+        var task1 = memo1.Get();
+        var task2 = memo2.Get();
+        var task3 = memo3.Get();
+        var task4 = memo4.Get();
+        var task5 = memo5.Get();
+        var task6 = memo6.Get();
+        var task7 = memo7.Get();
+        var task8 = memo8.Get();
+        var task9 = memo9.Get();
+        var task10 = memo10.Get();
+        var task11 = memo11.Get();
+        var task12 = memo12.Get();
         await Task.WhenAll(task1, task2, task3, task4, task5, task6, task7, task8, task9, task10, task11, task12);
         action(await task1, await task2, await task3, await task4, await task5, await task6, await task7, await task8, await task9, await task10, await task11, await task12);
     }
@@ -615,21 +615,21 @@ public sealed class Reaction<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, 
         Stale(CacheState.CacheDirty);
     }
 
-    protected override async Task Execute(CancellationTokenSource cts)
+    protected override async Task Execute()
     {
-        var task1 = memo1.Get(cts);
-        var task2 = memo2.Get(cts);
-        var task3 = memo3.Get(cts);
-        var task4 = memo4.Get(cts);
-        var task5 = memo5.Get(cts);
-        var task6 = memo6.Get(cts);
-        var task7 = memo7.Get(cts);
-        var task8 = memo8.Get(cts);
-        var task9 = memo9.Get(cts);
-        var task10 = memo10.Get(cts);
-        var task11 = memo11.Get(cts);
-        var task12 = memo12.Get(cts);
-        var task13 = memo13.Get(cts);
+        var task1 = memo1.Get();
+        var task2 = memo2.Get();
+        var task3 = memo3.Get();
+        var task4 = memo4.Get();
+        var task5 = memo5.Get();
+        var task6 = memo6.Get();
+        var task7 = memo7.Get();
+        var task8 = memo8.Get();
+        var task9 = memo9.Get();
+        var task10 = memo10.Get();
+        var task11 = memo11.Get();
+        var task12 = memo12.Get();
+        var task13 = memo13.Get();
         await Task.WhenAll(task1, task2, task3, task4, task5, task6, task7, task8, task9, task10, task11, task12, task13);
         action(await task1, await task2, await task3, await task4, await task5, await task6, await task7, await task8, await task9, await task10, await task11, await task12, await task13);
     }
@@ -691,22 +691,22 @@ public sealed class Reaction<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, 
         Stale(CacheState.CacheDirty);
     }
 
-    protected override async Task Execute(CancellationTokenSource cts)
+    protected override async Task Execute()
     {
-        var task1 = memo1.Get(cts);
-        var task2 = memo2.Get(cts);
-        var task3 = memo3.Get(cts);
-        var task4 = memo4.Get(cts);
-        var task5 = memo5.Get(cts);
-        var task6 = memo6.Get(cts);
-        var task7 = memo7.Get(cts);
-        var task8 = memo8.Get(cts);
-        var task9 = memo9.Get(cts);
-        var task10 = memo10.Get(cts);
-        var task11 = memo11.Get(cts);
-        var task12 = memo12.Get(cts);
-        var task13 = memo13.Get(cts);
-        var task14 = memo14.Get(cts);
+        var task1 = memo1.Get();
+        var task2 = memo2.Get();
+        var task3 = memo3.Get();
+        var task4 = memo4.Get();
+        var task5 = memo5.Get();
+        var task6 = memo6.Get();
+        var task7 = memo7.Get();
+        var task8 = memo8.Get();
+        var task9 = memo9.Get();
+        var task10 = memo10.Get();
+        var task11 = memo11.Get();
+        var task12 = memo12.Get();
+        var task13 = memo13.Get();
+        var task14 = memo14.Get();
         await Task.WhenAll(task1, task2, task3, task4, task5, task6, task7, task8, task9, task10, task11, task12, task13, task14);
         action(await task1, await task2, await task3, await task4, await task5, await task6, await task7, await task8, await task9, await task10, await task11, await task12, await task13, await task14);
     }
@@ -771,23 +771,23 @@ public sealed class Reaction<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, 
         Stale(CacheState.CacheDirty);
     }
 
-    protected override async Task Execute(CancellationTokenSource cts)
+    protected override async Task Execute()
     {
-        var task1 = memo1.Get(cts);
-        var task2 = memo2.Get(cts);
-        var task3 = memo3.Get(cts);
-        var task4 = memo4.Get(cts);
-        var task5 = memo5.Get(cts);
-        var task6 = memo6.Get(cts);
-        var task7 = memo7.Get(cts);
-        var task8 = memo8.Get(cts);
-        var task9 = memo9.Get(cts);
-        var task10 = memo10.Get(cts);
-        var task11 = memo11.Get(cts);
-        var task12 = memo12.Get(cts);
-        var task13 = memo13.Get(cts);
-        var task14 = memo14.Get(cts);
-        var task15 = memo15.Get(cts);
+        var task1 = memo1.Get();
+        var task2 = memo2.Get();
+        var task3 = memo3.Get();
+        var task4 = memo4.Get();
+        var task5 = memo5.Get();
+        var task6 = memo6.Get();
+        var task7 = memo7.Get();
+        var task8 = memo8.Get();
+        var task9 = memo9.Get();
+        var task10 = memo10.Get();
+        var task11 = memo11.Get();
+        var task12 = memo12.Get();
+        var task13 = memo13.Get();
+        var task14 = memo14.Get();
+        var task15 = memo15.Get();
         await Task.WhenAll(task1, task2, task3, task4, task5, task6, task7, task8, task9, task10, task11, task12, task13, task14, task15);
         action(await task1, await task2, await task3, await task4, await task5, await task6, await task7, await task8, await task9, await task10, await task11, await task12, await task13, await task14, await task15);
     }
@@ -855,25 +855,26 @@ public sealed class Reaction<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, 
         Stale(CacheState.CacheDirty);
     }
 
-    protected override async Task Execute(CancellationTokenSource cts)
+    protected override async Task Execute()
     {
-        var task1 = memo1.Get(cts);
-        var task2 = memo2.Get(cts);
-        var task3 = memo3.Get(cts);
-        var task4 = memo4.Get(cts);
-        var task5 = memo5.Get(cts);
-        var task6 = memo6.Get(cts);
-        var task7 = memo7.Get(cts);
-        var task8 = memo8.Get(cts);
-        var task9 = memo9.Get(cts);
-        var task10 = memo10.Get(cts);
-        var task11 = memo11.Get(cts);
-        var task12 = memo12.Get(cts);
-        var task13 = memo13.Get(cts);
-        var task14 = memo14.Get(cts);
-        var task15 = memo15.Get(cts);
-        var task16 = memo16.Get(cts);
+        var task1 = memo1.Get();
+        var task2 = memo2.Get();
+        var task3 = memo3.Get();
+        var task4 = memo4.Get();
+        var task5 = memo5.Get();
+        var task6 = memo6.Get();
+        var task7 = memo7.Get();
+        var task8 = memo8.Get();
+        var task9 = memo9.Get();
+        var task10 = memo10.Get();
+        var task11 = memo11.Get();
+        var task12 = memo12.Get();
+        var task13 = memo13.Get();
+        var task14 = memo14.Get();
+        var task15 = memo15.Get();
+        var task16 = memo16.Get();
         await Task.WhenAll(task1, task2, task3, task4, task5, task6, task7, task8, task9, task10, task11, task12, task13, task14, task15, task16);
         action(await task1, await task2, await task3, await task4, await task5, await task6, await task7, await task8, await task9, await task10, await task11, await task12, await task13, await task14, await task15, await task16);
     }
 }
+

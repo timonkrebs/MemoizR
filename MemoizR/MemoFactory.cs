@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+
 namespace MemoizR;
 
 public sealed class MemoFactory
@@ -63,10 +65,20 @@ public sealed class MemoFactory
 
     public MemoizR<T> CreateMemoizR<T>(Func<Task<T>> fn)
     {
-        return CreateMemoizR("MemoizR", fn);
+        return CreateMemoizR(_ => fn());
     }
 
     public MemoizR<T> CreateMemoizR<T>(string label, Func<Task<T>> fn, Func<T?, T?, bool>? equals = null)
+    {
+        return CreateMemoizR(label, _ => fn(), equals);
+    }
+
+    public MemoizR<T> CreateMemoizR<T>(Func<CancellationTokenSource, Task<T>> fn)
+    {
+        return CreateMemoizR("MemoizR", fn);
+    }
+
+    public MemoizR<T> CreateMemoizR<T>(string label, Func<CancellationTokenSource, Task<T>> fn, Func<T?, T?, bool>? equals = null)
     {
         return new MemoizR<T>(fn, Context, equals)
         {

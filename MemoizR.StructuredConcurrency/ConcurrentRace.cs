@@ -4,7 +4,6 @@ public sealed class ConcurrentRace<T> : SignalHandlR, IMemoizR, IStateGetR<T>
 {
     private CacheState State { get; set; } = CacheState.CacheDirty;
     private IReadOnlyCollection<Func<CancellationTokenSource, Task<T>>> fns;
-    private CancellationTokenSource? cancellationTokenSource = new();
     private T value = default!;
 
     CacheState IMemoizR.State { get => State; set => State = value; }
@@ -19,21 +18,32 @@ public sealed class ConcurrentRace<T> : SignalHandlR, IMemoizR, IStateGetR<T>
         cancellationTokenSource?.Cancel();
     }
 
-    public Task<T> Get()
+    public async Task<T> Get()
     {
-        return Get(new CancellationTokenSource());
-    }
-
-    public async Task<T> Get(CancellationTokenSource cancellationTokenSource)
-    {
-        Cancel();
-        this.cancellationTokenSource = cancellationTokenSource;
         // Only one thread should evaluate the graph at a time. otherwise the context could get messed up.
         // This should lead to perf gains because memoization can be utilized more efficiently.
         using (await mutex.LockAsync())
         using (await Context.ContextLock.UpgradeableLockAsync())
         {
-            await Update();
+            if (Context.CancellationTokenSource == null)
+            {
+                Cancel();
+            }
+            try
+            {
+                isStartingComponent = Context.CancellationTokenSource == null;
+                Context.CancellationTokenSource ??= new CancellationTokenSource();
+                cancellationTokenSource = Context.CancellationTokenSource;
+                await Update();
+            }
+            finally
+            {
+                if (isStartingComponent)
+                {
+                    Context.CancellationTokenSource = null;
+                }
+                isStartingComponent = false;
+            }
         }
 
         Thread.MemoryBarrier();
@@ -106,9 +116,27 @@ public sealed class ConcurrentRace<T> : SignalHandlR, IMemoizR, IStateGetR<T>
         }
     }
 
+    internal async Task Stale(CacheState state)
+    {
+        if (state <= State)
+        {
+            return;
+        }
+
+        State = state;
+
+        foreach (var observer in Observers)
+        {
+            if (observer.TryGetTarget(out var o))
+            {
+                await o.Stale(CacheState.CacheDirty);
+            }
+        }
+    }
+
     Task IMemoizR.Stale(CacheState state)
     {
-        return Task.CompletedTask;
+        return Stale(state);
     }
 
     ~ConcurrentRace()

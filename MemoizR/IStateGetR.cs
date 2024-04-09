@@ -2,5 +2,5 @@ namespace MemoizR;
 
 public interface IStateGetR<T>
 {
-    public Task<T> Get(CancellationTokenSource cancellationTokenSource);    
+    public Task<T> Get();    
 }

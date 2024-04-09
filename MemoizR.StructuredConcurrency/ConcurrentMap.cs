@@ -4,7 +4,6 @@ public sealed class ConcurrentMap<T> : SignalHandlR, IMemoizR, IStateGetR<IEnume
 {
     private CacheState State { get; set; } = CacheState.CacheClean;
     private IReadOnlyCollection<Func<CancellationTokenSource, Task<T>>> fns;
-    private CancellationTokenSource? cancellationTokenSource;
     private IEnumerable<T> value = new List<T>();
 
     CacheState IMemoizR.State { get => State; set => State = value; }
@@ -20,15 +19,8 @@ public sealed class ConcurrentMap<T> : SignalHandlR, IMemoizR, IStateGetR<IEnume
         cancellationTokenSource?.Cancel();
     }
 
-    public Task<IEnumerable<T>> Get()
+    public async Task<IEnumerable<T>> Get()
     {
-        return Get(new());
-    }
-
-    public async Task<IEnumerable<T>> Get(CancellationTokenSource cancellationTokenSource)
-    {
-        Cancel();
-        this.cancellationTokenSource = cancellationTokenSource;
         if (State == CacheState.CacheClean && Context.CurrentReaction == null)
         {
             return value;
@@ -39,19 +31,37 @@ public sealed class ConcurrentMap<T> : SignalHandlR, IMemoizR, IStateGetR<IEnume
         using (await mutex.LockAsync())
         using (await Context.ContextLock.UpgradeableLockAsync())
         {
-            // if someone else did read the graph while this thread was blocekd it could be that this is already Clean
-            if (State == CacheState.CacheClean && Context.CurrentReaction == null)
+            if (Context.CancellationTokenSource == null)
             {
-                Thread.MemoryBarrier();
-                return value;
+                Cancel();
             }
-
-            if (Context.CurrentReaction != null)
+            try
             {
-                Context.CheckDependenciesTheSame(this);
-            }
+                isStartingComponent = Context.CancellationTokenSource == null;
+                Context.CancellationTokenSource ??= new CancellationTokenSource();
+                cancellationTokenSource = Context.CancellationTokenSource;
+                // if someone else did read the graph while this thread was blocekd it could be that this is already Clean
+                if (State == CacheState.CacheClean && Context.CurrentReaction == null)
+                {
+                    Thread.MemoryBarrier();
+                    return value;
+                }
 
-            await UpdateIfNecessary();
+                if (Context.CurrentReaction != null)
+                {
+                    Context.CheckDependenciesTheSame(this);
+                }
+
+                await UpdateIfNecessary();
+            }
+            finally
+            {
+                if (isStartingComponent)
+                {
+                    Context.CancellationTokenSource = null;
+                }
+                isStartingComponent = false;
+            }
         }
 
         Thread.MemoryBarrier();

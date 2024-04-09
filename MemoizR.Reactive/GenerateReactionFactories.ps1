@@ -52,7 +52,7 @@ for ($i = 1; $i -le 16; $i++) {
 }
 
 $classFooter = @"
-    public AdvancedReaction CreateAdvancedReaction(Func<CancellationTokenSource, Task> fn)
+    public AdvancedReaction CreateAdvancedReaction(Func<Task> fn)
     {
         return new AdvancedReaction(fn, memoFactory.Context, synchronizationContext)
         {

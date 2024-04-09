@@ -16,7 +16,7 @@ function GenerateReactionClass {
         $memoFields += "private readonly IStateGetR<T$i> memo$i;"
         $memoParameters += "IStateGetR<T$i> memo$i"
         $memoArguments += "this.memo$i = memo$i"
-        $taskVariables += "var task$i = memo$i.Get(cts);"
+        $taskVariables += "var task$i = memo$i.Get();"
         $whenAllVariables += "task$i"
         $actionParameters += "await task$i"
     }
@@ -44,10 +44,10 @@ public sealed class Reaction<$genericTypesString> : ReactionBase
         $memoArgumentsString;
         this.action = action;
 
-        Stale(CacheState.CacheCheck);
+        Stale(CacheState.CacheDirty);
     }
 
-    protected override async Task Execute(CancellationTokenSource cts)
+    protected override async Task Execute()
     {
         $taskVariablesString
         await Task.WhenAll($($whenAllVariables -join ', '));

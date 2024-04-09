@@ -173,8 +173,8 @@ public class ReactiveTests
 
         await Task.Delay(100);
 
-        Assert.Equal(41, memoInvocationCount);
         Assert.Equal(41, invocationCountR1);
         Assert.Equal(41, invocationCountR2);
+        Assert.Equal(41, memoInvocationCount);
     }
 }

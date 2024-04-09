@@ -236,7 +236,7 @@ public class StructuredConcurrencyTests
         var c1 = f.CreateConcurrentMapReduce(
             async c =>
             {
-                await child1.Get(c);
+                await child1.Get();
                 return 4;
             },
             async c =>
