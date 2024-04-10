@@ -104,7 +104,7 @@ var child1 = f.CreateConcurrentMapReduce(
 var c1 = f.CreateConcurrentMapReduce(
     async c =>
     {
-        await child1.Get(c);
+        await child1.Get();
         return 4;
     });
 

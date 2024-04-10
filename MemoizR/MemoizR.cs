@@ -7,7 +7,7 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR, IStateGetR<T>
 
     CacheState IMemoizR.State { get => State; set => State = value; }
 
-    internal MemoizR(Func<CancellationTokenSource, Task<T>> fn, Context context, Func<T?, T?, bool>? equals = null) : base(context, equals)
+    internal MemoizR(Func<CancellationTokenSource, Task<T>> fn, Context context) : base(context)
     {
         this.fn = fn;
         this.State = CacheState.CacheDirty;

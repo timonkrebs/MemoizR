@@ -2,7 +2,7 @@ namespace MemoizR;
 
 public sealed class Signal<T> : MemoHandlR<T>, IStateGetR<T?>
 {
-    internal Signal(T value, Context context, Func<T?, T?, bool>? equals = null) : base(context, equals)
+    internal Signal(T value, Context context) : base(context)
     {
         this.Value = value;
     }

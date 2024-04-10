@@ -4,7 +4,6 @@ public sealed class ConcurrentRace<T> : SignalHandlR, IMemoizR, IStateGetR<T>
 {
     private CacheState State { get; set; } = CacheState.CacheDirty;
     private IReadOnlyCollection<Func<CancellationTokenSource, Task<T>>> fns;
-    private T value = default!;
 
     CacheState IMemoizR.State { get => State; set => State = value; }
 
@@ -34,7 +33,7 @@ public sealed class ConcurrentRace<T> : SignalHandlR, IMemoizR, IStateGetR<T>
                 isStartingComponent = Context.CancellationTokenSource == null;
                 Context.CancellationTokenSource ??= new CancellationTokenSource();
                 cancellationTokenSource = Context.CancellationTokenSource;
-                await Update();
+                return await Update();
             }
             finally
             {
@@ -45,13 +44,10 @@ public sealed class ConcurrentRace<T> : SignalHandlR, IMemoizR, IStateGetR<T>
                 isStartingComponent = false;
             }
         }
-
-        Thread.MemoryBarrier();
-        return value;
     }
 
     /** run the computation fn, updating the cached value */
-    private async Task Update()
+    private async Task<T> Update()
     {
         if (State == CacheState.Evaluating) throw new InvalidOperationException("Cyclic behavior detected");
 
@@ -63,6 +59,8 @@ public sealed class ConcurrentRace<T> : SignalHandlR, IMemoizR, IStateGetR<T>
         Context.CurrentReaction = this;
         Context.CurrentGets = [];
         Context.CurrentGetsIndex = 0;
+
+        T value = default!;
 
         try
         {
@@ -86,6 +84,7 @@ public sealed class ConcurrentRace<T> : SignalHandlR, IMemoizR, IStateGetR<T>
         catch (TaskCanceledException)
         {
             State = CacheState.CacheCheck;
+            throw;
         }
         finally
         {
@@ -106,6 +105,8 @@ public sealed class ConcurrentRace<T> : SignalHandlR, IMemoizR, IStateGetR<T>
                 }
             }
         }
+
+        return value;
     }
 
     async Task IMemoizR.UpdateIfNecessary()

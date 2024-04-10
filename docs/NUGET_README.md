@@ -85,9 +85,9 @@ var child1 = f.CreateConcurrentMapReduce(
 
 // all tasks get canceled if one fails
 var c1 = f.CreateConcurrentMapReduce(
-    async c =>
+    async _ =>
     {
-        await child1.Get(c);
+        await child1.Get();
 
         // Any group work can kick off other group work.
         await Task.WhenAll(Enumerable.Range(1, 10)
@@ -96,7 +96,7 @@ var c1 = f.CreateConcurrentMapReduce(
                 {
                     await Task.Delay(3000, c.Token);
                     return x;
-                }).Get(c)));
+                }).Get()));
         
         return 4;
     });

@@ -2,7 +2,7 @@ namespace MemoizR;
 
 public sealed class EagerRelativeSignal<T> : MemoHandlR<T>, IStateGetR<T>
 {
-    internal EagerRelativeSignal(T value, Context context) : base(context, null)
+    internal EagerRelativeSignal(T value, Context context) : base(context)
     {
         this.Value = value;
     }

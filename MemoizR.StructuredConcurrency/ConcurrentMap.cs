@@ -1,10 +1,9 @@
 namespace MemoizR.StructuredConcurrency;
 
-public sealed class ConcurrentMap<T> : SignalHandlR, IMemoizR, IStateGetR<IEnumerable<T>>
+public sealed class ConcurrentMap<T> : MemoHandlR<IEnumerable<T>>, IMemoizR, IStateGetR<IEnumerable<T>>
 {
     private CacheState State { get; set; } = CacheState.CacheClean;
     private IReadOnlyCollection<Func<CancellationTokenSource, Task<T>>> fns;
-    private IEnumerable<T> value = new List<T>();
 
     CacheState IMemoizR.State { get => State; set => State = value; }
 
@@ -23,7 +22,8 @@ public sealed class ConcurrentMap<T> : SignalHandlR, IMemoizR, IStateGetR<IEnume
     {
         if (State == CacheState.CacheClean && Context.CurrentReaction == null)
         {
-            return value;
+            Thread.MemoryBarrier();
+            return Value;
         }
 
         // Only one thread should evaluate the graph at a time. otherwise the context could get messed up.
@@ -44,7 +44,7 @@ public sealed class ConcurrentMap<T> : SignalHandlR, IMemoizR, IStateGetR<IEnume
                 if (State == CacheState.CacheClean && Context.CurrentReaction == null)
                 {
                     Thread.MemoryBarrier();
-                    return value;
+                    return Value;
                 }
 
                 if (Context.CurrentReaction != null)
@@ -65,7 +65,7 @@ public sealed class ConcurrentMap<T> : SignalHandlR, IMemoizR, IStateGetR<IEnume
         }
 
         Thread.MemoryBarrier();
-        return value;
+        return Value;
     }
 
     /** update() if dirty, or a parent turns out to be dirty. */
@@ -123,7 +123,7 @@ public sealed class ConcurrentMap<T> : SignalHandlR, IMemoizR, IStateGetR<IEnume
         try
         {
             State = CacheState.Evaluating;
-            value = await new StructuredResultsJob<T>(fns, cancellationTokenSource!).Run();
+            Value = await new StructuredResultsJob<T>(fns, cancellationTokenSource!).Run();
             State = CacheState.CacheClean;
             // if the sources have changed, update source & observer links
             if (Context.CurrentGets.Length > 0)

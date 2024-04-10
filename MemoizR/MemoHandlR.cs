@@ -27,11 +27,9 @@ public abstract class SignalHandlR : IMemoHandlR
 
 public abstract class MemoHandlR<T> : SignalHandlR
 {
-    protected Func<T?, T?, bool> equals;
     internal T Value = default!;
 
-    internal MemoHandlR(Context context, Func<T?, T?, bool>? equals) : base(context)
+    internal MemoHandlR(Context context) : base(context)
     {
-        this.equals = equals ?? ((a, b) => Object.Equals(a, b));
     }
 }

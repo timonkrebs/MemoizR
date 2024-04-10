@@ -1,11 +1,10 @@
 namespace MemoizR.StructuredConcurrency;
 
-public sealed class ConcurrentMapReduce<T> : SignalHandlR, IMemoizR, IStateGetR<T>
+public sealed class ConcurrentMapReduce<T> : MemoHandlR<T>, IMemoizR, IStateGetR<T>
 {
     private CacheState State { get; set; } = CacheState.CacheClean;
     private IReadOnlyCollection<Func<CancellationTokenSource, Task<T>>> fns;
     private readonly Func<T, T, T?> reduce;
-    private T value = default!;
 
     CacheState IMemoizR.State { get => State; set => State = value; }
 
@@ -26,7 +25,7 @@ public sealed class ConcurrentMapReduce<T> : SignalHandlR, IMemoizR, IStateGetR<
         if (State == CacheState.CacheClean && Context.CurrentReaction == null)
         {
             Thread.MemoryBarrier();
-            return value;
+            return Value;
         }
 
         // Only one thread should evaluate the graph at a time. otherwise the context could get messed up.
@@ -38,7 +37,6 @@ public sealed class ConcurrentMapReduce<T> : SignalHandlR, IMemoizR, IStateGetR<
             {
                 Cancel();
             }
-
             try
             {
                 isStartingComponent = Context.CancellationTokenSource == null;
@@ -48,7 +46,7 @@ public sealed class ConcurrentMapReduce<T> : SignalHandlR, IMemoizR, IStateGetR<
                 if (State == CacheState.CacheClean && Context.CurrentReaction == null)
                 {
                     Thread.MemoryBarrier();
-                    return value;
+                    return Value;
                 }
 
                 if (Context.CurrentReaction != null)
@@ -69,7 +67,7 @@ public sealed class ConcurrentMapReduce<T> : SignalHandlR, IMemoizR, IStateGetR<
         }
 
         Thread.MemoryBarrier();
-        return value;
+        return Value;
     }
 
     /** update() if dirty, or a parent turns out to be dirty. */
@@ -127,7 +125,7 @@ public sealed class ConcurrentMapReduce<T> : SignalHandlR, IMemoizR, IStateGetR<
         try
         {
             State = CacheState.Evaluating;
-            value = await new StructuredReduceJob<T>(fns, reduce, cancellationTokenSource!).Run();
+            Value = await new StructuredReduceJob<T>(fns, reduce, cancellationTokenSource!).Run();
             State = CacheState.CacheClean;
 
             // if the sources have changed, update source & observer links
@@ -184,7 +182,6 @@ public sealed class ConcurrentMapReduce<T> : SignalHandlR, IMemoizR, IStateGetR<
                     }
                 }
             }
-
         }
 
         // We've rerun with the latest values from all of our Sources.

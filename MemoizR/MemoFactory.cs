@@ -68,9 +68,9 @@ public sealed class MemoFactory
         return CreateMemoizR(_ => fn());
     }
 
-    public MemoizR<T> CreateMemoizR<T>(string label, Func<Task<T>> fn, Func<T?, T?, bool>? equals = null)
+    public MemoizR<T> CreateMemoizR<T>(string label, Func<Task<T>> fn)
     {
-        return CreateMemoizR(label, _ => fn(), equals);
+        return CreateMemoizR(label, _ => fn());
     }
 
     public MemoizR<T> CreateMemoizR<T>(Func<CancellationTokenSource, Task<T>> fn)
@@ -78,9 +78,9 @@ public sealed class MemoFactory
         return CreateMemoizR("MemoizR", fn);
     }
 
-    public MemoizR<T> CreateMemoizR<T>(string label, Func<CancellationTokenSource, Task<T>> fn, Func<T?, T?, bool>? equals = null)
+    public MemoizR<T> CreateMemoizR<T>(string label, Func<CancellationTokenSource, Task<T>> fn)
     {
-        return new MemoizR<T>(fn, Context, equals)
+        return new MemoizR<T>(fn, Context)
         {
             Label = label
         };
