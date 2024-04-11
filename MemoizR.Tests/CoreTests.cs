@@ -278,36 +278,26 @@ public class CoreTests
     [Fact]
     public async Task TestDependencyUpdate()
     {
-        // Create a MemoFactory instance
         var f = new MemoFactory();
 
-        // Create a signal 'v1' with an initial value of 1
         var v1 = f.CreateSignal(1);
-
-        // Create a memoized computation 'm1' that depends on 'v1'
         var m1 = f.CreateMemoizR(async () => await v1.Get() * 2);
 
-        // Check the initial value of 'm1'
         Assert.Equal(2, await m1.Get());
 
-        // Update 'v1' to 3
         await v1.Set(3);
 
-        // Confirm that 'm1' updates automatically due to the change in 'v1'
         Assert.Equal(6, await m1.Get());
     }
 
     [Fact]
     public async Task TestCaching()
     {
-        // Create a MemoFactory instance
         var f = new MemoFactory();
 
-        // Create a signal 'v1' with an initial value of 1
         var v1 = f.CreateSignal(1);
 
         var invocationCount = 0;
-        // Create a memoized computation 'm1' that depends on 'v1'
         var m1 = f.CreateMemoizR(async () =>
         {
             invocationCount++;
@@ -326,30 +316,27 @@ public class CoreTests
     [Fact]
     public async Task TestThreadSafety()
     {
-        // Create a MemoFactory instance
         var f = new MemoFactory();
 
-        // Create a signal 'v1' with an initial value of 1
         var v1 = f.CreateSignal(1);
 
         var invocationCount = 0;
-        // Create a memoized computation 'm1' that depends on 'v1'
         var m1 = f.CreateMemoizR(async () =>
         {
             invocationCount++;
             return await v1.Get() * 2;
         });
 
-        // Create multiple threads to access 'm1' concurrently
         var tasks = new List<Task<int>>();
 
         await v1.Set(2);
+
+        // Create multiple threads to access 'm1' concurrently
         for (var i = 0; i < 100; i++)
         {
-            tasks.Add(Task.Run(async () => await m1.Get()));
+            tasks.Add(Task.Run(m1.Get));
         }
 
-        // Wait for all tasks to complete
         await Task.WhenAll(tasks);
 
         // Check if 'm1' was evaluated only once (thread-safe)
@@ -359,7 +346,6 @@ public class CoreTests
     [Fact]
     public async Task TestRelativeThreadSafety()
     {
-        // Create a MemoFactory instance
         var f = new MemoFactory();
 
         // Create a signal 'v1' with an initial value of 1
@@ -380,7 +366,6 @@ public class CoreTests
             tasks.Add(Task.Run(async () => await v1.Set(x => x + 2)));
         }
 
-        // Wait for all tasks to complete
         await Task.WhenAll(tasks);
 
         // Check if 'm1' was not evaluated
@@ -394,14 +379,12 @@ public class CoreTests
     [Fact]
     public async Task TestSignalEquality()
     {
-        // Create a MemoFactory instance
         var f = new MemoFactory();
 
         // Create two signals with the same initial value
         var v1 = f.CreateSignal(1);
         var v2 = f.CreateSignal(1);
 
-        // Create a memoized computation 'm1' for each signal
         var m1 = f.CreateMemoizR(async () => await v1.Get() * 2);
         var m2 = f.CreateMemoizR(async () => await v2.Get() * 2);
 
@@ -420,7 +403,6 @@ public class CoreTests
     [Fact]
     public async Task TestDynamicSignals()
     {
-        // Create a MemoFactory instance
         var f = new MemoFactory();
 
         var v1 = f.CreateSignal(1);

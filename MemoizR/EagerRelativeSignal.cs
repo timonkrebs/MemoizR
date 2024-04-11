@@ -31,13 +31,7 @@ public sealed class EagerRelativeSignal<T> : MemoHandlR<T>, IStateGetR<T>
             }
         }
     }
-
-    public async Task<T> Get(CancellationTokenSource cancellationTokenSource)
-    {
-        await Task.Delay(0, cancellationTokenSource.Token);
-        return await Get();
-    }
-
+    
     public async Task<T> Get()
     {
         if (Context.CurrentReaction == null)

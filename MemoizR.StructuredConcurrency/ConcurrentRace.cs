@@ -1,6 +1,6 @@
 namespace MemoizR.StructuredConcurrency;
 
-public sealed class ConcurrentRace<T> : SignalHandlR, IMemoizR, IStateGetR<T>
+public sealed class ConcurrentRace<T> : MemoHandlR<T>, IMemoizR, IStateGetR<T>
 {
     private CacheState State { get; set; } = CacheState.CacheDirty;
     private IReadOnlyCollection<Func<CancellationTokenSource, Task<T>>> fns;
@@ -24,10 +24,6 @@ public sealed class ConcurrentRace<T> : SignalHandlR, IMemoizR, IStateGetR<T>
         using (await mutex.LockAsync())
         using (await Context.ContextLock.UpgradeableLockAsync())
         {
-            if (Context.CancellationTokenSource == null)
-            {
-                Cancel();
-            }
             try
             {
                 isStartingComponent = Context.CancellationTokenSource == null;
@@ -50,6 +46,7 @@ public sealed class ConcurrentRace<T> : SignalHandlR, IMemoizR, IStateGetR<T>
     private async Task<T> Update()
     {
         if (State == CacheState.Evaluating) throw new InvalidOperationException("Cyclic behavior detected");
+        var oldValue = Value;
 
         /* Evaluate the reactive function body, dynamically capturing any other reactives used */
         var prevReaction = Context.CurrentReaction;
@@ -60,12 +57,10 @@ public sealed class ConcurrentRace<T> : SignalHandlR, IMemoizR, IStateGetR<T>
         Context.CurrentGets = [];
         Context.CurrentGetsIndex = 0;
 
-        T value = default!;
-
         try
         {
             State = CacheState.Evaluating;
-            value = await new StructuredRaceJob<T>(fns, cancellationTokenSource!).Run();
+            Value = await new StructuredRaceJob<T>(fns, cancellationTokenSource!).Run();
             State = CacheState.CacheClean;
 
             // if the sources have changed, update source & observer links
@@ -94,7 +89,7 @@ public sealed class ConcurrentRace<T> : SignalHandlR, IMemoizR, IStateGetR<T>
         }
 
         // handles diamond depenendencies if we're the parent of a diamond.
-        if (Observers.Length > 0)
+        if (!Equals(oldValue, Value) && Observers.Length > 0)
         {
             // We've changed value, so mark our children as dirty so they'll reevaluate
             foreach (var observer in Observers)
@@ -106,7 +101,7 @@ public sealed class ConcurrentRace<T> : SignalHandlR, IMemoizR, IStateGetR<T>
             }
         }
 
-        return value;
+        return Value;
     }
 
     async Task IMemoizR.UpdateIfNecessary()

@@ -5,7 +5,7 @@ public class ReactiveTests
     [Fact(Timeout = 1000)]
     public async Task TestReactive()
     {
-        var f = new MemoFactory("reactivity");
+        var f = new MemoFactory();
         var v1 = f.CreateSignal(1);
         Assert.Equal(1, await v1.Get());
         Assert.Equal(1, await v1.Get());
@@ -20,7 +20,7 @@ public class ReactiveTests
     public async Task TestReactiveInvocations()
     {
         var invocations = 0;
-        var f = new MemoFactory("reactivity");
+        var f = new MemoFactory();
         var v1 = f.CreateSignal(1);
         Assert.Equal(1, await v1.Get());
 
@@ -45,17 +45,12 @@ public class ReactiveTests
     [Fact(Timeout = 1000)]
     public async Task TestThreadSafety()
     {
-        // Create a MemoFactory instance
-        var f = new MemoFactory("reactivity");
+        var f = new MemoFactory();
 
-        // Create a signal 'v1' with an initial value of 1
         var v1 = f.CreateSignal(4);
-
-        var invocationCount = 0;
-        // Create a memoized computation 'm1' that depends on 'v1'
         var m1 = f.CreateMemoizR(async () => await v1.Get() * 2);
 
-
+        var invocationCount = 0;
         var result = 0;
         var r1 = f.BuildReaction()
         .CreateReaction(m1, m =>
@@ -94,16 +89,12 @@ public class ReactiveTests
     [Fact(Timeout = 500)]
     public async Task TestThreadSafety2()
     {
-        // Create a MemoFactory instance
-        var f = new MemoFactory("reactivity");
+        var f = new MemoFactory();
 
-        // Create a signal 'v1' with an initial value of 1
         var v1 = f.CreateSignal(4);
-
-        var invocationCount = 0;
-        // Create a memoized computation 'm1' that depends on 'v1'
         var m1 = f.CreateMemoizR(async () => await v1.Get() * 2);
-
+        
+        var invocationCount = 0;
         var r1 = f.BuildReaction().CreateReaction(m1, m => invocationCount++);
 
         var tasks = new List<Task>();
@@ -117,7 +108,6 @@ public class ReactiveTests
         var resultM1 = 0;
         tasks.Add(Task.Run(async () => resultM1 = await m1.Get()));
 
-        // Wait for all tasks to complete
         await Task.WhenAll(tasks);
         await Task.Delay(100);
 
@@ -132,14 +122,11 @@ public class ReactiveTests
     [Fact(Timeout = 2000)]
     public async Task TestThreadSafety3()
     {
-        // Create a MemoFactory instance
-        var f = new MemoFactory("reactivity");
+        var f = new MemoFactory();
 
-        // Create a signal 'v1' with an initial value of 1
         var v1 = f.CreateSignal(4);
 
         var memoInvocationCount = 0;
-        // Create a memoized computation 'm1' that depends on 'v1'
         var m1 = f.CreateMemoizR(async () =>
         {
             memoInvocationCount++;
@@ -164,7 +151,6 @@ public class ReactiveTests
         var resultM1 = 0;
         tasks.Add(Task.Run(async () => resultM1 = await m1.Get()));
 
-        // Wait for all tasks to complete
         await Task.WhenAll(tasks);
         await Task.Delay(100);
 

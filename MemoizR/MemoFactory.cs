@@ -14,7 +14,8 @@ public sealed class MemoFactory
             // Default context is mapped to empty string
             if (string.IsNullOrWhiteSpace(contextKey))
             {
-                contextKey = "";
+                Context = new Context();
+                return;
             }
 
             if (CONTEXTS.TryGetValue(contextKey, out var weakContext))

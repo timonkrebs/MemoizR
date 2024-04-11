@@ -31,10 +31,6 @@ public sealed class ConcurrentMap<T> : MemoHandlR<IEnumerable<T>>, IMemoizR, ISt
         using (await mutex.LockAsync())
         using (await Context.ContextLock.UpgradeableLockAsync())
         {
-            if (Context.CancellationTokenSource == null)
-            {
-                Cancel();
-            }
             try
             {
                 isStartingComponent = Context.CancellationTokenSource == null;
@@ -111,6 +107,8 @@ public sealed class ConcurrentMap<T> : MemoHandlR<IEnumerable<T>>, IMemoizR, ISt
     /** run the computation fn, updating the cached value */
     private async Task Update()
     {
+        var oldValue = Value ?? [];
+        
         /* Evaluate the reactive function body, dynamically capturing any other reactives used */
         var prevReaction = Context.CurrentReaction;
         var prevGets = Context.CurrentGets;
@@ -168,7 +166,7 @@ public sealed class ConcurrentMap<T> : MemoHandlR<IEnumerable<T>>, IMemoizR, ISt
             Context.CurrentGetsIndex = prevIndex;
 
             // handles diamond depenendencies if we're the parent of a diamond.
-            if (Observers.Length > 0)
+            if (Observers.Length > 0 && !oldValue.SequenceEqual(Value ?? []))
             {
                 // We've changed value, so mark our children as dirty so they'll reevaluate
                 foreach (var observer in Observers)
