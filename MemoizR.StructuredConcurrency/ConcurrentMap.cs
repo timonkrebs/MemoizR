@@ -35,7 +35,7 @@ public sealed class ConcurrentMap<T> : MemoHandlR<IEnumerable<T>>, IMemoizR, ISt
             {
                 isStartingComponent = Context.CancellationTokenSource == null;
                 Context.CancellationTokenSource ??= new CancellationTokenSource();
-                // if someone else did read the graph while this thread was blocekd it could be that this is already Clean
+                // if someone else did read the graph while this thread was blocked it could be that this is already Clean
                 if (State == CacheState.CacheClean && Context.CurrentReaction == null)
                 {
                     Thread.MemoryBarrier();
@@ -122,6 +122,7 @@ public sealed class ConcurrentMap<T> : MemoHandlR<IEnumerable<T>>, IMemoizR, ISt
             State = CacheState.Evaluating;
             Value = await new StructuredResultsJob<T>(fns, Context.CancellationTokenSource!).Run();
             State = CacheState.CacheClean;
+
             // if the sources have changed, update source & observer links
             if (Context.CurrentGets.Length > 0)
             {
@@ -153,7 +154,7 @@ public sealed class ConcurrentMap<T> : MemoHandlR<IEnumerable<T>>, IMemoizR, ISt
                 Sources = [.. Sources.Take(Context.CurrentGetsIndex)];
             }
         }
-        catch (TaskCanceledException)
+        catch
         {
             State = CacheState.CacheCheck;
             throw;
@@ -163,8 +164,9 @@ public sealed class ConcurrentMap<T> : MemoHandlR<IEnumerable<T>>, IMemoizR, ISt
             Context.CurrentGets = prevGets;
             Context.CurrentReaction = prevReaction;
             Context.CurrentGetsIndex = prevIndex;
-
-            // handles diamond depenendencies if we're the parent of a diamond.
+        }
+        
+            // handles diamond dependencies if we're the parent of a diamond.
             if (Observers.Length > 0 && !oldValue.SequenceEqual(Value ?? []))
             {
                 // We've changed value, so mark our children as dirty so they'll reevaluate
@@ -175,7 +177,6 @@ public sealed class ConcurrentMap<T> : MemoHandlR<IEnumerable<T>>, IMemoizR, ISt
                         o.State = CacheState.CacheDirty;
                     }
                 }
-            }
         }
 
         // We've rerun with the latest values from all of our Sources.

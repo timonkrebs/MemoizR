@@ -37,7 +37,7 @@ public sealed class ConcurrentMapReduce<T> : MemoHandlR<T>, IMemoizR, IStateGetR
             {
                 isStartingComponent = Context.CancellationTokenSource == null;
                 Context.CancellationTokenSource ??= new CancellationTokenSource();
-                // if someone else did read the graph while this thread was blocekd it could be that this is already Clean
+                // if someone else did read the graph while this thread was blocked it could be that this is already Clean
                 if (State == CacheState.CacheClean && Context.CurrentReaction == null)
                 {
                     Thread.MemoryBarrier();
@@ -156,7 +156,7 @@ public sealed class ConcurrentMapReduce<T> : MemoHandlR<T>, IMemoizR, IStateGetR
                 Sources = [.. Sources.Take(Context.CurrentGetsIndex)];
             }
         }
-        catch (TaskCanceledException)
+        catch
         {
             State = CacheState.CacheCheck;
             throw;
@@ -166,17 +166,17 @@ public sealed class ConcurrentMapReduce<T> : MemoHandlR<T>, IMemoizR, IStateGetR
             Context.CurrentGets = prevGets;
             Context.CurrentReaction = prevReaction;
             Context.CurrentGetsIndex = prevIndex;
+        }
 
-            // handles diamond depenendencies if we're the parent of a diamond.
-            if (!Equals(oldValue, Value) && Observers.Length > 0)
+        // handles diamond dependencies if we're the parent of a diamond.
+        if (!Equals(oldValue, Value) && Observers.Length > 0)
+        {
+            // We've changed value, so mark our children as dirty so they'll reevaluate
+            foreach (var observer in Observers)
             {
-                // We've changed value, so mark our children as dirty so they'll reevaluate
-                foreach (var observer in Observers)
+                if (observer.TryGetTarget(out var o))
                 {
-                    if (observer.TryGetTarget(out var o))
-                    {
-                        o.State = CacheState.CacheDirty;
-                    }
+                    o.State = CacheState.CacheDirty;
                 }
             }
         }

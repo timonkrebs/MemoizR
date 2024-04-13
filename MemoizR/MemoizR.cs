@@ -26,26 +26,32 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR, IStateGetR<T>
         using (await mutex.LockAsync())
         using (await Context.ContextLock.UpgradeableLockAsync())
         {
-            isStartingComponent = Context.CancellationTokenSource == null;
-            Context.CancellationTokenSource ??= new CancellationTokenSource();
-            // if someone else did read the graph while this thread was blocked it could be that this is already Clean
-            if (State == CacheState.CacheClean && Context.CurrentReaction == null)
+            try
             {
-                Thread.MemoryBarrier();
-                return Value;
-            }
+                isStartingComponent = Context.CancellationTokenSource == null;
+                Context.CancellationTokenSource ??= new CancellationTokenSource();
+                // if someone else did read the graph while this thread was blocked it could be that this is already Clean
+                if (State == CacheState.CacheClean && Context.CurrentReaction == null)
+                {
+                    Thread.MemoryBarrier();
+                    return Value;
+                }
 
-            if (Context.CurrentReaction != null)
-            {
-                Context.CheckDependenciesTheSame(this);
-            }
+                if (Context.CurrentReaction != null)
+                {
+                    Context.CheckDependenciesTheSame(this);
+                }
 
-            await UpdateIfNecessary();
-            if (isStartingComponent)
-            {
-                Context.CancellationTokenSource = null;
+                await UpdateIfNecessary();
             }
-            isStartingComponent = false;
+            finally
+            {
+                if (isStartingComponent)
+                {
+                    Context.CancellationTokenSource = null;
+                }
+                isStartingComponent = false;
+            }
         }
 
         Thread.MemoryBarrier();
@@ -97,7 +103,7 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR, IStateGetR<T>
     {
         var oldValue = Value;
 
-        /* Evalute the reactive function body, dynamically capturing any other reactives used */
+        /* Evaluate the reactive function body, dynamically capturing any other reactives used */
         var prevReaction = Context.CurrentReaction;
         var prevGets = Context.CurrentGets;
         var prevIndex = Context.CurrentGetsIndex;
@@ -189,6 +195,7 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR, IStateGetR<T>
             await UpdateIfNecessary();
         }
     }
+
     internal async Task Stale(CacheState state)
     {
         if (state <= State)

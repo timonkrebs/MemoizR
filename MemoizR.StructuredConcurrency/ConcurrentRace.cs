@@ -75,9 +75,9 @@ public sealed class ConcurrentRace<T> : MemoHandlR<T>, IMemoizR, IStateGetR<T>
                 }
             }
         }
-        catch (TaskCanceledException)
+        catch
         {
-            State = CacheState.CacheCheck;
+            State = CacheState.CacheDirty;
             throw;
         }
         finally
@@ -87,7 +87,7 @@ public sealed class ConcurrentRace<T> : MemoHandlR<T>, IMemoizR, IStateGetR<T>
             Context.CurrentGetsIndex = prevIndex;
         }
 
-        // handles diamond depenendencies if we're the parent of a diamond.
+        // handles diamond dependencies if we're the parent of a diamond.
         if (!Equals(oldValue, Value) && Observers.Length > 0)
         {
             // We've changed value, so mark our children as dirty so they'll reevaluate
