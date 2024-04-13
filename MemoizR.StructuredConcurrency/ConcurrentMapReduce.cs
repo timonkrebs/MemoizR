@@ -17,7 +17,7 @@ public sealed class ConcurrentMapReduce<T> : MemoHandlR<T>, IMemoizR, IStateGetR
 
     public void Cancel()
     {
-        cancellationTokenSource?.Cancel();
+        Context.CancellationTokenSource?.Cancel();
     }
 
     public async Task<T> Get()
@@ -37,7 +37,6 @@ public sealed class ConcurrentMapReduce<T> : MemoHandlR<T>, IMemoizR, IStateGetR
             {
                 isStartingComponent = Context.CancellationTokenSource == null;
                 Context.CancellationTokenSource ??= new CancellationTokenSource();
-                cancellationTokenSource = Context.CancellationTokenSource;
                 // if someone else did read the graph while this thread was blocekd it could be that this is already Clean
                 if (State == CacheState.CacheClean && Context.CurrentReaction == null)
                 {
@@ -123,7 +122,7 @@ public sealed class ConcurrentMapReduce<T> : MemoHandlR<T>, IMemoizR, IStateGetR
         try
         {
             State = CacheState.Evaluating;
-            Value = await new StructuredReduceJob<T>(fns, reduce, cancellationTokenSource!).Run();
+            Value = await new StructuredReduceJob<T>(fns, reduce, Context.CancellationTokenSource!).Run();
             State = CacheState.CacheClean;
 
             // if the sources have changed, update source & observer links

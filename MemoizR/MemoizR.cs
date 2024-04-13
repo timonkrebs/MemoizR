@@ -13,11 +13,6 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR, IStateGetR<T>
         this.State = CacheState.CacheDirty;
     }
 
-    private void Cancel()
-    {
-        cancellationTokenSource?.Cancel();
-    }
-
     public async Task<T> Get()
     {
         if (State == CacheState.CacheClean && Context.CurrentReaction == null)
@@ -31,13 +26,8 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR, IStateGetR<T>
         using (await mutex.LockAsync())
         using (await Context.ContextLock.UpgradeableLockAsync())
         {
-            if (Context.CancellationTokenSource == null)
-            {
-                Cancel();
-            }
             isStartingComponent = Context.CancellationTokenSource == null;
             Context.CancellationTokenSource ??= new CancellationTokenSource();
-            cancellationTokenSource = Context.CancellationTokenSource;
             // if someone else did read the graph while this thread was blocked it could be that this is already Clean
             if (State == CacheState.CacheClean && Context.CurrentReaction == null)
             {
@@ -119,7 +109,7 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR, IStateGetR<T>
         try
         {
             State = CacheState.Evaluating;
-            Value = await fn(cancellationTokenSource!);
+            Value = await fn(Context.CancellationTokenSource!);
             State = CacheState.CacheClean;
 
             // if the sources have changed, update source & observer links
@@ -152,6 +142,11 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR, IStateGetR<T>
                 RemoveParentObservers(Context.CurrentGetsIndex);
                 Sources = [.. Sources.Take(Context.CurrentGetsIndex)];
             }
+        }
+        catch
+        {
+            State = CacheState.CacheCheck;
+            throw;
         }
         finally
         {

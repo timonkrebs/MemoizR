@@ -14,7 +14,7 @@ public sealed class ConcurrentRace<T> : MemoHandlR<T>, IMemoizR, IStateGetR<T>
 
     public void Cancel()
     {
-        cancellationTokenSource?.Cancel();
+        Context.CancellationTokenSource?.Cancel();
     }
 
     public async Task<T> Get()
@@ -28,7 +28,6 @@ public sealed class ConcurrentRace<T> : MemoHandlR<T>, IMemoizR, IStateGetR<T>
             {
                 isStartingComponent = Context.CancellationTokenSource == null;
                 Context.CancellationTokenSource ??= new CancellationTokenSource();
-                cancellationTokenSource = Context.CancellationTokenSource;
                 return await Update();
             }
             finally
@@ -60,7 +59,7 @@ public sealed class ConcurrentRace<T> : MemoHandlR<T>, IMemoizR, IStateGetR<T>
         try
         {
             State = CacheState.Evaluating;
-            Value = await new StructuredRaceJob<T>(fns, cancellationTokenSource!).Run();
+            Value = await new StructuredRaceJob<T>(fns, Context.CancellationTokenSource!).Run();
             State = CacheState.CacheClean;
 
             // if the sources have changed, update source & observer links

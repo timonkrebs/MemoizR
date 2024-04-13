@@ -3,7 +3,6 @@ namespace MemoizR.Reactive;
 public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
 {
     private CancellationTokenSource cts = new();
-    private CancellationTokenSource sourceCts = new();
     private CacheState State { get; set; } = CacheState.CacheClean;
     private SynchronizationContext? synchronizationContext;
     private bool isPaused;
@@ -33,7 +32,6 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
     public void Dispose()
     {
         Pause();
-        sourceCts.Cancel();
         RemoveParentObservers(0);
     }
 
@@ -41,9 +39,8 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
     {
         using (await Context.ContextLock.UpgradeableLockAsync())
         {
-            isStartingComponent = Context.CancellationTokenSource == null;
+            isStartingComponent = true;
             Context.CancellationTokenSource ??= new CancellationTokenSource();
-            cancellationTokenSource = Context.CancellationTokenSource;
             var temp = synchronizationContext;
             try
             {
@@ -54,11 +51,7 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
             finally
             {
                 synchronizationContext = temp;
-                if (isStartingComponent)
-                {
-                    Context.CancellationTokenSource = null;
-                }
-                isStartingComponent = false;
+                Context.CancellationTokenSource = null;
             }
         }
     }
@@ -127,7 +120,6 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
             {
                 try
                 {
-                    sourceCts = new CancellationTokenSource();
                     if (synchronizationContext != null)
                     {
                         var tcs = new TaskCompletionSource();
@@ -234,6 +226,8 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
             State = state;
             cts?.Cancel();
             cts = new();
+            Context.CancellationTokenSource?.Cancel();
+            Context.CancellationTokenSource ??= new CancellationTokenSource();
             Task.Run(async () =>
                 {
                     try
@@ -243,20 +237,12 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
                         using (await Context.Mutex.LockAsync())
                         using (await Context.ContextLock.UpgradeableLockAsync())
                         {
-                            isStartingComponent = Context.CancellationTokenSource == null;
-                            Context.CancellationTokenSource ??= new CancellationTokenSource();
-                            cancellationTokenSource = Context.CancellationTokenSource;
                             await UpdateIfNecessary().ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
-
                         }
                     }
                     finally
                     {
-                        if (isStartingComponent)
-                        {
-                            Context.CancellationTokenSource = null;
-                        }
-                        isStartingComponent = false;
+                        Context.CancellationTokenSource = null;
                     }
                 });
 

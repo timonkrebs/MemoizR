@@ -153,6 +153,79 @@ public class StructuredConcurrencyTests
         Assert.Equal(5, invocations);
     }
 
+    [Fact]
+    public async Task TestMultipleMapHandlingCancel()
+    {
+        var f = new MemoFactory("concurrent");
+        var v1 = f.CreateSignal(1);
+        var v2 = f.CreateSignal(2);
+        var v3 = f.CreateSignal(3);
+
+        // all tasks get canceled if one fails
+        var c1 = f.CreateConcurrentMap(
+            async c =>
+            {
+                await Task.Delay(2, c.Token);
+                return await v1.Get();
+            },
+            async c =>
+            {
+                await Task.Delay(2, c.Token);
+                return await v2.Get();
+            },
+            async c =>
+            {
+                await Task.Delay(20, c.Token);
+                return await v3.Get();
+            });
+
+        var invocations = 0;
+        var x = await c1.Get();
+        f.BuildReaction().CreateReaction(c1, c =>
+        {
+            invocations++;
+            x = c;
+        });
+
+        await Task.Delay(100);
+        Assert.Equal(1, invocations);
+
+        await v1.Set(4);
+        await Task.Delay(100);
+        Assert.Equal(4, x.Single(x => x == 4));
+        Assert.Equal(4, x.ElementAt(0));
+        Assert.Equal(2, invocations);
+
+        await v2.Set(5);
+        await Task.Delay(100);
+        Assert.Equal(5, x.Single(x => x == 5));
+        Assert.Equal(5, x.ElementAt(1));
+        Assert.Equal(3, invocations);
+
+        await v3.Set(6);
+        await Task.Delay(100);
+        Assert.Equal(6, x.Single(x => x == 6));
+        Assert.Equal(6, x.ElementAt(2));
+        Assert.Equal(4, invocations);
+
+        // If canceled nothing should change
+        await v2.Set(7);
+        await v2.Set(6);
+        c1.Cancel();
+        await Task.Delay(100);
+        Assert.Equal(5, x.Single(x => x == 5));
+        Assert.Equal(5, x.ElementAt(1));
+        Assert.Equal(4, invocations);
+
+        // cancellation should not disable reactivity and never get into race conditions
+        await v2.Set(7);
+        await v2.Set(8);
+        await Task.Delay(100);
+        Assert.Equal(8, x.Single(x => x == 8));
+        Assert.Equal(8, x.ElementAt(1));
+        Assert.Equal(5, invocations);
+    }
+
     [Fact(Timeout = 1000)]
     public async Task TestThreadSafety()
     {
