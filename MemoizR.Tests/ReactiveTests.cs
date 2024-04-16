@@ -16,6 +16,101 @@ public class ReactiveTests
         await v1.Set(2);
     }
 
+    [Fact(Skip="Experimantal")]
+    public async Task TestAsyncEnumerable()
+    {
+        var f = new MemoFactory();
+        var v1 = f.CreateSignal(1);
+        var invocationCount = 0;
+        var result = 0;
+
+        var m1 = f.BuildReaction()
+        .CreateAsyncEnumerableExperimental(v1);
+
+        await Task.Delay(100);
+
+        var _ = Task.Run(async () =>
+        {
+            await foreach (var m in m1)
+            {
+                result = m;
+                invocationCount++;
+            }
+        });
+
+        await Task.Delay(10);
+        Assert.Equal(0, result);
+        Assert.Equal(0, invocationCount);
+
+        await v1.Set(2);
+        await Task.Delay(100);
+        Assert.Equal(2, result);
+        Assert.Equal(1, invocationCount);
+
+        await v1.Set(3);
+        await Task.Delay(100);
+        Assert.Equal(3, result);
+        Assert.Equal(2, invocationCount);
+
+        await v1.Set(3);
+        await Task.Delay(100);
+        Assert.Equal(3, result);
+        Assert.Equal(2, invocationCount);
+
+        await v1.Set(4);
+        await Task.Delay(100);
+        Assert.Equal(4, result);
+        Assert.Equal(3, invocationCount);
+    }
+
+    [Fact(Skip="Experimantal")]
+    public async Task TestAsyncEnumerableWithBackpressure()
+    {
+        var f = new MemoFactory();
+        var v1 = f.CreateSignal(1);
+        var invocationCount = 0;
+        var result = 0;
+
+        var m1 = f.BuildReaction()
+        .CreateAsyncEnumerableExperimental(v1);
+
+        await Task.Delay(100);
+
+        var _ = Task.Run(async () =>
+        {
+            await foreach (var m in m1)
+            {
+                result = m;
+                invocationCount++;
+                await Task.Delay(100);
+            }
+        });
+
+        await Task.Delay(200);
+        Assert.Equal(0, result);
+        Assert.Equal(0, invocationCount);
+
+        await v1.Set(2);
+        await Task.Delay(200);
+        Assert.Equal(2, result);
+        Assert.Equal(1, invocationCount);
+
+        await v1.Set(3);
+        await Task.Delay(200);
+        Assert.Equal(3, result);
+        Assert.Equal(2, invocationCount);
+
+        await v1.Set(3);
+        await Task.Delay(200);
+        Assert.Equal(3, result);
+        Assert.Equal(2, invocationCount);
+
+        await v1.Set(4);
+        await Task.Delay(200);
+        Assert.Equal(4, result);
+        Assert.Equal(3, invocationCount);
+    }
+
     [Fact(Timeout = 1000)]
     public async Task TestReactiveInvocations()
     {
@@ -52,14 +147,17 @@ public class ReactiveTests
 
         var invocationCount = 0;
         var result = 0;
-        var r1 = f.BuildReaction()
-        .CreateReaction(m1, m =>
-        {
-            invocationCount++;
-            result = m;
-        });
+        var _ = Task.Run(() =>
+            {
+                var r1 = f.BuildReaction()
+                        .CreateReaction(m1, m =>
+                        {
+                            invocationCount++;
+                            result = m;
+                        });
+            });
 
-        var _ = v1.Set(1000);
+        _ = v1.Set(1000);
         for (var i = 0; i < 100; i++)
         {
             _ = v1.Set(i);
@@ -93,7 +191,7 @@ public class ReactiveTests
 
         var v1 = f.CreateSignal(4);
         var m1 = f.CreateMemoizR(async () => await v1.Get() * 2);
-        
+
         var invocationCount = 0;
         var r1 = f.BuildReaction().CreateReaction(m1, m => invocationCount++);
 

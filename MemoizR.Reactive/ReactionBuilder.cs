@@ -21,6 +21,70 @@ public sealed class ReactionBuilder
         return this;
     }
 
+
+    private class AsyncEnumerator<T> : IAsyncEnumerator<T>
+    {
+        internal required Task<T> GetNext { get; set; }
+#pragma warning disable CS8618 
+        internal Reaction Reaction { get; set; }
+        public T Current { get; set; }
+#pragma warning restore CS8618 
+
+        public ValueTask DisposeAsync()
+        {
+            Reaction.Dispose();
+            return ValueTask.CompletedTask;
+        }
+
+        public async ValueTask<bool> MoveNextAsync()
+        {
+            Current = await GetNext!;
+            return true;
+        }
+    }
+
+    private class AsyncEnumerable<T> : IAsyncEnumerable<T>
+    {
+        private AsyncEnumerator<T> enumerator;
+
+        public AsyncEnumerable(AsyncEnumerator<T> enumerator)
+        {
+            this.enumerator = enumerator;
+        }
+
+        public IAsyncEnumerator<T> GetAsyncEnumerator(CancellationToken cancellationToken = default)
+        {
+            return enumerator;
+        }
+    }
+
+    public IAsyncEnumerable<T> CreateAsyncEnumerableExperimental<T>(IStateGetR<T> memo)
+    {
+        lock (memoFactory)
+        {
+            var tcs = new TaskCompletionSource<T>();
+            var enumerator = new AsyncEnumerator<T>
+            {
+                GetNext = tcs.Task
+            };
+
+            new Reaction(async () =>
+            {
+                var oldTask = tcs;
+                var newTcs = new TaskCompletionSource<T>();
+                tcs = newTcs;
+                enumerator.GetNext = newTcs.Task;
+                oldTask.SetResult(await memo.Get());
+            }, memoFactory.Context)
+            {
+                Label = label,
+                DebounceTime = TimeSpan.Zero
+            };
+
+            return new AsyncEnumerable<T>(enumerator);
+        }
+    }
+
     public Reaction CreateReaction<T>(IStateGetR<T> memo, Action<T> action)
     {
         lock (memoFactory)
