@@ -28,17 +28,17 @@ Out-File -FilePath .\ReactionBuilder.cs -InputObject $classHeader -Encoding ASCI
 
 for ($i = 1; $i -le 16; $i++) {
     $memoTypes = 1..$i | ForEach-Object { "T$_" }
-    $memoNames = 1..$i | ForEach-Object { "memo$_" }
+    $memoNames = 1..$i | ForEach-Object { "await memo$_.Get()" }
     $parameter = 1..$i | ForEach-Object { "IStateGetR<T$_> memo$_" }
     $actionType = ($memoTypes -join ", ")
     $parameterNames = ($parameter -join ", ")
     $actionName = ($memoNames -join ", ")
     $method = @"
-    public Reaction<$actionType> CreateReaction<$actionType>($parameterNames, Action<$actionType> action)
+    public Reaction CreateReaction<$actionType>($parameterNames, Action<$actionType> action)
     {
         lock (memoFactory)
         {
-            return new Reaction<$actionType>($actionName, action, memoFactory.Context, synchronizationContext)
+            return new Reaction(async () => action($actionName), memoFactory.Context, synchronizationContext)
             {
                 Label = label,
                 DebounceTime = debounceTime
