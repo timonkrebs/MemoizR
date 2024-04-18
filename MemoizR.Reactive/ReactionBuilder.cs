@@ -6,7 +6,7 @@ public sealed class ReactionBuilder
     private readonly SynchronizationContext? synchronizationContext;
 
     private string label;
-    private TimeSpan debounceTime = TimeSpan.FromMilliseconds(10);
+    private TimeSpan debounceTime = TimeSpan.FromMilliseconds(1);
 
     public ReactionBuilder(MemoFactory memoFactory, SynchronizationContext? synchronizationContext, string label)
     {
@@ -70,15 +70,16 @@ public sealed class ReactionBuilder
 
             new Reaction(async () =>
             {
-                var oldTask = tcs;
+                var result = await memo.Get();
+                var oldTsc = tcs;
                 var newTcs = new TaskCompletionSource<T>();
                 tcs = newTcs;
                 enumerator.GetNext = newTcs.Task;
-                oldTask.SetResult(await memo.Get());
+                oldTsc.SetResult(result);
             }, memoFactory.Context)
             {
                 Label = label,
-                DebounceTime = TimeSpan.Zero
+                DebounceTime = debounceTime
             };
 
             return new AsyncEnumerable<T>(enumerator);

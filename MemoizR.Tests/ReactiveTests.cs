@@ -43,22 +43,22 @@ public class ReactiveTests
         Assert.Equal(0, invocationCount);
 
         await v1.Set(2);
-        await Task.Delay(100);
+        await Task.Delay(20);
         Assert.Equal(2, result);
         Assert.Equal(1, invocationCount);
 
         await v1.Set(3);
-        await Task.Delay(100);
+        await Task.Delay(20);
         Assert.Equal(3, result);
         Assert.Equal(2, invocationCount);
 
         await v1.Set(3);
-        await Task.Delay(100);
+        await Task.Delay(20);
         Assert.Equal(3, result);
         Assert.Equal(2, invocationCount);
 
         await v1.Set(4);
-        await Task.Delay(100);
+        await Task.Delay(20);
         Assert.Equal(4, result);
         Assert.Equal(3, invocationCount);
     }
