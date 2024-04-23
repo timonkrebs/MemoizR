@@ -1,21 +1,24 @@
-﻿namespace MemoizR.StructuredConcurrency;
+﻿using Nito.AsyncEx;
+
+namespace MemoizR.StructuredConcurrency;
 
 public abstract class StructuredJobBase<T>
 {
     protected List<Task> tasks = new List<Task>();
     protected T? result;
+    protected AsyncLock mutex = new AsyncLock();
 
-    protected abstract void AddConcurrentWork();
+    protected abstract Task AddConcurrentWork();
 
     public async Task<T> Run()
     {
         try
         {
             List<Task> tasks;
-            lock (this)
+            using (mutex.Lock())
             {
                 this.tasks = new List<Task>();
-                AddConcurrentWork();
+                await AddConcurrentWork();
                 tasks = this.tasks;
             }
 

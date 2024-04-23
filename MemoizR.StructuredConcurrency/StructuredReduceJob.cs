@@ -13,9 +13,9 @@ public sealed class StructuredReduceJob<T> : StructuredJobBase<T>
         this.cancellationTokenSource = cancellationTokenSource;
     }
 
-    protected override void AddConcurrentWork()
+    protected override Task AddConcurrentWork()
     {
-        this.tasks.AddRange(fns
+        tasks.AddRange(fns
         .Select(async x => await Task.Run(async () =>
             {
                 try
@@ -34,5 +34,6 @@ public sealed class StructuredReduceJob<T> : StructuredJobBase<T>
 
             }, cancellationTokenSource.Token)
         ));
+        return Task.CompletedTask;
     }
 }

@@ -59,22 +59,25 @@ public class StructuredConcurrencyTests
     {
         var f = new MemoFactory();
 
+        var v1 = f.CreateSignal(1);
+
         // all tasks get canceled if one fails
         var c1 = f.CreateConcurrentRace(
-            async c =>
+            v1.Get,
+            async (c, r)  =>
             {
                 await Task.Delay(100, c.Token);
-                return 1;
+                return r * 1;
             },
-            async c =>
+            async (c, r) =>
             {
                 await Task.Delay(3000, c.Token);
-                return 2;
+                return r * 2;
             },
-            async c =>
+            async (c, r) =>
             {
                 await Task.Delay(5000, c.Token);
-                return 3;
+                return r * 3;
             });
 
         Assert.Equal(1, await c1.Get());

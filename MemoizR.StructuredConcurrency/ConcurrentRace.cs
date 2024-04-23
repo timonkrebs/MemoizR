@@ -1,14 +1,19 @@
 namespace MemoizR.StructuredConcurrency;
 
-public sealed class ConcurrentRace<T> : MemoHandlR<T>, IMemoizR, IStateGetR<T>
+public sealed class ConcurrentRace<T, I> : MemoHandlR<T>, IMemoizR, IStateGetR<T>
 {
     private CacheState State { get; set; } = CacheState.CacheDirty;
-    private IReadOnlyCollection<Func<CancellationTokenSource, Task<T>>> fns;
+    Func<Task<I>> action;
+    private IReadOnlyCollection<Func<CancellationTokenSource, I, Task<T>>> fns;
 
     CacheState IMemoizR.State { get => State; set => State = value; }
 
-    internal ConcurrentRace(IReadOnlyCollection<Func<CancellationTokenSource, Task<T>>> fns, Context context) : base(context)
+    internal ConcurrentRace(
+        Func<Task<I>> action,
+        IReadOnlyCollection<Func<CancellationTokenSource, I, Task<T>>> fns, 
+        Context context) : base(context)
     {
+        this.action = action;
         this.fns = fns;
     }
 
@@ -59,7 +64,7 @@ public sealed class ConcurrentRace<T> : MemoHandlR<T>, IMemoizR, IStateGetR<T>
         try
         {
             State = CacheState.Evaluating;
-            Value = await new StructuredRaceJob<T>(fns, Context.CancellationTokenSource!).Run();
+            Value = await new StructuredRaceJob<T, I>(action ,fns, Context.CancellationTokenSource!).Run();
             State = CacheState.CacheClean;
 
             // if the sources have changed, update source & observer links

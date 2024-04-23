@@ -30,14 +30,14 @@ public static class StructuredConcurrencyFactory
         };
     }
 
-    public static ConcurrentRace<T> CreateConcurrentRace<T>(this MemoFactory memoFactory, params Func<CancellationTokenSource, Task<T>>[] fns)
+    public static ConcurrentRace<T, R> CreateConcurrentRace<T, R>(this MemoFactory memoFactory, Func<Task<R>> resolver, params Func<CancellationTokenSource, R, Task<T>>[] fns)
     {
-        return CreateConcurrentRace(memoFactory, "Concurrent Race", fns);
+        return CreateConcurrentRace(memoFactory, "Concurrent Race", resolver, fns);
     }
 
-    public static ConcurrentRace<T> CreateConcurrentRace<T>(this MemoFactory memoFactory, string label, params Func<CancellationTokenSource, Task<T>>[] fns)
+    public static ConcurrentRace<T, R> CreateConcurrentRace<T, R>(this MemoFactory memoFactory, string label, Func<Task<R>> resolver, params Func<CancellationTokenSource, R, Task<T>>[] fns)
     {
-        return new ConcurrentRace<T>(fns, memoFactory.Context)
+        return new ConcurrentRace<T, R>(resolver, fns, memoFactory.Context)
         {
             Label = label
         };
