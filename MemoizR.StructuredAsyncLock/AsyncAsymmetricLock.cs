@@ -49,30 +49,31 @@ public sealed class AsyncAsymmetricLock
     /// <returns>A disposable that releases the lock when disposed.</returns>
     private Task<IDisposable> RequestExclusiveLockAsync(CancellationToken cancellationToken, int lockScope)
     {
-        lock (this)
+        if (this.lockScope == lockScope && locksHeld < 0)
         {
-            if (this.lockScope == lockScope && locksHeld < 0)
-            {
-                throw new InvalidOperationException("Can not aquire recursive exclusive lock in the scope of an upgradeable lock");
-            }
+            throw new InvalidOperationException("Can not aquire recursive exclusive lock in the scope of an upgradeable lock");
+        }
 
-            if (this.lockScope == lockScope && locksHeld > 0)
-            {
-                throw new InvalidOperationException("Can not aquire recursive exclusive locks in the same scope");
-            }
+        if (this.lockScope == lockScope && locksHeld > 0)
+        {
+            throw new InvalidOperationException("Can not aquire recursive exclusive locks in the same scope");
+        }
 
-            // If the lock is available and there are no waiting upgradeable, or upgrading upgradeable, take it immediately.
-            if (locksHeld == 0 && upgradeable.IsEmpty && upgradedLocksHeld == 0)
-            {
-                Interlocked.Increment(ref locksHeld);
-                this.lockScope = lockScope;
-                return Task.FromResult<IDisposable>(new ExclusivePrioKey(this));
-            }
-            else
-            {
-                // Wait for the lock to become available or cancellation.
-                return exclusive.Enqueue(this, cancellationToken, lockScope);
-            }
+        // If the lock is available and there are no waiting upgradeable, or upgrading upgradeable, take it immediately.
+        if (locksHeld == 0 && upgradeable.IsEmpty && upgradedLocksHeld == 0)
+        {
+            Interlocked.Increment(ref locksHeld);
+            this.lockScope = lockScope;
+            return Task.FromResult<IDisposable>(new ExclusivePrioKey(this));
+        }
+        else if (this.lockScope != lockScope)
+        {
+            // Wait for the lock to become available or cancellation.
+            return exclusive.Enqueue(this, cancellationToken, lockScope);
+        }
+        else
+        {
+            throw new InvalidOperationException("Should never happen!");
         }
     }
 
@@ -92,8 +93,8 @@ public sealed class AsyncAsymmetricLock
                 lockScope = rand.Next(1, int.MaxValue);
                 AsyncLocalScope.Value = lockScope;
             }
+            return new AwaitableDisposable<IDisposable>(RequestExclusiveLockAsync(cancellationToken, lockScope));
         }
-        return new AwaitableDisposable<IDisposable>(RequestExclusiveLockAsync(cancellationToken, lockScope));
     }
 
     /// <summary>
@@ -106,58 +107,40 @@ public sealed class AsyncAsymmetricLock
     }
 
     /// <summary>
-    /// Synchronously acquires the lock as a exclusive. Returns a disposable that releases the lock when disposed. This method may block the calling thread.
-    /// </summary>
-    /// <param name="cancellationToken">The cancellation token used to cancel the lock. If this is already set, then this method will attempt to take the lock immediately (succeeding if the lock is currently available).</param>
-    /// <returns>A disposable that releases the lock when disposed.</returns>
-    public IDisposable ExclusiveLock(CancellationToken cancellationToken)
-    {
-        return RequestExclusiveLockAsync(cancellationToken, Environment.CurrentManagedThreadId).GetAwaiter().GetResult();
-    }
-
-    /// <summary>
-    /// Synchronously acquires the lock as a exclusive. Returns a disposable that releases the lock when disposed. This method may block the calling thread.
-    /// </summary>
-    /// <returns>A disposable that releases the lock when disposed.</returns>
-    public IDisposable ExclusiveLock()
-    {
-        return ExclusiveLock(CancellationToken.None);
-    }
-
-    /// <summary>
     /// Asynchronously acquires the lock as a upgradeable. Returns a disposable that releases the lock when disposed.
     /// </summary>
     /// <param name="cancellationToken">The cancellation token used to cancel the lock. If this is already set, then this method will attempt to take the lock immediately (succeeding if the lock is currently available).</param>
     /// <returns>A disposable that releases the lock when disposed.</returns>
     private Task<IDisposable> RequestUpgradeableLockAsync(CancellationToken cancellationToken, int lockScope)
     {
-        lock (this)
+        var canAcquireLock = false;
+
+        if (locksHeld == 0)
         {
-            var canAcquireLock = false;
-
-            if (locksHeld == 0)
-            {
-                Interlocked.Decrement(ref locksHeld);
-                this.lockScope = lockScope;
-                canAcquireLock = true;
-            }
-            else if (locksHeld > 0 && this.lockScope == lockScope)
-            {
-                Interlocked.Increment(ref upgradedLocksHeld);
-                canAcquireLock = true;
-            }
-            else if (locksHeld < 0 && this.lockScope == lockScope)
-            {
-                Interlocked.Decrement(ref locksHeld);
-                canAcquireLock = true;
-            }
-
-            var ret = canAcquireLock
-                ? Task.FromResult<IDisposable>(new UpgradeableKey(this))
-                : upgradeable.Enqueue(this, cancellationToken, lockScope);
-            ReleaseWaitersWhenCanceled(ret);
-            return ret;
+            Interlocked.Decrement(ref locksHeld);
+            this.lockScope = lockScope;
+            canAcquireLock = true;
         }
+        else if (locksHeld > 0 && this.lockScope == lockScope)
+        {
+            Interlocked.Increment(ref upgradedLocksHeld);
+            canAcquireLock = true;
+        }
+        else if (locksHeld < 0 && this.lockScope == lockScope)
+        {
+            Interlocked.Decrement(ref locksHeld);
+            canAcquireLock = true;
+        }
+        else if (this.lockScope == lockScope)
+        {
+            throw new InvalidOperationException("Should never happen!");
+        }
+
+        var ret = canAcquireLock
+            ? Task.FromResult<IDisposable>(new UpgradeableKey(this))
+            : upgradeable.Enqueue(this, cancellationToken, lockScope);
+        ReleaseWaitersWhenCanceled(ret);
+        return ret;
     }
 
     /// <summary>
@@ -176,8 +159,8 @@ public sealed class AsyncAsymmetricLock
                 lockScope = rand.Next(1, int.MaxValue);
                 AsyncLocalScope.Value = lockScope;
             }
+            return new AwaitableDisposable<IDisposable>(RequestUpgradeableLockAsync(cancellationToken, lockScope));
         }
-        return new AwaitableDisposable<IDisposable>(RequestUpgradeableLockAsync(cancellationToken, lockScope));
     }
 
     /// <summary>
@@ -187,25 +170,6 @@ public sealed class AsyncAsymmetricLock
     public AwaitableDisposable<IDisposable> UpgradeableLockAsync()
     {
         return UpgradeableLockAsync(CancellationToken.None);
-    }
-
-    /// <summary>
-    /// Synchronously acquires the lock as a upgradeable. Returns a disposable that releases the lock when disposed. This method may block the calling thread.
-    /// </summary>
-    /// <param name="cancellationToken">The cancellation token used to cancel the lock. If this is already set, then this method will attempt to take the lock immediately (succeeding if the lock is currently available).</param>
-    /// <returns>A disposable that releases the lock when disposed.</returns>
-    public IDisposable UpgradeableLock(CancellationToken cancellationToken)
-    {
-        return RequestUpgradeableLockAsync(cancellationToken, Environment.CurrentManagedThreadId).GetAwaiter().GetResult();
-    }
-
-    /// <summary>
-    /// Asynchronously acquires the lock as a upgradeable. Returns a disposable that releases the lock when disposed. This method may block the calling thread.
-    /// </summary>
-    /// <returns>A disposable that releases the lock when disposed.</returns>
-    public IDisposable UpgradeableLock()
-    {
-        return UpgradeableLock(CancellationToken.None);
     }
 
     /// <summary>
