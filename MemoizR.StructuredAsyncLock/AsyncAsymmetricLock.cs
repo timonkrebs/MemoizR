@@ -158,34 +158,22 @@ public sealed class AsyncAsymmetricLock
     {
         var canAcquireLock = false;
 
-        if (LocksHeld == 0)
+        if (LocksHeld == 0 && UpgradedLocksHeld == 0)
         {
             lock (this)
             {
-                Interlocked.Decrement(ref locksHeld);
+                Interlocked.Increment(ref upgradedLocksHeld);
             }
             LockScope = lockScope;
             canAcquireLock = true;
         }
-        else if (LocksHeld > 0 && LockScope == lockScope)
+        else if (LockScope == lockScope)
         {
             lock (this)
             {
                 Interlocked.Increment(ref upgradedLocksHeld);
             }
             canAcquireLock = true;
-        }
-        else if (LocksHeld < 0 && LockScope == lockScope)
-        {
-            lock (this)
-            {
-                Interlocked.Decrement(ref locksHeld);
-            }
-            canAcquireLock = true;
-        }
-        else if (LockScope == lockScope)
-        {
-            throw new InvalidOperationException("Should never happen!");
         }
 
         var ret = canAcquireLock
@@ -233,7 +221,7 @@ public sealed class AsyncAsymmetricLock
         {
             lock (this)
             {
-                Interlocked.Decrement(ref locksHeld);
+                Interlocked.Increment(ref upgradedLocksHeld);
             }
             LockScope = upgradeable.Dequeue(new UpgradeableKey(this));
             AsyncLocalScope.Value = LockScope;
@@ -292,15 +280,7 @@ public sealed class AsyncAsymmetricLock
             }
             else
             {
-                lock (this)
-                {
-                    Interlocked.Increment(ref locksHeld);
-                }
-
-                if (LocksHeld == 0)
-                {
-                    LockScope = 0;
-                }
+                throw new InvalidOperationException("Should never happen!");
             }
             ReleaseWaiters();
         }

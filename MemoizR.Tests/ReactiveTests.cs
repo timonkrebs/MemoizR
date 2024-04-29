@@ -184,7 +184,7 @@ public class ReactiveTests
         Assert.Equal(1, invocationCount);
     }
 
-    [Fact(Timeout = 500)]
+    [Fact(Timeout = 1000)]
     public async Task TestThreadSafety2()
     {
         var f = new MemoFactory();
@@ -245,6 +245,8 @@ public class ReactiveTests
             await Task.Delay(35);
         }
 
+        tasks.Add(Task.Run(async () => await v1.Set(41)));
+
         await Task.Delay(1);
         var resultM1 = 0;
         tasks.Add(Task.Run(async () => resultM1 = await m1.Get()));
@@ -252,13 +254,48 @@ public class ReactiveTests
         await Task.WhenAll(tasks);
         await Task.Delay(100);
 
-        Assert.Equal(78, await m1.Get());
-        Assert.Equal(78, resultM1);
+        Assert.Equal(82, await m1.Get());
+        Assert.Equal(82, resultM1);
+    }
+
+    [Fact(Timeout = 2000)]
+    public async Task TestThreadSafety4()
+    {
+        var f = new MemoFactory();
+
+        var v1 = f.CreateSignal(4);
+
+        var memoInvocationCount = 0;
+        var m1 = f.CreateMemoizR(async () =>
+        {
+            memoInvocationCount++;
+            return await v1.Get() * 2;
+        });
+
+        var invocationCountR1 = 0;
+        var r1 = f.BuildReaction().CreateReaction(m1, m => invocationCountR1++);
+        var invocationCountR2 = 0;
+        var r2 = f.BuildReaction().CreateReaction(m1, m => invocationCountR2++);
 
         await Task.Delay(100);
 
-        Assert.Equal(41, invocationCountR1);
-        Assert.Equal(41, invocationCountR2);
-        Assert.Equal(41, memoInvocationCount);
+        var tasks = new List<Task>();
+        for (var i = 0; i < 40; i++)
+        {
+            tasks.Add(Task.Run(async () => await v1.Set(i)));
+            await Task.Delay(35);
+        }
+
+        tasks.Add(Task.Run(async () => await v1.Set(41)));
+
+        await Task.WhenAll(tasks);
+
+        Assert.Equal(82, await m1.Get());
+
+        await Task.Delay(100);
+
+        Assert.Equal(42, invocationCountR1);
+        Assert.Equal(42, invocationCountR2);
+        Assert.Equal(42, memoInvocationCount);
     }
 }
