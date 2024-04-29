@@ -24,21 +24,31 @@ public sealed class ReactionBuilder
 
     private class AsyncEnumerator<T> : IAsyncEnumerator<T>
     {
-        internal required Task<T> GetNext { get; set; }
-#pragma warning disable CS8618 
-        internal Reaction Reaction { get; set; }
-        public T Current { get; set; }
-#pragma warning restore CS8618 
+        private Task<T> nextTask = default!;
+        internal required Task<T> GetNext
+        {
+            get
+            {
+                return nextTask;
+            }
+            set
+            {
+                nextTask = value;
+            }
+        }
+
+        internal Reaction? Reaction { get; set; }
+        public T Current { get; set; } = default!;
 
         public ValueTask DisposeAsync()
         {
-            Reaction.Dispose();
+            Reaction?.Dispose();
             return ValueTask.CompletedTask;
         }
 
         public async ValueTask<bool> MoveNextAsync()
         {
-            Current = await GetNext!;
+            Current = await GetNext;
             return true;
         }
     }
@@ -63,10 +73,7 @@ public sealed class ReactionBuilder
         lock (memoFactory)
         {
             var tcs = new TaskCompletionSource<T>();
-            var enumerator = new AsyncEnumerator<T>
-            {
-                GetNext = tcs.Task
-            };
+            var enumerator = new AsyncEnumerator<T> { GetNext = tcs.Task };
 
             new Reaction(async () =>
             {

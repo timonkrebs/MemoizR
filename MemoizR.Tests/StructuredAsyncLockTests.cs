@@ -11,16 +11,16 @@ public class AsyncAsymmetricLockTests
         // Arrange
         var asyncLock = new AsyncAsymmetricLock();
         var cancellationTokenSource = new CancellationTokenSource();
-        Assert.Equal(0, asyncLock.lockScope);
+        Assert.Equal(0, asyncLock.LockScope);
 
         // Act
         using (var disposable = await asyncLock.ExclusiveLockAsync())
         {
-            var lockScope = asyncLock.lockScope;
+            var lockScope = asyncLock.LockScope;
             // Assert
             Assert.NotNull(disposable);
-            Assert.Equal(1, asyncLock.locksHeld);
-            Assert.Equal(0, asyncLock.upgradedLocksHeld);
+            Assert.Equal(1, asyncLock.LocksHeld);
+            Assert.Equal(0, asyncLock.UpgradedLocksHeld);
             Assert.NotEqual(0, lockScope);
 
             await Assert.ThrowsAsync<InvalidOperationException>(async () =>
@@ -35,34 +35,34 @@ public class AsyncAsymmetricLockTests
     {
         // Arrange
         var asyncLock = new AsyncAsymmetricLock();
-        Assert.Equal(0, asyncLock.lockScope);
+        Assert.Equal(0, asyncLock.LockScope);
 
         // Act
         using (var disposable = await asyncLock.UpgradeableLockAsync())
         {
-            var lockScope = asyncLock.lockScope;
+            var lockScope = asyncLock.LockScope;
             // Assert
             Assert.NotNull(disposable);
-            Assert.Equal(-1, asyncLock.locksHeld);
-            Assert.Equal(0, asyncLock.upgradedLocksHeld);
+            Assert.Equal(-1, asyncLock.LocksHeld);
+            Assert.Equal(0, asyncLock.UpgradedLocksHeld);
             Assert.NotEqual(0, lockScope);
 
             using (var disposable2 = await asyncLock.UpgradeableLockAsync())
             {
                 Assert.NotNull(disposable2);
-                Assert.Equal(-2, asyncLock.locksHeld);
-                Assert.Equal(0, asyncLock.upgradedLocksHeld);
-                Assert.Equal(lockScope, asyncLock.lockScope);
+                Assert.Equal(-2, asyncLock.LocksHeld);
+                Assert.Equal(0, asyncLock.UpgradedLocksHeld);
+                Assert.Equal(lockScope, asyncLock.LockScope);
             }
 
-            Assert.Equal(-1, asyncLock.locksHeld);
-            Assert.Equal(0, asyncLock.upgradedLocksHeld);
-            Assert.Equal(lockScope, asyncLock.lockScope);
+            Assert.Equal(-1, asyncLock.LocksHeld);
+            Assert.Equal(0, asyncLock.UpgradedLocksHeld);
+            Assert.Equal(lockScope, asyncLock.LockScope);
         }
 
-        Assert.Equal(0, asyncLock.locksHeld);
-        Assert.Equal(0, asyncLock.upgradedLocksHeld);
-        Assert.Equal(0, asyncLock.lockScope);
+        Assert.Equal(0, asyncLock.LocksHeld);
+        Assert.Equal(0, asyncLock.UpgradedLocksHeld);
+        Assert.Equal(0, asyncLock.LockScope);
     }
 
     [Fact(Timeout = 500)]
@@ -75,9 +75,9 @@ public class AsyncAsymmetricLockTests
         using var _ = await asyncLock.UpgradeableLockAsync();
 
         // Assert
-        Assert.Equal(-1, asyncLock.locksHeld);
-        Assert.Equal(0, asyncLock.upgradedLocksHeld);
-        Assert.NotEqual(0, asyncLock.lockScope);
+        Assert.Equal(-1, asyncLock.LocksHeld);
+        Assert.Equal(0, asyncLock.UpgradedLocksHeld);
+        Assert.NotEqual(0, asyncLock.LockScope);
 
         await Assert.ThrowsAsync<InvalidOperationException>(async () =>
         {
@@ -96,55 +96,60 @@ public class AsyncAsymmetricLockTests
         using var _ = await asyncLock.ExclusiveLockAsync();
 
         // Assert
-        var lockScope = asyncLock.lockScope;
-        Assert.Equal(1, asyncLock.locksHeld);
-        Assert.Equal(0, asyncLock.upgradedLocksHeld);
+        var lockScope = asyncLock.LockScope;
+        Assert.Equal(1, asyncLock.LocksHeld);
+        Assert.Equal(0, asyncLock.UpgradedLocksHeld);
         Assert.NotEqual(0, lockScope);
 
         using (var disposable = await asyncLock.UpgradeableLockAsync(cancellationTokenSource.Token))
         {
             Assert.NotNull(disposable);
-            Assert.Equal(1, asyncLock.locksHeld);
-            Assert.Equal(1, asyncLock.upgradedLocksHeld);
-            Assert.Equal(lockScope, asyncLock.lockScope);
+            Assert.Equal(1, asyncLock.LocksHeld);
+            Assert.Equal(1, asyncLock.UpgradedLocksHeld);
+            Assert.Equal(lockScope, asyncLock.LockScope);
 
             using (var disposable2 = await asyncLock.UpgradeableLockAsync())
             {
                 Assert.NotNull(disposable2);
-                Assert.Equal(1, asyncLock.locksHeld);
-                Assert.Equal(2, asyncLock.upgradedLocksHeld);
-                Assert.Equal(lockScope, asyncLock.lockScope);
+                Assert.Equal(1, asyncLock.LocksHeld);
+                Assert.Equal(2, asyncLock.UpgradedLocksHeld);
+                Assert.Equal(lockScope, asyncLock.LockScope);
             }
         }
 
-        Assert.Equal(1, asyncLock.locksHeld);
-        Assert.Equal(0, asyncLock.upgradedLocksHeld);
+        Assert.Equal(1, asyncLock.LocksHeld);
+        Assert.Equal(0, asyncLock.UpgradedLocksHeld);
         Assert.NotEqual(0, lockScope);
     }
 
-    [Fact(Timeout = 1000)]
+    [Fact(Timeout = 10000)]
     public async Task UpgradeableLock_ThreadSavety()
     {
         // Arrange
         var asyncLock = new AsyncAsymmetricLock();
 
-        Assert.Equal(0, asyncLock.lockScope);
+        Assert.Equal(0, asyncLock.LockScope);
 
-        var task1  = SimulateGet(asyncLock);
+        var task1 = SimulateGet(asyncLock);
         await Task.Delay(10);
         var task2 = SimulateReaction(asyncLock);
         await Task.Delay(10);
         var task3 = SimulateGet(asyncLock);
         await Task.Delay(10);
-        var task4 = Task.Run(async () => await SimulateReaction(asyncLock));
-        var task5 = Task.Run(async () => await SimulateGet(asyncLock));
-        var task6 = Task.Run(async () => await SimulateReaction(asyncLock));
-        var task7 = Task.Run(async () => await SimulateReaction(asyncLock));
+        var tasks = new List<Task>();
 
-        await Task.WhenAll(task1, task2, task3, task4, task5, task6, task7);
-        Assert.Equal(0, asyncLock.locksHeld);
-        Assert.Equal(0, asyncLock.upgradedLocksHeld);
-        Assert.Equal(0, asyncLock.lockScope);
+        for (int i = 0; i < 100; i++)
+        {
+            tasks.Add(Task.Run(async () => await SimulateReaction(asyncLock)));
+            tasks.Add(Task.Run(async () => await SimulateGet(asyncLock)));
+            tasks.Add(Task.Run(async () => await SimulateReaction(asyncLock)));
+            tasks.Add(Task.Run(async () => await SimulateReaction(asyncLock)));
+        }
+
+        await Task.WhenAll([task1, task2, task3, .. tasks]);
+        Assert.Equal(0, asyncLock.LocksHeld);
+        Assert.Equal(0, asyncLock.UpgradedLocksHeld);
+        Assert.Equal(0, asyncLock.LockScope);
     }
 
     private async Task SimulateGet(AsyncAsymmetricLock asyncLock)
@@ -154,16 +159,16 @@ public class AsyncAsymmetricLockTests
         {
             // Assert
             Assert.NotNull(upgradeableDisposable2);
-            Assert.Equal(-1, asyncLock.locksHeld);
-            Assert.Equal(0, asyncLock.upgradedLocksHeld);
-            Assert.NotEqual(0, asyncLock.lockScope);
-            await Task.Delay(100);
+            Assert.Equal(-1, asyncLock.LocksHeld);
+            Assert.Equal(0, asyncLock.UpgradedLocksHeld);
+            Assert.NotEqual(0, asyncLock.LockScope);
+            await Task.Delay(5);
         }
     }
 
     private async Task SimulateReaction(AsyncAsymmetricLock asyncLock)
     {
-        var oldLockScope = asyncLock.lockScope;
+        var oldLockScope = asyncLock.LockScope;
         var lockScope = 0;
 
         // Act
@@ -172,41 +177,41 @@ public class AsyncAsymmetricLockTests
             var cancellationTokenSource = new CancellationTokenSource();
 
             // Assert
-            await Task.Delay(100);
-            lockScope = asyncLock.lockScope;
+            await Task.Delay(5);
+            lockScope = asyncLock.LockScope;
             Assert.NotEqual(0, lockScope);
             Assert.NotEqual(oldLockScope, lockScope);
-            Assert.Equal(1, asyncLock.locksHeld);
-            Assert.Equal(0, asyncLock.upgradedLocksHeld);
+            Assert.Equal(1, asyncLock.LocksHeld);
+            Assert.Equal(0, asyncLock.UpgradedLocksHeld);
 
             using (var upgradeableDisposable = await asyncLock.UpgradeableLockAsync(cancellationTokenSource.Token))
             {
                 Assert.NotNull(upgradeableDisposable);
-                Assert.Equal(1, asyncLock.locksHeld);
-                Assert.Equal(1, asyncLock.upgradedLocksHeld);
-                Assert.Equal(lockScope, asyncLock.lockScope);
+                Assert.Equal(1, asyncLock.LocksHeld);
+                Assert.Equal(1, asyncLock.UpgradedLocksHeld);
+                Assert.Equal(lockScope, asyncLock.LockScope);
 
                 using (var upgradeableDisposable2 = await asyncLock.UpgradeableLockAsync())
                 {
                     Assert.NotNull(upgradeableDisposable2);
-                    Assert.Equal(1, asyncLock.locksHeld);
-                    Assert.Equal(2, asyncLock.upgradedLocksHeld);
-                    Assert.Equal(lockScope, asyncLock.lockScope);
+                    Assert.Equal(1, asyncLock.LocksHeld);
+                    Assert.Equal(2, asyncLock.UpgradedLocksHeld);
+                    Assert.Equal(lockScope, asyncLock.LockScope);
                 }
 
                 Assert.NotNull(upgradeableDisposable);
-                Assert.Equal(1, asyncLock.locksHeld);
-                Assert.Equal(1, asyncLock.upgradedLocksHeld);
-                Assert.Equal(lockScope, asyncLock.lockScope);
+                Assert.Equal(1, asyncLock.LocksHeld);
+                Assert.Equal(1, asyncLock.UpgradedLocksHeld);
+                Assert.Equal(lockScope, asyncLock.LockScope);
             }
 
-            Assert.Equal(1, asyncLock.locksHeld);
-            Assert.Equal(0, asyncLock.upgradedLocksHeld);
-            Assert.Equal(lockScope, asyncLock.lockScope);
+            Assert.Equal(1, asyncLock.LocksHeld);
+            Assert.Equal(0, asyncLock.UpgradedLocksHeld);
+            Assert.Equal(lockScope, asyncLock.LockScope);
         }
 
-        Assert.Equal(0, asyncLock.upgradedLocksHeld);
-        Assert.NotEqual(lockScope, asyncLock.lockScope);
-        Assert.NotEqual(oldLockScope, asyncLock.lockScope);
+        Assert.Equal(0, asyncLock.UpgradedLocksHeld);
+        Assert.NotEqual(lockScope, asyncLock.LockScope);
+        Assert.NotEqual(oldLockScope, asyncLock.LockScope);
     }
 }

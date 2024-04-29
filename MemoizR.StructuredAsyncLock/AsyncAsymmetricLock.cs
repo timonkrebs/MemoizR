@@ -21,11 +21,51 @@ public sealed class AsyncAsymmetricLock
     /// <summary>
     /// Number of exclusive locks held; negative if upgradeable lock are held; 0 if no locks are held.
     /// </summary>
-    internal volatile int locksHeld;
-    internal volatile int upgradedLocksHeld;
-    internal volatile int lockScope;
+    private volatile int locksHeld;
+    private volatile int upgradedLocksHeld;
+    private int lockScope;
     private readonly Random rand = new();
     private static readonly AsyncLocal<int> AsyncLocalScope = new();
+
+    internal int LockScope
+    {
+        get
+        {
+            lock (this)
+            {
+                return lockScope;
+            }
+        }
+        set
+        {
+            lock (this)
+            {
+                lockScope = value;
+            }
+        }
+    }
+
+    internal int LocksHeld
+    {
+        get
+        {
+            lock (this)
+            {
+                return locksHeld;
+            }
+        }
+    }
+
+    internal int UpgradedLocksHeld
+    {
+        get
+        {
+            lock (this)
+            {
+                return upgradedLocksHeld;
+            }
+        }
+    }
 
     /// <summary>
     /// Applies a continuation to the task that will call <see cref="ReleaseWaiters"/> if the task is canceled. This method may not be called while holding the sync lock.
@@ -49,24 +89,27 @@ public sealed class AsyncAsymmetricLock
     /// <returns>A disposable that releases the lock when disposed.</returns>
     private Task<IDisposable> RequestExclusiveLockAsync(CancellationToken cancellationToken, int lockScope)
     {
-        if (this.lockScope == lockScope && locksHeld < 0)
+        if (LockScope == lockScope && LocksHeld < 0)
         {
             throw new InvalidOperationException("Can not aquire recursive exclusive lock in the scope of an upgradeable lock");
         }
 
-        if (this.lockScope == lockScope && locksHeld > 0)
+        if (LockScope == lockScope && LocksHeld > 0)
         {
             throw new InvalidOperationException("Can not aquire recursive exclusive locks in the same scope");
         }
 
         // If the lock is available and there are no waiting upgradeable, or upgrading upgradeable, take it immediately.
-        if (locksHeld == 0 && upgradeable.IsEmpty && upgradedLocksHeld == 0)
+        if (LocksHeld == 0 && upgradeable.IsEmpty && UpgradedLocksHeld == 0)
         {
-            Interlocked.Increment(ref locksHeld);
-            this.lockScope = lockScope;
+            lock (this)
+            {
+                Interlocked.Increment(ref locksHeld);
+            }
+            LockScope = lockScope;
             return Task.FromResult<IDisposable>(new ExclusivePrioKey(this));
         }
-        else if (this.lockScope != lockScope)
+        else if (LockScope != lockScope)
         {
             // Wait for the lock to become available or cancellation.
             return exclusive.Enqueue(this, cancellationToken, lockScope);
@@ -115,23 +158,32 @@ public sealed class AsyncAsymmetricLock
     {
         var canAcquireLock = false;
 
-        if (locksHeld == 0)
+        if (LocksHeld == 0)
         {
-            Interlocked.Decrement(ref locksHeld);
-            this.lockScope = lockScope;
+            lock (this)
+            {
+                Interlocked.Decrement(ref locksHeld);
+            }
+            LockScope = lockScope;
             canAcquireLock = true;
         }
-        else if (locksHeld > 0 && this.lockScope == lockScope)
+        else if (LocksHeld > 0 && LockScope == lockScope)
         {
-            Interlocked.Increment(ref upgradedLocksHeld);
+            lock (this)
+            {
+                Interlocked.Increment(ref upgradedLocksHeld);
+            }
             canAcquireLock = true;
         }
-        else if (locksHeld < 0 && this.lockScope == lockScope)
+        else if (LocksHeld < 0 && LockScope == lockScope)
         {
-            Interlocked.Decrement(ref locksHeld);
+            lock (this)
+            {
+                Interlocked.Decrement(ref locksHeld);
+            }
             canAcquireLock = true;
         }
-        else if (this.lockScope == lockScope)
+        else if (LockScope == lockScope)
         {
             throw new InvalidOperationException("Should never happen!");
         }
@@ -177,19 +229,25 @@ public sealed class AsyncAsymmetricLock
     /// </summary>
     private void ReleaseWaiters()
     {
-        if (!upgradeable.IsEmpty && locksHeld == 0 && upgradedLocksHeld == 0)
+        if (!upgradeable.IsEmpty && LocksHeld == 0 && UpgradedLocksHeld == 0)
         {
-            Interlocked.Decrement(ref locksHeld);
-            lockScope = upgradeable.Dequeue(new UpgradeableKey(this));
-            AsyncLocalScope.Value = lockScope;
+            lock (this)
+            {
+                Interlocked.Decrement(ref locksHeld);
+            }
+            LockScope = upgradeable.Dequeue(new UpgradeableKey(this));
+            AsyncLocalScope.Value = LockScope;
         }
-        else if (!exclusive.IsEmpty && locksHeld == 0 && upgradedLocksHeld == 0)
+        else if (!exclusive.IsEmpty && LocksHeld == 0 && UpgradedLocksHeld == 0)
         {
-            Interlocked.Increment(ref locksHeld);
-            lockScope = exclusive.Dequeue(new ExclusivePrioKey(this));
-            AsyncLocalScope.Value = lockScope;
+            lock (this)
+            {
+                Interlocked.Increment(ref locksHeld);
+            }
+            LockScope = exclusive.Dequeue(new ExclusivePrioKey(this));
+            AsyncLocalScope.Value = LockScope;
         }
-        else if ((!upgradeable.IsEmpty || !exclusive.IsEmpty) && locksHeld == 0 && upgradedLocksHeld == 0)
+        else if ((!upgradeable.IsEmpty || !exclusive.IsEmpty) && LocksHeld == 0 && UpgradedLocksHeld == 0)
         {
             throw new InvalidOperationException();
         }
@@ -202,10 +260,13 @@ public sealed class AsyncAsymmetricLock
     {
         lock (this)
         {
-            Interlocked.Decrement(ref locksHeld);
-            if (locksHeld == 0)
+            lock (this)
             {
-                lockScope = 0;
+                Interlocked.Decrement(ref locksHeld);
+            }
+            if (LocksHeld == 0)
+            {
+                LockScope = 0;
             }
             ReleaseWaiters();
         }
@@ -218,20 +279,27 @@ public sealed class AsyncAsymmetricLock
     {
         lock (this)
         {
-            if (upgradedLocksHeld > 0)
+            if (UpgradedLocksHeld > 0)
             {
-                Interlocked.Decrement(ref upgradedLocksHeld);
-                if (upgradedLocksHeld == 0 && locksHeld == 0)
+                lock (this)
                 {
-                    lockScope = 0;
+                    Interlocked.Decrement(ref upgradedLocksHeld);
+                }
+                if (UpgradedLocksHeld == 0 && LocksHeld == 0)
+                {
+                    LockScope = 0;
                 }
             }
             else
             {
-                Interlocked.Increment(ref locksHeld);
-                if (locksHeld == 0)
+                lock (this)
                 {
-                    lockScope = 0;
+                    Interlocked.Increment(ref locksHeld);
+                }
+
+                if (LocksHeld == 0)
+                {
+                    LockScope = 0;
                 }
             }
             ReleaseWaiters();
