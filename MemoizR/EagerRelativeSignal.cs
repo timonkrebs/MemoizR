@@ -32,7 +32,8 @@ public sealed class EagerRelativeSignal<T> : MemoHandlR<T>, IStateGetR<T>
     
     public async Task<T> Get()
     {
-        if (Context.CurrentReaction == null)
+        Context.CreateNewScopeIfNeeded();
+        if (Context.ReactionScope.CurrentReaction == null)
         {
             return Value;
         }

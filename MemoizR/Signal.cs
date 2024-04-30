@@ -4,7 +4,7 @@ public sealed class Signal<T> : MemoHandlR<T>, IStateGetR<T?>
 {
     internal Signal(T value, Context context) : base(context)
     {
-        this.Value = value;
+        Value = value;
     }
 
     public async Task Set(T value)
@@ -13,7 +13,7 @@ public sealed class Signal<T> : MemoHandlR<T>, IStateGetR<T?>
         // Must be Upgradeable because it could change to "Writeble-Lock" if something synchronously reactive is listening.
         using (await Context.ContextLock.ExclusiveLockAsync())
         {
-            if (Equals(this.Value, value))
+            if (Equals(Value, value))
             {
                 for (int i = 0; i < Observers.Length; i++)
                 {
@@ -43,7 +43,8 @@ public sealed class Signal<T> : MemoHandlR<T>, IStateGetR<T?>
 
     public async Task<T?> Get()
     {
-        if (Context.CurrentReaction == null)
+        Context.CreateNewScopeIfNeeded();
+        if (Context.ReactionScope.CurrentReaction == null)
         {
             return Value;
         }

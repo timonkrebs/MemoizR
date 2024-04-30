@@ -248,10 +248,7 @@ public sealed class AsyncAsymmetricLock
     {
         lock (this)
         {
-            lock (this)
-            {
-                Interlocked.Decrement(ref locksHeld);
-            }
+            Interlocked.Decrement(ref locksHeld);
             if (LocksHeld == 0)
             {
                 LockScope = 0;
@@ -269,10 +266,7 @@ public sealed class AsyncAsymmetricLock
         {
             if (UpgradedLocksHeld > 0)
             {
-                lock (this)
-                {
-                    Interlocked.Decrement(ref upgradedLocksHeld);
-                }
+                Interlocked.Decrement(ref upgradedLocksHeld);
                 if (UpgradedLocksHeld == 0 && LocksHeld == 0)
                 {
                     LockScope = 0;

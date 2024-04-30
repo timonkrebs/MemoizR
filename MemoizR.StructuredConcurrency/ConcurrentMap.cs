@@ -20,7 +20,8 @@ public sealed class ConcurrentMap<T> : MemoHandlR<IEnumerable<T>>, IMemoizR, ISt
 
     public async Task<IEnumerable<T>> Get()
     {
-        if (State == CacheState.CacheClean && Context.CurrentReaction == null)
+        Context.CreateNewScopeIfNeeded();
+        if (State == CacheState.CacheClean && Context.ReactionScope.CurrentReaction == null)
         {
             return Value;
         }
@@ -35,12 +36,12 @@ public sealed class ConcurrentMap<T> : MemoHandlR<IEnumerable<T>>, IMemoizR, ISt
                 isStartingComponent = Context.CancellationTokenSource == null;
                 Context.CancellationTokenSource ??= new CancellationTokenSource();
                 // if someone else did read the graph while this thread was blocked it could be that this is already Clean
-                if (State == CacheState.CacheClean && Context.CurrentReaction == null)
+                if (State == CacheState.CacheClean && Context.ReactionScope.CurrentReaction == null)
                 {
                     return Value;
                 }
 
-                if (Context.CurrentReaction != null)
+                if (Context.ReactionScope.CurrentReaction != null)
                 {
                     Context.CheckDependenciesTheSame(this);
                 }
@@ -106,13 +107,13 @@ public sealed class ConcurrentMap<T> : MemoHandlR<IEnumerable<T>>, IMemoizR, ISt
         var oldValue = Value ?? [];
         
         /* Evaluate the reactive function body, dynamically capturing any other reactives used */
-        var prevReaction = Context.CurrentReaction;
-        var prevGets = Context.CurrentGets;
-        var prevIndex = Context.CurrentGetsIndex;
+        var prevReaction = Context.ReactionScope.CurrentReaction;
+        var prevGets = Context.ReactionScope.CurrentGets;
+        var prevIndex = Context.ReactionScope.CurrentGetsIndex;
 
-        Context.CurrentReaction = this;
-        Context.CurrentGets = [];
-        Context.CurrentGetsIndex = 0;
+        Context.ReactionScope.CurrentReaction = this;
+        Context.ReactionScope.CurrentGets = [];
+        Context.ReactionScope.CurrentGetsIndex = 0;
 
         try
         {
@@ -121,21 +122,21 @@ public sealed class ConcurrentMap<T> : MemoHandlR<IEnumerable<T>>, IMemoizR, ISt
             State = CacheState.CacheClean;
 
             // if the sources have changed, update source & observer links
-            if (Context.CurrentGets.Length > 0)
+            if (Context.ReactionScope.CurrentGets.Length > 0)
             {
                 // remove all old Sources' .observers links to us
-                RemoveParentObservers(Context.CurrentGetsIndex);
+                RemoveParentObservers(Context.ReactionScope.CurrentGetsIndex);
                 // update source up links
-                if (Sources.Any() && Context.CurrentGetsIndex > 0)
+                if (Sources.Any() && Context.ReactionScope.CurrentGetsIndex > 0)
                 {
-                    Sources = [.. Sources.Take(Context.CurrentGetsIndex), .. Context.CurrentGets];
+                    Sources = [.. Sources.Take(Context.ReactionScope.CurrentGetsIndex), .. Context.ReactionScope.CurrentGets];
                 }
                 else
                 {
-                    Sources = Context.CurrentGets;
+                    Sources = Context.ReactionScope.CurrentGets;
                 }
 
-                for (var i = Context.CurrentGetsIndex; i < Sources.Length; i++)
+                for (var i = Context.ReactionScope.CurrentGetsIndex; i < Sources.Length; i++)
                 {
                     // Add ourselves to the end of the parent .observers array
                     var source = Sources[i];
@@ -144,11 +145,11 @@ public sealed class ConcurrentMap<T> : MemoHandlR<IEnumerable<T>>, IMemoizR, ISt
                         : [.. source.Observers, new WeakReference<IMemoizR>(this)];
                 }
             }
-            else if (Sources.Any() && Context.CurrentGetsIndex < Sources.Length)
+            else if (Sources.Any() && Context.ReactionScope.CurrentGetsIndex < Sources.Length)
             {
                 // remove all old Sources' .observers links to us
-                RemoveParentObservers(Context.CurrentGetsIndex);
-                Sources = [.. Sources.Take(Context.CurrentGetsIndex)];
+                RemoveParentObservers(Context.ReactionScope.CurrentGetsIndex);
+                Sources = [.. Sources.Take(Context.ReactionScope.CurrentGetsIndex)];
             }
         }
         catch
@@ -158,9 +159,9 @@ public sealed class ConcurrentMap<T> : MemoHandlR<IEnumerable<T>>, IMemoizR, ISt
         }
         finally
         {
-            Context.CurrentGets = prevGets;
-            Context.CurrentReaction = prevReaction;
-            Context.CurrentGetsIndex = prevIndex;
+            Context.ReactionScope.CurrentGets = prevGets;
+            Context.ReactionScope.CurrentReaction = prevReaction;
+            Context.ReactionScope.CurrentGetsIndex = prevIndex;
         }
         
             // handles diamond dependencies if we're the parent of a diamond.

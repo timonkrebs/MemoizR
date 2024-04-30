@@ -106,13 +106,13 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
         }
 
         // Evaluate the reactive function body, dynamically capturing any other reactives used.
-        var prevReaction = Context.CurrentReaction;
-        var prevGets = Context.CurrentGets;
-        var prevIndex = Context.CurrentGetsIndex;
+        var prevReaction = Context.ReactionScope.CurrentReaction;
+        var prevGets = Context.ReactionScope.CurrentGets;
+        var prevIndex = Context.ReactionScope.CurrentGetsIndex;
 
-        Context.CurrentReaction = this;
-        Context.CurrentGets = [];
-        Context.CurrentGetsIndex = 0;
+        Context.ReactionScope.CurrentReaction = this;
+        Context.ReactionScope.CurrentGets = [];
+        Context.ReactionScope.CurrentGetsIndex = 0;
 
         try
         {
@@ -159,21 +159,21 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
             }
 
             // If the Sources have changed, update source & observer links.
-            if (Context.CurrentGets.Length > 0)
+            if (Context.ReactionScope.CurrentGets.Length > 0)
             {
                 // remove all old Sources' .observers links to us
-                RemoveParentObservers(Context.CurrentGetsIndex);
+                RemoveParentObservers(Context.ReactionScope.CurrentGetsIndex);
                 // Update source up links.
-                if (Sources.Any() && Context.CurrentGetsIndex > 0)
+                if (Sources.Any() && Context.ReactionScope.CurrentGetsIndex > 0)
                 {
-                    Sources = [.. Sources.Take(Context.CurrentGetsIndex), .. Context.CurrentGets];
+                    Sources = [.. Sources.Take(Context.ReactionScope.CurrentGetsIndex), .. Context.ReactionScope.CurrentGets];
                 }
                 else
                 {
-                    Sources = Context.CurrentGets;
+                    Sources = Context.ReactionScope.CurrentGets;
                 }
 
-                for (var i = Context.CurrentGetsIndex; i < Sources.Length; i++)
+                for (var i = Context.ReactionScope.CurrentGetsIndex; i < Sources.Length; i++)
                 {
                     // Add ourselves to the end of the parent .observers array.
                     var source = Sources[i];
@@ -182,18 +182,18 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
                         : [.. source.Observers, new WeakReference<IMemoizR>(this)];
                 }
             }
-            else if (Sources.Any() && Context.CurrentGetsIndex < Sources.Length)
+            else if (Sources.Any() && Context.ReactionScope.CurrentGetsIndex < Sources.Length)
             {
                 // remove all old Sources' .observers links to us
-                RemoveParentObservers(Context.CurrentGetsIndex);
-                Sources = [.. Sources.Take(Context.CurrentGetsIndex)];
+                RemoveParentObservers(Context.ReactionScope.CurrentGetsIndex);
+                Sources = [.. Sources.Take(Context.ReactionScope.CurrentGetsIndex)];
             }
         }
         finally
         {
-            Context.CurrentGets = prevGets;
-            Context.CurrentReaction = prevReaction;
-            Context.CurrentGetsIndex = prevIndex;
+            Context.ReactionScope.CurrentGets = prevGets;
+            Context.ReactionScope.CurrentReaction = prevReaction;
+            Context.ReactionScope.CurrentGetsIndex = prevIndex;
         }
 
         // We've rerun with the latest values from all of our Sources.
@@ -227,15 +227,14 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
             cts?.Cancel();
             cts = new();
 
-            Task.Run(async () =>
+            Context.CancellationTokenSource?.Cancel();
+            Context.CancellationTokenSource ??= new CancellationTokenSource();
+
+            Task.Delay(DebounceTime, cts.Token).ContinueWith(async _ =>
                 {
-                    Context.CancellationTokenSource?.Cancel();
-                    Context.CancellationTokenSource ??= new CancellationTokenSource();
+                    Context.CreateNewScopeIfNeeded();
                     try
                     {
-                        await Task.Delay(DebounceTime, cts.Token);
-
-                        using (await Context.Mutex.LockAsync())
                         using (await Context.ContextLock.UpgradeableLockAsync())
                         {
                             await UpdateIfNecessary().ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
@@ -244,6 +243,7 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
                     finally
                     {
                         Context.CancellationTokenSource = null;
+                        Context.CleanScope();
                     }
                 });
 

@@ -24,6 +24,7 @@ public sealed class ConcurrentRace<T, I> : MemoHandlR<T>, IMemoizR, IStateGetR<T
 
     public async Task<T> Get()
     {
+        Context.CreateNewScopeIfNeeded();
         // Only one thread should evaluate the graph at a time. otherwise the context could get messed up.
         // This should lead to perf gains because memoization can be utilized more efficiently.
         using (await mutex.LockAsync())
@@ -53,13 +54,13 @@ public sealed class ConcurrentRace<T, I> : MemoHandlR<T>, IMemoizR, IStateGetR<T
         var oldValue = Value;
 
         /* Evaluate the reactive function body, dynamically capturing any other reactives used */
-        var prevReaction = Context.CurrentReaction;
-        var prevGets = Context.CurrentGets;
-        var prevIndex = Context.CurrentGetsIndex;
+        var prevReaction = Context.ReactionScope.CurrentReaction;
+        var prevGets = Context.ReactionScope.CurrentGets;
+        var prevIndex = Context.ReactionScope.CurrentGetsIndex;
 
-        Context.CurrentReaction = this;
-        Context.CurrentGets = [];
-        Context.CurrentGetsIndex = 0;
+        Context.ReactionScope.CurrentReaction = this;
+        Context.ReactionScope.CurrentGets = [];
+        Context.ReactionScope.CurrentGetsIndex = 0;
 
         try
         {
@@ -68,9 +69,9 @@ public sealed class ConcurrentRace<T, I> : MemoHandlR<T>, IMemoizR, IStateGetR<T
             State = CacheState.CacheClean;
 
             // if the sources have changed, update source & observer links
-            if (Context.CurrentGets.Length > 0)
+            if (Context.ReactionScope.CurrentGets.Length > 0)
             {
-                for (var i = Context.CurrentGetsIndex; i < Sources.Length; i++)
+                for (var i = Context.ReactionScope.CurrentGetsIndex; i < Sources.Length; i++)
                 {
                     // Add ourselves to the end of the parent .observers array
                     var source = Sources[i];
@@ -87,9 +88,9 @@ public sealed class ConcurrentRace<T, I> : MemoHandlR<T>, IMemoizR, IStateGetR<T
         }
         finally
         {
-            Context.CurrentGets = prevGets;
-            Context.CurrentReaction = prevReaction;
-            Context.CurrentGetsIndex = prevIndex;
+            Context.ReactionScope.CurrentGets = prevGets;
+            Context.ReactionScope.CurrentReaction = prevReaction;
+            Context.ReactionScope.CurrentGetsIndex = prevIndex;
         }
 
         // handles diamond dependencies if we're the parent of a diamond.
