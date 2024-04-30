@@ -24,7 +24,6 @@ public sealed class ConcurrentMapReduce<T> : MemoHandlR<T>, IMemoizR, IStateGetR
     {
         if (State == CacheState.CacheClean && Context.CurrentReaction == null)
         {
-            Thread.MemoryBarrier();
             return Value;
         }
 
@@ -40,7 +39,6 @@ public sealed class ConcurrentMapReduce<T> : MemoHandlR<T>, IMemoizR, IStateGetR
                 // if someone else did read the graph while this thread was blocked it could be that this is already Clean
                 if (State == CacheState.CacheClean && Context.CurrentReaction == null)
                 {
-                    Thread.MemoryBarrier();
                     return Value;
                 }
 
@@ -61,7 +59,6 @@ public sealed class ConcurrentMapReduce<T> : MemoHandlR<T>, IMemoizR, IStateGetR
             }
         }
 
-        Thread.MemoryBarrier();
         return Value;
     }
 

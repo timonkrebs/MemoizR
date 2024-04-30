@@ -17,7 +17,6 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR, IStateGetR<T>
     {
         if (State == CacheState.CacheClean && Context.CurrentReaction == null)
         {
-            Thread.MemoryBarrier();
             return Value;
         }
 
@@ -33,7 +32,6 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR, IStateGetR<T>
                 // if someone else did read the graph while this thread was blocked it could be that this is already Clean
                 if (State == CacheState.CacheClean && Context.CurrentReaction == null)
                 {
-                    Thread.MemoryBarrier();
                     return Value;
                 }
 
@@ -54,7 +52,6 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR, IStateGetR<T>
             }
         }
 
-        Thread.MemoryBarrier();
         return Value;
     }
 

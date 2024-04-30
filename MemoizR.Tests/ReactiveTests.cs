@@ -16,7 +16,7 @@ public class ReactiveTests
         await v1.Set(2);
     }
 
-    [Fact(Skip="Experimantal")]
+    [Fact(Skip = "Experimantal")]
     public async Task TestAsyncEnumerable()
     {
         var f = new MemoFactory();
@@ -63,7 +63,7 @@ public class ReactiveTests
         Assert.Equal(3, invocationCount);
     }
 
-    [Fact(Skip="Experimantal")]
+    [Fact(Skip = "Experimantal")]
     public async Task TestAsyncEnumerableWithBackpressure()
     {
         var f = new MemoFactory();
@@ -135,6 +135,48 @@ public class ReactiveTests
         await Task.Delay(20);
 
         Assert.Equal(2, invocations);
+    }
+
+    [Fact(Timeout = 1000)]
+    public async Task TestAutoSubscriptionHandling()
+    {
+        var invocations = new Invocations { Count = 0 };
+        var f = new MemoFactory();
+        var v1 = f.CreateSignal(1);
+
+        Assert.Equal(1, await v1.Get());
+
+        CreateReaction(f, v1, invocations);
+
+        GC.Collect();
+        GC.Collect();
+        await Task.Delay(100);
+        GC.Collect();
+        GC.Collect();
+
+        await Task.Delay(30);
+        Assert.Equal(1, invocations.Count);
+        await Task.Delay(100);
+
+        await v1.Set(2);
+        await Task.Delay(100);
+
+        Assert.Equal(1, invocations.Count);
+
+        await v1.Set(2);
+        await Task.Delay(20);
+
+        Assert.Equal(1, invocations.Count);
+    }
+
+    private void CreateReaction(MemoFactory f, Signal<int> v1, Invocations invocations)
+    {
+        f.BuildReaction()
+        .CreateReaction(v1, v => invocations.Count++);
+    }
+
+    private class Invocations{
+        public int Count { get; set; }
     }
 
     [Fact(Timeout = 1000)]
@@ -259,6 +301,7 @@ public class ReactiveTests
     }
 
     [Fact(Timeout = 2000)]
+    [Trait("Category","Unit")]
     public async Task TestThreadSafety4()
     {
         var f = new MemoFactory();
@@ -266,16 +309,21 @@ public class ReactiveTests
         var v1 = f.CreateSignal(4);
 
         var memoInvocationCount = 0;
-        var m1 = f.CreateMemoizR(async () =>
+        var m1 = f.CreateMemoizR("m1", async () =>
         {
             memoInvocationCount++;
             return await v1.Get() * 2;
         });
 
+        var m2 = f.CreateMemoizR("m2", async () =>
+        {
+            return await m1.Get() * 2;
+        });
+
         var invocationCountR1 = 0;
-        var r1 = f.BuildReaction().CreateReaction(m1, m => invocationCountR1++);
+        var r1 = f.BuildReaction().CreateReaction(m2, m => invocationCountR1++);
         var invocationCountR2 = 0;
-        var r2 = f.BuildReaction().CreateReaction(m1, m => invocationCountR2++);
+        var r2 = f.BuildReaction().CreateReaction(m2, m => invocationCountR2++);
 
         await Task.Delay(100);
 

@@ -17,9 +17,7 @@ public sealed class EagerRelativeSignal<T> : MemoHandlR<T>, IStateGetR<T>
             // only updating the value should be locked
             lock (this)
             {
-                Thread.MemoryBarrier();
-                Value = fn(Value);
-                Thread.MemoryBarrier();
+                Value = fn(Value);   
             }
 
             for (int i = 0; i < Observers.Length; i++)
@@ -36,7 +34,6 @@ public sealed class EagerRelativeSignal<T> : MemoHandlR<T>, IStateGetR<T>
     {
         if (Context.CurrentReaction == null)
         {
-            Thread.MemoryBarrier();
             return Value;
         }
 
@@ -48,7 +45,6 @@ public sealed class EagerRelativeSignal<T> : MemoHandlR<T>, IStateGetR<T>
             Context.CheckDependenciesTheSame(this);
         }
 
-        Thread.MemoryBarrier();
         return Value;
     }
 }
