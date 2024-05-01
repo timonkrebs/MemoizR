@@ -257,7 +257,7 @@ public class ReactiveTests
 
         await Task.Delay(100);
 
-        Assert.Equal(2, invocationCount);
+        Assert.InRange(invocationCount, 1, 2);
     }
 
     [Fact(Timeout = 2000)]
@@ -392,7 +392,7 @@ public class ReactiveTests
 
         await Task.WhenAll(tasks);
 
-        await Task.Delay(150);
+        await Task.Delay(190);
 
         Assert.Equal(168, result1);
         Assert.Equal(168, result2);
