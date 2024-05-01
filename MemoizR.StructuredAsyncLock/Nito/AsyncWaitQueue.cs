@@ -18,13 +18,13 @@ internal interface IAsyncWaitQueue<T>
     /// Creates a new entry and queues it to this wait queue. The returned task must support both synchronous and asynchronous waits.
     /// </summary>
     /// <returns>The queued task.</returns>
-    Task<T> Enqueue(int lockScope);
+    Task<T> Enqueue(double lockScope);
 
     /// <summary>
     /// Removes a single entry in the wait queue and completes it. This method may only be called if <see cref="IsEmpty"/> is <c>false</c>. The task continuations for the completed task must be executed asynchronously.
     /// </summary>
     /// <param name="result">The result used to complete the wait queue entry. If this isn't needed, use <c>default(T)</c>.</param>
-    int Dequeue(T? result = default);
+    double Dequeue(T? result = default);
 
     /// <summary>
     /// Removes all entries in the wait queue and completes them. The task continuations for the completed tasks must be executed asynchronously.
@@ -58,7 +58,7 @@ internal static class AsyncWaitQueueExtensions
     /// <param name="mutex">A synchronization object taken while cancelling the entry.</param>
     /// <param name="token">The token used to cancel the wait.</param>
     /// <returns>The queued task.</returns>
-    public static Task<T> Enqueue<T>(this IAsyncWaitQueue<T> @this, object mutex, CancellationToken token, int lockScope)
+    public static Task<T> Enqueue<T>(this IAsyncWaitQueue<T> @this, object mutex, CancellationToken token, double lockScope)
     {
         if (token.IsCancellationRequested)
             return Task.FromCanceled<T>(token);
@@ -85,7 +85,7 @@ internal static class AsyncWaitQueueExtensions
 [DebuggerTypeProxy(typeof(DefaultAsyncWaitQueue<>.DebugView))]
 internal sealed class DefaultAsyncWaitQueue<T> : IAsyncWaitQueue<T>
 {
-    private readonly Deque<(TaskCompletionSource<T>, int)> _queue = new Deque<(TaskCompletionSource<T>, int)>();
+    private readonly Deque<(TaskCompletionSource<T>, double)> _queue = new Deque<(TaskCompletionSource<T>, double)>();
 
     private int Count
     {
@@ -97,14 +97,14 @@ internal sealed class DefaultAsyncWaitQueue<T> : IAsyncWaitQueue<T>
         get { return Count == 0; }
     }
 
-    Task<T> IAsyncWaitQueue<T>.Enqueue(int lockScope)
+    Task<T> IAsyncWaitQueue<T>.Enqueue(double lockScope)
     {
         var tcs = TaskCompletionSourceExtensions.CreateAsyncTaskSource<T>();
         _queue.AddToBack((tcs, lockScope));
         return tcs.Task;
     }
 
-    int IAsyncWaitQueue<T>.Dequeue(T? result)
+    double IAsyncWaitQueue<T>.Dequeue(T? result)
     {
         var res = _queue.RemoveFromFront();
         

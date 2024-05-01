@@ -227,7 +227,6 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
             cts?.Cancel();
             cts = new();
 
-            Context.CancellationTokenSource?.Cancel();
             Context.CancellationTokenSource ??= new CancellationTokenSource();
 
             Task.Delay(DebounceTime, cts.Token).ContinueWith(async _ =>

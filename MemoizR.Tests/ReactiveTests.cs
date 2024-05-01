@@ -257,7 +257,7 @@ public class ReactiveTests
 
         await Task.Delay(100);
 
-        Assert.InRange(invocationCount, 1, 2);
+        Assert.Equal(2, invocationCount);
     }
 
     [Fact(Timeout = 2000)]
@@ -267,12 +267,7 @@ public class ReactiveTests
 
         var v1 = f.CreateSignal(4);
 
-        var memoInvocationCount = 0;
-        var m1 = f.CreateMemoizR(async () =>
-        {
-            memoInvocationCount++;
-            return await v1.Get() * 2;
-        });
+        var m1 = f.CreateMemoizR(async () => await v1.Get() * 2);
 
         var result1 = 0;
         var r1 = f.BuildReaction().CreateReaction(m1, m => result1 = m);
@@ -304,6 +299,7 @@ public class ReactiveTests
     }
 
     [Fact(Timeout = 2000)]
+    [Trait("Category", "Unit")]
     public async Task TestThreadSafety4()
     {
         var f = new MemoFactory();
@@ -344,13 +340,12 @@ public class ReactiveTests
 
         await Task.Delay(100);
 
-        Assert.InRange(memoInvocationCount, 42, 45);
-        Assert.InRange(invocationCountR1, 40, 42);
-        Assert.InRange(invocationCountR2, 40, 42);
+        Assert.Equal(42, memoInvocationCount);
+        Assert.Equal(42, invocationCountR1);
+        Assert.Equal(42, invocationCountR2);
     }
 
     [Fact(Timeout = 1000)]
-    [Trait("Category", "Unit")]
     public async Task TestThreadSafety5()
     {
         var f = new MemoFactory();
@@ -370,7 +365,7 @@ public class ReactiveTests
             return await m1.Get() * 2;
         });
 
-        var m3 = f.CreateMemoizR("m4", async () =>
+        var m3 = f.CreateMemoizR("m3", async () =>
         {
             await Task.Delay(100);
             return await m1.Get() * 2;

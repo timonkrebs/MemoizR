@@ -196,6 +196,7 @@ public sealed class ConcurrentMapReduce<T> : MemoHandlR<T>, IMemoizR, IStateGetR
 
     async Task IMemoizR.UpdateIfNecessary()
     {
+        using (await mutex.LockAsync())
         using (await Context.ContextLock.UpgradeableLockAsync())
         {
             await UpdateIfNecessary();

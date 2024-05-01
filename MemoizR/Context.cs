@@ -13,13 +13,13 @@ public class ReactionScope
 public class Context
 {
     private readonly Random rand = new();
-    private static readonly AsyncLocal<int> AsyncLocalScope = new();
+    private static readonly AsyncLocal<double> AsyncLocalScope = new();
     internal AsyncAsymmetricLock ContextLock = new();
     internal AsyncLock Mutex = new();
 
     /** current capture context for identifying sources (other memoizR elements)
     * - active while evaluating a memoizR function body  */
-    private Dictionary<int, WeakReference<ReactionScope>> AsyncReactionScopes = new();
+    private Dictionary<double, WeakReference<ReactionScope>> AsyncReactionScopes = new();
 
     public ReactionScope ReactionScope
     {
@@ -28,12 +28,18 @@ public class Context
             lock (this)
             {
                 var key = AsyncLocalScope.Value;
-                if(!(AsyncReactionScopes.TryGetValue(key, out var reactionScopeRef) && reactionScopeRef!.TryGetTarget(out var reactionScope)))
+                ReactionScope reactionScope;
+                if (!AsyncReactionScopes.TryGetValue(key, out var reactionScopeRef))
                 {
                     reactionScope = new ReactionScope();
                     AsyncReactionScopes.Add(key, new WeakReference<ReactionScope>(reactionScope));
                 }
-   
+                else if (!reactionScopeRef!.TryGetTarget(out reactionScope!))
+                {
+                    reactionScope = new ReactionScope();
+                    AsyncReactionScopes[key] = new WeakReference<ReactionScope>(reactionScope);
+                }
+
                 return reactionScope;
             }
         }
@@ -43,13 +49,13 @@ public class Context
 
     internal void CreateNewScopeIfNeeded()
     {
-        if (AsyncLocalScope.Value != 0)
-        {
-            return;
-        }
         lock (this)
         {
-            var key = rand.Next(1, int.MaxValue);
+            if (AsyncLocalScope.Value != 0)
+            {
+                return;
+            }
+            var key = rand.NextDouble();
             AsyncLocalScope.Value = key;
             AsyncReactionScopes.Add(key, new WeakReference<ReactionScope>(new ReactionScope()));
         }

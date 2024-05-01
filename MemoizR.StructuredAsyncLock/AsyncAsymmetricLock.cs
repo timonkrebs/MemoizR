@@ -23,11 +23,11 @@ public sealed class AsyncAsymmetricLock
     /// </summary>
     private volatile int locksHeld;
     private volatile int upgradedLocksHeld;
-    private int lockScope;
+    private double lockScope;
     private readonly Random rand = new();
-    private static readonly AsyncLocal<int> AsyncLocalScope = new();
+    private static readonly AsyncLocal<double> AsyncLocalScope = new();
 
-    internal int LockScope
+    internal double LockScope
     {
         get
         {
@@ -87,7 +87,7 @@ public sealed class AsyncAsymmetricLock
     /// </summary>
     /// <param name="cancellationToken">The cancellation token used to cancel the lock. If this is already set, then this method will attempt to take the lock immediately (succeeding if the lock is currently available).</param>
     /// <returns>A disposable that releases the lock when disposed.</returns>
-    private Task<IDisposable> RequestExclusiveLockAsync(CancellationToken cancellationToken, int lockScope)
+    private Task<IDisposable> RequestExclusiveLockAsync(CancellationToken cancellationToken, double lockScope)
     {
         if (LockScope == lockScope && LocksHeld < 0)
         {
@@ -127,13 +127,16 @@ public sealed class AsyncAsymmetricLock
     /// <returns>A disposable that releases the lock when disposed.</returns>
     public AwaitableDisposable<IDisposable> ExclusiveLockAsync(CancellationToken cancellationToken)
     {
-        int lockScope;
+        double lockScope;
         lock (this)
         {
             lockScope = AsyncLocalScope.Value;
             if (lockScope == 0)
             {
-                lockScope = rand.Next(1, int.MaxValue);
+                do
+                {
+                    lockScope = rand.NextDouble();
+                } while (lockScope == 0);
                 AsyncLocalScope.Value = lockScope;
             }
             return new AwaitableDisposable<IDisposable>(RequestExclusiveLockAsync(cancellationToken, lockScope));
@@ -154,7 +157,7 @@ public sealed class AsyncAsymmetricLock
     /// </summary>
     /// <param name="cancellationToken">The cancellation token used to cancel the lock. If this is already set, then this method will attempt to take the lock immediately (succeeding if the lock is currently available).</param>
     /// <returns>A disposable that releases the lock when disposed.</returns>
-    private Task<IDisposable> RequestUpgradeableLockAsync(CancellationToken cancellationToken, int lockScope)
+    private Task<IDisposable> RequestUpgradeableLockAsync(CancellationToken cancellationToken, double lockScope)
     {
         var canAcquireLock = false;
 
@@ -190,13 +193,16 @@ public sealed class AsyncAsymmetricLock
     /// <returns>A disposable that releases the lock when disposed.</returns>
     public AwaitableDisposable<IDisposable> UpgradeableLockAsync(CancellationToken cancellationToken)
     {
-        int lockScope;
+        double lockScope;
         lock (this)
         {
             lockScope = AsyncLocalScope.Value;
             if (lockScope == 0)
             {
-                lockScope = rand.Next(1, int.MaxValue);
+                do
+                {
+                    lockScope = rand.NextDouble();
+                } while (lockScope == 0);
                 AsyncLocalScope.Value = lockScope;
             }
             return new AwaitableDisposable<IDisposable>(RequestUpgradeableLockAsync(cancellationToken, lockScope));

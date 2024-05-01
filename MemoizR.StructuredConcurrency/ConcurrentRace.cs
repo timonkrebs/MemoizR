@@ -111,6 +111,7 @@ public sealed class ConcurrentRace<T, I> : MemoHandlR<T>, IMemoizR, IStateGetR<T
 
     async Task IMemoizR.UpdateIfNecessary()
     {
+        using (await mutex.LockAsync())
         using (await Context.ContextLock.UpgradeableLockAsync())
         {
             await Update();

@@ -169,7 +169,7 @@ public class AsyncAsymmetricLockTests
     private async Task SimulateReaction(AsyncAsymmetricLock asyncLock)
     {
         var oldLockScope = asyncLock.LockScope == 0 ? 42 : asyncLock.LockScope;
-        var lockScope = 0;
+        double lockScope = 0;
 
         // Act
         using (var exclusive = await asyncLock.ExclusiveLockAsync())
@@ -178,7 +178,7 @@ public class AsyncAsymmetricLockTests
 
             // Assert
             await Task.Delay(5);
-            lockScope = asyncLock.LockScope == 0 ? 24 : asyncLock.LockScope;
+            lockScope = asyncLock.LockScope;
             Assert.NotEqual(0, lockScope);
             Assert.NotEqual(oldLockScope, lockScope);
             Assert.Equal(1, asyncLock.LocksHeld);

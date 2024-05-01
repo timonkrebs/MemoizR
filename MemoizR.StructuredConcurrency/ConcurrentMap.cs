@@ -194,6 +194,7 @@ public sealed class ConcurrentMap<T> : MemoHandlR<IEnumerable<T>>, IMemoizR, ISt
 
     async Task IMemoizR.UpdateIfNecessary()
     {
+        using (await mutex.LockAsync())
         using (await Context.ContextLock.UpgradeableLockAsync())
         {
             await UpdateIfNecessary();
