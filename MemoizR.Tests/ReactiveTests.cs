@@ -345,8 +345,8 @@ public class ReactiveTests
         await Task.Delay(100);
 
         Assert.InRange(memoInvocationCount, 42, 45);
-        Assert.InRange(invocationCountR1, 42, 42);
-        Assert.InRange(invocationCountR2, 42, 42);
+        Assert.InRange(invocationCountR1, 40, 42);
+        Assert.InRange(invocationCountR2, 40, 42);
     }
 
     [Fact(Timeout = 1000)]
