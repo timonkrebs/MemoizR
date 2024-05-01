@@ -37,15 +37,16 @@ public sealed class ConcurrentMapReduce<T> : MemoHandlR<T>, IMemoizR, IStateGetR
             {
                 isStartingComponent = Context.CancellationTokenSource == null;
                 Context.CancellationTokenSource ??= new CancellationTokenSource();
-                // if someone else did read the graph while this thread was blocked it could be that this is already Clean
-                if (State == CacheState.CacheClean && Context.ReactionScope.CurrentReaction == null)
-                {
-                    return Value;
-                }
-
+                
                 if (Context.ReactionScope.CurrentReaction != null)
                 {
                     Context.CheckDependenciesTheSame(this);
+                }
+
+                // if someone else did read the graph while this thread was blocked it could be that this is already Clean
+                if (State == CacheState.CacheClean)
+                {
+                    return Value;
                 }
 
                 await UpdateIfNecessary();

@@ -257,7 +257,7 @@ public class ReactiveTests
 
         await Task.Delay(100);
 
-        Assert.InRange(invocationCount, 1, 2);
+        Assert.Equal(2, invocationCount);
     }
 
     [Fact(Timeout = 2000)]
@@ -274,10 +274,10 @@ public class ReactiveTests
             return await v1.Get() * 2;
         });
 
-        var invocationCountR1 = 0;
-        var r1 = f.BuildReaction().CreateReaction(m1, m => invocationCountR1++);
-        var invocationCountR2 = 0;
-        var r2 = f.BuildReaction().CreateReaction(m1, m => invocationCountR2++);
+        var result1 = 0;
+        var r1 = f.BuildReaction().CreateReaction(m1, m => result1 = m);
+        var result2 = 0;
+        var r2 = f.BuildReaction().CreateReaction(m1, m => result2 = m);
 
         await Task.Delay(100);
 
@@ -299,6 +299,8 @@ public class ReactiveTests
 
         Assert.Equal(82, await m1.Get());
         Assert.Equal(82, resultM1);
+        Assert.Equal(82, result1);
+        Assert.Equal(82, result2);
     }
 
     [Fact(Timeout = 2000)]
@@ -342,9 +344,9 @@ public class ReactiveTests
 
         await Task.Delay(100);
 
-        Assert.InRange(invocationCountR1, 40, 43);
-        Assert.InRange(invocationCountR2, 40, 43);
-        Assert.InRange(memoInvocationCount, 40, 45);
+        Assert.InRange(memoInvocationCount, 42, 45);
+        Assert.InRange(invocationCountR1, 42, 42);
+        Assert.InRange(invocationCountR2, 42, 42);
     }
 
     [Fact(Timeout = 1000)]
