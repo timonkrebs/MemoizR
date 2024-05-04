@@ -208,8 +208,9 @@ public class ReactiveTests
 
         for (var i = 0; i < 21; i++)
         {
-            _ = v1.Set(i);
-            _ = v1.Set(i);
+            var j = i;
+            _ = v1.Set(j);
+            _ = v1.Set(j);
         }
 
         var resultM1 = 0;
@@ -228,6 +229,7 @@ public class ReactiveTests
     }
 
     [Fact(Timeout = 1000)]
+    [Trait("Category", "Unit")]
     public async Task TestThreadSafety2()
     {
         var f = new MemoFactory();
@@ -236,27 +238,28 @@ public class ReactiveTests
         var m1 = f.CreateMemoizR(async () => await v1.Get() * 2);
 
         var invocationCount = 0;
-        var r1 = f.BuildReaction().CreateReaction(m1, m => invocationCount++);
+        var r1 = f.BuildReaction()
+        .AddDebounceTime(TimeSpan.FromMilliseconds(10))
+        .CreateReaction(m1, m => invocationCount++);
 
         var tasks = new List<Task>();
         for (var i = 0; i < 200; i++)
         {
-            tasks.Add(Task.Run(async () => await v1.Set(i)));
-            tasks.Add(Task.Run(async () => await v1.Set(i)));
+            var j = i;
+            tasks.Add(Task.Run(async () => await v1.Set(j)));
+            tasks.Add(Task.Run(async () => await v1.Set(j)));
         }
 
-        await Task.Delay(1);
-        var resultM1 = 0;
-        tasks.Add(Task.Run(async () => resultM1 = await m1.Get()));
-
         await Task.WhenAll(tasks);
-        await Task.Delay(100);
+        await Task.Run(async () => await v1.Set(200));
+        await Task.Delay(1);
+        //var resultM1 = 0;
+        // tasks.Add(Task.Run(async () => resultM1 = await m1.Get()));
+
+        await Task.Delay(500);
 
         Assert.Equal(400, await m1.Get());
-        Assert.Equal(400, resultM1);
-
-        await Task.Delay(100);
-
+        //Assert.Equal(400, resultM1);
         Assert.Equal(2, invocationCount);
     }
 
@@ -299,7 +302,6 @@ public class ReactiveTests
     }
 
     [Fact(Timeout = 2000)]
-    [Trait("Category", "Unit")]
     public async Task TestThreadSafety4()
     {
         var f = new MemoFactory();

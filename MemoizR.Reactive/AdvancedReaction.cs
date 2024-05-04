@@ -11,7 +11,10 @@ public sealed class AdvancedReaction : ReactionBase
     {
         this.fn = fn;
 
-        Task.Run(Init).GetAwaiter().GetResult();
+        var debounceTime = DebounceTime;
+        DebounceTime = TimeSpan.Zero;
+        Stale(CacheState.CacheDirty);
+        DebounceTime = debounceTime;
     }
 
     protected override Task Execute()

@@ -7,7 +7,7 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
     private SynchronizationContext? synchronizationContext;
     private bool isPaused;
 
-    public TimeSpan DebounceTime { private get; init; }
+    public TimeSpan DebounceTime { protected get; init; }
 
     CacheState IMemoizR.State { get => State; set => State = value; }
 
@@ -33,27 +33,6 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
     {
         Pause();
         RemoveParentObservers(0);
-    }
-
-    protected async Task Init()
-    {
-        using (await Context.ContextLock.UpgradeableLockAsync())
-        {
-            isStartingComponent = true;
-            Context.CancellationTokenSource ??= new CancellationTokenSource();
-            var temp = synchronizationContext;
-            try
-            {
-                synchronizationContext = null;
-                // The reaction must be initialized to build the Sources.
-                await Update();
-            }
-            finally
-            {
-                synchronizationContext = temp;
-                Context.CancellationTokenSource = null;
-            }
-        }
     }
 
     protected abstract Task Execute();

@@ -28,7 +28,7 @@ public sealed class Signal<T> : MemoHandlR<T>, IStateGetR<T?>
             // only updating the value should be locked
             lock (this)
             {
-                this.Value = value;
+                Value = value;
             }
 
             for (int i = 0; i < Observers.Length; i++)
