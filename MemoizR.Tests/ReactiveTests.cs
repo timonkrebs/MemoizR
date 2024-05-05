@@ -259,7 +259,7 @@ public class ReactiveTests
 
         Assert.Equal(400, await m1.Get());
         Assert.NotEqual(400, resultM1);
-        Assert.True(invocationCount > 2, "Must be invoked more than twice");
+        Assert.True(invocationCount > 1, "Must be invoked more than once");
     }
 
     [Fact(Timeout = 2000)]

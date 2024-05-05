@@ -268,9 +268,11 @@ public class StructuredConcurrencyTests
             _ = v3.Set(i);
         }
 
-        _ = v1.Set(1);
-        _ = v2.Set(2);
+        var one = v1.Set(1);
+        var two = v2.Set(2);
         await v3.Set(3);
+        await one;
+        await two;
         await Task.Delay(100);
         Assert.Equal(1, x.ElementAt(0));
         Assert.Equal(2, x.ElementAt(1));
