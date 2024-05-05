@@ -249,18 +249,17 @@ public class ReactiveTests
             tasks.Add(Task.Run(async () => await v1.Set(j)));
             tasks.Add(Task.Run(async () => await v1.Set(j)));
         }
+        var resultM1 = 0;
+        tasks.Add(Task.Run(async () => resultM1 = await m1.Get()));
 
         await Task.WhenAll(tasks);
         await Task.Run(async () => await v1.Set(200));
-        await Task.Delay(1);
-        //var resultM1 = 0;
-        // tasks.Add(Task.Run(async () => resultM1 = await m1.Get()));
 
         await Task.Delay(500);
 
         Assert.Equal(400, await m1.Get());
-        //Assert.Equal(400, resultM1);
-        Assert.Equal(2, invocationCount);
+        Assert.NotEqual(400, resultM1);
+        Assert.True(invocationCount > 2, "Must be invoked more than twice");
     }
 
     [Fact(Timeout = 2000)]
@@ -282,7 +281,8 @@ public class ReactiveTests
         var tasks = new List<Task>();
         for (var i = 0; i < 40; i++)
         {
-            tasks.Add(Task.Run(async () => await v1.Set(i)));
+            var j = i;
+            tasks.Add(Task.Run(async () => await v1.Set(j)));
             await Task.Delay(35);
         }
 
@@ -330,7 +330,8 @@ public class ReactiveTests
         var tasks = new List<Task>();
         for (var i = 0; i < 40; i++)
         {
-            tasks.Add(Task.Run(async () => await v1.Set(i)));
+            var j = i;
+            tasks.Add(Task.Run(async () => await v1.Set(j)));
             await Task.Delay(35);
         }
 

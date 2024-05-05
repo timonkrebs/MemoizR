@@ -11,7 +11,7 @@ public sealed class Reaction : ReactionBase
     {
         this.action = action;
 
-        Stale(CacheState.CacheDirty);
+        Stale(CacheState.CacheDirty, TimeSpan.Zero);
     }
 
     protected override async Task Execute()

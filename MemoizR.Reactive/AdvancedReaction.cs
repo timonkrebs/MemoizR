@@ -11,10 +11,7 @@ public sealed class AdvancedReaction : ReactionBase
     {
         this.fn = fn;
 
-        var debounceTime = DebounceTime;
-        DebounceTime = TimeSpan.Zero;
-        Stale(CacheState.CacheDirty);
-        DebounceTime = debounceTime;
+        Stale(CacheState.CacheDirty, TimeSpan.Zero);
     }
 
     protected override Task Execute()

@@ -197,7 +197,7 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
         }
     }
 
-    internal Task Stale(CacheState state)
+    internal Task Stale(CacheState state, TimeSpan debounceTime)
     {
         // Add Scheduling
         lock (this)
@@ -208,7 +208,7 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
 
             Context.CancellationTokenSource ??= new CancellationTokenSource();
 
-            Task.Delay(DebounceTime, cts.Token).ContinueWith(async _ =>
+            Task.Delay(debounceTime, cts.Token).ContinueWith(async _ =>
                 {
                     Context.CreateNewScopeIfNeeded();
                     try
@@ -231,6 +231,6 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
 
     Task IMemoizR.Stale(CacheState state)
     {
-        return Stale(state);
+        return Stale(state, DebounceTime);
     }
 }
