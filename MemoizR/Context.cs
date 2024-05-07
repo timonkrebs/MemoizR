@@ -5,9 +5,9 @@ namespace MemoizR;
 
 public class ReactionScope
 {
-    internal IMemoHandlR? CurrentReaction = null;
-    internal IMemoHandlR[] CurrentGets = [];
-    internal int CurrentGetsIndex;
+    internal volatile IMemoHandlR? CurrentReaction = null;
+    internal volatile IMemoHandlR[] CurrentGets = [];
+    internal volatile int CurrentGetsIndex;
 }
 
 public class Context
@@ -27,7 +27,7 @@ public class Context
         {
             lock (this)
             {
-                var key = AsyncLocalScope.Value;
+                var key = AsyncLocalScope.Value == 0 ? rand.NextDouble() : AsyncLocalScope.Value;
                 ReactionScope reactionScope;
                 if (!AsyncReactionScopes.TryGetValue(key, out var reactionScopeRef))
                 {
