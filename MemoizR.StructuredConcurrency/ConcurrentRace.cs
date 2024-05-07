@@ -28,6 +28,7 @@ public sealed class ConcurrentRace<T, I> : MemoHandlR<T>, IMemoizR, IStateGetR<T
         // Only one thread should evaluate the graph at a time. otherwise the context could get messed up.
         // This should lead to perf gains because memoization can be utilized more efficiently.
         using (await mutex.LockAsync())
+        using (await Context.ContextLock.UpgradeableLockAsync())
         {
             try
             {
