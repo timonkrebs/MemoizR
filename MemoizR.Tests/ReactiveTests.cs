@@ -200,13 +200,15 @@ public class ReactiveTests
                         });
             });
 
+        await Task.Delay(200);
+
         _ = v1.Set(1000);
         for (var i = 0; i < 100; i++)
         {
             _ = v1.Set(i);
         }
 
-      for (var i = 0; i < 21; i++)
+        for (var i = 0; i < 21; i++)
         {
             var j = i;
             _ = v1.Set(j);
@@ -237,7 +239,7 @@ public class ReactiveTests
         var r1 = f.BuildReaction()
         .AddDebounceTime(TimeSpan.FromMilliseconds(10))
         .CreateReaction(m1, m => invocationCount++);
-
+        await Task.Delay(50);
         var tasks = new List<Task>();
         for (var i = 0; i < 200; i++)
         {
@@ -251,7 +253,7 @@ public class ReactiveTests
         await Task.WhenAll(tasks);
         await Task.Run(async () => await v1.Set(200));
 
-        await Task.Delay(500);
+        await Task.Delay(50);
 
         Assert.Equal(400, await m1.Get());
         Assert.NotEqual(400, resultM1);
