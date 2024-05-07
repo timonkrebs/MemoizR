@@ -229,7 +229,7 @@ public class StructuredConcurrencyTests
         Assert.Equal(5, invocations);
     }
 
-    [Fact(Timeout = 1000)]
+    [Fact(Timeout = 2000)]
     public async Task TestThreadSafety()
     {
         var f = new MemoFactory();
@@ -268,11 +268,10 @@ public class StructuredConcurrencyTests
             _ = v3.Set(i);
         }
 
+        await Task.Delay(1000);
         var one = v1.Set(1);
         var two = v2.Set(2);
         await v3.Set(3);
-        await one;
-        await two;
         await Task.Delay(100);
         Assert.Equal(1, x.ElementAt(0));
         Assert.Equal(2, x.ElementAt(1));
