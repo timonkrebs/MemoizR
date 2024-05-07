@@ -1,5 +1,5 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
-using Nito.Collections;
 
 namespace MemoizR.StructuredAsyncLock.Nito;
 
@@ -24,13 +24,7 @@ internal interface IAsyncWaitQueue<T>
     /// Removes a single entry in the wait queue and completes it. This method may only be called if <see cref="IsEmpty"/> is <c>false</c>. The task continuations for the completed task must be executed asynchronously.
     /// </summary>
     /// <param name="result">The result used to complete the wait queue entry. If this isn't needed, use <c>default(T)</c>.</param>
-    double Dequeue(T? result = default);
-
-    /// <summary>
-    /// Removes all entries in the wait queue and completes them. The task continuations for the completed tasks must be executed asynchronously.
-    /// </summary>
-    /// <param name="result">The result used to complete the wait queue entries. If this isn't needed, use <c>default(T)</c>.</param>
-    void DequeueAll(T? result = default);
+    double Dequeue(T result, double? lockScope = null);
 
     /// <summary>
     /// Attempts to remove an entry from the wait queue and cancels it. The task continuations for the completed task must be executed asynchronously.
@@ -38,12 +32,6 @@ internal interface IAsyncWaitQueue<T>
     /// <param name="task">The task to cancel.</param>
     /// <param name="cancellationToken">The cancellation token to use to cancel the task.</param>
     bool TryCancel(Task task, CancellationToken cancellationToken);
-
-    /// <summary>
-    /// Removes all entries from the wait queue and cancels them. The task continuations for the completed tasks must be executed asynchronously.
-    /// </summary>
-    /// <param name="cancellationToken">The cancellation token to use to cancel the tasks.</param>
-    void CancelAll(CancellationToken cancellationToken);
 }
 
 /// <summary>
@@ -85,11 +73,11 @@ internal static class AsyncWaitQueueExtensions
 [DebuggerTypeProxy(typeof(DefaultAsyncWaitQueue<>.DebugView))]
 internal sealed class DefaultAsyncWaitQueue<T> : IAsyncWaitQueue<T>
 {
-    private readonly Deque<(TaskCompletionSource<T>, double)> _queue = new Deque<(TaskCompletionSource<T>, double)>();
+    private readonly ConcurrentDictionary<double, ConcurrentStack<TaskCompletionSource<T>>> _dictionary = new();
 
     private int Count
     {
-        get { return _queue.Count; }
+        get { return _dictionary.Count; }
     }
 
     bool IAsyncWaitQueue<T>.IsEmpty
@@ -100,46 +88,83 @@ internal sealed class DefaultAsyncWaitQueue<T> : IAsyncWaitQueue<T>
     Task<T> IAsyncWaitQueue<T>.Enqueue(double lockScope)
     {
         var tcs = TaskCompletionSourceExtensions.CreateAsyncTaskSource<T>();
-        _queue.AddToBack((tcs, lockScope));
+        if (_dictionary.TryGetValue(lockScope, out var stack))
+        {
+            stack.Push(tcs);
+        }
+        var concurrentStack = new ConcurrentStack<TaskCompletionSource<T>>();
+        concurrentStack.Push(tcs);
+
+        _dictionary.TryAdd(lockScope, concurrentStack);
         return tcs.Task;
     }
 
-    double IAsyncWaitQueue<T>.Dequeue(T? result)
+    double IAsyncWaitQueue<T>.Dequeue(T result, double? lockScope)
     {
-        var res = _queue.RemoveFromFront();
-        
-        res.Item1.TrySetResult(result!);
-        
-        return res.Item2;
-    }
+        Console.WriteLine("Dequeue " + lockScope);
+        if (lockScope.HasValue && _dictionary.TryGetValue(lockScope!.Value, out var item))
+        {
+            var c = item.Count;
 
-    void IAsyncWaitQueue<T>.DequeueAll(T? result)
-    {
-        foreach (var source in _queue)
-            source.Item1.TrySetResult(result!);
-        _queue.Clear();
+            if (c == 0)
+            {
+                throw new InvalidOperationException("should not dequeue ");
+            }
+
+            if (c == 1)
+            {
+                item.TryPop(out var tcs);
+                tcs!.TrySetResult(result);
+                _dictionary.Remove(lockScope.Value, out _);
+            }
+            else
+            {
+                item.TryPop(out _);
+            }
+            return lockScope.Value;
+        }
+
+        var randomItem = _dictionary.First();
+
+        Console.WriteLine("randomItem " + randomItem.Key);
+
+        var count = randomItem.Value.Count;
+
+        if (count == 0)
+        {
+            throw new InvalidOperationException("should not dequeue ");
+        }
+
+        if (count == 1)
+        {
+            randomItem.Value.TryPop(out var tcs);
+            tcs!.TrySetResult(result);
+            _dictionary.Remove(randomItem.Key, out _);
+        }
+        else
+        {
+            randomItem.Value.TryPop(out _);
+        }
+
+        return randomItem.Key;
     }
 
     bool IAsyncWaitQueue<T>.TryCancel(Task task, CancellationToken cancellationToken)
     {
-        for (int i = 0; i != _queue.Count; ++i)
+        Console.WriteLine("TryCancel");
+        for (int i = 0; i != _dictionary.Count; ++i)
         {
-            if (_queue[i].Item1.Task == task)
+            var element = _dictionary.ElementAt(i);
+            if (element.Value.First().Task == task)
             {
-                _queue[i].Item1.TrySetCanceled(cancellationToken);
-                _queue.RemoveAt(i);
+                element.Value.First().TrySetCanceled(cancellationToken);
+                _dictionary.Remove(element.Key, out _);
                 return true;
             }
         }
         return false;
     }
 
-    void IAsyncWaitQueue<T>.CancelAll(CancellationToken cancellationToken)
-    {
-        foreach (var source in _queue)
-            source.Item1.TrySetCanceled(cancellationToken);
-        _queue.Clear();
-    }
 
     [DebuggerNonUserCode]
     internal sealed class DebugView
@@ -156,9 +181,9 @@ internal sealed class DefaultAsyncWaitQueue<T> : IAsyncWaitQueue<T>
         {
             get
             {
-                var result = new List<Task<T>>(_queue._queue.Count);
-                foreach (var entry in _queue._queue)
-                    result.Add(entry.Item1.Task);
+                var result = new List<Task<T>>(_queue._dictionary.Count);
+                foreach (var entry in _queue._dictionary)
+                    result.Add(entry.Value.First().Task);
                 return result.ToArray();
             }
         }
