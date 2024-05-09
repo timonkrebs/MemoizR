@@ -25,7 +25,7 @@ internal interface IAsyncWaitDictionary<T>
     /// Removes a single entry in the wait dictionary and completes it. This method may only be called if <see cref="IsEmpty"/> is <c>false</c>. The task continuations for the completed task must be executed asynchronously.
     /// </summary>
     /// <param name="result">The result used to complete the wait dictionary entry. If this isn't needed, use <c>default(T)</c>.</param>
-    double Dequeue(T result, double? lockScope, bool isExclusive);
+    double Dequeue(T result, double? lockScope);
 }
 
 /// <summary>
@@ -63,20 +63,20 @@ internal sealed class DefaultAsyncWaitDictionary<T> : IAsyncWaitDictionary<T>
         return tcs.Task;
     }
 
-    double IAsyncWaitDictionary<T>.Dequeue(T result, double? lockScope, bool isExclusive)
+    double IAsyncWaitDictionary<T>.Dequeue(T result, double? lockScope)
     {
         if (lockScope.HasValue && _dictionary.TryGetValue(lockScope!.Value, out var item))
         {
-            HandleDequeue(item, result, lockScope.Value, isExclusive);
+            HandleDequeue(item, result, lockScope.Value);
             return lockScope.Value;
         }
 
         var randomItem = _dictionary.Last();
-        HandleDequeue(randomItem.Value, result, randomItem.Key, isExclusive);
+        HandleDequeue(randomItem.Value, result, randomItem.Key);
         return randomItem.Key;
     }
 
-    private void HandleDequeue(ConcurrentStack<TaskCompletionSource<T>> item, T result, double lockScope, bool isExclusive)
+    private void HandleDequeue(ConcurrentStack<TaskCompletionSource<T>> item, T result, double lockScope)
     {
         var c = item.Count;
 
@@ -90,11 +90,6 @@ internal sealed class DefaultAsyncWaitDictionary<T> : IAsyncWaitDictionary<T>
             item.TryPop(out var tcs);
             tcs!.TrySetResult(result);
             _dictionary.Remove(lockScope, out _);
-        }
-        else if (isExclusive)
-        {
-            item.TryPop(out var tcs);
-            tcs!.TrySetResult(result);
         }
         else
         {

@@ -90,7 +90,6 @@ public class AsyncAsymmetricLockTests
     {
         // Arrange
         var asyncLock = new AsyncAsymmetricLock();
-        var cancellationTokenSource = new CancellationTokenSource();
 
         // Act
         using var _ = await asyncLock.ExclusiveLockAsync();
@@ -101,7 +100,7 @@ public class AsyncAsymmetricLockTests
         Assert.Equal(0, asyncLock.UpgradedLocksHeld);
         Assert.NotEqual(0, lockScope);
 
-        using (var disposable = await asyncLock.UpgradeableLockAsync(cancellationTokenSource.Token))
+        using (var disposable = await asyncLock.UpgradeableLockAsync())
         {
             Assert.NotNull(disposable);
             Assert.Equal(1, asyncLock.LocksHeld);
@@ -174,8 +173,6 @@ public class AsyncAsymmetricLockTests
         // Act
         using (var exclusive = await asyncLock.ExclusiveLockAsync())
         {
-            var cancellationTokenSource = new CancellationTokenSource();
-
             // Assert
             await Task.Delay(5);
             lockScope = asyncLock.LockScope;
@@ -184,7 +181,7 @@ public class AsyncAsymmetricLockTests
             Assert.Equal(1, asyncLock.LocksHeld);
             Assert.Equal(0, asyncLock.UpgradedLocksHeld);
 
-            using (var upgradeableDisposable = await asyncLock.UpgradeableLockAsync(cancellationTokenSource.Token))
+            using (var upgradeableDisposable = await asyncLock.UpgradeableLockAsync())
             {
                 Assert.NotNull(upgradeableDisposable);
                 Assert.Equal(1, asyncLock.LocksHeld);

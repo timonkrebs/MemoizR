@@ -70,9 +70,8 @@ public sealed class AsyncAsymmetricLock
     /// <summary>
     /// Asynchronously acquires the lock as a exclusive. Returns a disposable that releases the lock when disposed.
     /// </summary>
-    /// <param name="cancellationToken">The cancellation token used to cancel the lock. If this is already set, then this method will attempt to take the lock immediately (succeeding if the lock is currently available).</param>
     /// <returns>A disposable that releases the lock when disposed.</returns>
-    private Task<IDisposable> RequestExclusiveLockAsync(CancellationToken cancellationToken, double lockScope)
+    private Task<IDisposable> RequestExclusiveLockAsync(double lockScope)
     {
         if (LockScope == lockScope && LocksHeld < 0)
         {
@@ -87,10 +86,7 @@ public sealed class AsyncAsymmetricLock
         // If the lock is available and there are no waiting upgradeable, or upgrading upgradeable, take it immediately.
         if (LocksHeld == 0 && upgradeable.IsEmpty && UpgradedLocksHeld == 0)
         {
-            lock (this)
-            {
-                Interlocked.Increment(ref locksHeld);
-            }
+            Interlocked.Increment(ref locksHeld);
             LockScope = lockScope;
             return Task.FromResult<IDisposable>(new ExclusivePrioKey(this, lockScope));
         }
@@ -108,9 +104,8 @@ public sealed class AsyncAsymmetricLock
     /// <summary>
     /// Asynchronously acquires the lock as a exclusive. Returns a disposable that releases the lock when disposed.
     /// </summary>
-    /// <param name="cancellationToken">The cancellation token used to cancel the lock. If this is already set, then this method will attempt to take the lock immediately (succeeding if the lock is currently available).</param>
     /// <returns>A disposable that releases the lock when disposed.</returns>
-    public AwaitableDisposable<IDisposable> ExclusiveLockAsync(CancellationToken cancellationToken)
+    public AwaitableDisposable<IDisposable> ExclusiveLockAsync()
     {
         double lockScope;
         lock (this)
@@ -124,17 +119,8 @@ public sealed class AsyncAsymmetricLock
                 } while (lockScope == 0);
                 AsyncLocalScope.Value = lockScope;
             }
-            return new AwaitableDisposable<IDisposable>(RequestExclusiveLockAsync(cancellationToken, lockScope));
+            return new AwaitableDisposable<IDisposable>(RequestExclusiveLockAsync(lockScope));
         }
-    }
-
-    /// <summary>
-    /// Asynchronously acquires the lock as a exclusive. Returns a disposable that releases the lock when disposed.
-    /// </summary>
-    /// <returns>A disposable that releases the lock when disposed.</returns>
-    public AwaitableDisposable<IDisposable> ExclusiveLockAsync()
-    {
-        return ExclusiveLockAsync(CancellationToken.None);
     }
 
     /// <summary>
@@ -142,25 +128,19 @@ public sealed class AsyncAsymmetricLock
     /// </summary>
     /// <param name="cancellationToken">The cancellation token used to cancel the lock. If this is already set, then this method will attempt to take the lock immediately (succeeding if the lock is currently available).</param>
     /// <returns>A disposable that releases the lock when disposed.</returns>
-    private Task<IDisposable> RequestUpgradeableLockAsync(CancellationToken cancellationToken, double lockScope)
+    private Task<IDisposable> RequestUpgradeableLockAsync(double lockScope)
     {
         var canAcquireLock = false;
 
         if (LocksHeld == 0 && UpgradedLocksHeld == 0)
         {
-            lock (this)
-            {
-                Interlocked.Increment(ref upgradedLocksHeld);
-            }
+            Interlocked.Increment(ref upgradedLocksHeld);
             LockScope = lockScope;
             canAcquireLock = true;
         }
         else if (LockScope == lockScope)
         {
-            lock (this)
-            {
-                Interlocked.Increment(ref upgradedLocksHeld);
-            }
+            Interlocked.Increment(ref upgradedLocksHeld);
             canAcquireLock = true;
         }
 
@@ -174,9 +154,8 @@ public sealed class AsyncAsymmetricLock
     /// <summary>
     /// Asynchronously acquires the lock as a Upgradeable. Returns a disposable that releases the lock when disposed.
     /// </summary>
-    /// <param name="cancellationToken">The cancellation token used to cancel the lock. If this is already set, then this method will attempt to take the lock immediately (succeeding if the lock is currently available).</param>
     /// <returns>A disposable that releases the lock when disposed.</returns>
-    public AwaitableDisposable<IDisposable> UpgradeableLockAsync(CancellationToken cancellationToken)
+    public AwaitableDisposable<IDisposable> UpgradeableLockAsync()
     {
         double lockScope;
         lock (this)
@@ -190,17 +169,8 @@ public sealed class AsyncAsymmetricLock
                 } while (lockScope == 0);
                 AsyncLocalScope.Value = lockScope;
             }
-            return new AwaitableDisposable<IDisposable>(RequestUpgradeableLockAsync(cancellationToken, lockScope));
+            return new AwaitableDisposable<IDisposable>(RequestUpgradeableLockAsync(lockScope));
         }
-    }
-
-    /// <summary>
-    /// Asynchronously acquires the lock as a upgradeable. Returns a disposable that releases the lock when disposed.
-    /// </summary>
-    /// <returns>A disposable that releases the lock when disposed.</returns>
-    public AwaitableDisposable<IDisposable> UpgradeableLockAsync()
-    {
-        return UpgradeableLockAsync(CancellationToken.None);
     }
 
     /// <summary>
@@ -210,20 +180,14 @@ public sealed class AsyncAsymmetricLock
     {
         if (!upgradeable.IsEmpty && LocksHeld == 0 && UpgradedLocksHeld == 0)
         {
-            lock (this)
-            {
-                Interlocked.Increment(ref upgradedLocksHeld);
-            }
-            LockScope = upgradeable.Dequeue(new UpgradeableKey(this, lockScope), lockScope, isExclusive);
+            Interlocked.Increment(ref upgradedLocksHeld);
+            LockScope = upgradeable.Dequeue(new UpgradeableKey(this, lockScope), lockScope);
             AsyncLocalScope.Value = LockScope;
         }
         else if (!exclusive.IsEmpty && LocksHeld == 0 && UpgradedLocksHeld == 0)
         {
-            lock (this)
-            {
-                Interlocked.Increment(ref locksHeld);
-            }
-            LockScope = exclusive.Dequeue(new ExclusivePrioKey(this, lockScope), lockScope, isExclusive);
+            Interlocked.Increment(ref locksHeld);
+            LockScope = exclusive.Dequeue(new ExclusivePrioKey(this, lockScope), lockScope);
             AsyncLocalScope.Value = LockScope;
         }
         else if ((!upgradeable.IsEmpty || !exclusive.IsEmpty) && LocksHeld == 0 && UpgradedLocksHeld == 0)
