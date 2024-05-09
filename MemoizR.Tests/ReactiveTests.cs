@@ -61,9 +61,10 @@ public class ReactiveTests
         await Task.Delay(20);
         Assert.Equal(4, result);
         Assert.Equal(3, invocationCount);
+        Assert.NotNull(m1);
     }
 
-    [Fact(Skip = "Experimantal")]
+    [Fact]
     public async Task TestAsyncEnumerableWithBackpressure()
     {
         var f = new MemoFactory();
@@ -109,6 +110,7 @@ public class ReactiveTests
         await Task.Delay(200);
         Assert.Equal(4, result);
         Assert.Equal(3, invocationCount);
+        Assert.NotNull(m1);
     }
 
     [Fact(Timeout = 1000)]

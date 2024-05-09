@@ -114,7 +114,7 @@ public class StructuredConcurrencyTests
 
         var invocations = 0;
         var x = await c1.Get();
-        f.BuildReaction().CreateReaction(c1, c =>
+        var r = f.BuildReaction().CreateReaction(c1, c =>
         {
             invocations++;
             x = c;
@@ -125,6 +125,7 @@ public class StructuredConcurrencyTests
 
         await v1.Set(4);
         await Task.Delay(100);
+        Assert.NotNull(r);
         Assert.Equal(4, x.Single(x => x == 4));
         Assert.Equal(4, x.ElementAt(0));
         Assert.Equal(2, invocations);
@@ -154,6 +155,7 @@ public class StructuredConcurrencyTests
         Assert.Equal(8, x.Single(x => x == 8));
         Assert.Equal(8, x.ElementAt(1));
         Assert.Equal(5, invocations);
+        Assert.NotNull(r);
     }
 
     [Fact]
