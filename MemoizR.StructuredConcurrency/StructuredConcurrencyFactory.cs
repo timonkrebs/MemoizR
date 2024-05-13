@@ -11,7 +11,7 @@ public static class StructuredConcurrencyFactory
 
     public static ConcurrentMapReduce<T> CreateConcurrentMapReduce<T>(this MemoFactory memoFactory, string label, params Func<CancellationTokenSource, Task<T>>[] fns) where T : INumber<T>
     {
-        return new ConcurrentMapReduce<T>(fns, (v, a) => v + a, memoFactory.Context)
+        return new(fns, (v, a) => v + a, memoFactory.Context)
         {
             Label = label
         };
@@ -24,7 +24,7 @@ public static class StructuredConcurrencyFactory
 
     public static ConcurrentMapReduce<T> CreateConcurrentMapReduce<T>(this MemoFactory memoFactory, string label, Func<T, T?, T> reduce, params Func<CancellationTokenSource, Task<T>>[] fns)
     {
-        return new ConcurrentMapReduce<T>(fns, reduce, memoFactory.Context)
+        return new(fns, reduce, memoFactory.Context)
         {
             Label = label
         };
@@ -37,7 +37,7 @@ public static class StructuredConcurrencyFactory
 
     public static ConcurrentRace<T, R> CreateConcurrentRace<T, R>(this MemoFactory memoFactory, string label, Func<Task<R>> resolver, params Func<CancellationTokenSource, R, Task<T>>[] fns)
     {
-        return new ConcurrentRace<T, R>(resolver, fns, memoFactory.Context)
+        return new(resolver, fns, memoFactory.Context)
         {
             Label = label
         };
@@ -50,7 +50,7 @@ public static class StructuredConcurrencyFactory
 
     public static ConcurrentMap<T> CreateConcurrentMap<T>(this MemoFactory memoFactory, string label, params Func<CancellationTokenSource, Task<T>>[] fns)
     {
-        return new ConcurrentMap<T>(fns, memoFactory.Context)
+        return new(fns, memoFactory.Context)
         {
             Label = label
         };

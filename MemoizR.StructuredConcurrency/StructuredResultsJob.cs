@@ -2,7 +2,7 @@
 
 namespace MemoizR.StructuredConcurrency;
 
-public sealed class StructuredResultsJob<T> : StructuredJobBase<T[]>
+public sealed class StructuredResultsJob<T> : StructuredJobBase<ConcurrentDictionary<int, T>>
 {
     private readonly IReadOnlyCollection<Func<CancellationTokenSource, Task<T>>> fns;
     private readonly CancellationTokenSource cancellationTokenSource;
@@ -10,7 +10,7 @@ public sealed class StructuredResultsJob<T> : StructuredJobBase<T[]>
     public StructuredResultsJob(IReadOnlyCollection<Func<CancellationTokenSource, Task<T>>> fns, CancellationTokenSource cancellationTokenSource)
     {
         this.fns = fns;
-        this.result = new T[fns.Count];
+        this.result = new();
         this.cancellationTokenSource = cancellationTokenSource;
     }
 

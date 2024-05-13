@@ -157,8 +157,8 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
                     // Add ourselves to the end of the parent .observers array.
                     var source = Sources[i];
                     source.Observers = !source.Observers.Any()
-                        ? [new WeakReference<IMemoizR>(this)]
-                        : [.. source.Observers, new WeakReference<IMemoizR>(this)];
+                        ? [new(this)]
+                        : [.. source.Observers, new(this)];
                 }
             }
             else if (Sources.Any() && Context.ReactionScope.CurrentGetsIndex < Sources.Length)
@@ -191,7 +191,7 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
 
     async Task IMemoizR.UpdateIfNecessary()
     {
-        using (await Context.ContextLock.UpgradeableLockAsync())
+        using (await Context.ReactionScope.ContextLock.UpgradeableLockAsync())
         {
             await UpdateIfNecessary();
         }
@@ -206,14 +206,14 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
             cts?.Cancel();
             cts = new();
 
-            Context.CancellationTokenSource ??= new CancellationTokenSource();
+            Context.CancellationTokenSource ??= new();
 
             Task.Delay(debounceTime, cts.Token).ContinueWith(async _ =>
                 {
                     Context.CreateNewScopeIfNeeded();
                     try
                     {
-                        using (await Context.ContextLock.UpgradeableLockAsync())
+                        using (await Context.ReactionScope.ContextLock.UpgradeableLockAsync())
                         {
                             await UpdateIfNecessary().ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
                         }

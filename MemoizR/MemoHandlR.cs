@@ -9,7 +9,7 @@ public abstract class SignalHandlR : IMemoHandlR
 
     internal Context Context;
 
-    protected AsyncLock mutex = new AsyncLock();
+    protected AsyncLock mutex = new();
 
     IMemoHandlR[] IMemoHandlR.Sources { get => Sources; set => Sources = value; }
     WeakReference<IMemoizR>[] IMemoHandlR.Observers { get => Observers; set => Observers = value; }

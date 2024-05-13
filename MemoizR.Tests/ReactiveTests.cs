@@ -229,7 +229,6 @@ public class ReactiveTests
     }
 
     [Fact(Timeout = 2000)]
-    [Trait("Category", "Unit")]
     public async Task TestThreadSafety2()
     {
         var f = new MemoFactory();
@@ -296,6 +295,7 @@ public class ReactiveTests
         await Task.Delay(100);
 
         Assert.Equal(82, await m1.Get());
+
         Assert.Equal(82, resultM1);
         Assert.Equal(82, result1);
         Assert.Equal(82, result2);

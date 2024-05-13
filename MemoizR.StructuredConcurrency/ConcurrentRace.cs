@@ -28,12 +28,12 @@ public sealed class ConcurrentRace<T, I> : MemoHandlR<T>, IMemoizR, IStateGetR<T
         // Only one thread should evaluate the graph at a time. otherwise the context could get messed up.
         // This should lead to perf gains because memoization can be utilized more efficiently.
         using (await mutex.LockAsync())
-        using (await Context.ContextLock.UpgradeableLockAsync())
+        using (await Context.ReactionScope.ContextLock.UpgradeableLockAsync())
         {
             try
             {
                 isStartingComponent = Context.CancellationTokenSource == null;
-                Context.CancellationTokenSource ??= new CancellationTokenSource();
+                Context.CancellationTokenSource ??= new();
                 return await Update();
             }
             finally
@@ -76,8 +76,8 @@ public sealed class ConcurrentRace<T, I> : MemoHandlR<T>, IMemoizR, IStateGetR<T
                     // Add ourselves to the end of the parent .observers array
                     var source = Sources[i];
                     source.Observers = !source.Observers.Any()
-                        ? [new WeakReference<IMemoizR>(this)]
-                        : [.. source.Observers, new WeakReference<IMemoizR>(this)];
+                        ? [new(this)]
+                        : [.. source.Observers, new(this)];
                 }
             }
         }
@@ -112,7 +112,7 @@ public sealed class ConcurrentRace<T, I> : MemoHandlR<T>, IMemoizR, IStateGetR<T
     async Task IMemoizR.UpdateIfNecessary()
     {
         using (await mutex.LockAsync())
-        using (await Context.ContextLock.UpgradeableLockAsync())
+        using (await Context.ReactionScope.ContextLock.UpgradeableLockAsync())
         {
             await Update();
         }

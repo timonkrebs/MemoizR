@@ -97,7 +97,7 @@ public sealed class ReactionBuilder
     {
         lock (memoFactory)
         {
-            return new Reaction(async () => action(await memo.Get()), memoFactory.Context, synchronizationContext)
+            return new(async () => action(await memo.Get()), memoFactory.Context, synchronizationContext)
             {
                 Label = label,
                 DebounceTime = debounceTime
@@ -109,7 +109,7 @@ public sealed class ReactionBuilder
     {
         lock (memoFactory)
         {
-            return new Reaction(async () => action(await memo1.Get(), await memo2.Get()), memoFactory.Context, synchronizationContext)
+            return new(async () => action(await memo1.Get(), await memo2.Get()), memoFactory.Context, synchronizationContext)
             {
                 Label = label,
                 DebounceTime = debounceTime
@@ -121,7 +121,7 @@ public sealed class ReactionBuilder
     {
         lock (memoFactory)
         {
-            return new Reaction(async () => action(await memo1.Get(), await memo2.Get(), await memo3.Get()), memoFactory.Context, synchronizationContext)
+            return new(async () => action(await memo1.Get(), await memo2.Get(), await memo3.Get()), memoFactory.Context, synchronizationContext)
             {
                 Label = label,
                 DebounceTime = debounceTime
@@ -133,7 +133,7 @@ public sealed class ReactionBuilder
     {
         lock (memoFactory)
         {
-            return new Reaction(async () => action(await memo1.Get(), await memo2.Get(), await memo3.Get(), await memo4.Get()), memoFactory.Context, synchronizationContext)
+            return new(async () => action(await memo1.Get(), await memo2.Get(), await memo3.Get(), await memo4.Get()), memoFactory.Context, synchronizationContext)
             {
                 Label = label,
                 DebounceTime = debounceTime
@@ -145,7 +145,7 @@ public sealed class ReactionBuilder
     {
         lock (memoFactory)
         {
-            return new Reaction(async () => action(await memo1.Get(), await memo2.Get(), await memo3.Get(), await memo4.Get(), await memo5.Get()), memoFactory.Context, synchronizationContext)
+            return new(async () => action(await memo1.Get(), await memo2.Get(), await memo3.Get(), await memo4.Get(), await memo5.Get()), memoFactory.Context, synchronizationContext)
             {
                 Label = label,
                 DebounceTime = debounceTime
@@ -157,7 +157,7 @@ public sealed class ReactionBuilder
     {
         lock (memoFactory)
         {
-            return new Reaction(async () => action(await memo1.Get(), await memo2.Get(), await memo3.Get(), await memo4.Get(), await memo5.Get(), await memo6.Get()), memoFactory.Context, synchronizationContext)
+            return new(async () => action(await memo1.Get(), await memo2.Get(), await memo3.Get(), await memo4.Get(), await memo5.Get(), await memo6.Get()), memoFactory.Context, synchronizationContext)
             {
                 Label = label,
                 DebounceTime = debounceTime
@@ -169,7 +169,7 @@ public sealed class ReactionBuilder
     {
         lock (memoFactory)
         {
-            return new Reaction(async () => action(await memo1.Get(), await memo2.Get(), await memo3.Get(), await memo4.Get(), await memo5.Get(), await memo6.Get(), await memo7.Get()), memoFactory.Context, synchronizationContext)
+            return new(async () => action(await memo1.Get(), await memo2.Get(), await memo3.Get(), await memo4.Get(), await memo5.Get(), await memo6.Get(), await memo7.Get()), memoFactory.Context, synchronizationContext)
             {
                 Label = label,
                 DebounceTime = debounceTime
@@ -181,7 +181,7 @@ public sealed class ReactionBuilder
     {
         lock (memoFactory)
         {
-            return new Reaction(async () => action(await memo1.Get(), await memo2.Get(), await memo3.Get(), await memo4.Get(), await memo5.Get(), await memo6.Get(), await memo7.Get(), await memo8.Get()), memoFactory.Context, synchronizationContext)
+            return new(async () => action(await memo1.Get(), await memo2.Get(), await memo3.Get(), await memo4.Get(), await memo5.Get(), await memo6.Get(), await memo7.Get(), await memo8.Get()), memoFactory.Context, synchronizationContext)
             {
                 Label = label,
                 DebounceTime = debounceTime
@@ -193,7 +193,7 @@ public sealed class ReactionBuilder
     {
         lock (memoFactory)
         {
-            return new Reaction(async () => action(await memo1.Get(), await memo2.Get(), await memo3.Get(), await memo4.Get(), await memo5.Get(), await memo6.Get(), await memo7.Get(), await memo8.Get(), await memo9.Get()), memoFactory.Context, synchronizationContext)
+            return new(async () => action(await memo1.Get(), await memo2.Get(), await memo3.Get(), await memo4.Get(), await memo5.Get(), await memo6.Get(), await memo7.Get(), await memo8.Get(), await memo9.Get()), memoFactory.Context, synchronizationContext)
             {
                 Label = label,
                 DebounceTime = debounceTime
@@ -205,7 +205,7 @@ public sealed class ReactionBuilder
     {
         lock (memoFactory)
         {
-            return new Reaction(async () => action(await memo1.Get(), await memo2.Get(), await memo3.Get(), await memo4.Get(), await memo5.Get(), await memo6.Get(), await memo7.Get(), await memo8.Get(), await memo9.Get(), await memo10.Get()), memoFactory.Context, synchronizationContext)
+            return new(async () => action(await memo1.Get(), await memo2.Get(), await memo3.Get(), await memo4.Get(), await memo5.Get(), await memo6.Get(), await memo7.Get(), await memo8.Get(), await memo9.Get(), await memo10.Get()), memoFactory.Context, synchronizationContext)
             {
                 Label = label,
                 DebounceTime = debounceTime
@@ -217,7 +217,7 @@ public sealed class ReactionBuilder
     {
         lock (memoFactory)
         {
-            return new Reaction(async () => action(await memo1.Get(), await memo2.Get(), await memo3.Get(), await memo4.Get(), await memo5.Get(), await memo6.Get(), await memo7.Get(), await memo8.Get(), await memo9.Get(), await memo10.Get(), await memo11.Get()), memoFactory.Context, synchronizationContext)
+            return new(async () => action(await memo1.Get(), await memo2.Get(), await memo3.Get(), await memo4.Get(), await memo5.Get(), await memo6.Get(), await memo7.Get(), await memo8.Get(), await memo9.Get(), await memo10.Get(), await memo11.Get()), memoFactory.Context, synchronizationContext)
             {
                 Label = label,
                 DebounceTime = debounceTime
@@ -229,7 +229,7 @@ public sealed class ReactionBuilder
     {
         lock (memoFactory)
         {
-            return new Reaction(async () => action(await memo1.Get(), await memo2.Get(), await memo3.Get(), await memo4.Get(), await memo5.Get(), await memo6.Get(), await memo7.Get(), await memo8.Get(), await memo9.Get(), await memo10.Get(), await memo11.Get(), await memo12.Get()), memoFactory.Context, synchronizationContext)
+            return new(async () => action(await memo1.Get(), await memo2.Get(), await memo3.Get(), await memo4.Get(), await memo5.Get(), await memo6.Get(), await memo7.Get(), await memo8.Get(), await memo9.Get(), await memo10.Get(), await memo11.Get(), await memo12.Get()), memoFactory.Context, synchronizationContext)
             {
                 Label = label,
                 DebounceTime = debounceTime
@@ -241,7 +241,7 @@ public sealed class ReactionBuilder
     {
         lock (memoFactory)
         {
-            return new Reaction(async () => action(await memo1.Get(), await memo2.Get(), await memo3.Get(), await memo4.Get(), await memo5.Get(), await memo6.Get(), await memo7.Get(), await memo8.Get(), await memo9.Get(), await memo10.Get(), await memo11.Get(), await memo12.Get(), await memo13.Get()), memoFactory.Context, synchronizationContext)
+            return new(async () => action(await memo1.Get(), await memo2.Get(), await memo3.Get(), await memo4.Get(), await memo5.Get(), await memo6.Get(), await memo7.Get(), await memo8.Get(), await memo9.Get(), await memo10.Get(), await memo11.Get(), await memo12.Get(), await memo13.Get()), memoFactory.Context, synchronizationContext)
             {
                 Label = label,
                 DebounceTime = debounceTime
@@ -253,7 +253,7 @@ public sealed class ReactionBuilder
     {
         lock (memoFactory)
         {
-            return new Reaction(async () => action(await memo1.Get(), await memo2.Get(), await memo3.Get(), await memo4.Get(), await memo5.Get(), await memo6.Get(), await memo7.Get(), await memo8.Get(), await memo9.Get(), await memo10.Get(), await memo11.Get(), await memo12.Get(), await memo13.Get(), await memo14.Get()), memoFactory.Context, synchronizationContext)
+            return new(async () => action(await memo1.Get(), await memo2.Get(), await memo3.Get(), await memo4.Get(), await memo5.Get(), await memo6.Get(), await memo7.Get(), await memo8.Get(), await memo9.Get(), await memo10.Get(), await memo11.Get(), await memo12.Get(), await memo13.Get(), await memo14.Get()), memoFactory.Context, synchronizationContext)
             {
                 Label = label,
                 DebounceTime = debounceTime
@@ -265,7 +265,7 @@ public sealed class ReactionBuilder
     {
         lock (memoFactory)
         {
-            return new Reaction(async () => action(await memo1.Get(), await memo2.Get(), await memo3.Get(), await memo4.Get(), await memo5.Get(), await memo6.Get(), await memo7.Get(), await memo8.Get(), await memo9.Get(), await memo10.Get(), await memo11.Get(), await memo12.Get(), await memo13.Get(), await memo14.Get(), await memo15.Get()), memoFactory.Context, synchronizationContext)
+            return new(async () => action(await memo1.Get(), await memo2.Get(), await memo3.Get(), await memo4.Get(), await memo5.Get(), await memo6.Get(), await memo7.Get(), await memo8.Get(), await memo9.Get(), await memo10.Get(), await memo11.Get(), await memo12.Get(), await memo13.Get(), await memo14.Get(), await memo15.Get()), memoFactory.Context, synchronizationContext)
             {
                 Label = label,
                 DebounceTime = debounceTime
@@ -277,7 +277,7 @@ public sealed class ReactionBuilder
     {
         lock (memoFactory)
         {
-            return new Reaction(async () => action(await memo1.Get(), await memo2.Get(), await memo3.Get(), await memo4.Get(), await memo5.Get(), await memo6.Get(), await memo7.Get(), await memo8.Get(), await memo9.Get(), await memo10.Get(), await memo11.Get(), await memo12.Get(), await memo13.Get(), await memo14.Get(), await memo15.Get(), await memo16.Get()), memoFactory.Context, synchronizationContext)
+            return new(async () => action(await memo1.Get(), await memo2.Get(), await memo3.Get(), await memo4.Get(), await memo5.Get(), await memo6.Get(), await memo7.Get(), await memo8.Get(), await memo9.Get(), await memo10.Get(), await memo11.Get(), await memo12.Get(), await memo13.Get(), await memo14.Get(), await memo15.Get(), await memo16.Get()), memoFactory.Context, synchronizationContext)
             {
                 Label = label,
                 DebounceTime = debounceTime
@@ -287,7 +287,7 @@ public sealed class ReactionBuilder
 
     public AdvancedReaction CreateAdvancedReaction(Func<Task> fn)
     {
-        return new AdvancedReaction(fn, memoFactory.Context, synchronizationContext)
+        return new(fn, memoFactory.Context, synchronizationContext)
         {
             Label = label,
             DebounceTime = debounceTime

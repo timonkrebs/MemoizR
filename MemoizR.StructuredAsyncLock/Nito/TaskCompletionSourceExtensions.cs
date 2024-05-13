@@ -77,6 +77,6 @@ internal static class TaskCompletionSourceExtensions
     /// <typeparam name="TResult">The type of the result of the TCS.</typeparam>
     public static TaskCompletionSource<TResult> CreateAsyncTaskSource<TResult>()
     {
-        return new TaskCompletionSource<TResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        return new(TaskCreationOptions.RunContinuationsAsynchronously);
     }
 }

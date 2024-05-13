@@ -119,7 +119,7 @@ public sealed class AsyncAsymmetricLock
                 } while (lockScope == 0);
                 AsyncLocalScope.Value = lockScope;
             }
-            return new AwaitableDisposable<IDisposable>(RequestExclusiveLockAsync(lockScope));
+            return new(RequestExclusiveLockAsync(lockScope));
         }
     }
 
@@ -130,25 +130,19 @@ public sealed class AsyncAsymmetricLock
     /// <returns>A disposable that releases the lock when disposed.</returns>
     private Task<IDisposable> RequestUpgradeableLockAsync(double lockScope)
     {
-        var canAcquireLock = false;
-
         if (LocksHeld == 0 && UpgradedLocksHeld == 0)
         {
             Interlocked.Increment(ref upgradedLocksHeld);
             LockScope = lockScope;
-            canAcquireLock = true;
+            return Task.FromResult<IDisposable>(new UpgradeableKey(this, lockScope, false));
         }
         else if (LockScope == lockScope)
         {
             Interlocked.Increment(ref upgradedLocksHeld);
-            canAcquireLock = true;
+            return Task.FromResult<IDisposable>(new UpgradeableKey(this, lockScope, true));
         }
 
-        var ret = canAcquireLock
-            ? Task.FromResult<IDisposable>(new UpgradeableKey(this, lockScope))
-            : upgradeable.Enqueue(lockScope);
-
-        return ret;
+        return upgradeable.Enqueue(lockScope);
     }
 
     /// <summary>
@@ -169,19 +163,19 @@ public sealed class AsyncAsymmetricLock
                 } while (lockScope == 0);
                 AsyncLocalScope.Value = lockScope;
             }
-            return new AwaitableDisposable<IDisposable>(RequestUpgradeableLockAsync(lockScope));
+            return new(RequestUpgradeableLockAsync(lockScope));
         }
     }
 
     /// <summary>
     /// Grants lock(s) to waiting tasks. This method assumes the sync lock is already held.
     /// </summary>
-    private void ReleaseWaiters(double lockScope, bool isExclusive)
+    public void ReleaseWaiters(double lockScope)
     {
         if (!upgradeable.IsEmpty && LocksHeld == 0 && UpgradedLocksHeld == 0)
         {
             Interlocked.Increment(ref upgradedLocksHeld);
-            LockScope = upgradeable.Dequeue(new UpgradeableKey(this, lockScope), lockScope);
+            LockScope = upgradeable.Dequeue(new UpgradeableKey(this, lockScope, false), lockScope);
             AsyncLocalScope.Value = LockScope;
         }
         else if (!exclusive.IsEmpty && LocksHeld == 0 && UpgradedLocksHeld == 0)
@@ -208,14 +202,14 @@ public sealed class AsyncAsymmetricLock
             {
                 LockScope = 0;
             }
-            ReleaseWaiters(lockScope, true);
+            ReleaseWaiters(lockScope);
         }
     }
 
     /// <summary>
     /// Releases the lock as a upgradeable.
     /// </summary>
-    internal void ReleaseUpgradeableLock(double lockScope)
+    internal void ReleaseUpgradeableLock(double lockScope, bool doNotRelease)
     {
         lock (this)
         {
@@ -231,7 +225,11 @@ public sealed class AsyncAsymmetricLock
             {
                 throw new InvalidOperationException("Should never happen!");
             }
-            ReleaseWaiters(lockScope, false);
+            if (!doNotRelease)
+            {
+                ReleaseWaiters(lockScope);
+            }
+
         }
     }
 
@@ -266,20 +264,22 @@ public sealed class AsyncAsymmetricLock
     {
         private readonly AsyncAsymmetricLock asyncPriorityLock;
         private readonly double lockScope;
+        private readonly bool ignoreDispose;
 
         /// <summary>
         /// Creates the key for a lock.
         /// </summary>
         /// <param name="asyncPriorityLock">The lock to release. May not be <c>null</c>.</param>
-        public UpgradeableKey(AsyncAsymmetricLock asyncPriorityLock, double lockScope)
+        public UpgradeableKey(AsyncAsymmetricLock asyncPriorityLock, double lockScope, bool ignoreDispose)
         {
             this.asyncPriorityLock = asyncPriorityLock;
             this.lockScope = lockScope;
+            this.ignoreDispose = ignoreDispose;
         }
 
         public void Dispose()
         {
-            asyncPriorityLock.ReleaseUpgradeableLock(lockScope);
+            asyncPriorityLock.ReleaseUpgradeableLock(lockScope, ignoreDispose);
         }
     }
 }

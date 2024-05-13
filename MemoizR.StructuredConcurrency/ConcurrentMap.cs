@@ -29,12 +29,12 @@ public sealed class ConcurrentMap<T> : MemoHandlR<IEnumerable<T>>, IMemoizR, ISt
         // Only one thread should evaluate the graph at a time. otherwise the context could get messed up.
         // This should lead to perf gains because memoization can be utilized more efficiently.
         using (await mutex.LockAsync())
-        using (await Context.ContextLock.UpgradeableLockAsync())
+        using (await Context.ReactionScope.ContextLock.UpgradeableLockAsync())
         {
             try
             {
                 isStartingComponent = Context.CancellationTokenSource == null;
-                Context.CancellationTokenSource ??= new CancellationTokenSource();
+                Context.CancellationTokenSource ??= new();
                 
                 if (Context.ReactionScope.CurrentReaction != null)
                 {
@@ -119,7 +119,7 @@ public sealed class ConcurrentMap<T> : MemoHandlR<IEnumerable<T>>, IMemoizR, ISt
         try
         {
             State = CacheState.Evaluating;
-            Value = await new StructuredResultsJob<T>(fns, Context.CancellationTokenSource!).Run();
+            Value = (await new StructuredResultsJob<T>(fns, Context.CancellationTokenSource!).Run()).Select(x => x.Value);;
             State = CacheState.CacheClean;
 
             // if the sources have changed, update source & observer links
@@ -142,8 +142,8 @@ public sealed class ConcurrentMap<T> : MemoHandlR<IEnumerable<T>>, IMemoizR, ISt
                     // Add ourselves to the end of the parent .observers array
                     var source = Sources[i];
                     source.Observers = !source.Observers.Any()
-                        ? [new WeakReference<IMemoizR>(this)]
-                        : [.. source.Observers, new WeakReference<IMemoizR>(this)];
+                        ? [new(this)]
+                        : [.. source.Observers, new(this)];
                 }
             }
             else if (Sources.Any() && Context.ReactionScope.CurrentGetsIndex < Sources.Length)
@@ -195,7 +195,7 @@ public sealed class ConcurrentMap<T> : MemoHandlR<IEnumerable<T>>, IMemoizR, ISt
     async Task IMemoizR.UpdateIfNecessary()
     {
         using (await mutex.LockAsync())
-        using (await Context.ContextLock.UpgradeableLockAsync())
+        using (await Context.ReactionScope.ContextLock.UpgradeableLockAsync())
         {
             await UpdateIfNecessary();
         }

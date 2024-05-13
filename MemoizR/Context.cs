@@ -8,13 +8,14 @@ public class ReactionScope
     internal volatile IMemoHandlR? CurrentReaction = null;
     internal volatile IMemoHandlR[] CurrentGets = [];
     internal volatile int CurrentGetsIndex;
+    internal AsyncAsymmetricLock ContextLock = new();
 }
 
 public class Context
 {
-    private readonly Random rand = new();
+    private static readonly Random rand = new();
     private static readonly AsyncLocal<double> AsyncLocalScope = new();
-    internal AsyncAsymmetricLock ContextLock = new();
+    
     internal AsyncLock Mutex = new();
 
     /** current capture context for identifying sources (other memoizR elements)
@@ -31,13 +32,13 @@ public class Context
                 ReactionScope reactionScope;
                 if (!AsyncReactionScopes.TryGetValue(key, out var reactionScopeRef))
                 {
-                    reactionScope = new ReactionScope();
-                    AsyncReactionScopes.Add(key, new WeakReference<ReactionScope>(reactionScope));
+                    reactionScope = new();
+                    AsyncReactionScopes.Add(key, new(reactionScope));
                 }
                 else if (!reactionScopeRef!.TryGetTarget(out reactionScope!))
                 {
-                    reactionScope = new ReactionScope();
-                    AsyncReactionScopes[key] = new WeakReference<ReactionScope>(reactionScope);
+                    reactionScope = new();
+                    AsyncReactionScopes[key] = new(reactionScope);
                 }
 
                 return reactionScope;
@@ -57,7 +58,7 @@ public class Context
             }
             var key = rand.NextDouble();
             AsyncLocalScope.Value = key;
-            AsyncReactionScopes.Add(key, new WeakReference<ReactionScope>(new ReactionScope()));
+            AsyncReactionScopes.Add(key, new(new()));
         }
     }
 

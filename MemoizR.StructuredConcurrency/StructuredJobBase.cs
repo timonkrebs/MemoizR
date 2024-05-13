@@ -4,9 +4,9 @@ namespace MemoizR.StructuredConcurrency;
 
 public abstract class StructuredJobBase<T>
 {
-    protected List<Task> tasks = new List<Task>();
+    protected List<Task> tasks = new();
     protected T? result;
-    protected AsyncLock mutex = new AsyncLock();
+    protected AsyncLock mutex = new();
 
     protected abstract Task AddConcurrentWork();
 
@@ -17,7 +17,7 @@ public abstract class StructuredJobBase<T>
             List<Task> tasks;
             using (mutex.Lock())
             {
-                this.tasks = new List<Task>();
+                this.tasks = new();
                 await AddConcurrentWork();
                 tasks = this.tasks;
             }

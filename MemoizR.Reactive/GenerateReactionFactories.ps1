@@ -38,7 +38,7 @@ for ($i = 1; $i -le 16; $i++) {
     {
         lock (memoFactory)
         {
-            return new Reaction(async () => action($actionName), memoFactory.Context, synchronizationContext)
+            return new(async () => action($actionName), memoFactory.Context, synchronizationContext)
             {
                 Label = label,
                 DebounceTime = debounceTime
@@ -54,7 +54,7 @@ for ($i = 1; $i -le 16; $i++) {
 $classFooter = @"
     public AdvancedReaction CreateAdvancedReaction(Func<Task> fn)
     {
-        return new AdvancedReaction(fn, memoFactory.Context, synchronizationContext)
+        return new(fn, memoFactory.Context, synchronizationContext)
         {
             Label = label,
             DebounceTime = debounceTime

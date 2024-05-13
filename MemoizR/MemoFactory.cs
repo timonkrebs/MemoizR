@@ -14,7 +14,7 @@ public sealed class MemoFactory
             // Default context is mapped to empty string
             if (string.IsNullOrWhiteSpace(contextKey))
             {
-                Context = new Context();
+                Context = new();
                 return;
             }
 
@@ -26,14 +26,14 @@ public sealed class MemoFactory
                 }
                 else
                 {
-                    Context = new Context();
+                    Context = new();
                     weakContext.SetTarget(Context);
                 }
             }
             else
             {
-                Context = new Context();
-                CONTEXTS.Add(contextKey, new WeakReference<Context>(Context));
+                Context = new();
+                CONTEXTS.Add(contextKey, new(Context));
             }
 
             if (Context == null)
@@ -81,7 +81,7 @@ public sealed class MemoFactory
 
     public MemoizR<T> CreateMemoizR<T>(string label, Func<CancellationTokenSource, Task<T>> fn)
     {
-        return new MemoizR<T>(fn, Context)
+        return new(fn, Context)
         {
             Label = label
         };
@@ -94,7 +94,7 @@ public sealed class MemoFactory
 
     public Signal<T> CreateSignal<T>(string label, T value)
     {
-        return new Signal<T>(value, Context)
+        return new(value, Context)
         {
             Label = label
         };
@@ -107,7 +107,7 @@ public sealed class MemoFactory
 
     public EagerRelativeSignal<T> CreateEagerRelativeSignal<T>(string label, T value)
     {
-        return new EagerRelativeSignal<T>(value, Context)
+        return new(value, Context)
         {
             Label = label
         };
