@@ -119,39 +119,8 @@ public sealed class ConcurrentMap<T> : MemoHandlR<IEnumerable<T>>, IMemoizR, ISt
         try
         {
             State = CacheState.Evaluating;
-            Value = (await new StructuredResultsJob<T>(fns, Context.CancellationTokenSource!).Run()).Select(x => x.Value);;
+            Value = (await new StructuredResultsJob<T>(fns, Context!, this).Run()).Select(x => x.Value);;
             State = CacheState.CacheClean;
-
-            // if the sources have changed, update source & observer links
-            if (Context.ReactionScope.CurrentGets.Length > 0)
-            {
-                // remove all old Sources' .observers links to us
-                RemoveParentObservers(Context.ReactionScope.CurrentGetsIndex);
-                // update source up links
-                if (Sources.Any() && Context.ReactionScope.CurrentGetsIndex > 0)
-                {
-                    Sources = [.. Sources.Take(Context.ReactionScope.CurrentGetsIndex), .. Context.ReactionScope.CurrentGets];
-                }
-                else
-                {
-                    Sources = Context.ReactionScope.CurrentGets;
-                }
-
-                for (var i = Context.ReactionScope.CurrentGetsIndex; i < Sources.Length; i++)
-                {
-                    // Add ourselves to the end of the parent .observers array
-                    var source = Sources[i];
-                    source.Observers = !source.Observers.Any()
-                        ? [new(this)]
-                        : [.. source.Observers, new(this)];
-                }
-            }
-            else if (Sources.Any() && Context.ReactionScope.CurrentGetsIndex < Sources.Length)
-            {
-                // remove all old Sources' .observers links to us
-                RemoveParentObservers(Context.ReactionScope.CurrentGetsIndex);
-                Sources = [.. Sources.Take(Context.ReactionScope.CurrentGetsIndex)];
-            }
         }
         catch
         {
@@ -181,15 +150,6 @@ public sealed class ConcurrentMap<T> : MemoHandlR<IEnumerable<T>>, IMemoizR, ISt
         // We've rerun with the latest values from all of our Sources.
         // This means that we no longer need to update until a signal changes
         State = CacheState.CacheClean;
-    }
-
-    private void RemoveParentObservers(int index)
-    {
-        if (!Sources.Any()) return;
-        foreach (var source in Sources.Skip(index))
-        {
-            source.Observers = [.. source.Observers.Where(x => x.TryGetTarget(out var o) ? o != this : false)];
-        }
     }
 
     async Task IMemoizR.UpdateIfNecessary()

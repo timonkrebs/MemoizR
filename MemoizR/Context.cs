@@ -91,4 +91,15 @@ public class Context
             }
         }
     }
+
+    internal double ForceNewScope()
+    {
+        lock (this)
+        {
+            var key = rand.NextDouble();
+            AsyncLocalScope.Value = key;
+            AsyncReactionScopes.Add(key, new(new()));
+            return key;
+        }
+    }
 }

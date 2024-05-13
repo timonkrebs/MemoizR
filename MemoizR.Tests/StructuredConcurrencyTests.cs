@@ -1,6 +1,5 @@
 namespace MemoizR.Tests;
 
-[Collection("Sequential")]
 public class StructuredConcurrencyTests
 {
     [Fact]
@@ -84,6 +83,7 @@ public class StructuredConcurrencyTests
     }
 
     [Fact]
+    [Trait("Category", "Unit")]
     public async Task TestMultipleMapHandling()
     {
         var f = new MemoFactory();

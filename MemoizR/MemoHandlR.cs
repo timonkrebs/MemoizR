@@ -11,8 +11,28 @@ public abstract class SignalHandlR : IMemoHandlR
 
     protected AsyncLock mutex = new();
 
-    IMemoHandlR[] IMemoHandlR.Sources { get => Sources; set => Sources = value; }
-    WeakReference<IMemoizR>[] IMemoHandlR.Observers { get => Observers; set => Observers = value; }
+    IMemoHandlR[] IMemoHandlR.Sources
+    {
+        get => Sources;
+        set
+        {
+            lock (this)
+            {
+                Sources = value;
+            }
+        }
+    }
+    WeakReference<IMemoizR>[] IMemoHandlR.Observers
+    {
+        get => Observers;
+        set
+        {
+            lock (this)
+            {
+                Observers = value;
+            }
+        }
+    }
 
     internal bool isStartingComponent;
 

@@ -2,7 +2,6 @@ using MemoizR.StructuredAsyncLock;
 
 namespace MemoizR.Tests;
 
-[Collection("Sequential")]
 public class AsyncAsymmetricLockTests
 {
     [Fact(Timeout = 500)]
