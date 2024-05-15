@@ -121,7 +121,7 @@ public sealed class ConcurrentMapReduce<T> : MemoHandlR<T>, IMemoizR, IStateGetR
         try
         {
             State = CacheState.Evaluating;
-            Value = await new StructuredReduceJob<T>(fns, reduce, Context.CancellationTokenSource!).Run();
+            Value = await new StructuredReduceJob<T>(fns, reduce, Context, this).Run();
             State = CacheState.CacheClean;
 
             // if the sources have changed, update source & observer links

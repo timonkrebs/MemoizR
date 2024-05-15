@@ -41,7 +41,6 @@ public sealed class StructuredResultsJob<T> : StructuredJobBase<ConcurrentDictio
                     // if the sources have changed, update source & observer links
                     if (context.ReactionScope.CurrentGets.Length > 0)
                     {
-
                         // update source up links
                         if (allSources.Any() && context.ReactionScope.CurrentGetsIndex > 0)
                         {
