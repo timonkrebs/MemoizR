@@ -10,6 +10,8 @@ public abstract class StructuredJobBase<T>
 
     protected abstract Task AddConcurrentWork();
 
+    protected virtual void HandleSubscriptions() { }
+
     public async Task<T> Run()
     {
         try
@@ -23,13 +25,15 @@ public abstract class StructuredJobBase<T>
             }
 
             await Task.WhenAll(tasks);
+            HandleSubscriptions();
             return result!;
         }
         catch
         {
             var t = Task.WhenAll(tasks);
             await t.ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
-            if(t.Exception != null) {
+            if (t.Exception != null)
+            {
                 throw t.Exception;
             }
             throw;

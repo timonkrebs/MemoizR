@@ -1,9 +1,11 @@
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 
 namespace MemoizR.StructuredConcurrency;
 
 public sealed class StructuredResultsJob<T> : StructuredJobBase<ConcurrentDictionary<int, T>>
 {
+    private IList<IMemoHandlR> allSources = [];
+
     private readonly IReadOnlyCollection<Func<CancellationTokenSource, Task<T>>> fns;
     private readonly Context context;
     private readonly ConcurrentMap<T> @this;
@@ -27,7 +29,7 @@ public sealed class StructuredResultsJob<T> : StructuredJobBase<ConcurrentDictio
                 context.ReactionScope.CurrentReaction = @this;
                 try
                 {
-                    result![i] = await x(cancellationTokenSource);
+                    result!.TryAdd(i, await x(cancellationTokenSource));
                 }
                 catch
                 {
@@ -39,20 +41,21 @@ public sealed class StructuredResultsJob<T> : StructuredJobBase<ConcurrentDictio
                     // if the sources have changed, update source & observer links
                     if (context.ReactionScope.CurrentGets.Length > 0)
                     {
+
                         // update source up links
-                        if (@this.Sources.Any() && context.ReactionScope.CurrentGetsIndex > 0)
+                        if (allSources.Any() && context.ReactionScope.CurrentGetsIndex > 0)
                         {
-                            @this.Sources = [.. @this.Sources, .. context.ReactionScope.CurrentGets];
+                            allSources = [.. allSources, .. context.ReactionScope.CurrentGets];
                         }
                         else
                         {
-                            @this.Sources = context.ReactionScope.CurrentGets;
+                            allSources = context.ReactionScope.CurrentGets;
                         }
 
-                        for (var i = context.ReactionScope.CurrentGetsIndex; i < @this.Sources.Length; i++)
+                        for (var i = context.ReactionScope.CurrentGetsIndex; i < allSources.Count(); i++)
                         {
                             // Add ourselves to the end of the parent .observers array
-                            var source = @this.Sources[i];
+                            var source = allSources[i];
                             source.Observers = !source.Observers.Any()
                                 ? [new(@this)]
                                 : [.. source.Observers, new(@this)];
@@ -63,5 +66,10 @@ public sealed class StructuredResultsJob<T> : StructuredJobBase<ConcurrentDictio
             }, cancellationTokenSource.Token)
         ));
         return Task.CompletedTask;
+    }
+
+    protected override void HandleSubscriptions()
+    {
+        @this.Sources = allSources.Distinct().ToArray();
     }
 }
