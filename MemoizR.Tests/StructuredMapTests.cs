@@ -18,16 +18,16 @@ namespace MemoizR.Tests.StructuredConcurrency
                 async (cts) => await v2.Get(),
                 async (cts) => await v3.Get());
 
-            Assert.Equal(new[] { 1, 2, 3 }, await map.Get());
+            Assert.Equal([1, 2, 3], await map.Get());
 
             await v1.Set(4);
-            Assert.Equal(new[] { 4, 2, 3 }, await map.Get());
+            Assert.Equal([4, 2, 3], await map.Get());
 
             await v2.Set(5);
-            Assert.Equal(new[] { 4, 5, 3 }, await map.Get());
+            Assert.Equal([4, 5, 3], await map.Get());
 
             await v3.Set(6);
-            Assert.Equal(new[] { 4, 5, 6 }, await map.Get());
+            Assert.Equal([4, 5, 6], await map.Get());
         }
 
         [Fact]
@@ -52,16 +52,24 @@ namespace MemoizR.Tests.StructuredConcurrency
                 async (cts) => await map2.Get(),
                 async (cts) => await map2.Get());
 
-            Assert.Equal(new[] { 1, 2, 3 }, await map1.Get());
+            Assert.Equal([1, 2, 3], await map1.Get());
+            Assert.Equal([[1, 2, 3], [1, 2, 3]], await map2.Get());
+            Assert.Equal([[[1, 2, 3], [1, 2, 3]], [[1, 2, 3], [1, 2, 3]]], await map3.Get());
 
             await v1.Set(4);
-            Assert.Equal(new[] { 4, 2, 3 }, await map1.Get());
+            Assert.Equal([4, 2, 3], await map1.Get());
+            Assert.Equal([[4, 2, 3], [4, 2, 3]], await map2.Get());
+            Assert.Equal([[[4, 2, 3], [4, 2, 3]], [[4, 2, 3], [4, 2, 3]]], await map3.Get());
 
             await v2.Set(5);
-            Assert.Equal(new[] { 4, 5, 3 }, await map1.Get());
+            Assert.Equal([4, 5, 3], await map1.Get());
+            Assert.Equal([[4, 5, 3], [4, 5, 3]], await map2.Get());
+            Assert.Equal([[[4, 5, 3], [4, 5, 3]], [[4, 5, 3], [4, 5, 3]]], await map3.Get());
 
             await v3.Set(6);
-            Assert.Equal(new[] { 4, 5, 6 }, await map1.Get());
+            Assert.Equal([4, 5, 6], await map1.Get());
+            Assert.Equal([[4, 5, 6], [4, 5, 6]], await map2.Get());
+            Assert.Equal([[[4, 5, 6], [4, 5, 6]], [[4, 5, 6], [4, 5, 6]]], await map3.Get());
         }
     }
 }

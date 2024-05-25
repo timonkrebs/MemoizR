@@ -9,14 +9,14 @@ public sealed class AsyncAsymmetricLock
     /// Upgradeable can only execute one instance at a time in the locked scope, but allow for recursive entering. https://learn.microsoft.com/en-us/dotnet/api/system.threading.lockrecursionpolicy?view=net-7.0
     /// They are blocked by exclusive, and one at the time can be upgraded to allow entering exclusive locks.
     /// </summary>
-    readonly IAsyncWaitDictionary<IDisposable> upgradeable = new DefaultAsyncWaitDictionary<IDisposable>();
+    readonly IAsyncWaitQueue<IDisposable> upgradeable = new DefaultAsyncWaitQueue<IDisposable>();
 
     /// <summary>
     /// The queue of TCSs that other tasks are awaiting to acquire the lock as exclusive.
     /// Exclusive can not enter upgradeable locks. If they try InvalidOperationException will be thrown, because otherwise it will lead to deadlocks.
     /// Exclusive can execute with as many other exclusive locks simultaneously.
     /// </summary>
-    readonly IAsyncWaitDictionary<IDisposable> exclusive = new DefaultAsyncWaitDictionary<IDisposable>();
+    readonly IAsyncWaitQueue<IDisposable> exclusive = new DefaultAsyncWaitQueue<IDisposable>();
 
     /// <summary>
     /// Number of exclusive locks held; negative if upgradeable lock are held; 0 if no locks are held.
@@ -175,13 +175,13 @@ public sealed class AsyncAsymmetricLock
         if (!upgradeable.IsEmpty && LocksHeld == 0 && UpgradedLocksHeld == 0)
         {
             Interlocked.Increment(ref upgradedLocksHeld);
-            LockScope = upgradeable.Dequeue(new UpgradeableKey(this, lockScope, false), lockScope);
+            LockScope = upgradeable.Dequeue(new UpgradeableKey(this, lockScope, false));
             AsyncLocalScope.Value = LockScope;
         }
         else if (!exclusive.IsEmpty && LocksHeld == 0 && UpgradedLocksHeld == 0)
         {
             Interlocked.Increment(ref locksHeld);
-            LockScope = exclusive.Dequeue(new ExclusivePrioKey(this, lockScope), lockScope);
+            LockScope = exclusive.Dequeue(new ExclusivePrioKey(this, lockScope));
             AsyncLocalScope.Value = LockScope;
         }
         else if ((!upgradeable.IsEmpty || !exclusive.IsEmpty) && LocksHeld == 0 && UpgradedLocksHeld == 0)
