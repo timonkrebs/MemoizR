@@ -2,7 +2,7 @@ namespace MemoizR.Tests;
 
 public class StructuredConcurrencyTests
 {
-    [Fact]
+    [Fact(Timeout = 1000)]
     public async Task TestInitialization()
     {
         var f = new MemoFactory();
@@ -82,7 +82,7 @@ public class StructuredConcurrencyTests
         Assert.Equal(1, await c1.Get());
     }
 
-    [Fact]
+    [Fact(Timeout = 1000)]
     public async Task TestMultipleMapHandling()
     {
         var f = new MemoFactory();
@@ -157,7 +157,7 @@ public class StructuredConcurrencyTests
         Assert.NotNull(r);
     }
 
-    [Fact]
+    [Fact(Timeout = 1000)]
     public async Task TestMultipleMapHandlingCancel()
     {
         var f = new MemoFactory("concurrent");

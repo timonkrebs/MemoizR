@@ -29,7 +29,7 @@ public class ReactiveTests
 
         await Task.Delay(100);
 
-        var _ = Task.Run(async () =>
+        var t = new Task(async () =>
         {
             await foreach (var m in m1)
             {
@@ -37,6 +37,8 @@ public class ReactiveTests
                 invocationCount++;
             }
         });
+
+        t.Start();
 
         await Task.Delay(10);
         Assert.Equal(0, result);
@@ -92,21 +94,29 @@ public class ReactiveTests
         Assert.Equal(0, invocationCount);
 
         await v1.Set(2);
+        Assert.Equal(0, result);
+        Assert.Equal(0, invocationCount);
         await Task.Delay(200);
         Assert.Equal(2, result);
         Assert.Equal(1, invocationCount);
 
         await v1.Set(3);
+        Assert.Equal(2, result);
+        Assert.Equal(1, invocationCount);
         await Task.Delay(200);
         Assert.Equal(3, result);
         Assert.Equal(2, invocationCount);
 
         await v1.Set(3);
+        Assert.Equal(3, result);
+        Assert.Equal(2, invocationCount);
         await Task.Delay(200);
         Assert.Equal(3, result);
         Assert.Equal(2, invocationCount);
 
         await v1.Set(4);
+        Assert.Equal(3, result);
+        Assert.Equal(2, invocationCount);
         await Task.Delay(200);
         Assert.Equal(4, result);
         Assert.Equal(3, invocationCount);
@@ -285,7 +295,7 @@ public class ReactiveTests
             tasks.Add(Task.Run(async () => await v1.Set(j)));
             await Task.Delay(35);
         }
-
+        await Task.WhenAll(tasks);
         tasks.Add(Task.Run(async () => await v1.Set(41)));
 
         await Task.Delay(1);
@@ -351,6 +361,46 @@ public class ReactiveTests
 
     [Fact(Timeout = 1000)]
     public async Task TestThreadSafety5()
+    {
+        var f = new MemoFactory();
+
+        var v1 = f.CreateSignal(4);
+
+        var memoInvocationCount = 0;
+        var m1 = f.CreateMemoizR("m1", async () =>
+        {
+            memoInvocationCount++;
+            return await v1.Get() * 2;
+        });
+
+        var m2 = f.CreateMemoizR("m2", async () =>
+        {
+            return await m1.Get() * 2;
+        });
+
+        var invocationCountR1 = 0;
+        var r1 = f.BuildReaction().CreateReaction(m2, m => invocationCountR1++);
+        var invocationCountR2 = 0;
+        var r2 = f.BuildReaction().CreateReaction(m2, m => invocationCountR2++);
+
+        await Task.Delay(100);
+
+        var tasks = Enumerable.Range(1, 100_000).Select(i => new Task(async () => await v1.Set(i))).ToList();
+        Parallel.ForEach(tasks, t => t.Start());
+
+        await Task.WhenAll(tasks);
+
+        await v1.Set(41);
+
+        Assert.Equal(82, await m1.Get());
+
+        Assert.True(memoInvocationCount >= 1, "Must be invoked at least once");
+        Assert.True(invocationCountR1 <= memoInvocationCount, "Must be invoked at least once");
+        Assert.True(invocationCountR2 <= memoInvocationCount, "Must be invoked at least once");
+    }
+
+    [Fact(Timeout = 1000)]
+    public async Task TestThreadSafety6()
     {
         var f = new MemoFactory();
 

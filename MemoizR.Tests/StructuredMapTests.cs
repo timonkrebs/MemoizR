@@ -4,7 +4,7 @@ namespace MemoizR.Tests.StructuredConcurrency
 {
     public class ConcurrentMapTests
     {
-        [Fact]
+        [Fact(Timeout = 1000)]
         public async Task TestConcurrentMap()
         {
             var f = new MemoFactory();
@@ -30,7 +30,7 @@ namespace MemoizR.Tests.StructuredConcurrency
             Assert.Equal([4, 5, 6], await map.Get());
         }
 
-        [Fact]
+        [Fact(Timeout = 1000)]
         public async Task TestConcurrentMapWithDiamondDependencies()
         {
             var f = new MemoFactory();
