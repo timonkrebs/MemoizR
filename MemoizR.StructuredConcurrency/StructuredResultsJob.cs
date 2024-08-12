@@ -23,7 +23,7 @@ public sealed class StructuredResultsJob<T> : StructuredJobBase<ConcurrentDictio
     protected override Task AddConcurrentWork()
     {
         tasks.AddRange(fns
-        .Select(async (x, i) => await Task.Run(async () =>
+        .Select((x, i) => new Task<Task>(async () =>
             {
                 context.ForceNewScope();
                 context.ReactionScope.CurrentReaction = @this;

@@ -22,7 +22,7 @@ public sealed class StructuredReduceJob<T> : StructuredJobBase<T>
     protected override Task AddConcurrentWork()
     {
         tasks.AddRange(fns
-        .Select(async x => await Task.Run(async () =>
+        .Select(x => new Task<Task>(async () =>
             {
                 try
                 {
@@ -66,5 +66,10 @@ public sealed class StructuredReduceJob<T> : StructuredJobBase<T>
             }, cancellationTokenSource.Token)
         ));
         return Task.CompletedTask;
+    }
+
+    protected override void HandleSubscriptions()
+    {
+        @this.Sources = allSources.Distinct().ToArray();
     }
 }

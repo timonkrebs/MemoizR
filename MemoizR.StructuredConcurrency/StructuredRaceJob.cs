@@ -21,10 +21,7 @@ public sealed class StructuredRaceJob<T, R> : StructuredJobBase<T>
     protected override async Task AddConcurrentWork()
     {
         var inputs = await action();
-        tasks.AddRange(fns
-        .Select(async x =>
-        {
-            await Task.Run(async () =>
+        tasks.AddRange(fns.Select(x => new Task<Task>(async () =>
             {
                 try
                 {
@@ -34,7 +31,7 @@ public sealed class StructuredRaceJob<T, R> : StructuredJobBase<T>
                 }
                 catch (TaskCanceledException)
                 {
-                    if(!finished)
+                    if (!finished)
                     {
                         groupCancellationTokenSource.Cancel();
                         throw;
@@ -45,8 +42,8 @@ public sealed class StructuredRaceJob<T, R> : StructuredJobBase<T>
                     groupCancellationTokenSource.Cancel();
                     throw;
                 }
-            }, innerCancellationTokenSource.Token);
-        }
-        ));
+            }, innerCancellationTokenSource.Token)
+            ));
+
     }
 }
