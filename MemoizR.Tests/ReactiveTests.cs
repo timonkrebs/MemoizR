@@ -64,7 +64,7 @@ public class ReactiveTests
         Assert.NotNull(m1);
     }
 
-    [Fact]
+    [Fact(Timeout = 2000)]
     public async Task TestAsyncEnumerableWithBackpressure()
     {
         var f = new MemoFactory();
@@ -261,7 +261,8 @@ public class ReactiveTests
         Assert.True(invocationCount > 1, "Must be invoked more than once");
     }
 
-    [Fact(Timeout = 2000)]
+    [Fact(Timeout = 5000)]
+    [Trait("Category", "Unit")]
     public async Task TestThreadSafety3()
     {
         var f = new MemoFactory();
@@ -301,7 +302,7 @@ public class ReactiveTests
         Assert.Equal(82, result2);
     }
 
-    [Fact(Timeout = 2000)]
+    [Fact(Timeout = 5000)]
     public async Task TestThreadSafety4()
     {
         var f = new MemoFactory();

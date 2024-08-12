@@ -83,7 +83,6 @@ public class StructuredConcurrencyTests
     }
 
     [Fact]
-    [Trait("Category", "Unit")]
     public async Task TestMultipleMapHandling()
     {
         var f = new MemoFactory();
