@@ -20,13 +20,7 @@ public sealed class EagerRelativeSignal<T> : MemoHandlR<T>, IStateGetR<T>
                 Value = fn(Value);   
             }
 
-            for (int i = 0; i < Observers.Length; i++)
-            {
-                if (Observers[i].TryGetTarget(out var o))
-                {
-                    await o.Stale(CacheState.CacheDirty);
-                }
-            }
+            await Task.WhenAll(Observers.Select(o => o.Stale(CacheState.CacheDirty)));
         }
     }
     

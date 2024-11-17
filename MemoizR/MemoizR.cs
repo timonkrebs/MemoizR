@@ -137,8 +137,8 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR, IStateGetR<T>
                     // Add ourselves to the end of the parent .observers array
                     var source = Sources[i];
                     source.Observers = !source.Observers.Any()
-                        ? [new(this)]
-                        : [.. source.Observers, new(this)];
+                        ? [this]
+                        : [.. source.Observers, this];
                 }
             }
             else if (Sources.Any() && Context.ReactionScope.CurrentGetsIndex < Sources.Length)
@@ -164,13 +164,7 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR, IStateGetR<T>
         if (!Equals(oldValue, Value) && Observers.Length > 0)
         {
             // We've changed value, so mark our children as dirty so they'll reevaluate
-            foreach (var observer in Observers)
-            {
-                if (observer.TryGetTarget(out var o))
-                {
-                    o.State = CacheState.CacheDirty;
-                }
-            }
+await Task.WhenAll(Observers.Select(o => o.Stale(CacheState.CacheDirty)));
         }
 
         // We've rerun with the latest values from all of our Sources.
@@ -183,7 +177,7 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR, IStateGetR<T>
         if (!Sources.Any()) return;
         foreach (var source in Sources.Skip(index))
         {
-            source.Observers = [.. source.Observers.Where(x => x.TryGetTarget(out var o) ? o != this : false)];
+            source.Observers = [.. source.Observers.Where(o => o != this)];
         }
     }
 
@@ -205,13 +199,7 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR, IStateGetR<T>
 
         State = state;
 
-        foreach (var observer in Observers)
-        {
-            if (observer.TryGetTarget(out var o))
-            {
-                await o.Stale(CacheState.CacheCheck);
-            }
-        }
+await Task.WhenAll(Observers.Select(o => o.Stale(CacheState.CacheCheck)));
     }
 
     Task IMemoizR.Stale(CacheState state)

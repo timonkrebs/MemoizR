@@ -1,0 +1,19 @@
+{
+    "AssembliesPath": "bin/Release/net8.0",
+    "OutputPath": "bin/Release/net8.0",
+    "Assemblies": [
+      "MemoizR.StructuredAsyncLock.dll",
+      "MemoizR.dll",
+      "MemoizR.StructuredConcurrency.dll",
+      "MemoizR.Reactive.dll",
+      "MemoizR.Tests.dll",
+      "Nito.AsyncEx.Context.dll",
+      "Nito.AsyncEx.Coordination.dll",
+      "Nito.AsyncEx.Interop.WaitHandles.dll",
+      "Nito.AsyncEx.Oop.dll",
+      "Nito.AsyncEx.Tasks.dll",
+      "Nito.Cancellation.dll",
+      "Nito.Collections.Deque.dll",
+      "Nito.Disposables.dll"
+    ]
+  }

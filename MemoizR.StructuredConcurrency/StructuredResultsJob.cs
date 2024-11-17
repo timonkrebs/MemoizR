@@ -56,8 +56,8 @@ public sealed class StructuredResultsJob<T> : StructuredJobBase<ConcurrentDictio
                             // Add ourselves to the end of the parent .observers array
                             var source = allSources[i];
                             source.Observers = !source.Observers.Any()
-                                ? [new(@this)]
-                                : [.. source.Observers, new(@this)];
+                                ? [@this]
+                                : [.. source.Observers, @this];
                         }
                     }
                 }

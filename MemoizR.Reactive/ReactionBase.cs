@@ -1,3 +1,5 @@
+using Nito.AsyncEx;
+
 namespace MemoizR.Reactive;
 
 public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
@@ -6,6 +8,7 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
     private CacheState State { get; set; } = CacheState.CacheClean;
     private SynchronizationContext? synchronizationContext;
     private bool isPaused;
+    internal AsyncLock Mutex = new();
 
     public TimeSpan DebounceTime { protected get; init; }
 
@@ -42,12 +45,14 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
     {
         if (State == CacheState.CacheClean)
         {
+            Console.WriteLine($"UpdateIfNecessary CacheClean {Context.AsyncLocalScope.Value}");
             return;
         }
 
         // If we are potentially dirty, check if we have a parent who has actually changed value.
         if (State == CacheState.CacheCheck)
         {
+            Console.WriteLine($"UpdateIfNecessary CacheCheck {Context.AsyncLocalScope.Value}");
             foreach (var source in Sources)
             {
                 if (source is IMemoizR memoizR)
@@ -68,9 +73,11 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
         // If we were already dirty or marked dirty by the step above, update.
         if (State == CacheState.CacheDirty)
         {
+            Console.WriteLine($"UpdateIfNecessary CacheDirty {Context.AsyncLocalScope.Value}");
             await Update();
         }
 
+        Console.WriteLine($"UpdateIfNecessary CacheClean {Context.AsyncLocalScope.Value}");
         // By now, we're clean.
         State = CacheState.CacheClean;
     }
@@ -157,8 +164,8 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
                     // Add ourselves to the end of the parent .observers array.
                     var source = Sources[i];
                     source.Observers = !source.Observers.Any()
-                        ? [new(this)]
-                        : [.. source.Observers, new(this)];
+                        ? [this]
+                        : [.. source.Observers, this];
                 }
             }
             else if (Sources.Any() && Context.ReactionScope.CurrentGetsIndex < Sources.Length)
@@ -185,7 +192,7 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
         if (!Sources.Any()) return;
         foreach (var source in Sources.Skip(index))
         {
-            source.Observers = [.. source.Observers.Where(x => x.TryGetTarget(out var o) ? o != this : false)];
+            source.Observers = [.. source.Observers.Where(o => o != this)];
         }
     }
 
@@ -197,35 +204,52 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
         }
     }
 
-    internal Task Stale(CacheState state, TimeSpan debounceTime)
+    internal async Task Stale(CacheState state, TimeSpan debounceTime)
     {
+        Console.WriteLine($"trigger Stale {Context.AsyncLocalScope.Value}");
+        cts?.Cancel();
         // Add Scheduling
-        lock (this)
+        using (await Mutex.LockAsync())
         {
             State = state;
-            cts?.Cancel();
+
             cts = new();
 
             Context.CancellationTokenSource ??= new();
+            Console.WriteLine($"Stale {Context.AsyncLocalScope.Value}");
 
-            Task.Delay(debounceTime, cts.Token).ContinueWith(async _ =>
-                {
-                    Context.CreateNewScopeIfNeeded();
-                    try
-                    {
-                        using (await Context.ReactionScope.ContextLock.UpgradeableLockAsync())
-                        {
-                            await UpdateIfNecessary().ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
-                        }
-                    }
-                    finally
-                    {
-                        Context.CancellationTokenSource = null;
-                        Context.CleanScope();
-                    }
-                });
+            await TriggerUpdateIfNecessary(debounceTime, cts.Token);
+        }
+        Console.WriteLine($"left Stale lock {Context.AsyncLocalScope.Value}");
+    }
 
-            return Task.CompletedTask;
+    private async Task TriggerUpdateIfNecessary(TimeSpan debounceTime, CancellationToken token)
+    {
+        try
+        {
+            Console.WriteLine($"Run TriggerUpdateIfNecessary ");
+            await Task.Delay(debounceTime, token);
+
+            Context.CreateNewScopeIfNeeded();
+            Console.WriteLine($"ContinueWith {Context.AsyncLocalScope.Value}");
+
+            using (await Context.ReactionScope.ContextLock.UpgradeableLockAsync())
+            {
+                Console.WriteLine($"ReactionScope {Context.AsyncLocalScope.Value}");
+                await UpdateIfNecessary();
+                Console.WriteLine($"exit ReactionScope {Context.AsyncLocalScope.Value}");
+            }
+            Console.WriteLine($"left ReactionScope {Context.AsyncLocalScope.Value}");
+        }
+        catch (TaskCanceledException e)
+        {
+            Console.WriteLine($"TaskCanceledException {Context.AsyncLocalScope.Value}, {e.Message}");
+        }
+        finally
+        {
+            Context.CancellationTokenSource = null;
+            Context.CleanScope();
+            Console.WriteLine($"CleanScope {Context.AsyncLocalScope.Value}");
         }
     }
 

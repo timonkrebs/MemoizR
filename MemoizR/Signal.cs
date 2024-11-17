@@ -9,19 +9,16 @@ public sealed class Signal<T> : MemoHandlR<T>, IStateGetR<T?>
 
     public async Task Set(T value)
     {
+        Console.WriteLine($"enter ExclusiveLockAsync Set {value}");
         // There can be multiple threads updating the CacheState at the same time but no reads should be possible while in the process.
         // Must be Upgradeable because it could change to "Writeble-Lock" if something synchronously reactive is listening.
         using (await Context.ReactionScope.ContextLock.ExclusiveLockAsync())
         {
+            Console.WriteLine($"inside ExclusiveLockAsync Set {value}, {Value}");
             if (Equals(Value, value))
             {
-                for (int i = 0; i < Observers.Length; i++)
-                {
-                    if (Observers[i].TryGetTarget(out var o))
-                    {
-                        await o.Stale(CacheState.CacheCheck);
-                    }
-                }
+                Console.WriteLine($"check Observers {Observers.Length}");
+                await Task.WhenAll(Observers.Select(o => o.Stale(CacheState.CacheCheck)));
                 return;
             }
 
@@ -31,14 +28,10 @@ public sealed class Signal<T> : MemoHandlR<T>, IStateGetR<T?>
                 Value = value;
             }
 
-            for (int i = 0; i < Observers.Length; i++)
-            {
-                if (Observers[i].TryGetTarget(out var o))
-                {
-                    await o.Stale(CacheState.CacheDirty);
-                }
-            }
+            Console.WriteLine($"set Observers {Observers.Length}");
+            await Task.WhenAll(Observers.Select(o => o.Stale(CacheState.CacheDirty)));
         }
+        Console.WriteLine($"exited ExclusiveLockAsync Set {value}");
     }
 
     public async Task<T?> Get()

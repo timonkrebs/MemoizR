@@ -14,7 +14,7 @@ public class ReactionScope
 public class Context
 {
     private static readonly Random rand = new();
-    private static readonly AsyncLocal<double> AsyncLocalScope = new();
+    internal static readonly AsyncLocal<double> AsyncLocalScope = new();
     
     internal AsyncLock Mutex = new();
 

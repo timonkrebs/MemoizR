@@ -77,12 +77,18 @@ public sealed class ReactionBuilder
 
             new Reaction(async () =>
             {
-                var result = await memo.Get();
-                var oldTsc = tcs;
+                var m = memo;
+                Console.WriteLine($"Run Reaction ");
+                var result = await m.Get();
+                Console.WriteLine($"Run Reaction 2");
+                var oldTcs = tcs;
                 var newTcs = new TaskCompletionSource<T>();
                 tcs = newTcs;
+
                 enumerator.GetNext = newTcs.Task;
-                oldTsc.SetResult(result);
+                                Console.WriteLine($"Run Reaction 3");
+                oldTcs.SetResult(result);
+                Console.WriteLine($"Run Reaction 4");
             }, memoFactory.Context)
             {
                 Label = label,

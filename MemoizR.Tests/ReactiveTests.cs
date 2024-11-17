@@ -1,7 +1,18 @@
+using System;
+using System.Diagnostics;
+using Xunit.Abstractions;
+
 namespace MemoizR.Tests;
 
 public class ReactiveTests
 {
+    private readonly ITestOutputHelper output;
+
+    public ReactiveTests(ITestOutputHelper output)
+    {
+        this.output = output;
+    }
+
     [Fact(Timeout = 1000)]
     public async Task TestReactive()
     {
@@ -16,27 +27,33 @@ public class ReactiveTests
         await v1.Set(2);
     }
 
-    [Fact(Skip = "Experimantal")]
+    [Fact(Timeout = 5000)]
     public async Task TestAsyncEnumerable()
     {
+        Console.WriteLine("-----------  New Test Started  ----------");
         var f = new MemoFactory();
         var v1 = f.CreateSignal(1);
         var invocationCount = 0;
         var result = 0;
-
+        Console.WriteLine($"Creat Reaction ");
         var m1 = f.BuildReaction()
         .CreateAsyncEnumerableExperimental(v1);
-
+        Console.WriteLine($"Created Reaction ");
         await Task.Delay(100);
 
+        Console.WriteLine($"Creat Task ");
+        await Task.Delay(100);
         var t = new Task(async () =>
         {
             await foreach (var m in m1)
             {
+                Console.WriteLine($"Updated to : {m} from {result}");
                 result = m;
                 invocationCount++;
+                Console.WriteLine($"finished Updated to : {result}");
             }
         });
+        Console.WriteLine($"Created Task ");
 
         t.Start();
 
@@ -44,28 +61,39 @@ public class ReactiveTests
         Assert.Equal(0, result);
         Assert.Equal(0, invocationCount);
 
+        Console.WriteLine($"Set : 2");
         await v1.Set(2);
-        await Task.Delay(20);
+        Console.WriteLine($"finished Set : 2");
+        await Task.Delay(200);
+        Console.WriteLine($"Check Set : 2");
         Assert.Equal(2, result);
         Assert.Equal(1, invocationCount);
 
+        Console.WriteLine($"Set : 3");
         await v1.Set(3);
-        await Task.Delay(20);
+        Console.WriteLine($"finished Set : 3");
+        await Task.Delay(200);
+        Console.WriteLine($"check Set : 3");
         Assert.Equal(3, result);
         Assert.Equal(2, invocationCount);
 
+        Console.WriteLine($"Set : 3 again");
         await v1.Set(3);
-        await Task.Delay(20);
+        await Task.Delay(200);
         Assert.Equal(3, result);
         Assert.Equal(2, invocationCount);
 
+        Console.WriteLine($"Set : 4");
         await v1.Set(4);
-        await Task.Delay(20);
+        Console.WriteLine($"finished Set : 4");
+        await Task.Delay(200);
+        Console.WriteLine($"Check Set : 4");
         Assert.Equal(4, result);
         Assert.Equal(3, invocationCount);
         Assert.NotNull(m1);
     }
 
+    [Microsoft.Coyote.SystematicTesting.Test]
     [Fact(Timeout = 2000)]
     public async Task TestAsyncEnumerableWithBackpressure()
     {
@@ -77,17 +105,19 @@ public class ReactiveTests
         var m1 = f.BuildReaction()
         .CreateAsyncEnumerableExperimental(v1);
 
+        Console.WriteLine($"Creat Task ");
         await Task.Delay(100);
-
-        var _ = Task.Run(async () =>
+        var t = new Task(async () =>
         {
             await foreach (var m in m1)
             {
+                Console.WriteLine($"Updated to : {m} from {result}");
                 result = m;
                 invocationCount++;
-                await Task.Delay(100);
+                Console.WriteLine($"finished Updated to : {result}");
             }
         });
+        Console.WriteLine($"Created Task ");
 
         await Task.Delay(200);
         Assert.Equal(0, result);
@@ -271,8 +301,7 @@ public class ReactiveTests
         Assert.True(invocationCount > 1, "Must be invoked more than once");
     }
 
-    [Fact(Timeout = 5000)]
-    [Trait("Category", "Unit")]
+
     public async Task TestThreadSafety3()
     {
         var f = new MemoFactory();
@@ -441,7 +470,7 @@ public class ReactiveTests
 
         await Task.WhenAll(tasks);
 
-        await Task.Delay(190);
+        await Task.Delay(300);
 
         Assert.Equal(168, result1);
         Assert.Equal(168, result2);

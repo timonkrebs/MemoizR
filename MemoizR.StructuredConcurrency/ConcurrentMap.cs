@@ -35,7 +35,7 @@ public sealed class ConcurrentMap<T> : MemoHandlR<IEnumerable<T>>, IMemoizR, ISt
             {
                 isStartingComponent = Context.CancellationTokenSource == null;
                 Context.CancellationTokenSource ??= new();
-                
+
                 if (Context.ReactionScope.CurrentReaction != null)
                 {
                     Context.CheckDependenciesTheSame(this);
@@ -106,7 +106,7 @@ public sealed class ConcurrentMap<T> : MemoHandlR<IEnumerable<T>>, IMemoizR, ISt
     private async Task Update()
     {
         var oldValue = Value ?? [];
-        
+
         /* Evaluate the reactive function body, dynamically capturing any other reactives used */
         var prevReaction = Context.ReactionScope.CurrentReaction;
         var prevGets = Context.ReactionScope.CurrentGets;
@@ -119,7 +119,7 @@ public sealed class ConcurrentMap<T> : MemoHandlR<IEnumerable<T>>, IMemoizR, ISt
         try
         {
             State = CacheState.Evaluating;
-            Value = (await new StructuredResultsJob<T>(fns, Context!, this).Run()).Select(x => x.Value);;
+            Value = (await new StructuredResultsJob<T>(fns, Context!, this).Run()).Select(x => x.Value); ;
             State = CacheState.CacheClean;
         }
         catch
@@ -133,18 +133,12 @@ public sealed class ConcurrentMap<T> : MemoHandlR<IEnumerable<T>>, IMemoizR, ISt
             Context.ReactionScope.CurrentReaction = prevReaction;
             Context.ReactionScope.CurrentGetsIndex = prevIndex;
         }
-        
-            // handles diamond dependencies if we're the parent of a diamond.
-            if (Observers.Length > 0 && !oldValue.SequenceEqual(Value ?? []))
-            {
-                // We've changed value, so mark our children as dirty so they'll reevaluate
-                foreach (var observer in Observers)
-                {
-                    if (observer.TryGetTarget(out var o))
-                    {
-                        o.State = CacheState.CacheDirty;
-                    }
-                }
+
+        // handles diamond dependencies if we're the parent of a diamond.
+        if (Observers.Length > 0 && !oldValue.SequenceEqual(Value ?? []))
+        {
+            // We've changed value, so mark our children as dirty so they'll reevaluate
+            await Task.WhenAll(Observers.Select(o => o.Stale(CacheState.CacheDirty)));
         }
 
         // We've rerun with the latest values from all of our Sources.
@@ -170,13 +164,7 @@ public sealed class ConcurrentMap<T> : MemoHandlR<IEnumerable<T>>, IMemoizR, ISt
 
         State = state;
 
-        foreach (var observer in Observers)
-        {
-            if (observer.TryGetTarget(out var o))
-            {
-                await o.Stale(CacheState.CacheCheck);
-            }
-        }
+        await Task.WhenAll(Observers.Select(o => o.Stale(CacheState.CacheCheck)));
     }
 
     Task IMemoizR.Stale(CacheState state)

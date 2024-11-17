@@ -10,7 +10,7 @@ public sealed class ConcurrentRace<T, I> : MemoHandlR<T>, IMemoizR, IStateGetR<T
 
     internal ConcurrentRace(
         Func<Task<I>> action,
-        IReadOnlyCollection<Func<CancellationTokenSource, I, Task<T>>> fns, 
+        IReadOnlyCollection<Func<CancellationTokenSource, I, Task<T>>> fns,
         Context context) : base(context)
     {
         this.action = action;
@@ -65,7 +65,7 @@ public sealed class ConcurrentRace<T, I> : MemoHandlR<T>, IMemoizR, IStateGetR<T
         try
         {
             State = CacheState.Evaluating;
-            Value = await new StructuredRaceJob<T, I>(action ,fns, Context.CancellationTokenSource!).Run();
+            Value = await new StructuredRaceJob<T, I>(action, fns, Context.CancellationTokenSource!).Run();
             State = CacheState.CacheClean;
 
             // if the sources have changed, update source & observer links
@@ -76,8 +76,8 @@ public sealed class ConcurrentRace<T, I> : MemoHandlR<T>, IMemoizR, IStateGetR<T
                     // Add ourselves to the end of the parent .observers array
                     var source = Sources[i];
                     source.Observers = !source.Observers.Any()
-                        ? [new(this)]
-                        : [.. source.Observers, new(this)];
+                        ? [this]
+                        : [.. source.Observers, this];
                 }
             }
         }
@@ -97,13 +97,7 @@ public sealed class ConcurrentRace<T, I> : MemoHandlR<T>, IMemoizR, IStateGetR<T
         if (!Equals(oldValue, Value) && Observers.Length > 0)
         {
             // We've changed value, so mark our children as dirty so they'll reevaluate
-            foreach (var observer in Observers)
-            {
-                if (observer.TryGetTarget(out var o))
-                {
-                    o.State = CacheState.CacheDirty;
-                }
-            }
+            await Task.WhenAll(Observers.Select(o => o.Stale(CacheState.CacheDirty)));
         }
 
         return Value;
@@ -127,13 +121,7 @@ public sealed class ConcurrentRace<T, I> : MemoHandlR<T>, IMemoizR, IStateGetR<T
 
         State = state;
 
-        foreach (var observer in Observers)
-        {
-            if (observer.TryGetTarget(out var o))
-            {
-                await o.Stale(CacheState.CacheDirty);
-            }
-        }
+        await Task.WhenAll(Observers.Select(o => o.Stale(CacheState.CacheDirty)));
     }
 
     Task IMemoizR.Stale(CacheState state)
