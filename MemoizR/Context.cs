@@ -13,6 +13,7 @@ public class ReactionScope
 
 public class Context
 {
+    private Lock Lock { get; } = new();
     private static readonly Random rand = new();
     private static readonly AsyncLocal<double> AsyncLocalScope = new();
     
@@ -26,7 +27,7 @@ public class Context
     {
         get
         {
-            lock (this)
+            lock (Lock)
             {
                 var key = AsyncLocalScope.Value == 0 ? rand.NextDouble() : AsyncLocalScope.Value;
                 ReactionScope reactionScope;
@@ -50,7 +51,7 @@ public class Context
 
     internal void CreateNewScopeIfNeeded()
     {
-        lock (this)
+        lock (Lock)
         {
             if (AsyncLocalScope.Value != 0)
             {
@@ -64,7 +65,7 @@ public class Context
 
     internal void CleanScope()
     {
-        lock (this)
+        lock (Lock)
         {
             AsyncReactionScopes.Remove(AsyncLocalScope.Value);
         }
@@ -72,7 +73,7 @@ public class Context
 
     internal void CheckDependenciesTheSame(IMemoHandlR memoHandlR)
     {
-        lock (this)
+        lock (Lock)
         {
             var hasCurrentGets = ReactionScope.CurrentGets.Length == 0;
 
@@ -94,7 +95,7 @@ public class Context
 
     internal double ForceNewScope()
     {
-        lock (this)
+        lock (Lock)
         {
             var key = rand.NextDouble();
             AsyncLocalScope.Value = key;

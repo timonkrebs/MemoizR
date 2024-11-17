@@ -2,6 +2,8 @@ namespace MemoizR;
 
 public sealed class EagerRelativeSignal<T> : MemoHandlR<T>, IStateGetR<T>
 {
+    private Lock Lock { get; } = new();
+
     internal EagerRelativeSignal(T value, Context context) : base(context)
     {
         this.Value = value;
@@ -15,7 +17,7 @@ public sealed class EagerRelativeSignal<T> : MemoHandlR<T>, IStateGetR<T>
         using (await Context.ReactionScope.ContextLock.ExclusiveLockAsync())
         {
             // only updating the value should be locked
-            lock (this)
+            lock (Lock)
             {
                 Value = fn(Value);   
             }

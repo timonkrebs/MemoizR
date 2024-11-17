@@ -6,10 +6,12 @@ public sealed class StructuredResultsJob<T> : StructuredJobBase<ConcurrentDictio
 {
     private IList<IMemoHandlR> allSources = [];
 
+
     private readonly IReadOnlyCollection<Func<CancellationTokenSource, Task<T>>> fns;
     private readonly Context context;
     private readonly ConcurrentMap<T> @this;
     private readonly CancellationTokenSource cancellationTokenSource;
+    private Lock Lock { get; } = new();
 
     public StructuredResultsJob(IReadOnlyCollection<Func<CancellationTokenSource, Task<T>>> fns, Context context, ConcurrentMap<T> @this)
     {
@@ -36,7 +38,7 @@ public sealed class StructuredResultsJob<T> : StructuredJobBase<ConcurrentDictio
                     cancellationTokenSource.Cancel();
                     throw;
                 }
-                lock (this)
+                lock (Lock)
                 {
                     // if the sources have changed, update source & observer links
                     if (context.ReactionScope.CurrentGets.Length > 0)

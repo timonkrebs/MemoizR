@@ -8,7 +8,7 @@ public static class ReactiveMemoFactory
 
     public static MemoFactory AddSynchronizationContext(this MemoFactory memoFactory, SynchronizationContext synchronizationContext)
     {
-        lock (memoFactory)
+        lock (memoFactory.Lock)
         {
             SynchronizationContexts.Add(memoFactory, synchronizationContext);
             return memoFactory;

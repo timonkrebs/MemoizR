@@ -4,6 +4,7 @@ namespace MemoizR;
 
 public abstract class SignalHandlR : IMemoHandlR
 {
+    private Lock Lock { get; } = new();
     internal IMemoHandlR[] Sources { get; set; } = []; // sources in reference order, not deduplicated (up links)
     internal WeakReference<IMemoizR>[] Observers { get; set; } = []; // nodes that have us as sources (down links)
 
@@ -16,7 +17,7 @@ public abstract class SignalHandlR : IMemoHandlR
         get => Sources;
         set
         {
-            lock (this)
+            lock (Lock)
             {
                 Sources = value;
             }
@@ -27,7 +28,7 @@ public abstract class SignalHandlR : IMemoHandlR
         get => Observers;
         set
         {
-            lock (this)
+            lock (Lock)
             {
                 Observers = value;
             }

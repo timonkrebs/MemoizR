@@ -9,6 +9,7 @@ public sealed class StructuredReduceJob<T> : StructuredJobBase<T>
     private readonly Func<T, T, T?> reduce;
     private readonly Context context;
     private readonly ConcurrentMapReduce<T> @this;
+    private Lock Lock { get; } = new();
 
     public StructuredReduceJob(IReadOnlyCollection<Func<CancellationTokenSource, Task<T>>> fns, Func<T, T, T?> reduce, Context context, ConcurrentMapReduce<T> @this)
     {
@@ -27,7 +28,7 @@ public sealed class StructuredReduceJob<T> : StructuredJobBase<T>
                 try
                 {
                     var r = await x(cancellationTokenSource);
-                    lock (fns)
+                    lock (Lock)
                     {
                         result = reduce(r, result!);
                     }
@@ -37,7 +38,7 @@ public sealed class StructuredReduceJob<T> : StructuredJobBase<T>
                     cancellationTokenSource.Cancel();
                     throw;
                 }
-                lock (this)
+                lock (Lock)
                 {
                     // if the sources have changed, update source & observer links
                     if (context.ReactionScope.CurrentGets.Length > 0)

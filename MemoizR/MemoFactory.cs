@@ -1,15 +1,16 @@
-using System.Security.Cryptography;
-
 namespace MemoizR;
 
 public sealed class MemoFactory
 {
+
+    private static Lock contextsLock = new();
     internal static Dictionary<string, WeakReference<Context>> CONTEXTS = new Dictionary<string, WeakReference<Context>>();
     internal Context Context { get; }
+    public Lock Lock { get; } = new();
 
     public MemoFactory(string? contextKey = null)
     {
-        lock (CONTEXTS)
+        lock (contextsLock)
         {
             // Default context is mapped to empty string
             if (string.IsNullOrWhiteSpace(contextKey))
@@ -45,7 +46,7 @@ public sealed class MemoFactory
 
     public static void CleanUpContexts()
     {
-        lock (CONTEXTS)
+        lock (contextsLock)
         {
             var keysToRemove = new List<string>();
 

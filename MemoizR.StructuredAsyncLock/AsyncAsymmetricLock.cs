@@ -4,6 +4,7 @@ namespace MemoizR.StructuredAsyncLock;
 
 public sealed class AsyncAsymmetricLock
 {
+    private Lock Lock { get; } = new();
     /// <summary>
     /// The queue of TCSs that other tasks are awaiting to acquire the lock as upgradeable.
     /// Upgradeable can only execute one instance at a time in the locked scope, but allow for recursive entering. https://learn.microsoft.com/en-us/dotnet/api/system.threading.lockrecursionpolicy?view=net-7.0
@@ -31,14 +32,14 @@ public sealed class AsyncAsymmetricLock
     {
         get
         {
-            lock (this)
+            lock (Lock)
             {
                 return lockScope;
             }
         }
         set
         {
-            lock (this)
+            lock (Lock)
             {
                 lockScope = value;
             }
@@ -49,7 +50,7 @@ public sealed class AsyncAsymmetricLock
     {
         get
         {
-            lock (this)
+            lock (Lock)
             {
                 return locksHeld;
             }
@@ -60,7 +61,7 @@ public sealed class AsyncAsymmetricLock
     {
         get
         {
-            lock (this)
+            lock (Lock)
             {
                 return upgradedLocksHeld;
             }
@@ -108,7 +109,7 @@ public sealed class AsyncAsymmetricLock
     public AwaitableDisposable<IDisposable> ExclusiveLockAsync()
     {
         double lockScope;
-        lock (this)
+        lock (Lock)
         {
             lockScope = AsyncLocalScope.Value;
             if (lockScope == 0)
@@ -152,7 +153,7 @@ public sealed class AsyncAsymmetricLock
     public AwaitableDisposable<IDisposable> UpgradeableLockAsync()
     {
         double lockScope;
-        lock (this)
+        lock (Lock)
         {
             lockScope = AsyncLocalScope.Value;
             if (lockScope == 0)
@@ -195,7 +196,7 @@ public sealed class AsyncAsymmetricLock
     /// </summary>
     internal void ReleaseExclusiveLock()
     {
-        lock (this)
+        lock (Lock)
         {
             Interlocked.Decrement(ref locksHeld);
             if (LocksHeld == 0)
@@ -211,7 +212,7 @@ public sealed class AsyncAsymmetricLock
     /// </summary>
     internal void ReleaseUpgradeableLock(bool doNotRelease)
     {
-        lock (this)
+        lock (Lock)
         {
             if (UpgradedLocksHeld > 0)
             {
