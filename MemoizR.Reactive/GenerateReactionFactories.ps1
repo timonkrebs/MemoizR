@@ -36,7 +36,7 @@ for ($i = 1; $i -le 16; $i++) {
     $method = @"
     public Reaction CreateReaction<$actionType>($parameterNames, Action<$actionType> action)
     {
-        lock (memoFactory)
+        lock (memoFactory.Lock)
         {
             return new(async () => action($actionName), memoFactory.Context, synchronizationContext)
             {
