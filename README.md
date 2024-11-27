@@ -14,9 +14,7 @@
 
 > "The world is still short on languages that deal super elegantly and inherently and intuitively with concurrency" **Mads Torgersen** Lead Designer of C# (https://www.youtube.com/watch?v=Nuw3afaXLUc&t=4402s)
 
-MemoizR is a Declarative Structured Concurrency implementation for .NET that simplifies and enhances error handling, maintainability and state synchronization across multiple threads. It provides a maintainable and efficient way to manage concurrency, making it suitable for both simple and complex multi-threaded scenarios.
-
-> the dynamic structured concurrency part is still being worked on.
+MemoizR is a library for .NET that brings the power of Dynamic Lazy Memoization and Declarative Structured Concurrency to your fingertips. It streamlines complex multi-threaded scenarios, making them easier to write, maintain, and reason about.
 
 Inspired From **Stephen Cleary — Asynchronous streams** https://www.youtube.com/watch?v=-Tq4wLyen7Q&t=706s
 | compared to      | which is     | MemoizR/Signals |
@@ -27,35 +25,32 @@ Inspired From **Stephen Cleary — Asynchronous streams** https://www.youtube.co
 | IAsyncEnumerable | pull based   | push-pull       |
 
 ## Key Features
-- **Dynamic Lazy Memoization**: MemoizR introduces the concept of dynamic lazy memoization, allowing you to calculate values only when they are needed and not already calculated.
-- **Declarative Structured Concurrency**: This represents the most innovative aspect of this library, allowing for straightforward configuration, effortless maintenance, robust error handling, and seamless cancellation of intricate concurrency scenarios. Moreover, there's potential for even greater benefits on the horizon, such as concurrent resource management. All of this within the framework of an intuitive mental model for tackling complex concurrent systems.
-- **Dependency Graph**: It enables you to build a dependency graph of your data, ensuring that only necessary computations are performed.
-- **Automatic Synchronization**: MemoizR handles synchronization, making it easy to work with hard-to-concurrently-synchronize state.
-- **Performance Optimization**: Depending on your use case, MemoizR can optimize performance for scenarios with more reads than writes (thanks to memoization) or more writes than reads (using lazy evaluation).
+- **Dynamic Lazy Memoization**: Calculate values only when needed, avoiding unnecessary computations and optimizing performance.
+- **Declarative Structured Concurrency**: Easily manage complex concurrency scenarios with straightforward configuration, effortless maintenance, robust error handling, and seamless cancellation.
+- **Dependency Graph**:Automatically track dependencies between your data, ensuring that only necessary computations are performed.
+- **Automatic Synchronization**: Work with shared state without the hassle of manual synchronization.
+- **Performance Optimization**: Benefit from memoization for read-heavy scenarios and lazy evaluation for write-heavy scenarios.
+Inspiration
+## MemoizR draws inspiration from various sources
 
-## Inspiration
-- This implementation draws inspiration from the concepts found in reactively (https://github.com/modderme123/reactively) / solid (https://github.com/solidjs/signals), primarily the concept of dynamic lazy memoization.
-- Also from various other sources, VHDL for synchronization, ReactiveX (https://reactivex.io/), structured concurrency (https://vorpus.org/blog/notes-on-structured-concurrency-or-go-statement-considered-harmful/, https://github.com/StephenCleary/StructuredConcurrency) and many more.
-- Special thanks to @mfp22 for the idea of signal operators, which got me started with this library.
+- **Reactively and Solid**: Dynamic lazy memoization concepts.
+- **VHDL**: Synchronization mechanisms.
+- **ReactiveX**: Reactive programming paradigms.
+- **Structured Concurrency**: Principles for well-structured concurrent code.
+Special thanks to @mfp22 for the idea of signal operators!
 
-## Similarities and Advantages of MemoizR to ReactiveX and Dataflow 
+## Advantages over ReactiveX and Dataflow
 
-MemoizR shares some similarities with the [Dataflow (Task Parallel Library)](https://learn.microsoft.com/en-us/dotnet/standard/parallel-programming/dataflow-task-parallel-library) library in terms of handling concurrency and managing data flows. 
-However, MemoizR offers several advantages, such as implicit Join and LinkTo, which make it a powerful choice for managing concurrent operations and reactive data flows.
-One notable distinction between MemoizR and [ReactiveX](https://github.com/dotnet/reactive) lies in their subscription handling. In ReactiveX, it's common to manage subscriptions explicitly, keeping track of when to subscribe and unsubscribe from observable sequences. This can introduce complexities and potential resource leaks.
+MemoizR offers several advantages over traditional concurrency libraries:
 
 ### Implicit Subscription Handling
-There are no explicit subscriptions to manage. Instead, MemoizR's dependencies are automatically tracked and synchronized based on your code's structure. When you define dependencies between signals, memos, and reactions, MemoizR handles the subscription and synchronization behind the scenes. This implicit subscription handling simplifies your code and reduces the risk of subscription-related issues.
-
-### Dataflow Paradigm
-
-Both MemoizR and the Dataflow library are designed to handle concurrent operations and data flow in a structured manner. 
-They provide abstractions for defining tasks, dependencies, and synchronization, making it easier to manage complex concurrency scenarios.
-
-### Implicit LinkTo
-MemoizR also provides implicit LinkTo functionality. While in Dataflow, you typically use the LinkTo method to connect dataflow blocks, MemoizR handles the linking of dependencies automatically based on your code's structure. This simplifies the setup and maintenance of data flow relationships.
+No need to manage subscriptions manually; MemoizR automatically tracks and synchronizes dependencies.
+Implicit LinkTo: Dependencies are automatically linked based on your code's structure, simplifying data flow setup.
+Simplified Error Handling: Structured concurrency makes error handling more robust and easier to reason about.
 
 ## Usage
+
+### Basic Memoization
 
 ```cs
 // Setup
@@ -79,17 +74,14 @@ await v1.Set(2); // Setting v1 does not trigger evaluation of the graph
 await m3.Get(); // No operation, result is still 6 (because the last time the graph was evaluated, v1 was already 2)
 ```
 
-MemoizR can also handle dynamic changes in the graph, making it suitable for scenarios where the structure of the dependency graph may change at runtime.
+### Dynamic Graphs
+MemoizR can handle dynamic changes in the dependency graph:
 
 ```cs
 var m3 = f.CreateMemoizR(async() => await v1.Get() ? await m1.Get() : await m2.Get());
 ```
 
-## Declarative Structured Concurrency
-MemoizR's declarative structured concurrency model enhances maintainability, error handling, and cancellation of complex concurrency use cases. It allows you to set up and manage concurrency in a clear and structured way, making your code easier to understand and maintain.
-
-In summary, MemoizR offers a powerful and intuitive approach to managing concurrency and reactive data flows ([Dataflow (Task Parallel Library)](https://learn.microsoft.com/en-us/dotnet/standard/parallel-programming/dataflow-task-parallel-library), [Channels](https://learn.microsoft.com/en-us/dotnet/core/extensions/channels)), with features like implicit Join and LinkTo that simplify your code and improve maintainability. It also draws inspiration from [ReactiveX](https://github.com/dotnet/reactive), making it a versatile choice for reactive programming scenarios but without having to handle subscriptions.
-
+### Declarative Structured Concurrency
 ```cs
 var f = new MemoFactory("DSC");
 
@@ -109,13 +101,10 @@ var c1 = f.CreateConcurrentMapReduce(
     });
 
 var x = await c1.Get();
-
 ```
 
-## Reactivity
-You can use MemoizR to create reactive data flows easily:
-
-```csharp
+### Reactivity
+```cs
 var f = new MemoFactory();
 var v1 = f.CreateSignal(1);
 var m1 = f.CreateMemoizR(async() => await v1.Get());
@@ -123,8 +112,7 @@ var m2 = f.CreateMemoizR(async() => await v1.Get() * 2);
 var r1 = f.CreateReaction(m1, m2, (val1, val2) => val1 + val2);
 ```
 
-## Test it
-
-https://dotnetfiddle.net/Widget/Vrbwam
+Try it out!https:
+Experiment with MemoizR online: https://dotnetfiddle.net/Widget/EWtptc
 
 Example From: [Khalid Abuhakmeh](https://khalidabuhakmeh.com/memoizr-declarative-structured-concurrency-for-csharp#conclusion)

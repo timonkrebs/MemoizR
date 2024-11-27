@@ -16,7 +16,7 @@ public class ReactiveTests
         await v1.Set(2);
     }
 
-    [Fact(Skip = "Experimantal")]
+    [Fact(Timeout = 1000)]
     public async Task TestAsyncEnumerable()
     {
         var f = new MemoFactory();

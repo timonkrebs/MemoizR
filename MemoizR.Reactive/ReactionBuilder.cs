@@ -70,27 +70,25 @@ public sealed class ReactionBuilder
 
     public IAsyncEnumerable<T> CreateAsyncEnumerableExperimental<T>(IStateGetR<T> memo)
     {
-        lock (memoFactory.Lock)
+        var tcs = new TaskCompletionSource<T>();
+        var enumerator = new AsyncEnumerator<T> { GetNext = tcs.Task };
+        var reaction = new Reaction(async () =>
         {
-            var tcs = new TaskCompletionSource<T>();
-            var enumerator = new AsyncEnumerator<T> { GetNext = tcs.Task };
+            var result = await memo.Get();
+            var oldTsc = tcs;
+            var newTcs = new TaskCompletionSource<T>();
+            tcs = newTcs;
+            enumerator.GetNext = newTcs.Task;
+            oldTsc.SetResult(result);
+        }, memoFactory.Context)
+        {
+            Label = label,
+            DebounceTime = debounceTime
+        };
 
-            new Reaction(async () =>
-            {
-                var result = await memo.Get();
-                var oldTsc = tcs;
-                var newTcs = new TaskCompletionSource<T>();
-                tcs = newTcs;
-                enumerator.GetNext = newTcs.Task;
-                oldTsc.SetResult(result);
-            }, memoFactory.Context)
-            {
-                Label = label,
-                DebounceTime = debounceTime
-            };
+        enumerator.Reaction = reaction;
 
-            return new AsyncEnumerable<T>(enumerator);
-        }
+        return new AsyncEnumerable<T>(enumerator);
     }
 
     public Reaction CreateReaction<T>(IStateGetR<T> memo, Action<T> action)
