@@ -12,7 +12,7 @@ on:
 jobs:
   build:
 
-    runs-on: ubuntu-latest
+    runs-on: [windows-2022, ubuntu-24.04, ubuntu-24.04-arm, macos-14]
     timeout-minutes: 2
 
     steps:
