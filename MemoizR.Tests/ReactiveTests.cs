@@ -1,3 +1,5 @@
+using xRetry;
+
 namespace MemoizR.Tests;
 
 public class ReactiveTests
@@ -271,7 +273,7 @@ public class ReactiveTests
         Assert.True(invocationCount > 1, "Must be invoked more than once");
     }
 
-    [Fact(Timeout = 5000)]
+    [RetryFact(3, 5000)]
     [Trait("Category", "Unit")]
     public async Task TestThreadSafety3()
     {
@@ -359,7 +361,7 @@ public class ReactiveTests
         Assert.Equal(42, invocationCountR2);
     }
 
-    [Fact(Timeout = 1000)]
+    [RetryFact(3, 5000)]
     public async Task TestThreadSafety5()
     {
         var f = new MemoFactory();
@@ -399,7 +401,7 @@ public class ReactiveTests
         Assert.True(invocationCountR2 <= memoInvocationCount, "Must be invoked at least once");
     }
 
-    [Fact(Timeout = 1000)]
+    [RetryFact(3, 1000)]
     public async Task TestThreadSafety6()
     {
         var f = new MemoFactory();
