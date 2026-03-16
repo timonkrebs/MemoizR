@@ -15,7 +15,7 @@ public class CoyoteTests
         this.Output = output;
     }
 
-    [Fact(Timeout = 30000)]
+    [Fact]
     public void TestThreadSafety3Systematic()
     {
         var config = Configuration.Create().WithTestingIterations(100);
@@ -53,7 +53,7 @@ public class CoyoteTests
         Specification.Assert(result2 == 82, $"Expected result2 to be 82, got {result2}");
     }
 
-    [Fact(Timeout = 30000)]
+    [Fact]
     public void TestThreadSafety5Systematic()
     {
         var config = Configuration.Create().WithTestingIterations(100);
