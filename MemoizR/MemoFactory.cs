@@ -113,4 +113,14 @@ public sealed class MemoFactory
             Label = label
         };
     }
+
+    public T Untrack<T>(Func<T> fn)
+    {
+        return Context.Untrack(fn);
+    }
+
+    public Task<T> Untrack<T>(Func<Task<T>> fn)
+    {
+        return Context.Untrack(fn);
+    }
 }

@@ -103,4 +103,32 @@ public class Context
             return key;
         }
     }
+
+    public T Untrack<T>(Func<T> fn)
+    {
+        var listener = ReactionScope.CurrentReaction;
+        ReactionScope.CurrentReaction = null;
+        try
+        {
+            return fn();
+        }
+        finally
+        {
+            ReactionScope.CurrentReaction = listener;
+        }
+    }
+
+    public async Task<T> Untrack<T>(Func<Task<T>> fn)
+    {
+        var listener = ReactionScope.CurrentReaction;
+        ReactionScope.CurrentReaction = null;
+        try
+        {
+            return await fn();
+        }
+        finally
+        {
+            ReactionScope.CurrentReaction = listener;
+        }
+    }
 }
