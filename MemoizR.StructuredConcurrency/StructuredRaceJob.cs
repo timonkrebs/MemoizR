@@ -3,13 +3,13 @@
 public sealed class StructuredRaceJob<T, R> : StructuredJobBase<T>
 {
     private readonly Func<Task<R>> action;
-    private readonly IReadOnlyCollection<Func<CancellationTokenSource, R, Task<T>>> fns;
+    private readonly IReadOnlyCollection<Func<IStructuredResourceGroup, R, Task<T>>> fns;
     private readonly CancellationTokenSource innerCancellationTokenSource;
     private readonly CancellationTokenSource groupCancellationTokenSource;
     private bool finished;
 
     public StructuredRaceJob(Func<Task<R>> action,
-        IReadOnlyCollection<Func<CancellationTokenSource, R, Task<T>>> fns, CancellationTokenSource cancellationTokenSource)
+        IReadOnlyCollection<Func<IStructuredResourceGroup, R, Task<T>>> fns, CancellationTokenSource cancellationTokenSource)
     {
         this.action = action;
         this.fns = fns;
@@ -18,18 +18,34 @@ public sealed class StructuredRaceJob<T, R> : StructuredJobBase<T>
         this.innerCancellationTokenSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationTokenSource.Token);
     }
 
-    protected override async Task AddConcurrentWork()
+    private sealed class RaceResourceGroup : IStructuredResourceGroup
+    {
+        private readonly IStructuredResourceGroup parent;
+        public CancellationToken Token { get; }
+
+        public RaceResourceGroup(IStructuredResourceGroup parent, CancellationToken token)
+        {
+            this.parent = parent;
+            this.Token = token;
+        }
+
+        public void AddResource(IDisposable resource) => parent.AddResource(resource);
+        public void AddResource(IAsyncDisposable resource) => parent.AddResource(resource);
+    }
+
+    protected override async Task AddConcurrentWork(StructuredResourceGroup resourceGroup)
     {
         var inputs = await action();
+        var raceResourceGroup = new RaceResourceGroup(resourceGroup, innerCancellationTokenSource.Token);
         tasks.AddRange(fns.Select(x => new Task<Task>(async () =>
             {
                 try
                 {
-                    result = await x(innerCancellationTokenSource, inputs);
+                    result = await x(raceResourceGroup, inputs);
                     finished = true;
                     innerCancellationTokenSource.Cancel();
                 }
-                catch (TaskCanceledException)
+                catch (OperationCanceledException)
                 {
                     if (!finished)
                     {

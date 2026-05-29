@@ -103,6 +103,22 @@ var c1 = f.CreateConcurrentMapReduce(
 var x = await c1.Get();
 ```
 
+### Resources
+
+A concurrent job can own resources. These resources will be disposed by the job after all its work is done.
+
+```cs
+var groupTask = f.CreateConcurrentMapReduce(async group =>
+{
+    group.AddResource(myDisposableResource);
+
+    return await myDisposableResource.DoWorkAsync(group.Token);
+});
+await groupTask.Get(); // First, waits for all tasks to complete; then, disposes myDisposableResource.
+```
+
+All exceptions raised by disposal of any resource are ignored.
+
 ### Reactivity
 ```cs
 var f = new MemoFactory();
