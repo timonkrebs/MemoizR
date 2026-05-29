@@ -28,6 +28,14 @@ jobs:
       run: dotnet restore
     - name: Build
       run: dotnet build --no-restore
+    - name: Install Coyote CLI
+      run: |
+        dotnet tool install --global Microsoft.Coyote.CLI
+        echo "$HOME/.dotnet/tools" >> $GITHUB_PATH
+    - name: Coyote Rewrite
+      run: |
+        coyote rewrite MemoizR.Tests/bin/Debug/net9.0/MemoizR.Tests.dll
+        coyote rewrite MemoizR.Tests/bin/Debug/net9.0/MemoizR.dll
     - name: Test
       run: dotnet test --no-build --verbosity normal
       
