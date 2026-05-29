@@ -3,12 +3,12 @@ namespace MemoizR.StructuredConcurrency;
 public sealed class ConcurrentMapReduce<T> : MemoHandlR<T>, IMemoizR, IStateGetR<T>
 {
     private CacheState State { get; set; } = CacheState.CacheClean;
-    private IReadOnlyCollection<Func<CancellationTokenSource, Task<T>>> fns;
+    private IReadOnlyCollection<Func<IStructuredResourceGroup, Task<T>>> fns;
     private readonly Func<T, T, T?> reduce;
 
     CacheState IMemoizR.State { get => State; set => State = value; }
 
-    internal ConcurrentMapReduce(IReadOnlyCollection<Func<CancellationTokenSource, Task<T>>> fns, Func<T, T, T?> reduce, Context context) : base(context)
+    internal ConcurrentMapReduce(IReadOnlyCollection<Func<IStructuredResourceGroup, Task<T>>> fns, Func<T, T, T?> reduce, Context context) : base(context)
     {
         this.fns = fns;
         this.reduce = reduce;
@@ -121,7 +121,7 @@ public sealed class ConcurrentMapReduce<T> : MemoHandlR<T>, IMemoizR, IStateGetR
         try
         {
             State = CacheState.Evaluating;
-            Value = await new StructuredReduceJob<T>(fns, reduce, Context, this).Run();
+            Value = await new StructuredReduceJob<T>(fns, reduce, Context, this).Run(Context.CancellationTokenSource!.Token);
             State = CacheState.CacheClean;
 
             // if the sources have changed, update source & observer links
@@ -179,10 +179,6 @@ public sealed class ConcurrentMapReduce<T> : MemoHandlR<T>, IMemoizR, IStateGetR
                 }
             }
         }
-
-        // We've rerun with the latest values from all of our Sources.
-        // This means that we no longer need to update until a signal changes
-        State = CacheState.CacheClean;
     }
 
     private void RemoveParentObservers(int index)

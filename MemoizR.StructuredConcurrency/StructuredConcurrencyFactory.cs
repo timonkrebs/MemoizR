@@ -4,12 +4,12 @@ using MemoizR.StructuredConcurrency;
 namespace MemoizR;
 public static class StructuredConcurrencyFactory
 {
-    public static ConcurrentMapReduce<T> CreateConcurrentMapReduce<T>(this MemoFactory memoFactory, params Func<CancellationTokenSource, Task<T>>[] fns) where T : INumber<T>
+    public static ConcurrentMapReduce<T> CreateConcurrentMapReduce<T>(this MemoFactory memoFactory, params Func<IStructuredResourceGroup, Task<T>>[] fns) where T : INumber<T>
     {
         return CreateConcurrentMapReduce(memoFactory, "Numeric Concurrent Reduce", fns);
     }
 
-    public static ConcurrentMapReduce<T> CreateConcurrentMapReduce<T>(this MemoFactory memoFactory, string label, params Func<CancellationTokenSource, Task<T>>[] fns) where T : INumber<T>
+    public static ConcurrentMapReduce<T> CreateConcurrentMapReduce<T>(this MemoFactory memoFactory, string label, params Func<IStructuredResourceGroup, Task<T>>[] fns) where T : INumber<T>
     {
         return new(fns, (v, a) => v + a, memoFactory.Context)
         {
@@ -17,12 +17,12 @@ public static class StructuredConcurrencyFactory
         };
     }
 
-    public static ConcurrentMapReduce<T> CreateConcurrentMapReduce<T>(this MemoFactory memoFactory, Func<T, T?, T> reduce, params Func<CancellationTokenSource, Task<T>>[] fns)
+    public static ConcurrentMapReduce<T> CreateConcurrentMapReduce<T>(this MemoFactory memoFactory, Func<T, T?, T> reduce, params Func<IStructuredResourceGroup, Task<T>>[] fns)
     {
         return CreateConcurrentMapReduce(memoFactory, "Concurrent Reduce", reduce, fns);
     }
 
-    public static ConcurrentMapReduce<T> CreateConcurrentMapReduce<T>(this MemoFactory memoFactory, string label, Func<T, T?, T> reduce, params Func<CancellationTokenSource, Task<T>>[] fns)
+    public static ConcurrentMapReduce<T> CreateConcurrentMapReduce<T>(this MemoFactory memoFactory, string label, Func<T, T?, T> reduce, params Func<IStructuredResourceGroup, Task<T>>[] fns)
     {
         return new(fns, reduce, memoFactory.Context)
         {
@@ -30,12 +30,12 @@ public static class StructuredConcurrencyFactory
         };
     }
 
-    public static ConcurrentRace<T, R> CreateConcurrentRace<T, R>(this MemoFactory memoFactory, Func<Task<R>> resolver, params Func<CancellationTokenSource, R, Task<T>>[] fns)
+    public static ConcurrentRace<T, R> CreateConcurrentRace<T, R>(this MemoFactory memoFactory, Func<Task<R>> resolver, params Func<IStructuredResourceGroup, R, Task<T>>[] fns)
     {
         return CreateConcurrentRace(memoFactory, "Concurrent Race", resolver, fns);
     }
 
-    public static ConcurrentRace<T, R> CreateConcurrentRace<T, R>(this MemoFactory memoFactory, string label, Func<Task<R>> resolver, params Func<CancellationTokenSource, R, Task<T>>[] fns)
+    public static ConcurrentRace<T, R> CreateConcurrentRace<T, R>(this MemoFactory memoFactory, string label, Func<Task<R>> resolver, params Func<IStructuredResourceGroup, R, Task<T>>[] fns)
     {
         return new(resolver, fns, memoFactory.Context)
         {
@@ -43,12 +43,12 @@ public static class StructuredConcurrencyFactory
         };
     }
 
-    public static ConcurrentMap<T> CreateConcurrentMap<T>(this MemoFactory memoFactory, params Func<CancellationTokenSource, Task<T>>[] fns)
+    public static ConcurrentMap<T> CreateConcurrentMap<T>(this MemoFactory memoFactory, params Func<IStructuredResourceGroup, Task<T>>[] fns)
     {
         return CreateConcurrentMap(memoFactory, "Concurrent Map", fns);
     }
 
-    public static ConcurrentMap<T> CreateConcurrentMap<T>(this MemoFactory memoFactory, string label, params Func<CancellationTokenSource, Task<T>>[] fns)
+    public static ConcurrentMap<T> CreateConcurrentMap<T>(this MemoFactory memoFactory, string label, params Func<IStructuredResourceGroup, Task<T>>[] fns)
     {
         return new(fns, memoFactory.Context)
         {

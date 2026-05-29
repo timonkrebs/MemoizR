@@ -7,13 +7,13 @@ public sealed class StructuredResultsJob<T> : StructuredJobBase<ConcurrentDictio
     private IList<IMemoHandlR> allSources = [];
 
 
-    private readonly IReadOnlyCollection<Func<CancellationTokenSource, Task<T>>> fns;
+    private readonly IReadOnlyCollection<Func<IStructuredResourceGroup, Task<T>>> fns;
     private readonly Context context;
     private readonly ConcurrentMap<T> @this;
     private readonly CancellationTokenSource cancellationTokenSource;
     private Lock Lock { get; } = new();
 
-    public StructuredResultsJob(IReadOnlyCollection<Func<CancellationTokenSource, Task<T>>> fns, Context context, ConcurrentMap<T> @this)
+    public StructuredResultsJob(IReadOnlyCollection<Func<IStructuredResourceGroup, Task<T>>> fns, Context context, ConcurrentMap<T> @this)
     {
         this.fns = fns;
         this.context = context;
@@ -22,7 +22,7 @@ public sealed class StructuredResultsJob<T> : StructuredJobBase<ConcurrentDictio
         this.cancellationTokenSource = context.CancellationTokenSource!;
     }
 
-    protected override Task AddConcurrentWork()
+    protected override Task AddConcurrentWork(StructuredResourceGroup resourceGroup)
     {
         tasks.AddRange(fns
         .Select((x, i) => new Task<Task>(async () =>
@@ -31,7 +31,7 @@ public sealed class StructuredResultsJob<T> : StructuredJobBase<ConcurrentDictio
                 context.ReactionScope.CurrentReaction = @this;
                 try
                 {
-                    result!.TryAdd(i, await x(cancellationTokenSource));
+                    result!.TryAdd(i, await x(resourceGroup));
                 }
                 catch
                 {
@@ -64,7 +64,7 @@ public sealed class StructuredResultsJob<T> : StructuredJobBase<ConcurrentDictio
                     }
                 }
 
-            }, cancellationTokenSource.Token)
+            }, resourceGroup.Token)
         ));
         return Task.CompletedTask;
     }
