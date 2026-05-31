@@ -34,11 +34,13 @@ jobs:
         echo "$HOME/.dotnet/tools" >> $GITHUB_PATH
     - name: Coyote Rewrite
       run: |
-        coyote rewrite MemoizR.Tests/bin/Debug/net9.0/MemoizR.Tests.dll
-        coyote rewrite MemoizR.Tests/bin/Debug/net9.0/MemoizR.dll
-        coyote rewrite MemoizR.Tests/bin/Debug/net9.0/MemoizR.Reactive.dll
-        coyote rewrite MemoizR.Tests/bin/Debug/net9.0/MemoizR.StructuredConcurrency.dll
-        coyote rewrite MemoizR.Tests/bin/Debug/net9.0/MemoizR.StructuredAsyncLock.dll
+        # Use net9.0 as targeted in the project file. Rewrite in dependency order.
+        cd MemoizR.Tests/bin/Debug/net9.0/
+        coyote rewrite MemoizR.StructuredAsyncLock.dll
+        coyote rewrite MemoizR.dll
+        coyote rewrite MemoizR.Reactive.dll
+        coyote rewrite MemoizR.StructuredConcurrency.dll
+        coyote rewrite MemoizR.Tests.dll
     - name: Test
       run: dotnet test --no-build --verbosity normal
       

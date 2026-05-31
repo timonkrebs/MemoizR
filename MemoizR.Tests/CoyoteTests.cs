@@ -1,6 +1,8 @@
 using Xunit;
 using System.Linq;
+using System.Collections.Generic;
 using System.Threading.Tasks;
+using MemoizR;
 using Microsoft.Coyote;
 using Microsoft.Coyote.SystematicTesting;
 
