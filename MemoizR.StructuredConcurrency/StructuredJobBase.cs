@@ -1,4 +1,4 @@
-﻿using Nito.AsyncEx;
+using Nito.AsyncEx;
 
 namespace MemoizR.StructuredConcurrency;
 
@@ -8,19 +8,20 @@ public abstract class StructuredJobBase<T>
     protected T? result;
     protected AsyncLock mutex = new();
 
-    protected abstract Task AddConcurrentWork();
+    protected abstract Task AddConcurrentWork(StructuredResourceGroup resourceGroup);
 
     protected virtual void HandleSubscriptions() { }
 
-    public async Task<T> Run()
+    public async Task<T> Run(CancellationToken token)
     {
+        var resourceGroup = new StructuredResourceGroup(token);
         try
         {
             List<Task<Task>> tasks;
             using (mutex.Lock())
             {
                 this.tasks = new();
-                await AddConcurrentWork();
+                await AddConcurrentWork(resourceGroup);
                 tasks = this.tasks;
                 Parallel.ForEach(tasks, (task) => task.Start());
             }
@@ -38,6 +39,10 @@ public abstract class StructuredJobBase<T>
                 throw t.Exception;
             }
             throw;
+        }
+        finally
+        {
+            await resourceGroup.DisposeResources();
         }
     }
 }

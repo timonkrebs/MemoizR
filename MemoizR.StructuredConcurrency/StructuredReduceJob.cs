@@ -4,14 +4,14 @@ public sealed class StructuredReduceJob<T> : StructuredJobBase<T>
 {
     private IList<IMemoHandlR> allSources = [];
 
-    private readonly IReadOnlyCollection<Func<CancellationTokenSource, Task<T>>> fns;
+    private readonly IReadOnlyCollection<Func<IStructuredResourceGroup, Task<T>>> fns;
     private readonly CancellationTokenSource cancellationTokenSource;
     private readonly Func<T, T, T?> reduce;
     private readonly Context context;
     private readonly ConcurrentMapReduce<T> @this;
     private Lock Lock { get; } = new();
 
-    public StructuredReduceJob(IReadOnlyCollection<Func<CancellationTokenSource, Task<T>>> fns, Func<T, T, T?> reduce, Context context, ConcurrentMapReduce<T> @this)
+    public StructuredReduceJob(IReadOnlyCollection<Func<IStructuredResourceGroup, Task<T>>> fns, Func<T, T, T?> reduce, Context context, ConcurrentMapReduce<T> @this)
     {
         this.fns = fns;
         this.reduce = reduce;
@@ -20,14 +20,14 @@ public sealed class StructuredReduceJob<T> : StructuredJobBase<T>
         this.cancellationTokenSource = context.CancellationTokenSource!;
     }
 
-    protected override Task AddConcurrentWork()
+    protected override Task AddConcurrentWork(StructuredResourceGroup resourceGroup)
     {
         tasks.AddRange(fns
         .Select(x => new Task<Task>(async () =>
             {
                 try
                 {
-                    var r = await x(cancellationTokenSource);
+                    var r = await x(resourceGroup);
                     lock (Lock)
                     {
                         result = reduce(r, result!);
@@ -64,7 +64,7 @@ public sealed class StructuredReduceJob<T> : StructuredJobBase<T>
                     }
                 }
 
-            }, cancellationTokenSource.Token)
+            }, resourceGroup.Token)
         ));
         return Task.CompletedTask;
     }

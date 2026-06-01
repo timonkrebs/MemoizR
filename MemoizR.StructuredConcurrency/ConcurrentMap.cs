@@ -3,11 +3,11 @@ namespace MemoizR.StructuredConcurrency;
 public sealed class ConcurrentMap<T> : MemoHandlR<IEnumerable<T>>, IMemoizR, IStateGetR<IEnumerable<T>>
 {
     private CacheState State { get; set; } = CacheState.CacheClean;
-    private IReadOnlyCollection<Func<CancellationTokenSource, Task<T>>> fns;
+    private IReadOnlyCollection<Func<IStructuredResourceGroup, Task<T>>> fns;
 
     CacheState IMemoizR.State { get => State; set => State = value; }
 
-    internal ConcurrentMap(IReadOnlyCollection<Func<CancellationTokenSource, Task<T>>> fns, Context context) : base(context)
+    internal ConcurrentMap(IReadOnlyCollection<Func<IStructuredResourceGroup, Task<T>>> fns, Context context) : base(context)
     {
         this.fns = fns;
         this.State = CacheState.CacheDirty;
@@ -119,7 +119,7 @@ public sealed class ConcurrentMap<T> : MemoHandlR<IEnumerable<T>>, IMemoizR, ISt
         try
         {
             State = CacheState.Evaluating;
-            Value = (await new StructuredResultsJob<T>(fns, Context!, this).Run()).Select(x => x.Value);;
+            Value = (await new StructuredResultsJob<T>(fns, Context!, this).Run(Context.CancellationTokenSource!.Token)).Select(x => x.Value);
             State = CacheState.CacheClean;
         }
         catch
