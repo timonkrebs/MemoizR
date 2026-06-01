@@ -10,12 +10,21 @@ The headline: **the central "automatic synchronization" guarantee is structurall
 
 ---
 
+## ✅ Update — 2026-06-01: C1 & C2 fixed (branch `fix/critical-c1-c2`)
+
+Both 🔴 Critical findings are resolved, gated on new regression tests in `MemoizR.Tests/CriticalFixTests.cs`; the full suite is green (50/50, aside from the pre-existing flaky `StructuredConcurrencyTests.TestMultipleMapHandling` family, which is unrelated and unchanged in failure rate). See `CHANGELOG.md` and the per-finding notes below.
+
+- **C2** — dropped `ConfigureAwaitOptions.SuppressThrowing` in the four source-update loops so an upstream fault propagates out of `Get()`. Additionally changed `MemoizR.Update`'s catch from `CacheCheck` → `CacheDirty` so a faulted node re-evaluates instead of settling clean-stale on the next pass (the `ConcurrentMap`/`ConcurrentMapReduce` catches were intentionally **left** as `CacheCheck` — flipping them destabilized the pre-existing flaky cancellation tests). The intentional fire-and-forget suppression in the reaction debounce path was left untouched. **Behavioral change:** `Get()` now throws on an upstream fault instead of returning a stale value.
+- **C1** — replaced the `Dictionary<double, WeakReference<ReactionScope>>` + `AsyncLocal<double>` key scheme with a single `AsyncLocal<ReactionScope?>` (fixes the per-access scope leak and within-flow identity). The reaction debounce continuation now calls `ForceNewScope()` (was `CreateNewScopeIfNeeded()`) so each reaction update gets an isolated scope — the old non-persisting getter had provided that isolation by accident, and persisting the scope would otherwise let concurrent reaction updates corrupt each other's dependency tracking. **Scope (deliberate):** this delivers the leak + identity fix only. The per-flow `ContextLock` still does **not** serialize graph evaluation across independent threads — the global-lock decision in Open Question #1 was deferred, so the README "Automatic Synchronization" claim remains stronger than the implementation guarantees (now noted in `CHANGELOG.md` and a `Context.cs` doc comment).
+
+---
+
 ## Summary table
 
 | # | Severity | Title | File |
 |---|----------|-------|------|
-| C1 | 🔴 Critical | `ReactionScope` getter never persists its scope key → global lock excludes nothing + unbounded leak | `MemoizR/Context.cs:32` |
-| C2 | 🔴 Critical | `SuppressThrowing` swallows upstream faults → node `CacheClean` with stale value | `MemoizR/MemoizR.cs:75` |
+| C1 | ✅ **Fixed** (was 🔴 Critical) | `ReactionScope` getter never persists its scope key → global lock excludes nothing + unbounded leak | `MemoizR/Context.cs:32` |
+| C2 | ✅ **Fixed** (was 🔴 Critical) | `SuppressThrowing` swallows upstream faults → node `CacheClean` with stale value | `MemoizR/MemoizR.cs:75` |
 | H1 | 🟠 High | `StructuredReduceJob` shares one `ReactionScope` across parallel tasks (no `ForceNewScope`) | `MemoizR.StructuredConcurrency/StructuredReduceJob.cs:23-70` |
 | H2 | 🟠 High | `Observers`/`Sources` read & reassigned outside the per-instance `Lock` | `MemoizR/MemoizR.cs:164-214` |
 | H3 | 🟠 High | `Get()` fast-path reads non-volatile `State` | `MemoizR/MemoizR.cs:19` |
@@ -45,6 +54,8 @@ The headline: **the central "automatic synchronization" guarantee is structurall
 ### C1 — `ReactionScope` getter never persists its scope key → the global lock excludes nothing + unbounded leak
 `MemoizR/Context.cs:32` (getter 26-48), interacts with `MemoizR/Signal.cs:15`, `MemoizR/EagerRelativeSignal.cs:17`
 
+> ✅ **Fixed** — `Context` now stores the scope in a single `AsyncLocal<ReactionScope?>` (getter `CurrentScope.Value ??= new()`), removing the dictionary/leak and giving stable per-flow identity; `Set` establishes the flow scope mirroring `Get`. The reaction debounce continuation switched to `ForceNewScope()` to preserve per-reaction isolation. The cross-thread serialization aspect (the "global lock" framing) was **deferred** — see the Update banner at the top and Open Question #1.
+
 The getter computes `var key = AsyncLocalScope.Value == 0 ? rand.NextDouble() : AsyncLocalScope.Value;` but **never assigns the new key back** to `AsyncLocalScope.Value` (contrast `CreateNewScopeIfNeeded` at `Context.cs:52`, which does). The `ContextLock` lives *inside* `ReactionScope` (`Context.cs:11`), so this one omission cascades into three failures:
 
 - **The serialization invariant is void.** `Signal.Set` / `EagerRelativeSignal.Set` take `Context.ReactionScope.ContextLock.ExclusiveLockAsync()` **without** first calling `CreateNewScopeIfNeeded`. With `AsyncLocalScope.Value == 0`, every access mints a *fresh* `ReactionScope` with a *fresh* `ContextLock`. So a `Set` locks lock instance L1 while a concurrent `Get` (which *does* establish a scope, lock L2) holds a different lock. The comment *"Only one thread should evaluate the graph at a time"* (`MemoizR.cs:24`) is not enforced between a writer and a reader — exactly the cross-thread case the README sells as "Automatic Synchronization."
@@ -54,6 +65,8 @@ The getter computes `var key = AsyncLocalScope.Value == 0 ? rand.NextDouble() : 
 
 ### C2 — `SuppressThrowing` swallows upstream faults, leaving a node `CacheClean` with a stale value
 `MemoizR/MemoizR.cs:75` (also `ReactionBase.cs:55`, `ConcurrentMap.cs:80`, `ConcurrentMapReduce.cs:82`)
+
+> ✅ **Fixed** — `SuppressThrowing` removed at all four sites so the fault propagates; `MemoizR.Update`'s catch now sets `CacheDirty` (not `CacheCheck`) so a faulted node re-evaluates instead of settling clean-stale. See the Update banner at the top.
 
 When a parent's `Update()` throws, its `catch` sets `State = CacheCheck` and rethrows (`MemoizR.cs:151-154`) **without** changing its value — so it never marks this node dirty. The child awaits the parent with `ConfigureAwaitOptions.SuppressThrowing` and never inspects the result, so the loop falls through, the `CacheDirty` branch is skipped, and `MemoizR.cs:97` unconditionally sets `State = CacheClean`. **The node now reports clean while holding a pre-error value, and stays stale until something else marks it dirty.** A memoization library silently returning wrong results is the worst failure mode it has. The correct pattern already exists in `StructuredJobBase.cs:35-41`, which *inspects* `t.Exception` after suppressing.
 
@@ -230,8 +243,8 @@ Intentional "first wins," but a genuine non-cancellation failure in a loser mask
 
 ## Suggested remediation order
 
-1. **C1** (fix the scope/lock identity + leak) — it's the root the lock-based fixes for H2/H3 depend on.
-2. **C2** (stop swallowing upstream faults) — silent wrong results.
+1. ✅ **C1** (fix the scope/lock identity + leak) — **done** (leak + identity; cross-thread lock deferred). It's the root the lock-based fixes for H2/H3 depend on.
+2. ✅ **C2** (stop swallowing upstream faults) — **done**.
 3. **H1, H4, H5, H6, H7** (structured-concurrency correctness).
 4. **H8, H9** then the medium leaks/robustness.
 5. Add **concurrency stress tests** — these races are intermittent and today's tests pass *around* them. Gate any fix on a high-iteration parallel `Set`/`Get` test plus a faulting-source test for C2.

@@ -52,7 +52,10 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
             {
                 if (source is IMemoizR memoizR)
                 {
-                    await memoizR.UpdateIfNecessary().ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing); // updateIfNecessary() can change state.
+                    // updateIfNecessary() can change state. Do NOT SuppressThrowing here: a faulting
+                    // parent must propagate so this node is not left CacheClean over a stale value (C2).
+                    // (The intentional fire-and-forget suppression lives in the debounce path below.)
+                    await memoizR.UpdateIfNecessary();
                 }
 
                 if (State == CacheState.CacheDirty)
@@ -210,7 +213,11 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
 
             Task.Delay(debounceTime, cts.Token).ContinueWith(async _ =>
                 {
-                    Context.CreateNewScopeIfNeeded();
+                    // This debounced update is a logically independent evaluation. Force a fresh scope
+                    // so it does NOT share the CurrentReaction/CurrentGets of whatever flow scheduled it
+                    // (e.g. the Set that triggered Stale, or a sibling reaction's update). Sharing a
+                    // scope across concurrent reaction updates corrupts dependency tracking. (C1)
+                    Context.ForceNewScope();
                     try
                     {
                         using (await Context.ReactionScope.ContextLock.UpgradeableLockAsync())

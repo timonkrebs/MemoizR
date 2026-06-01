@@ -14,61 +14,36 @@ public class ReactionScope
 public class Context
 {
     private Lock Lock { get; } = new();
-    private static readonly Random rand = new();
-    private static readonly AsyncLocal<double> AsyncLocalScope = new();
-    
+
     internal AsyncLock Mutex = new();
 
-    /** current capture context for identifying sources (other memoizR elements)
-    * - active while evaluating a memoizR function body  */
-    private Dictionary<double, WeakReference<ReactionScope>> AsyncReactionScopes = new();
+    /// <summary>
+    /// The evaluation scope for the currently executing async flow. It identifies sources
+    /// (other memoizR elements) while a memoizR function body is being evaluated, and carries
+    /// the <see cref="ReactionScope.ContextLock"/> that serializes evaluation <em>within</em> that flow.
+    /// </summary>
+    /// <remarks>
+    /// The scope — and therefore its ContextLock — is per async-flow: two independent threads/flows
+    /// each resolve their own <see cref="ReactionScope"/> with their own lock instance. This lock does
+    /// NOT, on its own, serialize graph evaluation across unrelated threads (i.e. it is not a global
+    /// "only one thread evaluates the graph at a time" lock — see the threading-model open question in
+    /// the code review). Using <see cref="AsyncLocal{T}"/> gives a stable per-flow scope identity and
+    /// avoids the unbounded scope leak the previous dictionary-keyed implementation suffered from.
+    /// </remarks>
+    private static readonly AsyncLocal<ReactionScope?> CurrentScope = new();
 
-    public ReactionScope ReactionScope
-    {
-        get
-        {
-            lock (Lock)
-            {
-                var key = AsyncLocalScope.Value == 0 ? rand.NextDouble() : AsyncLocalScope.Value;
-                ReactionScope reactionScope;
-                if (!AsyncReactionScopes.TryGetValue(key, out var reactionScopeRef))
-                {
-                    reactionScope = new();
-                    AsyncReactionScopes.Add(key, new(reactionScope));
-                }
-                else if (!reactionScopeRef!.TryGetTarget(out reactionScope!))
-                {
-                    reactionScope = new();
-                    AsyncReactionScopes[key] = new(reactionScope);
-                }
-
-                return reactionScope;
-            }
-        }
-    }
+    public ReactionScope ReactionScope => CurrentScope.Value ??= new ReactionScope();
 
     public CancellationTokenSource? CancellationTokenSource { get; internal set; }
 
     internal void CreateNewScopeIfNeeded()
     {
-        lock (Lock)
-        {
-            if (AsyncLocalScope.Value != 0)
-            {
-                return;
-            }
-            var key = rand.NextDouble();
-            AsyncLocalScope.Value = key;
-            AsyncReactionScopes.Add(key, new(new()));
-        }
+        CurrentScope.Value ??= new ReactionScope();
     }
 
     internal void CleanScope()
     {
-        lock (Lock)
-        {
-            AsyncReactionScopes.Remove(AsyncLocalScope.Value);
-        }
+        CurrentScope.Value = null;
     }
 
     internal void CheckDependenciesTheSame(IMemoHandlR memoHandlR)
@@ -93,15 +68,9 @@ public class Context
         }
     }
 
-    internal double ForceNewScope()
+    internal void ForceNewScope()
     {
-        lock (Lock)
-        {
-            var key = rand.NextDouble();
-            AsyncLocalScope.Value = key;
-            AsyncReactionScopes.Add(key, new(new()));
-            return key;
-        }
+        CurrentScope.Value = new ReactionScope();
     }
 
     public T Untrack<T>(Func<T> fn)

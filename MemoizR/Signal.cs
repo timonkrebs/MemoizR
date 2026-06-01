@@ -10,6 +10,10 @@ public sealed class Signal<T> : MemoHandlR<T>, IStateGetR<T?>
 
     public async Task Set(T value)
     {
+        // Establish (or reuse) this async flow's scope first, mirroring Get, so the ContextLock we
+        // take is the flow's stable lock rather than a transient per-access one (C1).
+        Context.CreateNewScopeIfNeeded();
+
         // There can be multiple threads updating the CacheState at the same time but no reads should be possible while in the process.
         // Must be Upgradeable because it could change to "Writeble-Lock" if something synchronously reactive is listening.
         using (await Context.ReactionScope.ContextLock.ExclusiveLockAsync())

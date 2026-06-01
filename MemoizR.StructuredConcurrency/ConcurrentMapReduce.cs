@@ -79,7 +79,9 @@ public sealed class ConcurrentMapReduce<T> : MemoHandlR<T>, IMemoizR, IStateGetR
             {
                 if (source is IMemoizR memoizR)
                 {
-                    await memoizR.UpdateIfNecessary().ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing); // updateIfNecessary() can change state
+                    // updateIfNecessary() can change state. Do NOT SuppressThrowing here: a faulting
+                    // parent must propagate so this node is not left CacheClean over a stale value (C2).
+                    await memoizR.UpdateIfNecessary();
                 }
 
                 if (State == CacheState.CacheDirty)

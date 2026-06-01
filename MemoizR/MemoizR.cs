@@ -72,7 +72,9 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR, IStateGetR<T>
             {
                 if (source is IMemoizR memoizR)
                 {
-                    await memoizR.UpdateIfNecessary().ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing); // updateIfNecessary() can change state
+                    // updateIfNecessary() can change state. Do NOT SuppressThrowing here: a faulting
+                    // parent must propagate so this node is not left CacheClean over a stale value (C2).
+                    await memoizR.UpdateIfNecessary();
                 }
 
                 if (State == CacheState.CacheDirty)
@@ -150,7 +152,10 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR, IStateGetR<T>
         }
         catch
         {
-            State = CacheState.CacheCheck;
+            // The computation failed, so this node genuinely needs to recompute: keep it dirty
+            // (not merely CacheCheck, which would settle back to CacheClean over the stale value
+            // on the next pass when no source memo reports dirty). Matches ReactionBase.Update. (C2)
+            State = CacheState.CacheDirty;
             throw;
         }
         finally

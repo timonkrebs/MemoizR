@@ -77,7 +77,9 @@ public sealed class ConcurrentMap<T> : MemoHandlR<IEnumerable<T>>, IMemoizR, ISt
             {
                 if (source is IMemoizR memoizR)
                 {
-                    await memoizR.UpdateIfNecessary().ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing); // updateIfNecessary() can change state
+                    // updateIfNecessary() can change state. Do NOT SuppressThrowing here: a faulting
+                    // parent must propagate so this node is not left CacheClean over a stale value (C2).
+                    await memoizR.UpdateIfNecessary();
                 }
 
                 if (State == CacheState.CacheDirty)
@@ -133,7 +135,7 @@ public sealed class ConcurrentMap<T> : MemoHandlR<IEnumerable<T>>, IMemoizR, ISt
             Context.ReactionScope.CurrentReaction = prevReaction;
             Context.ReactionScope.CurrentGetsIndex = prevIndex;
         }
-        
+
             // handles diamond dependencies if we're the parent of a diamond.
             if (Observers.Length > 0 && !oldValue.SequenceEqual(Value ?? []))
             {
