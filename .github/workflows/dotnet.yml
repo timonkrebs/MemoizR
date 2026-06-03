@@ -28,6 +28,27 @@ jobs:
       run: dotnet restore
     - name: Build
       run: dotnet build --no-restore
+    # Run the regular suite against clean (non-instrumented) assemblies. Coyote's binary
+    # rewrite is only needed by the systematic CoyoteTests below; running the whole suite
+    # against rewritten assemblies changes exception/timing semantics and adds per-operation
+    # overhead, which makes the timing-sensitive tests fail.
     - name: Test
-      run: dotnet test --no-build --verbosity normal
-      
+      run: dotnet test --no-build --verbosity normal --filter "FullyQualifiedName!~CoyoteTests"
+    - name: Install Coyote CLI
+      run: |
+        dotnet tool install --global Microsoft.Coyote.CLI
+        echo "$HOME/.dotnet/tools" >> $GITHUB_PATH
+    - name: Coyote Rewrite
+      run: |
+        # Use net9.0 as targeted in the project file. Rewrite in dependency order.
+        cd MemoizR.Tests/bin/Debug/net9.0/
+        coyote rewrite MemoizR.StructuredAsyncLock.dll
+        coyote rewrite MemoizR.dll
+        coyote rewrite MemoizR.Reactive.dll
+        coyote rewrite MemoizR.StructuredConcurrency.dll
+        coyote rewrite MemoizR.Tests.dll
+    # Only the systematic concurrency test runs against the rewritten assemblies, where
+    # Coyote can fully control scheduling.
+    - name: Coyote systematic test
+      run: dotnet test --no-build --verbosity normal --filter "FullyQualifiedName~CoyoteTests"
+

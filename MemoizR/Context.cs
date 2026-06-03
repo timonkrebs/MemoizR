@@ -14,7 +14,6 @@ public class ReactionScope
 public class Context
 {
     private Lock Lock { get; } = new();
-    private static readonly Random rand = new();
     private static readonly AsyncLocal<double> AsyncLocalScope = new();
     
     internal AsyncLock Mutex = new();
@@ -29,7 +28,7 @@ public class Context
         {
             lock (Lock)
             {
-                var key = AsyncLocalScope.Value == 0 ? rand.NextDouble() : AsyncLocalScope.Value;
+                var key = AsyncLocalScope.Value == 0 ? Random.Shared.NextDouble() : AsyncLocalScope.Value;
                 ReactionScope reactionScope;
                 if (!AsyncReactionScopes.TryGetValue(key, out var reactionScopeRef))
                 {
@@ -57,7 +56,7 @@ public class Context
             {
                 return;
             }
-            var key = rand.NextDouble();
+            var key = Random.Shared.NextDouble();
             AsyncLocalScope.Value = key;
             AsyncReactionScopes.Add(key, new(new()));
         }
@@ -97,7 +96,7 @@ public class Context
     {
         lock (Lock)
         {
-            var key = rand.NextDouble();
+            var key = Random.Shared.NextDouble();
             AsyncLocalScope.Value = key;
             AsyncReactionScopes.Add(key, new(new()));
             return key;

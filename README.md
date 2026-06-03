@@ -132,3 +132,9 @@ Try it out!https:
 Experiment with MemoizR online: https://dotnetfiddle.net/Widget/EWtptc
 
 Example From: [Khalid Abuhakmeh](https://khalidabuhakmeh.com/memoizr-declarative-structured-concurrency-for-csharp#conclusion)
+
+## Testing
+
+Run the test suite with `dotnet test`. Thread interleavings of the locking code are explored
+systematically with [Microsoft Coyote](https://microsoft.github.io/coyote/); see
+[docs/Coyote.md](docs/Coyote.md) for how to rewrite the assemblies and run the Coyote test.
