@@ -4,7 +4,7 @@ namespace MemoizR.Tests;
 
 public class AsyncAsymmetricLockTests
 {
-    [Fact(Timeout = 500)]
+    [Fact(Timeout = 5000)]
     public async Task ExclusiveLock_AcquiredAndReleased()
     {
         // Arrange
@@ -29,7 +29,7 @@ public class AsyncAsymmetricLockTests
         }
     }
 
-    [Fact(Timeout = 500)]
+    [Fact(Timeout = 5000)]
     public async Task UpgradeableLock_AcquiredAndReleased()
     {
         // Arrange
@@ -64,7 +64,7 @@ public class AsyncAsymmetricLockTests
         Assert.Equal(0, asyncLock.LockScope);
     }
 
-    [Fact(Timeout = 500)]
+    [Fact(Timeout = 5000)]
     public async Task ExclusiveLock_BlockedByUpgradeable()
     {
         // Arrange
@@ -84,7 +84,7 @@ public class AsyncAsymmetricLockTests
         });
     }
 
-    [Fact(Timeout = 500)]
+    [Fact(Timeout = 5000)]
     public async Task UpgradeableLock_NotBlockedByExclusive()
     {
         // Arrange

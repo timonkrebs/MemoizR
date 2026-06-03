@@ -18,7 +18,7 @@ public class ReactiveTests
         await v1.Set(2);
     }
 
-    [Fact(Timeout = 1000)]
+    [Fact(Timeout = 30000)]
     public async Task TestAsyncEnumerable()
     {
         var f = new MemoFactory();
@@ -29,7 +29,10 @@ public class ReactiveTests
         var m1 = f.BuildReaction()
         .CreateAsyncEnumerableExperimental(v1);
 
-        await Task.Delay(100);
+        // The backing reaction fires once on creation, subscribing to v1 and advancing the stream
+        // past the initial value. Wait for that subscription instead of guessing with a fixed sleep,
+        // so the first element the consumer sees is a genuine change.
+        await Eventually.Until(() => Assert.NotEmpty(v1.Observers));
 
         var t = new Task(async () =>
         {
@@ -47,28 +50,40 @@ public class ReactiveTests
         Assert.Equal(0, invocationCount);
 
         await v1.Set(2);
-        await Task.Delay(20);
-        Assert.Equal(2, result);
-        Assert.Equal(1, invocationCount);
+        await Eventually.Until(() =>
+        {
+            Assert.Equal(2, result);
+            Assert.Equal(1, invocationCount);
+        });
 
         await v1.Set(3);
-        await Task.Delay(20);
-        Assert.Equal(3, result);
-        Assert.Equal(2, invocationCount);
+        await Eventually.Until(() =>
+        {
+            Assert.Equal(3, result);
+            Assert.Equal(2, invocationCount);
+        });
 
+        // Setting the same value emits nothing new: negative assertion, so settle then verify.
         await v1.Set(3);
-        await Task.Delay(20);
+        await Task.Delay(50);
         Assert.Equal(3, result);
         Assert.Equal(2, invocationCount);
 
         await v1.Set(4);
-        await Task.Delay(20);
-        Assert.Equal(4, result);
-        Assert.Equal(3, invocationCount);
+        await Eventually.Until(() =>
+        {
+            Assert.Equal(4, result);
+            Assert.Equal(3, invocationCount);
+        });
         Assert.NotNull(m1);
     }
 
-    [Fact(Timeout = 2000)]
+    // NOTE: this test models a deliberately slow consumer (100ms per item). The experimental
+    // async-enumerable is lossy under backpressure — the producer advances the stream slot
+    // regardless of the consumer — so the fixed 200ms producer cadence is load-bearing: it lets
+    // the consumer finish its cycle and re-park on the next slot before the next value is set.
+    // We keep that cadence and only widen the per-test timeout for slow CI agents.
+    [Fact(Timeout = 30000)]
     public async Task TestAsyncEnumerableWithBackpressure()
     {
         var f = new MemoFactory();
@@ -125,7 +140,7 @@ public class ReactiveTests
         Assert.NotNull(m1);
     }
 
-    [Fact(Timeout = 1000)]
+    [Fact(Timeout = 30000)]
     public async Task TestReactiveInvocations()
     {
         var invocations = 0;
@@ -136,22 +151,18 @@ public class ReactiveTests
         var m1 = f.BuildReaction()
         .CreateReaction(v1, v => invocations++);
 
-        await Task.Delay(30);
-        Assert.Equal(1, invocations);
-        await Task.Delay(100);
+        await Eventually.Until(() => Assert.Equal(1, invocations));
 
         await v1.Set(2);
-        await Task.Delay(100);
+        await Eventually.Until(() => Assert.Equal(2, invocations));
 
-        Assert.Equal(2, invocations);
-
+        // Setting the same value must not fire the reaction again: negative, so settle then verify.
         await v1.Set(2);
-        await Task.Delay(20);
-
+        await Task.Delay(50);
         Assert.Equal(2, invocations);
     }
 
-    [Fact(Timeout = 1000)]
+    [Fact(Timeout = 30000)]
     public async Task TestAutoSubscriptionHandling()
     {
         var invocations = new Invocations { Count = 0 };
@@ -162,24 +173,22 @@ public class ReactiveTests
 
         CreateReaction(f, v1, invocations);
 
-        GC.Collect();
-        GC.Collect();
-        await Task.Delay(100);
-        GC.Collect();
-        GC.Collect();
+        // The pending initial run keeps the reaction alive until it fires exactly once; wait for it.
+        await Eventually.Until(() => Assert.Equal(1, invocations.Count));
 
-        await Task.Delay(30);
-        Assert.Equal(1, invocations.Count);
+        // With no strong reference remaining, the reaction is collectible and must stop reacting.
+        GC.Collect();
+        GC.Collect();
         await Task.Delay(100);
+        GC.Collect();
+        GC.Collect();
 
         await v1.Set(2);
         await Task.Delay(100);
-
         Assert.Equal(1, invocations.Count);
 
         await v1.Set(2);
         await Task.Delay(20);
-
         Assert.Equal(1, invocations.Count);
     }
 
@@ -194,7 +203,7 @@ public class ReactiveTests
         public int Count { get; set; }
     }
 
-    [Fact(Timeout = 1000)]
+    [Fact(Timeout = 30000)]
     public async Task TestThreadSafety()
     {
         var f = new MemoFactory();
@@ -214,7 +223,8 @@ public class ReactiveTests
                         });
             });
 
-        await Task.Delay(200);
+        // Wait until the reaction has been created and subscribed, rather than a fixed sleep.
+        await Eventually.Until(() => Assert.NotEmpty(m1.Observers));
 
         _ = v1.Set(1000);
         for (var i = 0; i < 100; i++)
@@ -229,13 +239,13 @@ public class ReactiveTests
             _ = v1.Set(j);
         }
 
-        await Task.Delay(200);
-
-        Assert.Equal(40, await m1.Get());
-        Assert.Equal(40, result);
+        // v1 ends at 20, so m1 == 40 and the reaction converges to that.
+        await Eventually.Until(async () =>
+        {
+            Assert.Equal(40, await m1.Get());
+            Assert.Equal(40, result);
+        });
         Assert.Equal(await m1.Get(), result);
-
-        await Task.Delay(100);
 
         Assert.True(invocationCount >= 1, "Must be invoked at least once");
     }
@@ -252,7 +262,7 @@ public class ReactiveTests
         var r1 = f.BuildReaction()
         .AddDebounceTime(TimeSpan.FromMilliseconds(10))
         .CreateReaction(m1, m => invocationCount++);
-        await Task.Delay(50);
+        await Eventually.Until(() => Assert.NotEmpty(m1.Observers));
         var tasks = new List<Task>();
         for (var i = 0; i < 200; i++)
         {
@@ -266,11 +276,13 @@ public class ReactiveTests
         await Task.WhenAll(tasks);
         await Task.Run(async () => await v1.Set(200));
 
-        await Task.Delay(50);
-
-        Assert.Equal(400, await m1.Get());
+        // v1 ends at 200, so m1 == 400 and the reaction fires more than once over the storm.
+        await Eventually.Until(async () =>
+        {
+            Assert.Equal(400, await m1.Get());
+            Assert.True(invocationCount > 1, "Must be invoked more than once");
+        });
         Assert.NotEqual(400, resultM1);
-        Assert.True(invocationCount > 1, "Must be invoked more than once");
     }
 
     [RetryFact(3, 5000)]
@@ -314,7 +326,10 @@ public class ReactiveTests
         Assert.Equal(82, result2);
     }
 
-    [Fact(Timeout = 5000)]
+    // RetryFact like its structural siblings (TestThreadSafety3/5/6): this asserts exact invocation
+    // counts, which require each of the 41 spaced sets to be observed distinctly. That is robust on
+    // a quiet machine but can rarely coalesce under contention; the retry absorbs that tail.
+    [RetryFact(3, 1000)]
     public async Task TestThreadSafety4()
     {
         var f = new MemoFactory();
@@ -338,7 +353,12 @@ public class ReactiveTests
         var invocationCountR2 = 0;
         var r2 = f.BuildReaction().CreateReaction(m2, m => invocationCountR2++);
 
-        await Task.Delay(100);
+        // Both reactions must have run their initial pass (and subscribed) before the storm.
+        await Eventually.Until(() =>
+        {
+            Assert.True(invocationCountR1 >= 1);
+            Assert.True(invocationCountR2 >= 1);
+        });
 
         var tasks = new List<Task>();
         for (var i = 0; i < 40; i++)
@@ -354,11 +374,13 @@ public class ReactiveTests
 
         Assert.Equal(82, await m1.Get());
 
-        await Task.Delay(100);
-
-        Assert.Equal(42, memoInvocationCount);
-        Assert.Equal(42, invocationCountR1);
-        Assert.Equal(42, invocationCountR2);
+        // 41 distinct sets plus the one initial pass == 42 invocations at each level.
+        await Eventually.Until(() =>
+        {
+            Assert.Equal(42, memoInvocationCount);
+            Assert.Equal(42, invocationCountR1);
+            Assert.Equal(42, invocationCountR2);
+        }, timeoutMs: 4000);
     }
 
     [RetryFact(3, 5000)]

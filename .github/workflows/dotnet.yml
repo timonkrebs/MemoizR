@@ -13,10 +13,15 @@ jobs:
   build:
 
     strategy:
+      # Don't let a hiccup on one OS cancel the runs on the others — each leg reports independently.
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, ubuntu-24.04-arm, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 2
+    # Generous ceiling: this covers checkout + restore + build + test on the slowest agents
+    # (macOS/arm, cold caches). It is a runaway/hang backstop, not a performance budget — the old
+    # 2-minute cap killed otherwise-healthy jobs mid-build and read as test flakiness.
+    timeout-minutes: 15
 
     steps:
     - uses: actions/checkout@v6
@@ -28,6 +33,9 @@ jobs:
       run: dotnet restore
     - name: Build
       run: dotnet build --no-restore
+    # Tests run serially (xunit.runner.json disables collection parallelism) so the timing-sensitive
+    # reactive tests don't starve each other on 2-core agents. --blame-hang-timeout captures a dump
+    # if a test ever truly hangs, instead of silently eating the whole job timeout.
     - name: Test
-      run: dotnet test --no-build --verbosity normal
+      run: dotnet test --no-build --verbosity normal --blame-hang-timeout 5m
       
