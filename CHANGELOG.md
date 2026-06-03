@@ -16,6 +16,17 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
   longer mints a brand-new scope (and `ContextLock`) on every access for an async flow that never
   established one, and `Set` now establishes the flow scope (mirroring `Get`). The scope store was
   reimplemented on `AsyncLocal<ReactionScope>`, eliminating the dictionary that grew without bound.
+- **Flaky CI test suite.** The reactive tests asserted exact state after fixed `await Task.Delay(n)`
+  waits, but the reaction pipeline updates observers fire-and-forget (debounced), so on constrained
+  CI agents the work hadn't run yet and tests intermittently failed or hit tight per-test timeouts
+  (the suite failed ~87% of local repeat runs). Fixes, all in the test project only — no library
+  behavior change: (1) `xunit.runner.json` disables test-collection parallelism so the
+  timing-sensitive tests stop starving each other's thread pool on 2-core runners; (2) a new
+  `Eventually.Until` helper polls for the expected state instead of sleeping a fixed interval;
+  (3) a module initializer pre-grows the thread pool to remove cold-start starvation;
+  (4) over-tight `[Fact(Timeout=…)]` deadlock guards were widened (short-circuit/cancellation
+  timeouts that encode behavior were left intact); (5) the CI job `timeout-minutes` was raised from
+  2 to 15 (the old cap killed healthy jobs mid-build) and the matrix now uses `fail-fast: false`.
 
 ### Changed
 - **Behavioral change:** `Get()` now throws when an upstream source faults instead of returning a
