@@ -208,24 +208,40 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
 
             Context.CancellationTokenSource ??= new();
 
-            Task.Delay(debounceTime, cts.Token).ContinueWith(async _ =>
-                {
-                    Context.CreateNewScopeIfNeeded();
-                    try
-                    {
-                        using (await Context.ReactionScope.ContextLock.UpgradeableLockAsync())
-                        {
-                            await UpdateIfNecessary().ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
-                        }
-                    }
-                    finally
-                    {
-                        Context.CancellationTokenSource = null;
-                        Context.CleanScope();
-                    }
-                });
+            // Fire-and-forget the debounced update. A newer Stale cancels this token, so a
+            // superseded update is skipped entirely instead of running anyway (the previous
+            // ContinueWith ran even on cancellation, flooding the thread pool with redundant
+            // updates and starving it).
+            _ = RunDebouncedUpdateAsync(debounceTime, cts.Token);
 
             return Task.CompletedTask;
+        }
+    }
+
+    private async Task RunDebouncedUpdateAsync(TimeSpan debounceTime, CancellationToken token)
+    {
+        try
+        {
+            await Task.Delay(debounceTime, token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            // Superseded by a newer Stale before the debounce elapsed; nothing to do.
+            return;
+        }
+
+        Context.CreateNewScopeIfNeeded();
+        try
+        {
+            using (await Context.ReactionScope.ContextLock.UpgradeableLockAsync())
+            {
+                await UpdateIfNecessary().ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
+            }
+        }
+        finally
+        {
+            Context.CancellationTokenSource = null;
+            Context.CleanScope();
         }
     }
 

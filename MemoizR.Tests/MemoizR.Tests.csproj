@@ -9,7 +9,7 @@
     <IsTestProject>true</IsTestProject>
   </PropertyGroup>
 
-  <ItemGroup
+  <ItemGroup>
     <PackageReference Include="Microsoft.Coyote" Version="1.7.11" />
     <PackageReference Include="Microsoft.Coyote.Test" Version="1.7.11" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.5.1" />

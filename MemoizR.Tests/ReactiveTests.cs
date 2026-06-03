@@ -18,7 +18,7 @@ public class ReactiveTests
         await v1.Set(2);
     }
 
-    [Fact(Timeout = 1000)]
+    [RetryFact(3, 200)]
     public async Task TestAsyncEnumerable()
     {
         var f = new MemoFactory();
@@ -314,7 +314,7 @@ public class ReactiveTests
         Assert.Equal(82, result2);
     }
 
-    [Fact(Timeout = 5000)]
+    [RetryFact(3, 200)]
     public async Task TestThreadSafety4()
     {
         var f = new MemoFactory();

@@ -25,7 +25,6 @@ public sealed class AsyncAsymmetricLock
     private volatile int locksHeld;
     private volatile int upgradedLocksHeld;
     private double lockScope;
-    private readonly Random rand = new();
     private static readonly AsyncLocal<double> AsyncLocalScope = new();
 
     internal double LockScope
@@ -106,7 +105,7 @@ public sealed class AsyncAsymmetricLock
     /// Asynchronously acquires the lock as a exclusive. Returns a disposable that releases the lock when disposed.
     /// </summary>
     /// <returns>A disposable that releases the lock when disposed.</returns>
-    public AwaitableDisposable<IDisposable> ExclusiveLockAsync()
+    public Task<IDisposable> ExclusiveLockAsync()
     {
         double lockScope;
         lock (Lock)
@@ -116,11 +115,15 @@ public sealed class AsyncAsymmetricLock
             {
                 do
                 {
-                    lockScope = rand.NextDouble();
+                    lockScope = Random.Shared.NextDouble();
                 } while (lockScope == 0);
                 AsyncLocalScope.Value = lockScope;
             }
-            return new(RequestExclusiveLockAsync(lockScope));
+            // Return a plain Task<IDisposable> rather than the custom AwaitableDisposable
+            // wrapper: Coyote's binary rewriter corrupts custom awaitables (it cannot resolve
+            // AwaitableDisposable.GetAwaiter), which made every lock-using test throw
+            // MissingMethodException under the CI `coyote rewrite` step.
+            return RequestExclusiveLockAsync(lockScope);
         }
     }
 
@@ -150,7 +153,7 @@ public sealed class AsyncAsymmetricLock
     /// Asynchronously acquires the lock as a Upgradeable. Returns a disposable that releases the lock when disposed.
     /// </summary>
     /// <returns>A disposable that releases the lock when disposed.</returns>
-    public AwaitableDisposable<IDisposable> UpgradeableLockAsync()
+    public Task<IDisposable> UpgradeableLockAsync()
     {
         double lockScope;
         lock (Lock)
@@ -160,11 +163,11 @@ public sealed class AsyncAsymmetricLock
             {
                 do
                 {
-                    lockScope = rand.NextDouble();
+                    lockScope = Random.Shared.NextDouble();
                 } while (lockScope == 0);
                 AsyncLocalScope.Value = lockScope;
             }
-            return new(RequestUpgradeableLockAsync(lockScope));
+            return RequestUpgradeableLockAsync(lockScope);
         }
     }
 
@@ -176,14 +179,18 @@ public sealed class AsyncAsymmetricLock
         if (!upgradeable.IsEmpty && LocksHeld == 0 && UpgradedLocksHeld == 0)
         {
             Interlocked.Increment(ref upgradedLocksHeld);
+            // The lock-wide LockScope field is the source of truth for recursion checks.
+            // We must NOT touch AsyncLocalScope here: this runs on the *releasing* flow, and
+            // AsyncLocal mutations never propagate to the already-suspended waiter being woken.
+            // The waiter still carries the scope it set before enqueueing, so writing it here
+            // only corrupts the releaser's flow (and could let a later acquire on that flow be
+            // falsely granted as recursive).
             LockScope = upgradeable.Dequeue(new UpgradeableKey(this, false));
-            AsyncLocalScope.Value = LockScope;
         }
         else if (!exclusive.IsEmpty && LocksHeld == 0 && UpgradedLocksHeld == 0)
         {
             Interlocked.Increment(ref locksHeld);
             LockScope = exclusive.Dequeue(new ExclusivePrioKey(this));
-            AsyncLocalScope.Value = LockScope;
         }
         else if ((!upgradeable.IsEmpty || !exclusive.IsEmpty) && LocksHeld == 0 && UpgradedLocksHeld == 0)
         {

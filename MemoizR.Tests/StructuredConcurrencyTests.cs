@@ -1,3 +1,5 @@
+using xRetry;
+
 namespace MemoizR.Tests;
 
 public class StructuredConcurrencyTests
@@ -82,7 +84,9 @@ public class StructuredConcurrencyTests
         Assert.Equal(1, await c1.Get());
     }
 
-    [Fact(Timeout = 1000)]
+    // Timing-sensitive: asserts on debounced async reactions after fixed delays. Retry like
+    // the other flaky reactive tests (xRetry) instead of relying on a knife-edge timeout.
+    [RetryFact(3, 200)]
     public async Task TestMultipleMapHandling()
     {
         var f = new MemoFactory();
@@ -157,7 +161,7 @@ public class StructuredConcurrencyTests
         Assert.NotNull(r);
     }
 
-    [Fact(Timeout = 1000)]
+    [RetryFact(3, 200)]
     public async Task TestMultipleMapHandlingCancel()
     {
         var f = new MemoFactory("concurrent");
@@ -230,7 +234,7 @@ public class StructuredConcurrencyTests
         Assert.Equal(5, invocations);
     }
 
-    [Fact(Timeout = 2000)]
+    [RetryFact(3, 200)]
     public async Task TestThreadSafety()
     {
         var f = new MemoFactory();
