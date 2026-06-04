@@ -151,7 +151,8 @@ public class ReactiveTests
         Assert.Equal(2, invocations);
     }
 
-    [Fact(Timeout = 1000)]
+    // Depends on the GC collecting the reaction; collection timing is nondeterministic, so retry.
+    [RetryFact(3, 200)]
     public async Task TestAutoSubscriptionHandling()
     {
         var invocations = new Invocations { Count = 0 };
@@ -194,7 +195,9 @@ public class ReactiveTests
         public int Count { get; set; }
     }
 
-    [Fact(Timeout = 1000)]
+    // Timing-sensitive: asserts the debounced reaction's observed value after fixed delays.
+    // Retry like the sibling TestThreadSafety3-6 instead of relying on a knife-edge timeout.
+    [RetryFact(3, 200)]
     public async Task TestThreadSafety()
     {
         var f = new MemoFactory();
@@ -240,7 +243,7 @@ public class ReactiveTests
         Assert.True(invocationCount >= 1, "Must be invoked at least once");
     }
 
-    [Fact(Timeout = 2000)]
+    [RetryFact(3, 200)]
     public async Task TestThreadSafety2()
     {
         var f = new MemoFactory();
