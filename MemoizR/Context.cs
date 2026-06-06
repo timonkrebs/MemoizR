@@ -1,5 +1,4 @@
 using MemoizR.StructuredAsyncLock;
-using Nito.AsyncEx;
 
 namespace MemoizR;
 
@@ -15,8 +14,6 @@ public class Context
 {
     private Lock Lock { get; } = new();
     private static readonly AsyncLocal<double> AsyncLocalScope = new();
-    
-    internal AsyncLock Mutex = new();
 
     /** current capture context for identifying sources (other memoizR elements)
     * - active while evaluating a memoizR function body  */

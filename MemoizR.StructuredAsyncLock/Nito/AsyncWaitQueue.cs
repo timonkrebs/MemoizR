@@ -4,7 +4,7 @@ using Nito.Collections;
 namespace MemoizR.StructuredAsyncLock.Nito;
 
 /// <summary>
-/// A collection of cancelable <see cref="TaskCompletionSource{T}"/> instances. Implementations must assume the caller is holding a lock.
+/// A collection of <see cref="TaskCompletionSource{T}"/> instances. Implementations must assume the caller is holding a lock.
 /// </summary>
 /// <typeparam name="T">The type of the results. If this isn't needed, use <see cref="Object"/>.</typeparam>
 internal interface IAsyncWaitQueue<T>
@@ -24,59 +24,8 @@ internal interface IAsyncWaitQueue<T>
     /// Removes a single entry in the wait queue and completes it. This method may only be called if <see cref="IsEmpty"/> is <c>false</c>. The task continuations for the completed task must be executed asynchronously.
     /// </summary>
     /// <param name="result">The result used to complete the wait queue entry. If this isn't needed, use <c>default(T)</c>.</param>
+    /// <returns>The lock scope associated with the completed entry.</returns>
     double Dequeue(T? result = default);
-
-    bool Dequeue(T? result, double lockScope);
-
-    /// <summary>
-    /// Removes all entries in the wait queue and completes them. The task continuations for the completed tasks must be executed asynchronously.
-    /// </summary>
-    /// <param name="result">The result used to complete the wait queue entries. If this isn't needed, use <c>default(T)</c>.</param>
-    void DequeueAll(T? result = default);
-
-    /// <summary>
-    /// Attempts to remove an entry from the wait queue and cancels it. The task continuations for the completed task must be executed asynchronously.
-    /// </summary>
-    /// <param name="task">The task to cancel.</param>
-    /// <param name="cancellationToken">The cancellation token to use to cancel the task.</param>
-    bool TryCancel(Task task, CancellationToken cancellationToken);
-
-    /// <summary>
-    /// Removes all entries from the wait queue and cancels them. The task continuations for the completed tasks must be executed asynchronously.
-    /// </summary>
-    /// <param name="cancellationToken">The cancellation token to use to cancel the tasks.</param>
-    void CancelAll(CancellationToken cancellationToken);
-}
-
-/// <summary>
-/// Provides extension methods for wait queues.
-/// </summary>
-internal static class AsyncWaitQueueExtensions
-{
-    /// <summary>
-    /// Creates a new entry and queues it to this wait queue. If the cancellation token is already canceled, this method immediately returns a canceled task without modifying the wait queue.
-    /// </summary>
-    /// <param name="this">The wait queue.</param>
-    /// <param name="mutex">A synchronization object taken while cancelling the entry.</param>
-    /// <param name="token">The token used to cancel the wait.</param>
-    /// <returns>The queued task.</returns>
-    public static Task<T> Enqueue<T>(this IAsyncWaitQueue<T> @this, object mutex, CancellationToken token, int lockScope)
-    {
-        if (token.IsCancellationRequested)
-            return Task.FromCanceled<T>(token);
-
-        var ret = @this.Enqueue(lockScope);
-        if (!token.CanBeCanceled)
-            return ret;
-
-        var registration = token.Register(() =>
-        {
-            lock (mutex)
-                @this.TryCancel(ret, token);
-        }, useSynchronizationContext: false);
-        ret.ContinueWith(_ => registration.Dispose(), CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
-        return ret;
-    }
 }
 
 /// <summary>
@@ -113,47 +62,6 @@ internal sealed class DefaultAsyncWaitQueue<T> : IAsyncWaitQueue<T>
         res.Item1.TrySetResult(result!);
 
         return res.Item2;
-    }
-
-    void IAsyncWaitQueue<T>.DequeueAll(T? result)
-    {
-        foreach (var source in _queue)
-            source.Item1.TrySetResult(result!);
-        _queue.Clear();
-    }
-
-    bool IAsyncWaitQueue<T>.Dequeue(T? result, double lockScope)
-    {
-        var x = _queue.FirstOrDefault(x => x.Item2 == lockScope);
-        if (x == default)
-        {
-            return false;
-        }
-        
-        x.Item1.TrySetResult(result!);
-        _queue.RemoveRange(_queue.IndexOf(x), 1);
-        return true;
-    }
-
-    bool IAsyncWaitQueue<T>.TryCancel(Task task, CancellationToken cancellationToken)
-    {
-        for (int i = 0; i != _queue.Count; ++i)
-        {
-            if (_queue[i].Item1.Task == task)
-            {
-                _queue[i].Item1.TrySetCanceled(cancellationToken);
-                _queue.RemoveAt(i);
-                return true;
-            }
-        }
-        return false;
-    }
-
-    void IAsyncWaitQueue<T>.CancelAll(CancellationToken cancellationToken)
-    {
-        foreach (var source in _queue)
-            source.Item1.TrySetCanceled(cancellationToken);
-        _queue.Clear();
     }
 
     [DebuggerNonUserCode]
