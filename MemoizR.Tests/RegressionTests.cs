@@ -92,4 +92,38 @@ public class RegressionTests
         Assert.Equal(10, last);
         Assert.Equal(afterInitial + 1, invocations);
     }
+
+    // The lock-free Get fast path reads State (volatile) and the cached Value without taking the
+    // ContextLock. Hammer that path from many readers while a writer keeps changing the source:
+    // readers must never observe an invalid value and the memo must converge to the last write.
+    // (A memory-visibility regression can't be proven by a unit test, but this guards the logic
+    // and exercises the fast path heavily.)
+    [Fact(Timeout = 20000)]
+    public async Task Memo_ConcurrentFastPathReads_StayConsistentAndConverge()
+    {
+        var f = new MemoFactory();
+        var v1 = f.CreateSignal(0);
+        var m1 = f.CreateMemoizR(async () => await v1.Get() * 2);
+        await m1.Get(); // prime so the CacheClean fast path is exercised
+
+        using var cts = new CancellationTokenSource();
+        var readers = Enumerable.Range(0, 8).Select(_ => Task.Run(async () =>
+        {
+            while (!cts.IsCancellationRequested)
+            {
+                var r = await m1.Get();
+                Assert.True(r % 2 == 0, $"memo is v1*2 and must always be even, saw {r}");
+            }
+        })).ToArray();
+
+        for (var i = 1; i <= 500; i++)
+        {
+            await v1.Set(i);
+        }
+
+        cts.Cancel();
+        await Task.WhenAll(readers);
+
+        Assert.Equal(1000, await m1.Get()); // converged to the last write (500 * 2)
+    }
 }

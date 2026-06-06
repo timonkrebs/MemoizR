@@ -3,9 +3,13 @@ namespace MemoizR.Reactive;
 public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
 {
     private CancellationTokenSource cts = new();
-    private CacheState State { get; set; } = CacheState.CacheClean;
+    // State is touched under two different locks (lock(this) in Stale, the ContextLock in
+    // UpdateIfNecessary), and isPaused is written by Pause/Resume from arbitrary threads and
+    // read in Update. Back both with volatile so the cross-lock/cross-thread reads see writes.
+    private volatile CacheState state = CacheState.CacheClean;
+    private CacheState State { get => state; set => state = value; }
     private SynchronizationContext? synchronizationContext;
-    private bool isPaused;
+    private volatile bool isPaused;
 
     public TimeSpan DebounceTime { protected get; init; }
 

@@ -4,9 +4,13 @@ namespace MemoizR;
 
 public class ReactionScope
 {
+    // CurrentReaction is read on the lock-free Get fast path (e.g. MemoizR.Get), so it stays
+    // volatile for that read's visibility. CurrentGets/CurrentGetsIndex are only ever touched
+    // while the graph is serialized by the ContextLock (and CheckDependenciesTheSame's
+    // Context.Lock / Interlocked), so they don't need volatile.
     internal volatile IMemoHandlR? CurrentReaction = null;
-    internal volatile IMemoHandlR[] CurrentGets = [];
-    internal volatile int CurrentGetsIndex;
+    internal IMemoHandlR[] CurrentGets = [];
+    internal int CurrentGetsIndex;
     internal AsyncAsymmetricLock ContextLock = new();
 }
 

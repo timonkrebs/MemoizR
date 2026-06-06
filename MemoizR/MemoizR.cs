@@ -2,7 +2,10 @@ namespace MemoizR;
 
 public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR, IStateGetR<T>
 {
-    private CacheState State { get; set; } = CacheState.CacheClean;
+    // State is read on the lock-free Get fast path (alongside the volatile CurrentReaction), so
+    // back it with a volatile field so that read/write has consistent visibility.
+    private volatile CacheState state = CacheState.CacheClean;
+    private CacheState State { get => state; set => state = value; }
     private Func<CancellationTokenSource, Task<T>> fn;
 
     CacheState IMemoizR.State { get => State; set => State = value; }

@@ -2,7 +2,10 @@ namespace MemoizR.StructuredConcurrency;
 
 public sealed class ConcurrentMapReduce<T> : MemoHandlR<T>, IMemoizR, IStateGetR<T>
 {
-    private CacheState State { get; set; } = CacheState.CacheClean;
+    // Read on the lock-free Get fast path (alongside the volatile CurrentReaction); back it
+    // with a volatile field for consistent visibility.
+    private volatile CacheState state = CacheState.CacheClean;
+    private CacheState State { get => state; set => state = value; }
     private IReadOnlyCollection<Func<IStructuredResourceGroup, Task<T>>> fns;
     private readonly Func<T, T, T?> reduce;
 
