@@ -126,4 +126,45 @@ public class RegressionTests
 
         Assert.Equal(1000, await m1.Get()); // converged to the last write (500 * 2)
     }
+
+    // A value type wider than a machine word whose two halves are always written equal. The memo
+    // value is set as one coherent struct; a torn read on the lock-free Get fast path (writer
+    // overwriting Value while a reader copies it) would surface mismatched halves. Backing Value
+    // with an immutable box behind a single volatile reference must make that impossible -- the
+    // reader only ever sees a fully-constructed box. (Tearing is probabilistic, so this guards the
+    // invariant and would catch a regression to a plain field rather than proving the model.)
+    private readonly record struct Pair(long A, long B);
+
+    [Fact(Timeout = 20000)]
+    public async Task Memo_ConcurrentFastPathReads_NeverTearWideStruct()
+    {
+        var f = new MemoFactory();
+        var v1 = f.CreateSignal(0L);
+        var m1 = f.CreateMemoizR(async () =>
+        {
+            var x = await v1.Get();
+            return new Pair(x, x);
+        });
+        await m1.Get(); // prime so the CacheClean fast path is exercised
+
+        using var cts = new CancellationTokenSource();
+        var readers = Enumerable.Range(0, 8).Select(_ => Task.Run(async () =>
+        {
+            while (!cts.IsCancellationRequested)
+            {
+                var p = await m1.Get();
+                Assert.True(p.A == p.B, $"torn read: halves came from different writes ({p.A} != {p.B})");
+            }
+        })).ToArray();
+
+        for (var i = 1L; i <= 2000; i++)
+        {
+            await v1.Set(i);
+        }
+
+        cts.Cancel();
+        await Task.WhenAll(readers);
+
+        Assert.Equal(new Pair(2000, 2000), await m1.Get());
+    }
 }

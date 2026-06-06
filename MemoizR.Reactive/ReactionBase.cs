@@ -27,10 +27,26 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
         isPaused = true;
     }
 
-    public Task Resume()
+    public async Task Resume()
     {
         isPaused = false;
-        return UpdateIfNecessary();
+        // Go through the ContextLock like every other update entry point (Get,
+        // IMemoizR.UpdateIfNecessary, RunDebouncedUpdateAsync). Calling the internal
+        // UpdateIfNecessary directly recomputes the node and rewires Sources/Observers and the
+        // shared ReactionScope with no lock held, racing a concurrent Signal.Set on the same
+        // context. volatile only restores visibility, not mutual exclusion, so serialize here.
+        Context.CreateNewScopeIfNeeded();
+        try
+        {
+            using (await Context.ReactionScope.ContextLock.UpgradeableLockAsync())
+            {
+                await UpdateIfNecessary();
+            }
+        }
+        finally
+        {
+            Context.CleanScope();
+        }
     }
 
     public void Dispose()
