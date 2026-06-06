@@ -277,29 +277,44 @@ public class StructuredConcurrencyTests
         var one = v1.Set(1);
         var two = v2.Set(2);
         await v3.Set(3);
-        await Task.Delay(100);
+        // Reactive propagation through the ConcurrentMap is async and debounced (and each map fn
+        // sleeps up to 50ms), so wait for the reaction to converge rather than guessing a fixed
+        // delay. The map result preserves source order [v1, v2, v3].
+        await WaitForConvergenceAsync(() => x.SequenceEqual([1, 2, 3]));
         Assert.Equal(1, x.ElementAt(0));
         Assert.Equal(2, x.ElementAt(1));
         Assert.Equal(3, x.ElementAt(2));
 
         await v1.Set(4);
-        await Task.Delay(100);
+        await WaitForConvergenceAsync(() => x.SequenceEqual([4, 2, 3]));
         Assert.Equal(4, x.Single(x => x == 4));
         Assert.Equal(4, x.ElementAt(0));
         Assert.Equal(2, x.ElementAt(1));
         Assert.Equal(3, x.ElementAt(2));
 
         await v2.Set(5);
-        await Task.Delay(100);
+        await WaitForConvergenceAsync(() => x.SequenceEqual([4, 5, 3]));
         Assert.Equal(5, x.Single(x => x == 5));
         Assert.Equal(4, x.ElementAt(0));
         Assert.Equal(5, x.ElementAt(1));
         Assert.Equal(3, x.ElementAt(2));
 
         await v3.Set(6);
-        await Task.Delay(100);
+        await WaitForConvergenceAsync(() => x.SequenceEqual([4, 5, 6]));
         Assert.Equal(6, x.Single(x => x == 6));
         Assert.Equal(6, x.ElementAt(2));
+    }
+
+    // Polls until the reactive graph has settled on the expected state, or a generous timeout
+    // elapses (after which the caller's assertions fail with a meaningful diff). Async, debounced
+    // propagation can take a variable number of recompute cycles, so a fixed delay is flaky.
+    private static async Task WaitForConvergenceAsync(Func<bool> converged, int timeoutMs = 5000)
+    {
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        while (!converged() && sw.ElapsedMilliseconds < timeoutMs)
+        {
+            await Task.Delay(10);
+        }
     }
 
     [Fact(Timeout = 1000)]
