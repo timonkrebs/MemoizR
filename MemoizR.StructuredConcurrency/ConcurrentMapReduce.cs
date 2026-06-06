@@ -2,20 +2,23 @@ namespace MemoizR.StructuredConcurrency;
 
 public sealed class ConcurrentMapReduce<T> : MemoHandlR<T>, IMemoizR, IStateGetR<T>
 {
-    // Read on the lock-free Get fast path (alongside the volatile CurrentReaction); back it
-    // with a volatile field for consistent visibility.
-    private volatile CacheState state = CacheState.CacheClean;
-    private CacheState State { get => state; set => state = value; }
+    // Read on the lock-free Get fast path (alongside the volatile CurrentReaction); the cell
+    // exposes a lock-free volatile read and guards transitions so a concurrent Stale can't be
+    // clobbered by an in-flight recompute committing Clean (see CacheStateCell).
+    private readonly CacheStateCell stateCell = new(CacheState.CacheClean);
+    private CacheState State => stateCell.State;
     private IReadOnlyCollection<Func<IStructuredResourceGroup, Task<T>>> fns;
     private readonly Func<T, T, T?> reduce;
 
-    CacheState IMemoizR.State { get => State; set => State = value; }
+    // The only external writer is the diamond down-link (a parent marking us dirty after it
+    // recomputed), which must be absorbed -- not generation-bumped -- during our own evaluation.
+    CacheState IMemoizR.State { get => stateCell.State; set => stateCell.InvalidateFromParent(value); }
 
     internal ConcurrentMapReduce(IReadOnlyCollection<Func<IStructuredResourceGroup, Task<T>>> fns, Func<T, T, T?> reduce, Context context) : base(context)
     {
         this.fns = fns;
         this.reduce = reduce;
-        this.State = CacheState.CacheDirty;
+        stateCell.Force(CacheState.CacheDirty);
     }
 
     public void Cancel()
@@ -75,6 +78,10 @@ public sealed class ConcurrentMapReduce<T> : MemoHandlR<T>, IMemoizR, IStateGetR
             return;
         }
 
+        // Snapshot the generation up front: if a Stale invalidates us while we check parents or
+        // recompute, the final commit below must not mark us Clean over it.
+        var token = stateCell.Generation;
+
         // If we are potentially dirty, see if we have a parent who has actually changed value
         if (State == CacheState.CacheCheck)
         {
@@ -103,8 +110,9 @@ public sealed class ConcurrentMapReduce<T> : MemoHandlR<T>, IMemoizR, IStateGetR
 
         if (State == CacheState.Evaluating) throw new InvalidOperationException("Cyclic behavior detected");
 
-        // By now, we're clean
-        State = CacheState.CacheClean;
+        // By now, we're clean -- unless a Stale invalidated us along the way, in which case leave
+        // the node dirty so the next Get recomputes instead of caching a stale value.
+        stateCell.TryCommitClean(token);
     }
 
     /** run the computation fn, updating the cached value */
@@ -121,11 +129,13 @@ public sealed class ConcurrentMapReduce<T> : MemoHandlR<T>, IMemoizR, IStateGetR
         Context.ReactionScope.CurrentGets = [];
         Context.ReactionScope.CurrentGetsIndex = 0;
 
+        // Mark Evaluating and snapshot the generation; commit Clean below only if no Stale
+        // invalidates us while the job runs.
+        var token = stateCell.BeginEvaluation();
         try
         {
-            State = CacheState.Evaluating;
             Value = await new StructuredReduceJob<T>(fns, reduce, Context, this).Run(Context.CancellationTokenSource!.Token);
-            State = CacheState.CacheClean;
+            stateCell.TryCommitClean(token);
 
             // if the sources have changed, update source & observer links
             if (Context.ReactionScope.CurrentGets.Length > 0)
@@ -160,7 +170,7 @@ public sealed class ConcurrentMapReduce<T> : MemoHandlR<T>, IMemoizR, IStateGetR
         }
         catch
         {
-            State = CacheState.CacheCheck;
+            stateCell.Force(CacheState.CacheCheck);
             throw;
         }
         finally
@@ -204,12 +214,12 @@ public sealed class ConcurrentMapReduce<T> : MemoHandlR<T>, IMemoizR, IStateGetR
 
     internal async Task Stale(CacheState state)
     {
-        if (state <= State)
+        // Escalate atomically and bump the generation so an in-flight recompute on another flow
+        // cannot commit Clean over this invalidation. No change => already at least this dirty.
+        if (!stateCell.Invalidate(state))
         {
             return;
         }
-
-        State = state;
 
         foreach (var observer in Observers)
         {

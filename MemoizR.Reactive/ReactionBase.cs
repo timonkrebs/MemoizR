@@ -3,23 +3,26 @@ namespace MemoizR.Reactive;
 public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
 {
     private CancellationTokenSource cts = new();
-    // State is touched under two different locks (lock(this) in Stale, the ContextLock in
-    // UpdateIfNecessary), and isPaused is written by Pause/Resume from arbitrary threads and
-    // read in Update. Back both with volatile so the cross-lock/cross-thread reads see writes.
-    private volatile CacheState state = CacheState.CacheClean;
-    private CacheState State { get => state; set => state = value; }
+    // State is invalidated by Stale (under lock(this), driven by a Set on another flow) and
+    // committed by the recompute under the ContextLock. The cell's generation guard stops the
+    // recompute from committing Clean over a Stale that arrived mid-evaluation -- the cross-flow
+    // lost-update race, which for a reaction means a missed trigger (see CacheStateCell). isPaused
+    // is written by Pause/Resume from arbitrary threads and read in Update, so it stays volatile.
+    private readonly CacheStateCell stateCell = new(CacheState.CacheClean);
+    private CacheState State => stateCell.State;
     private SynchronizationContext? synchronizationContext;
     private volatile bool isPaused;
 
     public TimeSpan DebounceTime { protected get; init; }
 
-    CacheState IMemoizR.State { get => State; set => State = value; }
+    // Written by a parent's diamond down-link; absorbed (not generation-bumped) during our own eval.
+    CacheState IMemoizR.State { get => stateCell.State; set => stateCell.InvalidateFromParent(value); }
 
     internal ReactionBase(Context context, SynchronizationContext? synchronizationContext = null)
     : base(context)
     {
         this.synchronizationContext = synchronizationContext;
-        this.State = CacheState.CacheDirty;
+        stateCell.Force(CacheState.CacheDirty);
     }
 
     public void Pause()
@@ -65,6 +68,10 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
             return;
         }
 
+        // Snapshot the generation up front: if a Stale invalidates us while we check parents or
+        // recompute, the final commit below must not mark us Clean over it.
+        var token = stateCell.Generation;
+
         // If we are potentially dirty, check if we have a parent who has actually changed value.
         if (State == CacheState.CacheCheck)
         {
@@ -91,8 +98,9 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
             await Update();
         }
 
-        // By now, we're clean.
-        State = CacheState.CacheClean;
+        // By now, we're clean -- unless a Stale invalidated us along the way, in which case stay
+        // dirty so the debounced update scheduled by that Stale re-runs us.
+        stateCell.TryCommitClean(token);
     }
 
     // Update the cached value by running the computation.
@@ -100,7 +108,7 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
     {
         if (isPaused)
         {
-            State = CacheState.CacheDirty;
+            stateCell.Force(CacheState.CacheDirty);
             return;
         }
 
@@ -113,6 +121,9 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
         Context.ReactionScope.CurrentGets = [];
         Context.ReactionScope.CurrentGetsIndex = 0;
 
+        // Mark Evaluating and snapshot the generation so a Stale during Execute escalates past
+        // Evaluating (bumping the generation) and blocks the commit below.
+        var token = stateCell.BeginEvaluation();
         try
         {
             if (!isPaused)
@@ -147,13 +158,13 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
                 }
                 catch
                 {
-                    State = CacheState.CacheDirty;
+                    stateCell.Force(CacheState.CacheDirty);
                     throw;
                 }
             }
             else
             {
-                State = CacheState.CacheDirty;
+                stateCell.Force(CacheState.CacheDirty);
                 return;
             }
 
@@ -195,9 +206,10 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
             Context.ReactionScope.CurrentGetsIndex = prevIndex;
         }
 
-        // We've rerun with the latest values from all of our Sources.
-        // This means that we no longer need to update until a signal changes.
-        State = CacheState.CacheClean;
+        // We've rerun with the latest values from all of our Sources, so we no longer need to
+        // update until a signal changes -- unless a Stale invalidated us mid-evaluation, in which
+        // case stay dirty so the debounced update scheduled by that Stale re-runs us.
+        stateCell.TryCommitClean(token);
     }
 
     private void RemoveParentObservers(int index)
@@ -222,7 +234,9 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
         // Add Scheduling
         lock (this)
         {
-            State = state;
+            // Escalate and bump the generation so an in-flight recompute can't commit Clean over
+            // this invalidation; the debounce below still (re)schedules the update regardless.
+            stateCell.Invalidate(state);
             cts?.Cancel();
             cts = new();
 

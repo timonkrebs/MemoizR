@@ -2,18 +2,21 @@ namespace MemoizR;
 
 public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR, IStateGetR<T>
 {
-    // State is read on the lock-free Get fast path (alongside the volatile CurrentReaction), so
-    // back it with a volatile field so that read/write has consistent visibility.
-    private volatile CacheState state = CacheState.CacheClean;
-    private CacheState State { get => state; set => state = value; }
+    // State is read on the lock-free Get fast path (alongside the volatile CurrentReaction); the
+    // cell exposes a lock-free volatile read and guards transitions so a concurrent Stale can't be
+    // clobbered by an in-flight recompute committing Clean (see CacheStateCell).
+    private readonly CacheStateCell stateCell = new(CacheState.CacheClean);
+    private CacheState State => stateCell.State;
     private Func<CancellationTokenSource, Task<T>> fn;
 
-    CacheState IMemoizR.State { get => State; set => State = value; }
+    // The only external writer of this is the diamond down-link (a parent marking us dirty after
+    // it recomputed), which must be absorbed -- not generation-bumped -- during our own evaluation.
+    CacheState IMemoizR.State { get => stateCell.State; set => stateCell.InvalidateFromParent(value); }
 
     internal MemoizR(Func<CancellationTokenSource, Task<T>> fn, Context context) : base(context)
     {
         this.fn = fn;
-        this.State = CacheState.CacheDirty;
+        stateCell.Force(CacheState.CacheDirty);
     }
 
     public async Task<T> Get()
@@ -68,6 +71,10 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR, IStateGetR<T>
             return;
         }
 
+        // Snapshot the generation up front: if a Stale invalidates us while we check parents or
+        // recompute, the final commit below must not mark us Clean over it.
+        var token = stateCell.Generation;
+
         // If we are potentially dirty, see if we have a parent who has actually changed value
         if (State == CacheState.CacheCheck)
         {
@@ -96,8 +103,9 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR, IStateGetR<T>
 
         if (State == CacheState.Evaluating) throw new InvalidOperationException("Cyclic behavior detected");
 
-        // By now, we're clean
-        State = CacheState.CacheClean;
+        // By now, we're clean -- unless a Stale invalidated us along the way, in which case leave
+        // the node dirty so the next Get recomputes instead of caching a stale value.
+        stateCell.TryCommitClean(token);
     }
 
     /** run the computation fn, updating the cached value */
@@ -114,11 +122,13 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR, IStateGetR<T>
         Context.ReactionScope.CurrentGets = [];
         Context.ReactionScope.CurrentGetsIndex = 0;
 
+        // Mark Evaluating and snapshot the generation; commit Clean below only if no Stale
+        // invalidates us while fn runs.
+        var token = stateCell.BeginEvaluation();
         try
         {
-            State = CacheState.Evaluating;
             Value = await fn(Context.CancellationTokenSource!);
-            State = CacheState.CacheClean;
+            stateCell.TryCommitClean(token);
 
             // if the sources have changed, update source & observer links
             if (Context.ReactionScope.CurrentGets.Length > 0)
@@ -153,7 +163,7 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR, IStateGetR<T>
         }
         catch
         {
-            State = CacheState.CacheCheck;
+            stateCell.Force(CacheState.CacheCheck);
             throw;
         }
         finally
@@ -176,9 +186,10 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR, IStateGetR<T>
             }
         }
 
-        // We've rerun with the latest values from all of our Sources.
-        // This means that we no longer need to update until a signal changes
-        State = CacheState.CacheClean;
+        // We've rerun with the latest values from all of our Sources, so we no longer need to
+        // update until a signal changes -- unless a Stale invalidated us mid-evaluation, in which
+        // case the commit is dropped and the node stays dirty for the next Get.
+        stateCell.TryCommitClean(token);
     }
 
     private void RemoveParentObservers(int index)
@@ -201,12 +212,12 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR, IStateGetR<T>
 
     internal async Task Stale(CacheState state)
     {
-        if (state <= State)
+        // Escalate atomically and bump the generation so an in-flight recompute on another flow
+        // cannot commit Clean over this invalidation. No change => already at least this dirty.
+        if (!stateCell.Invalidate(state))
         {
             return;
         }
-
-        State = state;
 
         foreach (var observer in Observers)
         {

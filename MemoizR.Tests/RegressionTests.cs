@@ -175,4 +175,49 @@ public class RegressionTests
         await v1.Set(123456);
         Assert.Equal(new Pair(123456, 123456), await m1.Get());
     }
+
+    // Deterministic reproduction of the cross-flow lost-update race. A memo's recompute (Update)
+    // ends by marking the node Clean. If a Stale (from a Set on another flow) dirties the node
+    // *during* that recompute, the Clean write must not clobber the Dirty -- otherwise the memo
+    // caches the value it computed from the now-stale source and never reconverges.
+    // Gates pin the exact interleaving: the recompute reads the source, parks, a newer Set lands,
+    // then the recompute resumes and tries to commit Clean.
+    [Fact(Timeout = 10000)]
+    public async Task Memo_StaleDuringRecompute_IsNotClobbered()
+    {
+        var f = new MemoFactory();
+        var s = f.CreateSignal(0);
+
+        var gateArmed = false;
+        var readDone = new TaskCompletionSource();
+        var proceed = new TaskCompletionSource();
+
+        var m = f.CreateMemoizR(async () =>
+        {
+            var x = await s.Get();
+            if (Volatile.Read(ref gateArmed))
+            {
+                Volatile.Write(ref gateArmed, false);
+                readDone.SetResult();
+                await proceed.Task;
+            }
+            return x;
+        });
+
+        await m.Get();            // prime: m is Clean@0 and the s -> m dependency link is established
+        await s.Set(1);           // m is now Dirty, s == 1
+
+        Volatile.Write(ref gateArmed, true);
+        var getter = Task.Run(async () => await m.Get()); // recomputes on its own flow: reads s == 1, parks
+        await readDone.Task;      // the recompute has read s == 1 and is parked mid-Update (Evaluating)
+
+        await s.Set(2);           // invalidate during the parked recompute: m -> Dirty, s == 2
+
+        proceed.SetResult();      // resume the recompute; it will try to commit the stale value (1)
+        await getter;
+
+        // The Set(2) that landed during the recompute must win: the memo must reconverge to 2,
+        // not stay stuck at the clobbered 1.
+        Assert.Equal(2, await m.Get());
+    }
 }

@@ -4,6 +4,9 @@
 - Date: 2026-06-06
 - Updated: 2026-06-06 — the lock-free `Value` read is now made tear-free and consistent
   (rule 4); it is no longer an accepted "eventually consistent" limitation.
+- Updated: 2026-06-06 — corrected the `ContextLock` scope description (it is per-flow, not
+  per-`Context`) and documented the generation guard that closes the cross-flow lost-update
+  race it leaves open (see "Cross-flow state coordination" below).
 - Deciders: MemoizR maintainers
 
 ## Context
@@ -11,9 +14,13 @@
 MemoizR is a concurrent reactive graph. Its thread-safety rests almost entirely on **locks**,
 not on lock-free field access:
 
-- Per `Context`, all graph evaluation (reading/recomputing memos, rewiring sources/observers)
-  is serialized by the `ContextLock`, an `AsyncAsymmetricLock` taken as upgradeable for reads
-  and exclusive for writes. Only one flow evaluates a given context's graph at a time.
+- The `ContextLock` (an `AsyncAsymmetricLock`, upgradeable for reads, exclusive for writes) lives
+  on the per-flow `ReactionScope`, so it serializes graph evaluation **within a flow**, not across
+  independent flows. This is deliberate: structured-concurrency children call
+  `Context.ForceNewScope()` and run on their own scope, so a single shared lock would let a parent
+  holding it deadlock against the children it is awaiting. The cross-flow gap this leaves on the
+  shared `State` field is closed separately by a generation guard (see "Cross-flow state
+  coordination").
 - Inside `AsyncAsymmetricLock`, the bookkeeping counters (`locksHeld`, `upgradedLocksHeld`,
   `lockScope`) are guarded by an internal `lock (Lock)` monitor. Every read goes through the
   `LocksHeld`/`UpgradedLocksHeld` properties (which lock) and every mutation runs inside that
@@ -88,6 +95,38 @@ We adopt the following rules for `volatile` in this codebase:
 5. **Locks are the primary synchronization mechanism; `volatile` only supports the deliberate
    lock-free fast path.** New shared mutable state should be protected by the appropriate lock.
    Reach for `volatile` only when you are intentionally reading a field without a lock.
+
+## Cross-flow state coordination (the generation guard)
+
+Because the `ContextLock` is per-flow (above), a memo node's shared `State` is **not** protected
+by a single lock: a `Set` invalidating the node (`Stale` → `CacheDirty`) runs on the writer's
+flow, while a `Get` recomputing it ends by writing `CacheClean` on a reader's flow. With nothing
+serializing them, the recompute could commit `CacheClean` *over* a `Dirty` that arrived while it
+was evaluating — leaving the memo cached-stale until the next write (for a reaction: a missed
+trigger). This is a genuine lost-update, distinct from the visibility concerns above; it was
+reproduced deterministically (`Memo_StaleDuringRecompute_IsNotClobbered`) and on the ARM CI runner.
+
+`State` is therefore held in a `CacheStateCell` that guards its transitions with a monotonic
+**generation**:
+
+- The current state is exposed through a plain `volatile` read, so the lock-free `Get` fast path
+  stays lock-free. Only the writers take the cell's gate.
+- An **invalidation** (`Stale`) escalates the state and **bumps the generation**.
+- An **evaluation** snapshots the generation when it begins (`BeginEvaluation`, which also marks
+  `Evaluating`) and only commits `CacheClean` if the generation is unchanged (`TryCommitClean`).
+  If a `Stale` bumped it meanwhile, the commit is dropped and the node stays dirty for the next
+  `Get` / the debounced reaction update to recompute.
+- The **diamond down-link** (a parent marking an observer dirty after it recomputed, via the
+  `IMemoizR.State` setter → `InvalidateFromParent`) escalates the state **without** bumping the
+  generation. When it fires during the observer's own same-flow evaluation — the observer is
+  reading that very parent — it must be *absorbed*, not treated as a concurrent invalidation,
+  otherwise the observer would needlessly recompute again (this is what distinguishes the benign
+  diamond propagation from a real cross-flow `Set`).
+
+This is node-local and changes no locking, so it cannot deadlock the structured-concurrency
+fork/join. Applies to `MemoizR`, `ConcurrentMap`, `ConcurrentMapReduce`, and `ReactionBase`.
+`ConcurrentRace` is exempt: it recomputes on every `Get`, so a clobbered `Clean` never yields a
+stale read.
 
 ## Consequences
 
