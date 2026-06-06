@@ -55,3 +55,21 @@ jobs:
     - name: Coyote systematic test
       run: dotnet test --no-build --verbosity normal --filter "FullyQualifiedName~CoyoteTests"
 
+  cognitive-complexity:
+    # Gate on SonarSource Cognitive Complexity (rule S3776). The opt-in
+    # MeasureCognitiveComplexity build (see Directory.Build.props) enables only
+    # S3776 with a per-method threshold of 15 (SonarLint.xml); WarningsAsErrors
+    # escalates any method above it to a build error. Single-OS: the metric is
+    # platform-independent, so there's no need to run it across the matrix.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+    - uses: actions/checkout@v6
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v5
+      with:
+        dotnet-version: 9.0.x
+    - name: Cognitive Complexity gate (S3776 <= 15)
+      run: dotnet build -p:MeasureCognitiveComplexity=true -p:WarningsAsErrors=S3776
+

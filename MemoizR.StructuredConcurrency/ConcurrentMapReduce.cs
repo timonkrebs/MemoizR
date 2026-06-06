@@ -137,36 +137,7 @@ public sealed class ConcurrentMapReduce<T> : MemoHandlR<T>, IMemoizR, IStateGetR
             Value = await new StructuredReduceJob<T>(fns, reduce, Context, this).Run(Context.CancellationTokenSource!.Token);
             stateCell.TryCommitClean(token);
 
-            // if the sources have changed, update source & observer links
-            if (Context.ReactionScope.CurrentGets.Length > 0)
-            {
-                // remove all old Sources' .observers links to us
-                RemoveParentObservers(Context.ReactionScope.CurrentGetsIndex);
-                // update source up links
-                if (Sources.Any() && Context.ReactionScope.CurrentGetsIndex > 0)
-                {
-                    Sources = [.. Sources.Take(Context.ReactionScope.CurrentGetsIndex), .. Context.ReactionScope.CurrentGets];
-                }
-                else
-                {
-                    Sources = Context.ReactionScope.CurrentGets;
-                }
-
-                for (var i = Context.ReactionScope.CurrentGetsIndex; i < Sources.Length; i++)
-                {
-                    // Add ourselves to the end of the parent .observers array
-                    var source = Sources[i];
-                    source.Observers = !source.Observers.Any()
-                        ? [new(this)]
-                        : [.. source.Observers, new(this)];
-                }
-            }
-            else if (Sources.Any() && Context.ReactionScope.CurrentGetsIndex < Sources.Length)
-            {
-                // remove all old Sources' .observers links to us
-                RemoveParentObservers(Context.ReactionScope.CurrentGetsIndex);
-                Sources = [.. Sources.Take(Context.ReactionScope.CurrentGetsIndex)];
-            }
+            UpdateSourceAndObserverLinks();
         }
         catch
         {
@@ -181,22 +152,66 @@ public sealed class ConcurrentMapReduce<T> : MemoHandlR<T>, IMemoizR, IStateGetR
         }
 
         // handles diamond dependencies if we're the parent of a diamond.
-        if (!Equals(oldValue, Value) && Observers.Length > 0)
+        if (!Equals(oldValue, Value))
         {
-            // We've changed value, so mark our children as dirty so they'll reevaluate
-            foreach (var observer in Observers)
-            {
-                if (observer.TryGetTarget(out var o))
-                {
-                    o.State = CacheState.CacheDirty;
-                }
-            }
+            MarkObserversDirty();
         }
 
         // We've rerun with the latest values from all of our Sources, so we no longer need to
         // update until a signal changes -- unless a Stale invalidated us mid-evaluation, in which
         // case the commit is dropped and the node stays dirty for the next Get.
         stateCell.TryCommitClean(token);
+    }
+
+    // Rewire our source up-links and the parents' observer down-links to match the Sources captured
+    // during this evaluation (Context.ReactionScope.CurrentGets). Extracted from Update to keep its
+    // Cognitive Complexity in budget; only ever runs under the ContextLock-serialized evaluation.
+    private void UpdateSourceAndObserverLinks()
+    {
+        // if the sources have changed, update source & observer links
+        if (Context.ReactionScope.CurrentGets.Length > 0)
+        {
+            // remove all old Sources' .observers links to us
+            RemoveParentObservers(Context.ReactionScope.CurrentGetsIndex);
+            // update source up links
+            if (Sources.Any() && Context.ReactionScope.CurrentGetsIndex > 0)
+            {
+                Sources = [.. Sources.Take(Context.ReactionScope.CurrentGetsIndex), .. Context.ReactionScope.CurrentGets];
+            }
+            else
+            {
+                Sources = Context.ReactionScope.CurrentGets;
+            }
+
+            for (var i = Context.ReactionScope.CurrentGetsIndex; i < Sources.Length; i++)
+            {
+                // Add ourselves to the end of the parent .observers array
+                var source = Sources[i];
+                source.Observers = !source.Observers.Any()
+                    ? [new(this)]
+                    : [.. source.Observers, new(this)];
+            }
+        }
+        else if (Sources.Any() && Context.ReactionScope.CurrentGetsIndex < Sources.Length)
+        {
+            // remove all old Sources' .observers links to us
+            RemoveParentObservers(Context.ReactionScope.CurrentGetsIndex);
+            Sources = [.. Sources.Take(Context.ReactionScope.CurrentGetsIndex)];
+        }
+    }
+
+    // Mark our observers dirty so they re-evaluate (the diamond down-link). Iterating an empty
+    // Observers array is a no-op, so the caller's value-changed guard is all that's needed.
+    private void MarkObserversDirty()
+    {
+        // We've changed value, so mark our children as dirty so they'll reevaluate
+        foreach (var observer in Observers)
+        {
+            if (observer.TryGetTarget(out var o))
+            {
+                o.State = CacheState.CacheDirty;
+            }
+        }
     }
 
     private void RemoveParentObservers(int index)

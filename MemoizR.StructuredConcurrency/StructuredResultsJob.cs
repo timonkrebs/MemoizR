@@ -25,48 +25,51 @@ public sealed class StructuredResultsJob<T> : StructuredJobBase<ConcurrentDictio
     protected override Task AddConcurrentWork(StructuredResourceGroup resourceGroup)
     {
         tasks.AddRange(fns
-        .Select((x, i) => new Task<Task>(async () =>
-            {
-                context.ForceNewScope();
-                context.ReactionScope.CurrentReaction = @this;
-                try
-                {
-                    result!.TryAdd(i, await x(resourceGroup));
-                }
-                catch
-                {
-                    cancellationTokenSource.Cancel();
-                    throw;
-                }
-                lock (Lock)
-                {
-                    // if the sources have changed, update source & observer links
-                    if (context.ReactionScope.CurrentGets.Length > 0)
-                    {
-                        // update source up links
-                        if (allSources.Any() && context.ReactionScope.CurrentGetsIndex > 0)
-                        {
-                            allSources = [.. allSources, .. context.ReactionScope.CurrentGets];
-                        }
-                        else
-                        {
-                            allSources = context.ReactionScope.CurrentGets;
-                        }
-
-                        for (var i = context.ReactionScope.CurrentGetsIndex; i < allSources.Count(); i++)
-                        {
-                            // Add ourselves to the end of the parent .observers array
-                            var source = allSources[i];
-                            source.Observers = !source.Observers.Any()
-                                ? [new(@this)]
-                                : [.. source.Observers, new(@this)];
-                        }
-                    }
-                }
-
-            }, resourceGroup.Token)
-        ));
+            .Select((x, i) => new Task<Task>(() => ExecuteFn(x, i, resourceGroup), resourceGroup.Token)));
         return Task.CompletedTask;
+    }
+
+    // Runs one mapped function on its own scope, records its result, and rewires source/observer
+    // links under Lock. Extracted from the AddConcurrentWork lambda to keep Cognitive Complexity
+    // in budget.
+    private async Task ExecuteFn(Func<IStructuredResourceGroup, Task<T>> x, int i, StructuredResourceGroup resourceGroup)
+    {
+        context.ForceNewScope();
+        context.ReactionScope.CurrentReaction = @this;
+        try
+        {
+            result!.TryAdd(i, await x(resourceGroup));
+        }
+        catch
+        {
+            cancellationTokenSource.Cancel();
+            throw;
+        }
+        lock (Lock)
+        {
+            // if the sources have changed, update source & observer links
+            if (context.ReactionScope.CurrentGets.Length > 0)
+            {
+                // update source up links
+                if (allSources.Any() && context.ReactionScope.CurrentGetsIndex > 0)
+                {
+                    allSources = [.. allSources, .. context.ReactionScope.CurrentGets];
+                }
+                else
+                {
+                    allSources = context.ReactionScope.CurrentGets;
+                }
+
+                for (var j = context.ReactionScope.CurrentGetsIndex; j < allSources.Count(); j++)
+                {
+                    // Add ourselves to the end of the parent .observers array
+                    var source = allSources[j];
+                    source.Observers = !source.Observers.Any()
+                        ? [new(@this)]
+                        : [.. source.Observers, new(@this)];
+                }
+            }
+        }
     }
 
     protected override void HandleSubscriptions()

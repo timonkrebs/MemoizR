@@ -1,0 +1,36 @@
+<Project>
+
+  <!--
+    Cognitive Complexity (SonarSource rule S3776), opt-in.
+
+    Normal builds are unaffected. To check it, build with the flag:
+
+        dotnet build -p:MeasureCognitiveComplexity=true
+
+    This pulls in the SonarAnalyzer.CSharp Roslyn analyzer and silences every
+    rule except S3776. With the default SonarLint.xml threshold (15), S3776
+    warns for any method that exceeds the recommended per-method maximum:
+
+        S3776: Refactor this method to reduce its Cognitive Complexity from N ...
+
+    The CI "cognitive-complexity" job escalates that warning to an error
+    (-p:WarningsAsErrors=S3776), so a method above 15 fails the build. Lower the
+    SonarLint.xml threshold to 0 for a full per-method census of every method's N.
+    Remove the three files (Directory.Build.props, cognitive-complexity.globalconfig,
+    SonarLint.xml) to unwire it entirely.
+  -->
+
+  <PropertyGroup>
+    <MeasureCognitiveComplexity Condition="'$(MeasureCognitiveComplexity)' == ''">false</MeasureCognitiveComplexity>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(MeasureCognitiveComplexity)' == 'true'">
+    <PackageReference Include="SonarAnalyzer.CSharp" Version="*">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+    <GlobalAnalyzerConfigFiles Include="$(MSBuildThisFileDirectory)cognitive-complexity.globalconfig" />
+    <AdditionalFiles Include="$(MSBuildThisFileDirectory)SonarLint.xml" />
+  </ItemGroup>
+
+</Project>

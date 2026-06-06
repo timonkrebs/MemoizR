@@ -126,78 +126,24 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
         var token = stateCell.BeginEvaluation();
         try
         {
-            if (!isPaused)
-            {
-                try
-                {
-                    if (synchronizationContext != null)
-                    {
-                        var tcs = new TaskCompletionSource();
-
-                        async void SendOrPostCallback(object? _)
-                        {
-                            try
-                            {
-                                await Execute();
-                            }
-                            catch (Exception e)
-                            {
-                                tcs.SetException(e);
-                            }
-
-                            tcs.SetResult();
-                        }
-
-                        synchronizationContext.Post(SendOrPostCallback, null);
-                        await tcs.Task;
-                    }
-                    else
-                    {
-                        await Execute();
-                    }
-                }
-                catch
-                {
-                    stateCell.Force(CacheState.CacheDirty);
-                    throw;
-                }
-            }
-            else
+            // isPaused may have flipped between the top-of-method guard and here.
+            if (isPaused)
             {
                 stateCell.Force(CacheState.CacheDirty);
                 return;
             }
 
-            // If the Sources have changed, update source & observer links.
-            if (Context.ReactionScope.CurrentGets.Length > 0)
+            try
             {
-                // remove all old Sources' .observers links to us
-                RemoveParentObservers(Context.ReactionScope.CurrentGetsIndex);
-                // Update source up links.
-                if (Sources.Any() && Context.ReactionScope.CurrentGetsIndex > 0)
-                {
-                    Sources = [.. Sources.Take(Context.ReactionScope.CurrentGetsIndex), .. Context.ReactionScope.CurrentGets];
-                }
-                else
-                {
-                    Sources = Context.ReactionScope.CurrentGets;
-                }
+                await InvokeExecute();
+            }
+            catch
+            {
+                stateCell.Force(CacheState.CacheDirty);
+                throw;
+            }
 
-                for (var i = Context.ReactionScope.CurrentGetsIndex; i < Sources.Length; i++)
-                {
-                    // Add ourselves to the end of the parent .observers array.
-                    var source = Sources[i];
-                    source.Observers = !source.Observers.Any()
-                        ? [new(this)]
-                        : [.. source.Observers, new(this)];
-                }
-            }
-            else if (Sources.Any() && Context.ReactionScope.CurrentGetsIndex < Sources.Length)
-            {
-                // remove all old Sources' .observers links to us
-                RemoveParentObservers(Context.ReactionScope.CurrentGetsIndex);
-                Sources = [.. Sources.Take(Context.ReactionScope.CurrentGetsIndex)];
-            }
+            UpdateSourceAndObserverLinks();
         }
         finally
         {
@@ -210,6 +156,73 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
         // update until a signal changes -- unless a Stale invalidated us mid-evaluation, in which
         // case stay dirty so the debounced update scheduled by that Stale re-runs us.
         stateCell.TryCommitClean(token);
+    }
+
+    // Run Execute on the captured SynchronizationContext if one was supplied (marshalling the
+    // result/exception back through a TaskCompletionSource), otherwise run it inline.
+    private async Task InvokeExecute()
+    {
+        if (synchronizationContext != null)
+        {
+            var tcs = new TaskCompletionSource();
+
+            async void SendOrPostCallback(object? _)
+            {
+                try
+                {
+                    await Execute();
+                }
+                catch (Exception e)
+                {
+                    tcs.SetException(e);
+                }
+
+                tcs.SetResult();
+            }
+
+            synchronizationContext.Post(SendOrPostCallback, null);
+            await tcs.Task;
+        }
+        else
+        {
+            await Execute();
+        }
+    }
+
+    // Rewire our source up-links and the parents' observer down-links to match the Sources captured
+    // during this evaluation. Extracted from Update to keep its Cognitive Complexity in budget.
+    private void UpdateSourceAndObserverLinks()
+    {
+        // If the Sources have changed, update source & observer links.
+        if (Context.ReactionScope.CurrentGets.Length > 0)
+        {
+            // remove all old Sources' .observers links to us
+            RemoveParentObservers(Context.ReactionScope.CurrentGetsIndex);
+            // Update source up links.
+            if (Sources.Any() && Context.ReactionScope.CurrentGetsIndex > 0)
+            {
+                Sources = [.. Sources.Take(Context.ReactionScope.CurrentGetsIndex), .. Context.ReactionScope.CurrentGets];
+            }
+            else
+            {
+                Sources = Context.ReactionScope.CurrentGets;
+            }
+
+            for (var i = Context.ReactionScope.CurrentGetsIndex; i < Sources.Length; i++)
+            {
+                // Add ourselves to the end of the parent .observers array.
+                var source = Sources[i];
+                source.Observers = !source.Observers.Any()
+                    ? [new(this)]
+                    : [.. source.Observers, new(this)];
+            }
+        }
+        else if (Sources.Any() && Context.ReactionScope.CurrentGetsIndex < Sources.Length)
+        {
+            // remove all old Sources' .observers links to us
+            RemoveParentObservers(Context.ReactionScope.CurrentGetsIndex);
+            Sources = [.. Sources.Take(Context.ReactionScope.CurrentGetsIndex)];
+        }
     }
 
     private void RemoveParentObservers(int index)

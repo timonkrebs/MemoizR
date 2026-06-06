@@ -79,11 +79,11 @@ public class ResourceManagementTests
         var resource2 = new ActionDisposable(() => disposalOrder.Add(2));
 
         var c1 = f.CreateConcurrentMapReduce(
-            async r =>
+            r =>
             {
                 r.AddResource(resource1);
                 r.AddResource(resource2);
-                return 1;
+                return Task.FromResult(1);
             });
 
         await c1.Get();
@@ -98,7 +98,7 @@ public class ResourceManagementTests
         var resource2 = new TestResource();
 
         var c1 = f.CreateConcurrentRace(
-            async () => "input",
+            () => Task.FromResult("input"),
             async (r, i) =>
             {
                 r.AddResource(resource1);

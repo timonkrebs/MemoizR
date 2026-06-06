@@ -1,0 +1,7 @@
+# Applied only during a `-p:MeasureCognitiveComplexity=true` build (see Directory.Build.props).
+# Silence every analyzer diagnostic, then re-enable only S3776 (Cognitive Complexity)
+# so the measurement build reports nothing else.
+is_global = true
+
+dotnet_analyzer_diagnostic.severity = none
+dotnet_diagnostic.S3776.severity = warning
