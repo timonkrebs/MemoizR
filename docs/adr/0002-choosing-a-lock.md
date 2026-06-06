@@ -64,9 +64,10 @@ Choose by answering, in order:
   outside the lock (this is how `AsyncAsymmetricLock` itself works: the synchronous bookkeeping is
   under `lock (Lock)`, and the actual waiting happens on an awaited `TaskCompletionSource` *after*
   the monitor is released).
-- **Keep the lock scope minimal and consistent.** A field must be guarded by the *same* lock on
-  every access for the visibility guarantee to hold; mixing locks (or a lock plus an unsynchronized
-  read) breaks it. An intentionally unsynchronized read needs `volatile` instead (ADR 0001).
+- **Publish shared state by exactly one discipline, consistently.** A field that is read while
+  another thread/flow may be writing it must be made safe by one of three mechanisms (see
+  "Publishing shared state" below). The bug to avoid is a field that is written under a lock but
+  *also* read (or written) on a path that no barrier covers.
 - **One `AsyncAsymmetricLock` per `Context`-flow, not per field.** It is the graph-serialization
   lock; do not use it as a general-purpose mutex.
 
@@ -79,7 +80,9 @@ Choose by answering, in order:
   `lockScope`).
 - `Context.Lock` — the `AsyncReactionScopes` dictionary, scope creation, and
   `CheckDependenciesTheSame`.
-- `SignalHandlR.Lock` — `Sources`/`Observers` array swaps; `Signal.Lock` /
+- `SignalHandlR.Lock` — the `IMemoHandlR.Observers`/`Sources` *interface* setters, which exist to
+  guard array swaps made by parallel structured-concurrency children. (Note this lock is not the
+  sole guard of those fields — see "Publishing shared state".) `Signal.Lock` /
   `EagerRelativeSignal.Lock` — the cached `Value` write.
 - `CacheStateCell` (the `gate`) — a memo's `State`/generation transitions (the lost-update guard,
   ADR 0001/follow-up).
@@ -91,8 +94,9 @@ Choose by answering, in order:
 **`Nito.AsyncEx.AsyncLock` (`mutex`)** — serialize a single node's / job's work that spans awaits,
 plain mutual exclusion:
 
-- `MemoHandlR.mutex` — ensures only one evaluation of a given memo node runs at a time, held across
-  the awaited recompute.
+- `SignalHandlR.mutex` (inherited by every `MemoHandlR<T>` node — the memos, `ConcurrentMap`,
+  `ConcurrentMapReduce`, `ConcurrentRace`) — ensures only one evaluation of a given node runs at a
+  time, held across the awaited recompute.
 - `StructuredJobBase.mutex`.
 
 **`AsyncAsymmetricLock` (`ContextLock`)** — serialize evaluation of the reactive graph, held across
@@ -108,6 +112,39 @@ would deadlock structured-concurrency children against the parent awaiting them)
 state coordination this leaves open is handled by the `CacheStateCell` generation guard, not by
 widening the lock (see ADR 0001, "Cross-flow state coordination").
 
+## Publishing shared state
+
+Picking the right *lock* is only half the story; a field read concurrently with a write also needs
+its writes *published* to the reader. MemoizR uses three disciplines — a field should rely on
+exactly one, applied to every access:
+
+1. **One consistent lock.** Every read and write takes the same monitor. The release/acquire
+   fences publish the writes; no `volatile` is needed (ADR 0001). This is the common case
+   (`locksHeld`, `Context`'s dictionary, `CacheStateCell`'s state under its `gate`).
+
+2. **`volatile` / `Volatile.Read` for an intentional lock-free read.** Used only on the deliberate
+   `Get()` fast path: `State`, `CurrentReaction`, the `ValueBox` reference (ADR 0001).
+
+3. **A happens-before barrier — a fork/join or a higher-level lock that already serializes all
+   access.** No per-field lock is needed because something coarser orders the accesses:
+   - `StructuredJobBase.result` and the jobs' source accumulation are written by child tasks
+     during the fork, then read **without** a lock after `await Task.WhenAll(...)` — the join is
+     the barrier. The concurrent *writes* during the fork are still made safe per job, not left
+     unsynchronized: `StructuredReduceJob` folds into its `result` under the job's `lock (Lock)`,
+     while `StructuredResultsJob`'s `result` is a `ConcurrentDictionary` written with `TryAdd`
+     (the collection's own internal synchronization — discipline (1) applied by the collection).
+     Both jobs accumulate `allSources` and rewire observer links under `lock (Lock)`.
+   - `SignalHandlR.Sources` / `Observers` are mutated and read **lock-free during normal graph
+     evaluation**, which is serialized per flow by the `ContextLock`; writes are also whole-array
+     swaps (an atomic reference publish). The `SignalHandlR.Lock` on the `IMemoHandlR` interface
+     setters covers only the extra case of *parallel* structured-concurrency children appending to
+     the same observer array. So these fields are guarded by (3) + atomic swaps, **not** by
+     `SignalHandlR.Lock` alone.
+
+The rule of thumb is the test: if you cannot name which of these three covers a field, it is a
+bug. What is *not* allowed is a field written under a lock and also read on a path that none of the
+three covers.
+
 ## Consequences
 
 - A reader can decide in one question ("is there an `await` in the critical section?") which family
@@ -116,6 +153,7 @@ widening the lock (see ADR 0001, "Cross-flow state coordination").
   cheap and easy to reason about.
 - The two async locks are reserved for the two things that genuinely need to stay locked across
   awaits: serializing one node's evaluation (`mutex`) and serializing the graph (`ContextLock`).
-- The guidance is only safe if each piece of state keeps to a single, consistent lock; deviations
-  (an unsynchronized fast-path read) are the explicit, documented `volatile` exceptions in
-  ADR 0001.
+- The guidance is only safe if each piece of state is published by exactly one of the three
+  disciplines above. The two that are not "one consistent lock" — the `volatile` fast-path reads
+  (ADR 0001) and the join/`ContextLock`-serialized fields (`result`, `Sources`/`Observers`) — are
+  called out explicitly so they are not mistaken for unguarded access.

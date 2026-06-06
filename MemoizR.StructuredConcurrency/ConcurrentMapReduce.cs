@@ -192,6 +192,11 @@ public sealed class ConcurrentMapReduce<T> : MemoHandlR<T>, IMemoizR, IStateGetR
                 }
             }
         }
+
+        // We've rerun with the latest values from all of our Sources, so we no longer need to
+        // update until a signal changes -- unless a Stale invalidated us mid-evaluation, in which
+        // case the commit is dropped and the node stays dirty for the next Get.
+        stateCell.TryCommitClean(token);
     }
 
     private void RemoveParentObservers(int index)

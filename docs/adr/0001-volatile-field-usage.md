@@ -66,9 +66,12 @@ We adopt the following rules for `volatile` in this codebase:
    release visibility. They are kept consistent: if one field on a fast-path expression is
    volatile, all of them are.
    - Applies to: `ReactionScope.CurrentReaction` and `State` (in `MemoizR`, `ConcurrentMap`,
-     `ConcurrentMapReduce`). `State` is backed by a `volatile` field behind an unchanged
-     property so call sites are untouched. `ReactionBase.State`/`isPaused` are also volatile
-     because they are touched under *two different* locks / from arbitrary threads.
+     `ConcurrentMapReduce`). `State` is backed by a `CacheStateCell` — a `volatile` field for the
+     lock-free read, plus a `gate` monitor that serializes its transitions (the generation guard,
+     see "Cross-flow state coordination") — behind an unchanged property so call sites are
+     untouched. `ReactionBase`'s `State` goes through the same cell; its `isPaused` is a plain
+     `volatile bool` because it is written by `Pause`/`Resume` from arbitrary threads and read in
+     `Update` with no lock.
 
 3. **`volatile` is never used as a substitute for atomicity.** Compound read-modify-write
    operations (e.g. `CurrentGets = [.. CurrentGets, x]`, incrementing `CurrentGetsIndex`,
@@ -112,10 +115,12 @@ reproduced deterministically (`Memo_StaleDuringRecompute_IsNotClobbered`) and on
 - The current state is exposed through a plain `volatile` read, so the lock-free `Get` fast path
   stays lock-free. Only the writers take the cell's gate.
 - An **invalidation** (`Stale`) escalates the state and **bumps the generation**.
-- An **evaluation** snapshots the generation when it begins (`BeginEvaluation`, which also marks
-  `Evaluating`) and only commits `CacheClean` if the generation is unchanged (`TryCommitClean`).
-  If a `Stale` bumped it meanwhile, the commit is dropped and the node stays dirty for the next
-  `Get` / the debounced reaction update to recompute.
+- An **evaluation** snapshots the generation before it commits: `UpdateIfNecessary` snapshots it up
+  front via `Generation` (covering the parent-check phase), and `Update` re-snapshots via
+  `BeginEvaluation` (which also marks `Evaluating`) so a `Stale` during the recompute itself is
+  caught. It only commits `CacheClean` if the snapshotted generation is unchanged
+  (`TryCommitClean`). If a `Stale` bumped it meanwhile, the commit is dropped and the node stays
+  dirty for the next `Get` / the debounced reaction update to recompute.
 - The **diamond down-link** (a parent marking an observer dirty after it recomputed, via the
   `IMemoizR.State` setter → `InvalidateFromParent`) escalates the state **without** bumping the
   generation. When it fires during the observer's own same-flow evaluation — the observer is
