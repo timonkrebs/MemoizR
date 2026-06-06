@@ -3,19 +3,26 @@ namespace MemoizR.Reactive;
 public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
 {
     private CancellationTokenSource cts = new();
-    private CacheState State { get; set; } = CacheState.CacheClean;
+    // State is invalidated by Stale (under lock(this), driven by a Set on another flow) and
+    // committed by the recompute under the ContextLock. The cell's generation guard stops the
+    // recompute from committing Clean over a Stale that arrived mid-evaluation -- the cross-flow
+    // lost-update race, which for a reaction means a missed trigger (see CacheStateCell). isPaused
+    // is written by Pause/Resume from arbitrary threads and read in Update, so it stays volatile.
+    private readonly CacheStateCell stateCell = new(CacheState.CacheClean);
+    private CacheState State => stateCell.State;
     private SynchronizationContext? synchronizationContext;
-    private bool isPaused;
+    private volatile bool isPaused;
 
     public TimeSpan DebounceTime { protected get; init; }
 
-    CacheState IMemoizR.State { get => State; set => State = value; }
+    // Written by a parent's diamond down-link; absorbed (not generation-bumped) during our own eval.
+    CacheState IMemoizR.State { get => stateCell.State; set => stateCell.InvalidateFromParent(value); }
 
     internal ReactionBase(Context context, SynchronizationContext? synchronizationContext = null)
     : base(context)
     {
         this.synchronizationContext = synchronizationContext;
-        this.State = CacheState.CacheDirty;
+        stateCell.Force(CacheState.CacheDirty);
     }
 
     public void Pause()
@@ -23,10 +30,26 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
         isPaused = true;
     }
 
-    public Task Resume()
+    public async Task Resume()
     {
         isPaused = false;
-        return UpdateIfNecessary();
+        // Go through the ContextLock like every other update entry point (Get,
+        // IMemoizR.UpdateIfNecessary, RunDebouncedUpdateAsync). Calling the internal
+        // UpdateIfNecessary directly recomputes the node and rewires Sources/Observers and the
+        // shared ReactionScope with no lock held, racing a concurrent Signal.Set on the same
+        // context. volatile only restores visibility, not mutual exclusion, so serialize here.
+        Context.CreateNewScopeIfNeeded();
+        try
+        {
+            using (await Context.ReactionScope.ContextLock.UpgradeableLockAsync())
+            {
+                await UpdateIfNecessary();
+            }
+        }
+        finally
+        {
+            Context.CleanScope();
+        }
     }
 
     public void Dispose()
@@ -44,6 +67,10 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
         {
             return;
         }
+
+        // Snapshot the generation up front: if a Stale invalidates us while we check parents or
+        // recompute, the final commit below must not mark us Clean over it.
+        var token = stateCell.Generation;
 
         // If we are potentially dirty, check if we have a parent who has actually changed value.
         if (State == CacheState.CacheCheck)
@@ -71,8 +98,9 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
             await Update();
         }
 
-        // By now, we're clean.
-        State = CacheState.CacheClean;
+        // By now, we're clean -- unless a Stale invalidated us along the way, in which case stay
+        // dirty so the debounced update scheduled by that Stale re-runs us.
+        stateCell.TryCommitClean(token);
     }
 
     // Update the cached value by running the computation.
@@ -80,7 +108,7 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
     {
         if (isPaused)
         {
-            State = CacheState.CacheDirty;
+            stateCell.Force(CacheState.CacheDirty);
             return;
         }
 
@@ -93,80 +121,29 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
         Context.ReactionScope.CurrentGets = [];
         Context.ReactionScope.CurrentGetsIndex = 0;
 
+        // Mark Evaluating and snapshot the generation so a Stale during Execute escalates past
+        // Evaluating (bumping the generation) and blocks the commit below.
+        var token = stateCell.BeginEvaluation();
         try
         {
-            if (!isPaused)
+            // isPaused may have flipped between the top-of-method guard and here.
+            if (isPaused)
             {
-                try
-                {
-                    if (synchronizationContext != null)
-                    {
-                        var tcs = new TaskCompletionSource();
-
-                        async void SendOrPostCallback(object? _)
-                        {
-                            try
-                            {
-                                await Execute();
-                            }
-                            catch (Exception e)
-                            {
-                                tcs.SetException(e);
-                            }
-
-                            tcs.SetResult();
-                        }
-
-                        synchronizationContext.Post(SendOrPostCallback, null);
-                        await tcs.Task;
-                    }
-                    else
-                    {
-                        await Execute();
-                    }
-                }
-                catch
-                {
-                    State = CacheState.CacheDirty;
-                    throw;
-                }
-            }
-            else
-            {
-                State = CacheState.CacheDirty;
+                stateCell.Force(CacheState.CacheDirty);
                 return;
             }
 
-            // If the Sources have changed, update source & observer links.
-            if (Context.ReactionScope.CurrentGets.Length > 0)
+            try
             {
-                // remove all old Sources' .observers links to us
-                RemoveParentObservers(Context.ReactionScope.CurrentGetsIndex);
-                // Update source up links.
-                if (Sources.Any() && Context.ReactionScope.CurrentGetsIndex > 0)
-                {
-                    Sources = [.. Sources.Take(Context.ReactionScope.CurrentGetsIndex), .. Context.ReactionScope.CurrentGets];
-                }
-                else
-                {
-                    Sources = Context.ReactionScope.CurrentGets;
-                }
+                await InvokeExecute();
+            }
+            catch
+            {
+                stateCell.Force(CacheState.CacheDirty);
+                throw;
+            }
 
-                for (var i = Context.ReactionScope.CurrentGetsIndex; i < Sources.Length; i++)
-                {
-                    // Add ourselves to the end of the parent .observers array.
-                    var source = Sources[i];
-                    source.Observers = !source.Observers.Any()
-                        ? [new(this)]
-                        : [.. source.Observers, new(this)];
-                }
-            }
-            else if (Sources.Any() && Context.ReactionScope.CurrentGetsIndex < Sources.Length)
-            {
-                // remove all old Sources' .observers links to us
-                RemoveParentObservers(Context.ReactionScope.CurrentGetsIndex);
-                Sources = [.. Sources.Take(Context.ReactionScope.CurrentGetsIndex)];
-            }
+            UpdateSourceAndObserverLinks();
         }
         finally
         {
@@ -175,9 +152,77 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
             Context.ReactionScope.CurrentGetsIndex = prevIndex;
         }
 
-        // We've rerun with the latest values from all of our Sources.
-        // This means that we no longer need to update until a signal changes.
-        State = CacheState.CacheClean;
+        // We've rerun with the latest values from all of our Sources, so we no longer need to
+        // update until a signal changes -- unless a Stale invalidated us mid-evaluation, in which
+        // case stay dirty so the debounced update scheduled by that Stale re-runs us.
+        stateCell.TryCommitClean(token);
+    }
+
+    // Run Execute on the captured SynchronizationContext if one was supplied (marshalling the
+    // result/exception back through a TaskCompletionSource), otherwise run it inline.
+    private async Task InvokeExecute()
+    {
+        if (synchronizationContext != null)
+        {
+            var tcs = new TaskCompletionSource();
+
+            async void SendOrPostCallback(object? _)
+            {
+                try
+                {
+                    await Execute();
+                }
+                catch (Exception e)
+                {
+                    tcs.SetException(e);
+                }
+
+                tcs.SetResult();
+            }
+
+            synchronizationContext.Post(SendOrPostCallback, null);
+            await tcs.Task;
+        }
+        else
+        {
+            await Execute();
+        }
+    }
+
+    // Rewire our source up-links and the parents' observer down-links to match the Sources captured
+    // during this evaluation. Extracted from Update to keep its Cognitive Complexity in budget.
+    private void UpdateSourceAndObserverLinks()
+    {
+        // If the Sources have changed, update source & observer links.
+        if (Context.ReactionScope.CurrentGets.Length > 0)
+        {
+            // remove all old Sources' .observers links to us
+            RemoveParentObservers(Context.ReactionScope.CurrentGetsIndex);
+            // Update source up links.
+            if (Sources.Any() && Context.ReactionScope.CurrentGetsIndex > 0)
+            {
+                Sources = [.. Sources.Take(Context.ReactionScope.CurrentGetsIndex), .. Context.ReactionScope.CurrentGets];
+            }
+            else
+            {
+                Sources = Context.ReactionScope.CurrentGets;
+            }
+
+            for (var i = Context.ReactionScope.CurrentGetsIndex; i < Sources.Length; i++)
+            {
+                // Add ourselves to the end of the parent .observers array.
+                var source = Sources[i];
+                source.Observers = !source.Observers.Any()
+                    ? [new(this)]
+                    : [.. source.Observers, new(this)];
+            }
+        }
+        else if (Sources.Any() && Context.ReactionScope.CurrentGetsIndex < Sources.Length)
+        {
+            // remove all old Sources' .observers links to us
+            RemoveParentObservers(Context.ReactionScope.CurrentGetsIndex);
+            Sources = [.. Sources.Take(Context.ReactionScope.CurrentGetsIndex)];
+        }
     }
 
     private void RemoveParentObservers(int index)
@@ -202,7 +247,9 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
         // Add Scheduling
         lock (this)
         {
-            State = state;
+            // Escalate and bump the generation so an in-flight recompute can't commit Clean over
+            // this invalidation; the debounce below still (re)schedules the update regardless.
+            stateCell.Invalidate(state);
             cts?.Cancel();
             cts = new();
 

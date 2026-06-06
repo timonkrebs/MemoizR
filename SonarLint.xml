@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Configures SonarAnalyzer rule parameters for the opt-in Cognitive Complexity
+  build (see Directory.Build.props). Threshold 15 is the SonarSource-recommended
+  per-method maximum: S3776 fires only for methods that exceed it, which is what
+  the CI gate enforces. Lower <Value> to 0 for a full per-method census of every
+  method's Cognitive Complexity.
+-->
+<AnalysisInput>
+  <Rules>
+    <Rule>
+      <Key>S3776</Key>
+      <Parameters>
+        <Parameter>
+          <Key>threshold</Key>
+          <Value>15</Value>
+        </Parameter>
+      </Parameters>
+    </Rule>
+  </Rules>
+</AnalysisInput>

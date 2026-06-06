@@ -451,4 +451,37 @@ public class ReactiveTests
         Assert.Equal(168, result1);
         Assert.Equal(168, result2);
     }
+
+    // Resume() recomputes the reaction and rewires Sources/Observers + the shared ReactionScope.
+    // It now goes through the ContextLock like every other update path, so running it
+    // concurrently with a flood of Set() calls must serialize cleanly: no exception, no deadlock,
+    // and the reaction must still converge on the final write. (Before the fix Resume ran the
+    // update with no lock held, racing a concurrent Set on the same context.)
+    [Fact(Timeout = 10000)]
+    public async Task Reaction_ResumeConcurrentWithSet_DoesNotThrowAndConverges()
+    {
+        var f = new MemoFactory();
+        var v1 = f.CreateSignal(0);
+        var last = -1;
+        var r = f.BuildReaction().CreateReaction(v1, v => last = v);
+
+        r.Pause();
+
+        // Hammer Set from many tasks while Resume runs concurrently against the same context.
+        var setters = Enumerable.Range(1, 200).Select(i => Task.Run(() => v1.Set(i))).ToArray();
+        var resume = r.Resume();
+        await Task.WhenAll(setters);
+        await resume;          // must not throw / deadlock
+        await v1.Set(1000);
+
+        // The debounced reaction must settle on the last write.
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        while (last != 1000 && sw.ElapsedMilliseconds < 5000)
+        {
+            await Task.Delay(20);
+        }
+
+        Assert.Equal(1000, last);
+        GC.KeepAlive(r);
+    }
 }

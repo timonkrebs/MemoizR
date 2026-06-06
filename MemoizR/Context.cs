@@ -1,13 +1,16 @@
 using MemoizR.StructuredAsyncLock;
-using Nito.AsyncEx;
 
 namespace MemoizR;
 
 public class ReactionScope
 {
+    // CurrentReaction is read on the lock-free Get fast path (e.g. MemoizR.Get), so it stays
+    // volatile for that read's visibility. CurrentGets/CurrentGetsIndex are only ever touched
+    // while the graph is serialized by the ContextLock (and CheckDependenciesTheSame's
+    // Context.Lock / Interlocked), so they don't need volatile.
     internal volatile IMemoHandlR? CurrentReaction = null;
-    internal volatile IMemoHandlR[] CurrentGets = [];
-    internal volatile int CurrentGetsIndex;
+    internal IMemoHandlR[] CurrentGets = [];
+    internal int CurrentGetsIndex;
     internal AsyncAsymmetricLock ContextLock = new();
 }
 
@@ -15,8 +18,6 @@ public class Context
 {
     private Lock Lock { get; } = new();
     private static readonly AsyncLocal<double> AsyncLocalScope = new();
-    
-    internal AsyncLock Mutex = new();
 
     /** current capture context for identifying sources (other memoizR elements)
     * - active while evaluating a memoizR function body  */

@@ -22,8 +22,11 @@ public sealed class AsyncAsymmetricLock
     /// <summary>
     /// Number of exclusive locks held; negative if upgradeable lock are held; 0 if no locks are held.
     /// </summary>
-    private volatile int locksHeld;
-    private volatile int upgradedLocksHeld;
+    // Every read/write of these counters happens inside lock (Lock) (the LocksHeld/
+    // UpgradedLocksHeld getters lock, and the Interlocked mutations run under that same lock),
+    // so the monitor already provides the fences and atomicity. No `volatile` is needed.
+    private int locksHeld;
+    private int upgradedLocksHeld;
     private double lockScope;
     private static readonly AsyncLocal<double> AsyncLocalScope = new();
 

@@ -92,4 +92,129 @@ public class RegressionTests
         Assert.Equal(10, last);
         Assert.Equal(afterInitial + 1, invocations);
     }
+
+    // The lock-free Get fast path reads State (volatile) and the cached Value without taking the
+    // ContextLock. Hammer that path from many readers while a writer keeps changing the source:
+    // readers must never observe an invalid value and the memo must converge to the last write.
+    // (A memory-visibility regression can't be proven by a unit test, but this guards the logic
+    // and exercises the fast path heavily.)
+    [Fact(Timeout = 20000)]
+    public async Task Memo_ConcurrentFastPathReads_StayConsistentAndConverge()
+    {
+        var f = new MemoFactory();
+        var v1 = f.CreateSignal(0);
+        var m1 = f.CreateMemoizR(async () => await v1.Get() * 2);
+        await m1.Get(); // prime so the CacheClean fast path is exercised
+
+        using var cts = new CancellationTokenSource();
+        var readers = Enumerable.Range(0, 8).Select(_ => Task.Run(async () =>
+        {
+            while (!cts.IsCancellationRequested)
+            {
+                var r = await m1.Get();
+                Assert.True(r % 2 == 0, $"memo is v1*2 and must always be even, saw {r}");
+            }
+        })).ToArray();
+
+        for (var i = 1; i <= 500; i++)
+        {
+            await v1.Set(i);
+        }
+
+        cts.Cancel();
+        await Task.WhenAll(readers);
+
+        Assert.Equal(1000, await m1.Get()); // converged to the last write (500 * 2)
+    }
+
+    // A value type wider than a machine word whose two halves are always written equal. The memo
+    // value is set as one coherent struct; a torn read on the lock-free Get fast path (a writer
+    // overwriting Value while a reader copies it) would surface mismatched halves. Backing Value
+    // with an immutable box behind a single volatile reference makes that impossible -- the reader
+    // only ever observes a fully-constructed box. This test guards that no-tearing invariant; it
+    // does not assert convergence *during* the concurrent reads, because whether a memo read by
+    // many independent flows converges immediately is governed by the (separate) per-flow
+    // ContextLock behaviour, not by the value publication this test covers.
+    private readonly record struct Pair(long A, long B);
+
+    [Fact(Timeout = 20000)]
+    public async Task Memo_ConcurrentFastPathReads_NeverTearWideStruct()
+    {
+        var f = new MemoFactory();
+        var v1 = f.CreateSignal(0L);
+        var m1 = f.CreateMemoizR(async () =>
+        {
+            var x = await v1.Get();
+            return new Pair(x, x);
+        });
+        await m1.Get(); // prime so the CacheClean fast path is exercised
+
+        using var cts = new CancellationTokenSource();
+        var readers = Enumerable.Range(0, 8).Select(_ => Task.Run(async () =>
+        {
+            while (!cts.IsCancellationRequested)
+            {
+                var p = await m1.Get();
+                Assert.True(p.A == p.B, $"torn read: halves came from different writes ({p.A} != {p.B})");
+            }
+        })).ToArray();
+
+        for (var i = 1L; i <= 2000; i++)
+        {
+            await v1.Set(i);
+        }
+
+        cts.Cancel();
+        await Task.WhenAll(readers);
+
+        // Once all concurrency has stopped, a fresh write must still propagate cleanly -- this
+        // also confirms the fast path returns the recomputed value, not a stale snapshot.
+        await v1.Set(123456);
+        Assert.Equal(new Pair(123456, 123456), await m1.Get());
+    }
+
+    // Deterministic reproduction of the cross-flow lost-update race. A memo's recompute (Update)
+    // ends by marking the node Clean. If a Stale (from a Set on another flow) dirties the node
+    // *during* that recompute, the Clean write must not clobber the Dirty -- otherwise the memo
+    // caches the value it computed from the now-stale source and never reconverges.
+    // Gates pin the exact interleaving: the recompute reads the source, parks, a newer Set lands,
+    // then the recompute resumes and tries to commit Clean.
+    [Fact(Timeout = 10000)]
+    public async Task Memo_StaleDuringRecompute_IsNotClobbered()
+    {
+        var f = new MemoFactory();
+        var s = f.CreateSignal(0);
+
+        var gateArmed = false;
+        var readDone = new TaskCompletionSource();
+        var proceed = new TaskCompletionSource();
+
+        var m = f.CreateMemoizR(async () =>
+        {
+            var x = await s.Get();
+            if (Volatile.Read(ref gateArmed))
+            {
+                Volatile.Write(ref gateArmed, false);
+                readDone.SetResult();
+                await proceed.Task;
+            }
+            return x;
+        });
+
+        await m.Get();            // prime: m is Clean@0 and the s -> m dependency link is established
+        await s.Set(1);           // m is now Dirty, s == 1
+
+        Volatile.Write(ref gateArmed, true);
+        var getter = Task.Run(async () => await m.Get()); // recomputes on its own flow: reads s == 1, parks
+        await readDone.Task;      // the recompute has read s == 1 and is parked mid-Update (Evaluating)
+
+        await s.Set(2);           // invalidate during the parked recompute: m -> Dirty, s == 2
+
+        proceed.SetResult();      // resume the recompute; it will try to commit the stale value (1)
+        await getter;
+
+        // The Set(2) that landed during the recompute must win: the memo must reconverge to 2,
+        // not stay stuck at the clobbered 1.
+        Assert.Equal(2, await m.Get());
+    }
 }
