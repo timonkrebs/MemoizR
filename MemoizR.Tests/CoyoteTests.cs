@@ -78,9 +78,12 @@ public class CoyoteTests
         // uncontrolled lock in play Coyote falls back to its periodic heuristic monitor, which
         // fires spuriously under the heavy interleaving of this chain workload (the bug this
         // test hunts -- a node cached-stale after the race -- is caught by the value assertion
-        // in the iteration, and real hangs still fail the suite via the CI job timeout).
+        // in the iteration, and real hangs still fail the suite via the CI job timeout). The
+        // deadlock timeout only controls how long a spuriously-"hung" iteration waits before
+        // being abandoned; the default 5s made those iterations dominate the runtime.
         var configuration = Configuration.Create()
             .WithTestingIterations(100)
+            .WithDeadlockTimeout(100)
             .WithPotentialDeadlocksReportedAsBugs(false);
         var engine = TestingEngine.Create(configuration, TestChainLostUpdateIteration);
         engine.Run();

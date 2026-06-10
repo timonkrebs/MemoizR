@@ -173,7 +173,13 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
     {
         if (synchronizationContext != null)
         {
-            var tcs = new TaskCompletionSource();
+            // RunContinuationsAsynchronously: completing the TCS must not run the rest of the
+            // update pipeline (link rewiring, state commit, lock releases) inline inside the
+            // SynchronizationContext's posted callback -- that work belongs to the update's own
+            // flow, and running it on e.g. a UI thread inside the post both blocks that thread
+            // and exposes the pipeline to whatever exception handling wraps the context's
+            // callbacks.
+            var tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
             async void SendOrPostCallback(object? _)
             {

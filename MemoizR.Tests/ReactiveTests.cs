@@ -136,15 +136,15 @@ public class ReactiveTests
         var m1 = f.BuildReaction()
         .CreateReaction(v1, v => invocations++);
 
-        await Task.Delay(30);
+        await TestHelpers.WaitForConvergenceAsync(() => invocations == 1);
         Assert.Equal(1, invocations);
-        await Task.Delay(100);
 
         await v1.Set(2);
-        await Task.Delay(100);
-
+        await TestHelpers.WaitForConvergenceAsync(() => invocations == 2);
         Assert.Equal(2, invocations);
 
+        // Same-value Set must not retrigger: a negative assertion, so it keeps a real
+        // quiescence window instead of a poll.
         await v1.Set(2);
         await Task.Delay(20);
 
@@ -217,7 +217,8 @@ public class ReactiveTests
                         });
             });
 
-        await Task.Delay(200);
+        // The reaction is built on another task; wait for its initial run instead of guessing.
+        await TestHelpers.WaitForConvergenceAsync(() => invocationCount >= 1);
 
         _ = v1.Set(1000);
         for (var i = 0; i < 100; i++)
@@ -232,14 +233,13 @@ public class ReactiveTests
             _ = v1.Set(j);
         }
 
-        await Task.Delay(200);
+        // The fire-and-forget Sets race each other; the last write of the second loop (20) must
+        // win once everything settles -- poll for the debounced reaction to land on it.
+        await TestHelpers.WaitForConvergenceAsync(() => result == 40);
 
         Assert.Equal(40, await m1.Get());
         Assert.Equal(40, result);
         Assert.Equal(await m1.Get(), result);
-
-        await Task.Delay(100);
-
         Assert.True(invocationCount >= 1, "Must be invoked at least once");
     }
 
@@ -298,7 +298,9 @@ public class ReactiveTests
         {
             var j = i;
             tasks.Add(Task.Run(async () => await v1.Set(j)));
-            await Task.Delay(35);
+            // Pace the Sets so they spread over time (each lands well outside the 1ms debounce
+            // window); 10ms keeps that property without the original 35ms * 40 = 1.4s of padding.
+            await Task.Delay(10);
         }
         await Task.WhenAll(tasks);
         tasks.Add(Task.Run(async () => await v1.Set(41)));
@@ -308,7 +310,8 @@ public class ReactiveTests
         tasks.Add(Task.Run(async () => resultM1 = await m1.Get()));
 
         await Task.WhenAll(tasks);
-        await Task.Delay(100);
+        // Wait for both debounced reactions to land on the final write instead of a fixed delay.
+        await TestHelpers.WaitForConvergenceAsync(() => result1 == 82 && result2 == 82);
 
         Assert.Equal(82, await m1.Get());
 
@@ -440,13 +443,15 @@ public class ReactiveTests
             Task.Run(async () => await v1.Set(41))
         };
 
-        await Task.Delay(500);
+        // Wait for the first write to propagate through both slow memos (100ms each) before the
+        // second write, instead of a fixed 500ms: 41 * 2 * 2 = 164.
+        await TestHelpers.WaitForConvergenceAsync(() => result1 == 164 && result2 == 164);
 
         tasks.Add(Task.Run(async () => await v1.Set(42)));
 
         await Task.WhenAll(tasks);
 
-        await Task.Delay(190);
+        await TestHelpers.WaitForConvergenceAsync(() => result1 == 168 && result2 == 168);
 
         Assert.Equal(168, result1);
         Assert.Equal(168, result2);
@@ -541,8 +546,11 @@ public class ReactiveTests
     }
 
     // Happy path for the SynchronizationContext marshalling: Execute must actually be posted to
-    // the supplied context and the reaction must converge through it.
-    [Fact(Timeout = 10000)]
+    // the supplied context and the reaction must converge through it. Generous poll budgets:
+    // every await inside Execute round-trips through the context's Post (a thread-pool hop), so
+    // under full-suite parallel load on a small runner propagation can take a while -- the polls
+    // exit early on healthy runs.
+    [Fact(Timeout = 30000)]
     public async Task Reaction_WithSynchronizationContext_ExecutesViaContextAndConverges()
     {
         var syncCtx = new CapturingSynchronizationContext();
@@ -551,12 +559,12 @@ public class ReactiveTests
         var last = 0;
         var r = f.BuildReaction().CreateReaction(v1, v => last = v);
 
-        await TestHelpers.WaitForConvergenceAsync(() => last == 1);
+        await TestHelpers.WaitForConvergenceAsync(() => last == 1, timeoutMs: 15000);
         Assert.Equal(1, last);
         Assert.True(syncCtx.Posted > 0, "Execute was never posted to the supplied SynchronizationContext");
 
         await v1.Set(7);
-        await TestHelpers.WaitForConvergenceAsync(() => last == 7);
+        await TestHelpers.WaitForConvergenceAsync(() => last == 7, timeoutMs: 15000);
         Assert.Equal(7, last);
         Assert.True(syncCtx.Exceptions.IsEmpty,
             $"unhandled exception escaped onto the SynchronizationContext: {string.Join(", ", syncCtx.Exceptions)}");
@@ -569,7 +577,7 @@ public class ReactiveTests
     // -- a process crash on a real UI context. The fault must instead surface exactly once,
     // through the awaited update (observable via Resume), with nothing escaping onto the context,
     // and the reaction must recover on the next Set.
-    [Fact(Timeout = 10000)]
+    [Fact(Timeout = 30000)]
     public async Task Reaction_ExecuteThrowsUnderSynchronizationContext_FaultsResumeWithoutCrashingContext()
     {
         var syncCtx = new CapturingSynchronizationContext();
@@ -582,7 +590,7 @@ public class ReactiveTests
             last = v;
         });
 
-        await TestHelpers.WaitForConvergenceAsync(() => last == 1); // initial run done
+        await TestHelpers.WaitForConvergenceAsync(() => last == 1, timeoutMs: 15000); // initial run done
 
         r.Pause();
         await v1.Set(13);
@@ -592,7 +600,7 @@ public class ReactiveTests
 
         // The failed run must not have poisoned the reaction: the next write still triggers it.
         await v1.Set(2);
-        await TestHelpers.WaitForConvergenceAsync(() => last == 2);
+        await TestHelpers.WaitForConvergenceAsync(() => last == 2, timeoutMs: 15000);
         Assert.Equal(2, last);
 
         // With the double-completion bug, the posted async void rethrew

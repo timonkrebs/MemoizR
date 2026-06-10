@@ -79,7 +79,7 @@ public class RegressionTests
             .AddDebounceTime(TimeSpan.FromMilliseconds(50))
             .CreateReaction(v1, v => { Interlocked.Increment(ref invocations); last = v; });
 
-        await Task.Delay(200);
+        await TestHelpers.WaitForConvergenceAsync(() => Volatile.Read(ref invocations) >= 1);
         var afterInitial = invocations; // the initial reaction run
 
         for (var i = 1; i <= 10; i++)
@@ -87,7 +87,10 @@ public class RegressionTests
             await v1.Set(i);
         }
 
-        await Task.Delay(300);
+        // Wait for the coalesced run to land on the final value, then keep a fixed quiescence
+        // window (4x the 50ms debounce) for the negative half: no FURTHER invocation may follow.
+        await TestHelpers.WaitForConvergenceAsync(() => last == 10);
+        await Task.Delay(200);
 
         Assert.Equal(10, last);
         Assert.Equal(afterInitial + 1, invocations);

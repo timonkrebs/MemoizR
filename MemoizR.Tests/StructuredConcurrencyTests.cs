@@ -123,35 +123,39 @@ public class StructuredConcurrencyTests
             x = c;
         });
 
-        await Task.Delay(100);
+        // Poll for the propagated value (the reaction assigns x after bumping invocations, so a
+        // converged value implies the matching invocation completed) instead of fixed delays.
+        await WaitForConvergenceAsync(() => invocations == 1);
         Assert.Equal(1, invocations);
 
         await v1.Set(4);
-        await Task.Delay(100);
+        await WaitForConvergenceAsync(() => x.ElementAt(0) == 4);
         Assert.NotNull(r);
         Assert.Equal(4, x.Single(x => x == 4));
         Assert.Equal(4, x.ElementAt(0));
         Assert.Equal(2, invocations);
 
         await v2.Set(5);
-        await Task.Delay(100);
+        await WaitForConvergenceAsync(() => x.ElementAt(1) == 5);
         Assert.Equal(5, x.Single(x => x == 5));
         Assert.Equal(5, x.ElementAt(1));
         Assert.Equal(3, invocations);
 
         await v3.Set(6);
-        await Task.Delay(100);
+        await WaitForConvergenceAsync(() => x.ElementAt(2) == 6);
         Assert.Equal(6, x.Single(x => x == 6));
         Assert.Equal(6, x.ElementAt(2));
         Assert.Equal(4, invocations);
 
         await v2.Set(7);
         await v2.Set(8);
-        await Task.Delay(100);
+        await WaitForConvergenceAsync(() => x.ElementAt(1) == 8);
         Assert.Equal(8, x.Single(x => x == 8));
         Assert.Equal(8, x.ElementAt(1));
         Assert.Equal(5, invocations);
 
+        // Re-setting to the same final value must not retrigger: this is a negative assertion,
+        // so it needs a real quiescence window, not a poll.
         await v2.Set(7);
         await v2.Set(8);
         await Task.Delay(100);
@@ -195,28 +199,31 @@ public class StructuredConcurrencyTests
             x = c;
         });
 
-        await Task.Delay(100);
+        // Poll for the propagated value (the reaction assigns x after bumping invocations, so a
+        // converged value implies the matching invocation completed) instead of fixed delays.
+        await WaitForConvergenceAsync(() => invocations == 1);
         Assert.Equal(1, invocations);
 
         await v1.Set(4);
-        await Task.Delay(100);
+        await WaitForConvergenceAsync(() => x.ElementAt(0) == 4);
         Assert.Equal(4, x.Single(x => x == 4));
         Assert.Equal(4, x.ElementAt(0));
         Assert.Equal(2, invocations);
 
         await v2.Set(5);
-        await Task.Delay(100);
+        await WaitForConvergenceAsync(() => x.ElementAt(1) == 5);
         Assert.Equal(5, x.Single(x => x == 5));
         Assert.Equal(5, x.ElementAt(1));
         Assert.Equal(3, invocations);
 
         await v3.Set(6);
-        await Task.Delay(100);
+        await WaitForConvergenceAsync(() => x.ElementAt(2) == 6);
         Assert.Equal(6, x.Single(x => x == 6));
         Assert.Equal(6, x.ElementAt(2));
         Assert.Equal(4, invocations);
 
-        // If canceled nothing should change
+        // If canceled nothing should change -- a negative assertion, so it needs a real
+        // quiescence window, not a poll.
         await v2.Set(7);
         await v2.Set(6);
         c1.Cancel();
@@ -228,7 +235,7 @@ public class StructuredConcurrencyTests
         // cancellation should not disable reactivity and never get into race conditions
         await v2.Set(7);
         await v2.Set(8);
-        await Task.Delay(100);
+        await WaitForConvergenceAsync(() => x.ElementAt(1) == 8);
         Assert.Equal(8, x.Single(x => x == 8));
         Assert.Equal(8, x.ElementAt(1));
         Assert.Equal(5, invocations);
@@ -264,16 +271,18 @@ public class StructuredConcurrencyTests
         f.BuildReaction().CreateReaction(c1, c => x = c);
 
         await Task.Delay(100);
-        var _ = v1.Set(1);
 
+        // Fire all Sets concurrently (they start hot), then await their completion instead of
+        // guessing a fixed settle delay -- same concurrency, deterministic synchronization.
+        var concurrentSets = new List<Task> { v1.Set(1) };
         for (var i = 0; i < 100; i++)
         {
-            _ = v1.Set(i);
-            _ = v2.Set(i);
-            _ = v3.Set(i);
+            concurrentSets.Add(v1.Set(i));
+            concurrentSets.Add(v2.Set(i));
+            concurrentSets.Add(v3.Set(i));
         }
+        await Task.WhenAll(concurrentSets);
 
-        await Task.Delay(1000);
         var one = v1.Set(1);
         var two = v2.Set(2);
         await v3.Set(3);
@@ -372,7 +381,7 @@ public class StructuredConcurrencyTests
         var child1 = f.CreateConcurrentMapReduce(
             async c =>
             {
-                await Task.Delay(3000);
+                await Task.Delay(300);
                 return 3;
             });
 
@@ -384,10 +393,12 @@ public class StructuredConcurrencyTests
             },
             async c =>
             {
-                await Task.Delay(2000, c.Token);
+                // Shorter than the child's delay, so the parent still has to keep waiting for
+                // the slower child after this sibling completed (the scenario under test).
+                await Task.Delay(200, c.Token);
                 return 2;
             });
 
-        var x = await c1.Get(); // should take 3 seconds
+        var x = await c1.Get(); // must wait for the slowest child (~300ms), not deadlock or cancel
     }
 }
