@@ -125,8 +125,32 @@ var f = new MemoFactory();
 var v1 = f.CreateSignal(1);
 var m1 = f.CreateMemoizR(async() => await v1.Get());
 var m2 = f.CreateMemoizR(async() => await v1.Get() * 2);
-var r1 = f.CreateReaction(m1, m2, (val1, val2) => val1 + val2);
+var r1 = f.BuildReaction().CreateReaction(m1, m2, (val1, val2) => val1 + val2);
 ```
+
+### WPF / UI threads
+
+With the `MemoizR.Wpf` package the whole dependency graph keeps evaluating on the thread pool;
+only each reaction's action is dispatched to the WPF UI thread:
+
+```cs
+var f = new MemoFactory().AddWpfDispatcher(); // uses Application.Current.Dispatcher
+
+var v1 = f.CreateSignal(1);
+var m1 = f.CreateMemoizR(async () => await v1.Get() * 2); // computed on worker threads
+
+// Dependencies are passed as separate parameters so they are evaluated independently of the
+// action; only the action below runs on the UI thread, with the already-computed values.
+var r1 = f.BuildReaction().CreateReaction(m1, v => viewModel.Value = v);
+
+await v1.Set(5); // safe from any thread
+```
+
+A specific `Dispatcher` can be supplied with `f.AddWpfDispatcher(dispatcher)`. On other UI
+stacks, register the UI `SynchronizationContext` directly from the UI thread with
+`f.AddSynchronizationContext(SynchronizationContext.Current!)` (`MemoizR.Reactive`); reactions
+built from the factory then follow the same contract: dependencies on the thread pool, action
+on the registered context.
 
 Try it out!https:
 Experiment with MemoizR online: https://dotnetfiddle.net/Widget/EWtptc

@@ -14,16 +14,24 @@ var f = new MemoFactory();
 var v1 = f.CreateSignal(1);
 var m1 = f.CreateMemoizR(async() => await v1.Get());
 var m2 = f.CreateMemoizR(async() => await v1.Get() * 2);
-var r1 = f.CreateReaction(m1, m2, (val1, val2) => val1 + val2);
+var r1 = f.BuildReaction().CreateReaction(m1, m2, (val1, val2) => val1 + val2);
 ```
 
-```csharp
+## UI threads
 
-// The following example uses the TaskScheduler.FromCurrentSynchronizationContext method in a Windows Presentation Foundation (WPF) app to schedule
-// https://learn.microsoft.com/en-us/dotnet/api/system.threading.tasks.taskscheduler?view=net-7.0#specifying-a-synchronization-context
-var UISyncContext = SynchronizationContext.Current;
+Register the UI thread's SynchronizationContext (from the UI thread) and reactions deliver
+their action on it, while the dependencies — passed as separate parameters so they can be
+evaluated independently of the action — keep evaluating on the thread pool:
+
+```csharp
+// e.g. in a UI app: capture the UI SynchronizationContext on the UI thread
+var UISyncContext = SynchronizationContext.Current!;
 var f = new MemoFactory();
 f.AddSynchronizationContext(UISyncContext);
 
-var r1 = f.CreateReaction(m1, m2, (val1, val2) => val1 + val2);
+// m1 and m2 are computed on worker threads; only the action runs on the UI thread.
+var r1 = f.BuildReaction().CreateReaction(m1, m2, (val1, val2) => val1 + val2);
 ```
+
+For WPF, the MemoizR.Wpf package wires this up directly from `Application.Current.Dispatcher`
+(callable from any thread): `var f = new MemoFactory().AddWpfDispatcher();`

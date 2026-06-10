@@ -221,7 +221,10 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
     }
 
     // Run Execute on the captured SynchronizationContext if one was supplied (marshalling the
-    // result/exception back through a TaskCompletionSource), otherwise run it inline.
+    // result/exception back through a TaskCompletionSource), otherwise run it inline. Only
+    // AdvancedReaction supplies a context here -- its opaque body cannot be split, so it runs on
+    // the context as a whole. Reaction marshals at action granularity inside its composed body
+    // instead (ReactionBuilder.InvokeActionAsync), keeping dependency evaluation off the context.
     private async Task InvokeExecute()
     {
         if (synchronizationContext != null)

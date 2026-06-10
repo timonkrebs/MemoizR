@@ -3,6 +3,16 @@ All notable changes to this project will be documented in this file.
  
 The format is based on [Keep a Changelog](http://keepachangelog.com/)
 and this project adheres to [Semantic Versioning](http://semver.org/).
+## [Unreleased]
+ 
+### Added
+- MemoizR.Wpf package: `AddWpfDispatcher` routes reaction actions to the WPF UI thread (via `Application.Current.Dispatcher` or an explicit `Dispatcher`) while the dependency graph keeps evaluating on the thread pool (#13)
+   
+### Changed
+- Reactions built with a SynchronizationContext now evaluate their dependencies on the thread pool and marshal only the action (with the already-evaluated values) to the context; `CreateAdvancedReaction` keeps running its whole body on the context (#13)
+ 
+### Fixed
+
 ## [0.1.0] - 2023-10-06
  
 ### Added

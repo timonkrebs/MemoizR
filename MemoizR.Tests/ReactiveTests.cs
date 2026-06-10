@@ -545,13 +545,13 @@ public class ReactiveTests
         }
     }
 
-    // Happy path for the SynchronizationContext marshalling: Execute must actually be posted to
-    // the supplied context and the reaction must converge through it. Generous poll budgets:
-    // every await inside Execute round-trips through the context's Post (a thread-pool hop), so
-    // under full-suite parallel load on a small runner propagation can take a while -- the polls
-    // exit early on healthy runs.
+    // Happy path for the SynchronizationContext marshalling: the reaction's action must actually
+    // be posted to the supplied context and the reaction must converge through it. Generous poll
+    // budgets: the action round-trips through the context's Post (a thread-pool hop), so under
+    // full-suite parallel load on a small runner propagation can take a while -- the polls exit
+    // early on healthy runs.
     [Fact(Timeout = 30000)]
-    public async Task Reaction_WithSynchronizationContext_ExecutesViaContextAndConverges()
+    public async Task Reaction_WithSynchronizationContext_RunsActionViaContextAndConverges()
     {
         var syncCtx = new CapturingSynchronizationContext();
         var f = new MemoFactory().AddSynchronizationContext(syncCtx);
@@ -561,7 +561,7 @@ public class ReactiveTests
 
         await TestHelpers.WaitForConvergenceAsync(() => last == 1, timeoutMs: 15000);
         Assert.Equal(1, last);
-        Assert.True(syncCtx.Posted > 0, "Execute was never posted to the supplied SynchronizationContext");
+        Assert.True(syncCtx.Posted > 0, "the action was never posted to the supplied SynchronizationContext");
 
         await v1.Set(7);
         await TestHelpers.WaitForConvergenceAsync(() => last == 7, timeoutMs: 15000);
@@ -571,14 +571,95 @@ public class ReactiveTests
         GC.KeepAlive(r);
     }
 
-    // Regression for the async-void double completion in InvokeExecute's posted callback: when
-    // Execute throws, the TCS was completed with SetException and then SetResult, and the
-    // resulting InvalidOperationException escaped the async void onto the SynchronizationContext
-    // -- a process crash on a real UI context. The fault must instead surface exactly once,
-    // through the awaited update (observable via Resume), with nothing escaping onto the context,
-    // and the reaction must recover on the next Set.
+    // The thread-pool/UI-thread split (#13): with a SynchronizationContext registered, dependency
+    // evaluation (the memo computations) must stay OFF the context -- on the worker flow that
+    // runs the update -- and only the action, with the already-evaluated values, may be
+    // marshalled to it. The capturing context makes itself Current for posted callbacks, so
+    // SynchronizationContext.Current distinguishes the two sides.
     [Fact(Timeout = 30000)]
-    public async Task Reaction_ExecuteThrowsUnderSynchronizationContext_FaultsResumeWithoutCrashingContext()
+    public async Task Reaction_WithSynchronizationContext_EvaluatesDependenciesOffContext_RunsActionOnContext()
+    {
+        var syncCtx = new CapturingSynchronizationContext();
+        var f = new MemoFactory().AddSynchronizationContext(syncCtx);
+        var v1 = f.CreateSignal(1);
+        var v2 = f.CreateSignal(10);
+        var memoRanOnContext = false;
+        var m1 = f.CreateMemoizR(async () =>
+        {
+            memoRanOnContext |= SynchronizationContext.Current == syncCtx;
+            return await v1.Get() * 2;
+        });
+
+        var last = 0;
+        var actionRanOffContext = false;
+        var r = f.BuildReaction().CreateReaction(m1, v2, (a, b) =>
+        {
+            actionRanOffContext |= SynchronizationContext.Current != syncCtx;
+            last = a + b;
+        });
+
+        await TestHelpers.WaitForConvergenceAsync(() => last == 12, timeoutMs: 15000);
+
+        await v1.Set(5);
+        await TestHelpers.WaitForConvergenceAsync(() => last == 20, timeoutMs: 15000);
+
+        Assert.False(memoRanOnContext, "dependency evaluation ran via the SynchronizationContext; it must stay on the thread pool");
+        Assert.False(actionRanOffContext, "the action ran outside the SynchronizationContext");
+        Assert.True(syncCtx.Exceptions.IsEmpty,
+            $"unhandled exception escaped onto the SynchronizationContext: {string.Join(", ", syncCtx.Exceptions)}");
+        GC.KeepAlive(r);
+    }
+
+    // CreateAdvancedReaction is the escape hatch from the dependency/action split: its opaque
+    // Func<Task> body cannot be split, so the WHOLE body still starts on the context
+    // (ReactionBase.InvokeExecute). A fault must surface exactly once through the awaited update
+    // (observable via Resume) with nothing escaping onto the context -- this keeps the
+    // async-void double-completion regression covered now that plain reactions no longer go
+    // through InvokeExecute's posted callback.
+    [Fact(Timeout = 30000)]
+    public async Task AdvancedReaction_WithSynchronizationContext_RunsWholeBodyViaContext_AndFaultsCleanly()
+    {
+        var syncCtx = new CapturingSynchronizationContext();
+        var f = new MemoFactory().AddSynchronizationContext(syncCtx);
+        var v1 = f.CreateSignal(1);
+        var last = 0;
+        var bodyStartedOffContext = false;
+        var r = f.BuildReaction().CreateAdvancedReaction(async () =>
+        {
+            bodyStartedOffContext |= SynchronizationContext.Current != syncCtx;
+            var v = await v1.Get();
+            if (v == 13) throw new InvalidOperationException("boom13");
+            last = v;
+        });
+
+        await TestHelpers.WaitForConvergenceAsync(() => last == 1, timeoutMs: 15000);
+        Assert.False(bodyStartedOffContext, "the advanced reaction body must start on the SynchronizationContext");
+        Assert.True(syncCtx.Posted > 0, "the body was never posted to the supplied SynchronizationContext");
+
+        r.Pause();
+        await v1.Set(13);
+        // Resume runs the pending update inline, so the Execute fault propagates to the caller.
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => r.Resume());
+        Assert.Contains("boom13", ex.Message);
+
+        // The failed run must not have poisoned the reaction: the next write still triggers it.
+        await v1.Set(2);
+        await TestHelpers.WaitForConvergenceAsync(() => last == 2, timeoutMs: 15000);
+        Assert.Equal(2, last);
+
+        Assert.True(syncCtx.Exceptions.IsEmpty,
+            $"unhandled exception escaped onto the SynchronizationContext: {string.Join(", ", syncCtx.Exceptions)}");
+        GC.KeepAlive(r);
+    }
+
+    // A throwing action under a SynchronizationContext (the posted callback is
+    // ReactionBuilder.InvokeActionAsync's): the fault must surface exactly once, through the
+    // awaited update (observable via Resume), with nothing escaping onto the context -- on a
+    // real UI context an escaped exception is a process crash -- and the reaction must recover
+    // on the next Set. (The async-void double-completion regression that motivated this shape
+    // lives on InvokeExecute's posted callback, covered by the AdvancedReaction test above.)
+    [Fact(Timeout = 30000)]
+    public async Task Reaction_ActionThrowsUnderSynchronizationContext_FaultsResumeWithoutCrashingContext()
     {
         var syncCtx = new CapturingSynchronizationContext();
         var f = new MemoFactory().AddSynchronizationContext(syncCtx);
