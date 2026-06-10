@@ -128,6 +128,34 @@ var m2 = f.CreateMemoizR(async() => await v1.Get() * 2);
 var r1 = f.CreateReaction(m1, m2, (val1, val2) => val1 + val2);
 ```
 
+### Data-race safety (strict mode)
+
+MemoizR publishes value *references* tear-free across concurrent flows, but only an immutable
+(or thread-safe) type makes the object behind the reference safe to share. Strict mode — the
+runtime analog of Swift's `Sendable` checking — validates this at node creation:
+
+```cs
+var f = new MemoFactory("strict", MemoFactoryOptions.StrictSendableChecks);
+
+record Person(string Name, int Age);          // init-only members => Sendable
+var p = f.CreateSignal(new Person("Ada", 36)); // ok
+var xs = f.CreateSignal(ImmutableArray.Create(1, 2, 3)); // ok
+
+f.CreateSignal(new List<int>()); // throws: List<int> is not Sendable
+                                 // (writable instance field '_items')
+```
+
+Types the structural check cannot prove (internally synchronized ones) can opt in with
+`[Sendable]`, the analog of Swift's `@unchecked Sendable`. Code that must only run inside a
+serialized graph evaluation can assert it dynamically — the `preconditionIsolated()` analog:
+
+```cs
+f.AssertEvaluationIsolated(); // throws outside a Get/Set/recompute/reaction update
+```
+
+See [ADR 0003](docs/adr/0003-sendable-checking-and-isolation-assertions.md) for the design and
+its limits.
+
 Try it out!https:
 Experiment with MemoizR online: https://dotnetfiddle.net/Widget/EWtptc
 

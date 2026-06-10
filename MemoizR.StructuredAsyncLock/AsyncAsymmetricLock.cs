@@ -67,6 +67,34 @@ public sealed class AsyncAsymmetricLock
     }
 
     /// <summary>
+    /// Whether the current async flow holds this lock (in either mode). Flow identity is the
+    /// same AsyncLocal scope that drives reentrancy, so a child task spawned inside the locked
+    /// region (which inherits the parent's execution context and would be granted a recursive
+    /// acquisition) counts as the holding flow, while an unrelated flow does not. Intended for
+    /// dynamic isolation assertions ("am I inside the locked region?"): the answer is a
+    /// point-in-time snapshot that can be stale the moment it is returned, so it must never be
+    /// used to decide whether an acquisition can be skipped.
+    /// </summary>
+    public bool IsHeldByCurrentFlow
+    {
+        get
+        {
+            // A flow that never acquired any asymmetric lock has no scope key minted; it cannot
+            // be the holder. Read outside the monitor -- the AsyncLocal is flow-local state.
+            var currentScope = AsyncLocalScope.Value;
+            if (currentScope == 0)
+            {
+                return false;
+            }
+
+            lock (Lock)
+            {
+                return lockScope == currentScope && (locksHeld > 0 || upgradedLocksHeld > 0);
+            }
+        }
+    }
+
+    /// <summary>
     /// Returns the current flow's lock scope, minting and pinning a fresh one onto the
     /// AsyncLocal if the flow has none yet. Must be called under <see cref="Lock"/>.
     /// </summary>

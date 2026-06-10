@@ -7,6 +7,7 @@ capture a significant decision, its context, and its consequences.
 |---|-------|--------|
 | [0001](0001-volatile-field-usage.md) | Use of `volatile` fields in MemoizR | Accepted |
 | [0002](0002-choosing-a-lock.md) | Choosing a lock: `System.Threading.Lock` vs `AsyncAsymmetricLock` | Accepted |
+| [0003](0003-sendable-checking-and-isolation-assertions.md) | Data-race safety at the user boundary: Sendable checking and dynamic isolation assertions | Accepted |
 
 New ADRs are numbered sequentially (`NNNN-title.md`).
 

@@ -11,6 +11,7 @@ public static class StructuredConcurrencyFactory
 
     public static ConcurrentMapReduce<T> CreateConcurrentMapReduce<T>(this MemoFactory memoFactory, string label, params Func<IStructuredResourceGroup, Task<T>>[] fns) where T : INumber<T>
     {
+        memoFactory.EnsureSendableIfStrict<T>();
         return new(fns, (v, a) => v + a, memoFactory.Context)
         {
             Label = label
@@ -24,6 +25,7 @@ public static class StructuredConcurrencyFactory
 
     public static ConcurrentMapReduce<T> CreateConcurrentMapReduce<T>(this MemoFactory memoFactory, string label, Func<T, T?, T> reduce, params Func<IStructuredResourceGroup, Task<T>>[] fns)
     {
+        memoFactory.EnsureSendableIfStrict<T>();
         return new(fns, reduce, memoFactory.Context)
         {
             Label = label
@@ -37,6 +39,9 @@ public static class StructuredConcurrencyFactory
 
     public static ConcurrentRace<T, R> CreateConcurrentRace<T, R>(this MemoFactory memoFactory, string label, Func<Task<R>> resolver, params Func<IStructuredResourceGroup, R, Task<T>>[] fns)
     {
+        // R crosses flows too: the resolver's result is handed to every racing child in parallel.
+        memoFactory.EnsureSendableIfStrict<T>();
+        memoFactory.EnsureSendableIfStrict<R>();
         return new(resolver, fns, memoFactory.Context)
         {
             Label = label
@@ -50,6 +55,9 @@ public static class StructuredConcurrencyFactory
 
     public static ConcurrentMap<T> CreateConcurrentMap<T>(this MemoFactory memoFactory, string label, params Func<IStructuredResourceGroup, Task<T>>[] fns)
     {
+        // The node's value is an IEnumerable<T> assembled fresh per recompute; the Ts inside it
+        // are what the consumers share, so the element type is what must be Sendable.
+        memoFactory.EnsureSendableIfStrict<T>();
         return new(fns, memoFactory.Context)
         {
             Label = label

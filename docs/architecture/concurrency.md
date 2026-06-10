@@ -652,7 +652,27 @@ Design points, each pinned by a test:
 | I11 | Scopes are cleaned up only by their creator | `CreateNewScopeIfNeeded` → `bool` (§2) | `Reaction_ResumeInsideActiveEvaluation…` |
 | I12 | Reaction side effects are ordered per node | reaction mutex (§11) | `Reaction_ExecutionsNeverOverlap…` |
 
-## 13. How this is verified
+## 13. The user boundary: Sendable values and dynamic isolation checks
+
+Everything above makes MemoizR's *own* state race-free — but the graph also shares **user
+values** across flows: `Value` hands the same `T` reference to every consumer, including
+lock-free fast-path readers, while any flow may be mutating the object behind it. That gap (and
+the runtime checks that close it, modeled on Swift's `Sendable` + `preconditionIsolated`) is
+recorded in [ADR 0003](../adr/0003-sendable-checking-and-isolation-assertions.md):
+
+- `SendableChecker` structurally verifies that a type is deeply immutable or internally
+  synchronized; `[Sendable]` is the trusted opt-in for types it cannot prove.
+- `MemoFactoryOptions.StrictSendableChecks` enforces the check when value-bearing nodes are
+  created (signals, memos, the concurrent nodes — including `ConcurrentRace`'s resolver result,
+  which is handed to every racing child in parallel).
+- `AsyncAsymmetricLock.IsHeldByCurrentFlow` + `Context.AssertEvaluationIsolated()` let code
+  assert "I am inside a serialized graph evaluation"; a DEBUG-only assert in
+  `UpdateSourceAndObserverLinks` mechanically pins its documented "only inside a
+  ContextLock-serialized evaluation" contract on every recompute of every Debug test run.
+
+These are boundary checks, not new synchronization: they change nothing in layers 1–5.
+
+## 14. How this is verified
 
 Three complementary techniques, because no single one can prove a memory model:
 
