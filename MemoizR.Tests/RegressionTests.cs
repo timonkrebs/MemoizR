@@ -283,4 +283,78 @@ public class RegressionTests
         // s == 2 must win: p recomputes to 1 and c must follow, not stay cached at 0.
         Assert.Equal(1, await c.Get());
     }
+
+    // Stress for the whole lost-update class across a multi-level chain: concurrent readers pull
+    // recomputes through every level on their own flows while a writer keeps invalidating from
+    // another, exercising the cascade-suppression, generation-bump and renotify paths at every
+    // depth. Whatever interleavings occur, the chain must reflect the last write once quiescent,
+    // and a fresh write afterwards must still propagate through every level (a node silently
+    // stuck Clean-but-stale would fail both).
+    [Fact(Timeout = 30000)]
+    public async Task MemoChain_ConcurrentSetsAndReads_AlwaysReconverges()
+    {
+        var f = new MemoFactory();
+        var s = f.CreateSignal(0);
+        var m1 = f.CreateMemoizR(async () => await s.Get() * 2);
+        var m2 = f.CreateMemoizR(async () => await m1.Get() + 1);
+        var m3 = f.CreateMemoizR(async () => await m2.Get() * 3);
+        await m3.Get(); // prime the whole chain
+
+        using var cts = new CancellationTokenSource();
+        var readers = new[] { (IStateGetR<int>)m1, m2, m3 }.Select(node => Task.Run(async () =>
+        {
+            while (!cts.IsCancellationRequested)
+            {
+                await node.Get();
+                await Task.Yield();
+            }
+        })).ToArray();
+
+        for (var i = 1; i <= 300; i++)
+        {
+            await s.Set(i);
+        }
+
+        cts.Cancel();
+        await Task.WhenAll(readers);
+
+        // Quiescent: every level must serve the value derived from the last write.
+        Assert.Equal((300 * 2 + 1) * 3, await m3.Get());
+
+        // And a write after quiescence must still reach the deepest node.
+        await s.Set(1000);
+        Assert.Equal((1000 * 2 + 1) * 3, await m3.Get());
+    }
+
+    // Error-path contract: a throwing computation must surface to the caller, must not poison the
+    // node, and must not sever its dependency links. Documented current semantics: with no
+    // further invalidation the memo keeps serving the last good value (it does not retry the
+    // failed computation on its own); the next write recomputes and recovers.
+    [Fact(Timeout = 10000)]
+    public async Task Memo_TransientException_DoesNotPoisonNode()
+    {
+        var f = new MemoFactory();
+        var v1 = f.CreateSignal(1);
+        var m = f.CreateMemoizR(async () =>
+        {
+            var x = await v1.Get();
+            if (x == 13) throw new InvalidOperationException("boom13");
+            return x * 2;
+        });
+
+        Assert.Equal(2, await m.Get());
+
+        await v1.Set(13);
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => m.Get());
+        Assert.Contains("boom13", ex.Message);
+
+        // No further invalidation: the memo serves the last good value rather than rethrowing
+        // or returning default.
+        Assert.Equal(2, await m.Get());
+
+        // The failed evaluation must not have unhooked the memo from its source: a new write
+        // still dirties it and the recompute succeeds.
+        await v1.Set(7);
+        Assert.Equal(14, await m.Get());
+    }
 }

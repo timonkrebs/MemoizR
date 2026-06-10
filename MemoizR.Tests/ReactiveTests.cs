@@ -507,4 +507,158 @@ public class ReactiveTests
         Assert.Equal(10, await m.Get());
         GC.KeepAlive(r);
     }
+
+    // A test SynchronizationContext that runs posted callbacks on the thread pool, makes itself
+    // Current for the callback (so async-void exceptions are rethrown through it, exactly like a
+    // UI context), and records any exception a callback throws instead of crashing the test host.
+    private sealed class CapturingSynchronizationContext : SynchronizationContext
+    {
+        public readonly System.Collections.Concurrent.ConcurrentQueue<Exception> Exceptions = new();
+        private int posted;
+        public int Posted => Volatile.Read(ref posted);
+
+        public override void Post(SendOrPostCallback d, object? state)
+        {
+            Interlocked.Increment(ref posted);
+            ThreadPool.QueueUserWorkItem(_ =>
+            {
+                var prev = Current;
+                SetSynchronizationContext(this);
+                try
+                {
+                    d(state);
+                }
+                catch (Exception e)
+                {
+                    Exceptions.Enqueue(e);
+                }
+                finally
+                {
+                    SetSynchronizationContext(prev);
+                }
+            });
+        }
+    }
+
+    // Happy path for the SynchronizationContext marshalling: Execute must actually be posted to
+    // the supplied context and the reaction must converge through it.
+    [Fact(Timeout = 10000)]
+    public async Task Reaction_WithSynchronizationContext_ExecutesViaContextAndConverges()
+    {
+        var syncCtx = new CapturingSynchronizationContext();
+        var f = new MemoFactory().AddSynchronizationContext(syncCtx);
+        var v1 = f.CreateSignal(1);
+        var last = 0;
+        var r = f.BuildReaction().CreateReaction(v1, v => last = v);
+
+        await TestHelpers.WaitForConvergenceAsync(() => last == 1);
+        Assert.Equal(1, last);
+        Assert.True(syncCtx.Posted > 0, "Execute was never posted to the supplied SynchronizationContext");
+
+        await v1.Set(7);
+        await TestHelpers.WaitForConvergenceAsync(() => last == 7);
+        Assert.Equal(7, last);
+        Assert.True(syncCtx.Exceptions.IsEmpty,
+            $"unhandled exception escaped onto the SynchronizationContext: {string.Join(", ", syncCtx.Exceptions)}");
+        GC.KeepAlive(r);
+    }
+
+    // Regression for the async-void double completion in InvokeExecute's posted callback: when
+    // Execute throws, the TCS was completed with SetException and then SetResult, and the
+    // resulting InvalidOperationException escaped the async void onto the SynchronizationContext
+    // -- a process crash on a real UI context. The fault must instead surface exactly once,
+    // through the awaited update (observable via Resume), with nothing escaping onto the context,
+    // and the reaction must recover on the next Set.
+    [Fact(Timeout = 10000)]
+    public async Task Reaction_ExecuteThrowsUnderSynchronizationContext_FaultsResumeWithoutCrashingContext()
+    {
+        var syncCtx = new CapturingSynchronizationContext();
+        var f = new MemoFactory().AddSynchronizationContext(syncCtx);
+        var v1 = f.CreateSignal(1);
+        var last = 0;
+        var r = f.BuildReaction().CreateReaction(v1, v =>
+        {
+            if (v == 13) throw new InvalidOperationException("boom13");
+            last = v;
+        });
+
+        await TestHelpers.WaitForConvergenceAsync(() => last == 1); // initial run done
+
+        r.Pause();
+        await v1.Set(13);
+        // Resume runs the pending update inline, so the Execute fault propagates to the caller.
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => r.Resume());
+        Assert.Contains("boom13", ex.Message);
+
+        // The failed run must not have poisoned the reaction: the next write still triggers it.
+        await v1.Set(2);
+        await TestHelpers.WaitForConvergenceAsync(() => last == 2);
+        Assert.Equal(2, last);
+
+        // With the double-completion bug, the posted async void rethrew
+        // InvalidOperationException("...already completed...") through the context.
+        Assert.True(syncCtx.Exceptions.IsEmpty,
+            $"unhandled exception escaped onto the SynchronizationContext: {string.Join(", ", syncCtx.Exceptions)}");
+        GC.KeepAlive(r);
+    }
+
+    // The node mutex must serialize a reaction's updates: two debounced updates inherit
+    // *different* flows' ContextLocks (which therefore order nothing between them), and the
+    // generation guard protects only the State commit, not Execute's side effects. Overlapping
+    // Executes would let a stale run apply its effects after a newer one finished.
+    [Fact(Timeout = 20000)]
+    public async Task Reaction_ExecutionsNeverOverlap_UnderConcurrentSets()
+    {
+        var f = new MemoFactory();
+        var v1 = f.CreateSignal(0);
+        var running = 0;
+        var maxRunning = 0;
+        var last = -1;
+        var r = f.BuildReaction().CreateReaction(v1, v =>
+        {
+            var now = Interlocked.Increment(ref running);
+            int seen;
+            while ((seen = Volatile.Read(ref maxRunning)) < now)
+            {
+                Interlocked.CompareExchange(ref maxRunning, now, seen);
+            }
+            Thread.Sleep(5); // widen the overlap window
+            last = v;
+            Interlocked.Decrement(ref running);
+        });
+
+        await TestHelpers.WaitForConvergenceAsync(() => last == 0); // initial run done
+
+        var setters = Enumerable.Range(1, 50).Select(i => Task.Run(() => v1.Set(i))).ToArray();
+        await Task.WhenAll(setters);
+        await v1.Set(1000);
+
+        await TestHelpers.WaitForConvergenceAsync(() => last == 1000);
+        Assert.Equal(1000, last);
+        Assert.Equal(1, maxRunning); // executions ran, and never two at once
+        GC.KeepAlive(r);
+    }
+
+    // Pause/Resume contract: a paused reaction must not execute for writes that arrive while
+    // paused, and Resume must run the pending update inline (so the latest value is applied by
+    // the time Resume's task completes).
+    [Fact(Timeout = 10000)]
+    public async Task Reaction_PausedDoesNotRun_ResumeRunsPendingInline()
+    {
+        var f = new MemoFactory();
+        var v1 = f.CreateSignal(1);
+        var last = -1;
+        var r = f.BuildReaction().CreateReaction(v1, v => last = v);
+
+        await TestHelpers.WaitForConvergenceAsync(() => last == 1); // initial run done
+
+        r.Pause();
+        await v1.Set(5);
+        await Task.Delay(100); // give the (paused) debounced update every chance to run wrongly
+        Assert.Equal(1, last); // paused: must not have executed
+
+        await r.Resume();
+        Assert.Equal(5, last); // Resume ran the pending update before returning
+        GC.KeepAlive(r);
+    }
 }

@@ -256,6 +256,33 @@ public class AsyncAsymmetricLockTests
         Assert.Equal(1, asyncLock.UpgradedLocksHeld);
     }
 
+    // --- Per-flow reentrancy contract ---
+
+    [Fact(Timeout = 1000)]
+    public async Task UpgradeableLock_RecursiveInSameScope_IsGranted()
+    {
+        var asyncLock = new AsyncAsymmetricLock();
+
+        using (await asyncLock.UpgradeableLockAsync())
+        {
+            Assert.Equal(1, asyncLock.UpgradedLocksHeld);
+
+            // Same async flow (same lock scope): the upgradeable lock is reentrant -- this is
+            // what lets nested Get/UpdateIfNecessary on one flow not self-deadlock.
+            using (await asyncLock.UpgradeableLockAsync())
+            {
+                Assert.Equal(2, asyncLock.UpgradedLocksHeld);
+            }
+
+            Assert.Equal(1, asyncLock.UpgradedLocksHeld);
+        }
+
+        // Fully drained: nothing leaked, the scope is released.
+        Assert.Equal(0, asyncLock.UpgradedLocksHeld);
+        Assert.Equal(0, asyncLock.LocksHeld);
+        Assert.Equal(0, asyncLock.LockScope);
+    }
+
     // --- Mutual exclusion / no lost wake-ups (fail loudly if a refactoring breaks the lock) ---
 
     [Fact(Timeout = 10000)]
@@ -304,6 +331,34 @@ public class AsyncAsymmetricLockTests
 
         Assert.Equal(100, counter);
         Assert.Equal(0, asyncLock.LocksHeld);
+        Assert.Equal(0, asyncLock.UpgradedLocksHeld);
+        Assert.Equal(0, asyncLock.LockScope);
+    }
+
+    // Mixed-mode stress: exclusive and upgradeable acquirers from independent flows interleave
+    // arbitrarily. Cross-scope they must all mutually exclude, and the wake-up chain through
+    // ReleaseWaiters must drain both queues -- a priority/handoff bug between the two waiter
+    // queues only surfaces in mixed mode, which the single-mode stress tests never enter.
+    [Fact(Timeout = 10000)]
+    public async Task MixedLocks_ManyConcurrent_SerializeWithoutLostUpdatesOrLeaks()
+    {
+        var asyncLock = new AsyncAsymmetricLock();
+        var counter = 0;
+
+        var tasks = Enumerable.Range(0, 100).Select(i => Task.Run(async () =>
+        {
+            using (await (i % 2 == 0 ? asyncLock.ExclusiveLockAsync() : asyncLock.UpgradeableLockAsync()))
+            {
+                var snapshot = counter;
+                await Task.Yield();
+                counter = snapshot + 1;
+            }
+        }));
+
+        await Task.WhenAll(tasks);
+
+        Assert.Equal(100, counter);                  // full mutual exclusion across both modes
+        Assert.Equal(0, asyncLock.LocksHeld);        // both queues fully drained
         Assert.Equal(0, asyncLock.UpgradedLocksHeld);
         Assert.Equal(0, asyncLock.LockScope);
     }

@@ -308,6 +308,30 @@ public class StructuredConcurrencyTests
     private static Task WaitForConvergenceAsync(Func<bool> converged, int timeoutMs = 5000)
         => TestHelpers.WaitForConvergenceAsync(converged, timeoutMs);
 
+    // Dependency tracking through the reduce job's *parallel* children: unlike the results job,
+    // they share the parent flow's scope, and the sources they read are accumulated across
+    // concurrently running tasks (CurrentGets under Context.Lock, folded under the job Lock --
+    // the very path that needs the volatile ReactionScope fields). Every signal read by any
+    // child must end up observed, so a later Set on either re-dirties the node.
+    [Fact(Timeout = 5000)]
+    public async Task ConcurrentMapReduce_ObservesSignalsReadByParallelChildren()
+    {
+        var f = new MemoFactory();
+        var v1 = f.CreateSignal(1);
+        var v2 = f.CreateSignal(10);
+        var sum = f.CreateConcurrentMapReduce(
+            async _ => await v1.Get(),
+            async _ => await v2.Get());
+
+        Assert.Equal(11, await sum.Get());
+
+        await v1.Set(2);
+        Assert.Equal(12, await sum.Get());
+
+        await v2.Set(20);
+        Assert.Equal(22, await sum.Get());
+    }
+
     [Fact(Timeout = 1000)]
     public async Task TestChildExecptionCancelationHandling()
     {
