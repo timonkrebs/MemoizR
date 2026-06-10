@@ -16,6 +16,10 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
     // and read in Update, so it stays volatile.
     private CacheState State => stateCell.State;
     private SynchronizationContext? synchronizationContext;
+    // The clock the debounce delay runs on (issue #38). Threaded through the constructor like
+    // synchronizationContext so tests can drive the debounce window with a fake provider instead
+    // of racing wall-clock time. Null defaults to TimeProvider.System.
+    private readonly TimeProvider timeProvider;
     private volatile bool isPaused;
 
     public TimeSpan DebounceTime { protected get; init; }
@@ -23,10 +27,11 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
     // Written by a parent's diamond down-link; absorbed (not generation-bumped) during our own eval.
     CacheState IMemoizR.State { get => stateCell.State; set => stateCell.InvalidateFromParent(value); }
 
-    internal ReactionBase(Context context, SynchronizationContext? synchronizationContext = null)
+    internal ReactionBase(Context context, SynchronizationContext? synchronizationContext = null, TimeProvider? timeProvider = null)
     : base(context)
     {
         this.synchronizationContext = synchronizationContext;
+        this.timeProvider = timeProvider ?? TimeProvider.System;
         stateCell.Force(CacheState.CacheDirty);
     }
 
@@ -386,7 +391,7 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
             // whole dependency-graph evaluation back onto the UI thread (#13).
             try
             {
-                await Task.Delay(debounceTime, token).ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
+                await Task.Delay(debounceTime, timeProvider, token).ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
             }
             catch (OperationCanceledException)
             {
