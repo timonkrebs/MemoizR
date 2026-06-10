@@ -24,7 +24,7 @@ public class GraphRewiringTests
         });
 
         Assert.Equal(11, await m.Get()); // Sources: [useB, a, b]
-        Assert.Contains(b.Observers, w => w.TryGetTarget(out var o) && ReferenceEquals(o, m));
+        Assert.True(TestHelpers.Observes(b.Observers, m), "m should be observing b");
 
         // Narrow the dependency set: the recompute reads only the [useB, a] prefix, so the
         // else-branch of UpdateSourceAndObserverLinks must truncate Sources and unsubscribe b.
@@ -32,7 +32,7 @@ public class GraphRewiringTests
         Assert.Equal(1, await m.Get());
         var afterNarrowing = invocations;
 
-        Assert.DoesNotContain(b.Observers, w => w.TryGetTarget(out var o) && ReferenceEquals(o, m));
+        Assert.False(TestHelpers.Observes(b.Observers, m), "m should no longer be observing b");
 
         // A write to the dropped source must neither dirty m nor recompute it.
         await b.Set(99);
@@ -63,8 +63,8 @@ public class GraphRewiringTests
         await pick.Set(false);
         Assert.Equal(101, await m.Get());
 
-        Assert.DoesNotContain(b.Observers, w => w.TryGetTarget(out var o) && ReferenceEquals(o, m));
-        Assert.Contains(c.Observers, w => w.TryGetTarget(out var o) && ReferenceEquals(o, m));
+        Assert.False(TestHelpers.Observes(b.Observers, m), "m should no longer be observing b");
+        Assert.True(TestHelpers.Observes(c.Observers, m), "m should be observing c");
 
         await b.Set(999);              // dropped source: must not dirty m
         Assert.Equal(101, await m.Get());

@@ -31,22 +31,26 @@ public class Context
     {
         get
         {
+            if (AsyncLocalScope.Value == 0)
+            {
+                // No scope is pinned to this flow, so the scope could never be looked up again:
+                // registering it would only leak a dictionary entry per access. Hand out a
+                // throwaway (no lock needed -- nothing shared is touched).
+                return new();
+            }
+
             lock (Lock)
             {
-                var key = AsyncLocalScope.Value == 0 ? Random.Shared.NextDouble() : AsyncLocalScope.Value;
-                ReactionScope reactionScope;
-                if (!AsyncReactionScopes.TryGetValue(key, out var reactionScopeRef))
+                var key = AsyncLocalScope.Value;
+                if (AsyncReactionScopes.TryGetValue(key, out var reactionScopeRef)
+                    && reactionScopeRef.TryGetTarget(out var reactionScope))
                 {
-                    reactionScope = new();
-                    AsyncReactionScopes.Add(key, new(reactionScope));
-                }
-                else if (!reactionScopeRef!.TryGetTarget(out reactionScope!))
-                {
-                    reactionScope = new();
-                    AsyncReactionScopes[key] = new(reactionScope);
+                    return reactionScope;
                 }
 
-                return reactionScope;
+                ReactionScope fresh = new();
+                AsyncReactionScopes[key] = new(fresh);
+                return fresh;
             }
         }
     }
@@ -67,8 +71,62 @@ public class Context
             }
             var key = Random.Shared.NextDouble();
             AsyncLocalScope.Value = key;
+            PruneDeadScopes();
             AsyncReactionScopes.Add(key, new(new()));
             return true;
+        }
+    }
+
+    // Pins a scope if needed and returns it -- one lock acquisition where CreateNewScopeIfNeeded
+    // followed by the ReactionScope getter would take two. Used by the Get fast paths, where the
+    // context-wide Lock is the contention point.
+    internal ReactionScope GetOrCreateScope()
+    {
+        lock (Lock)
+        {
+            var key = AsyncLocalScope.Value;
+            if (key == 0)
+            {
+                key = Random.Shared.NextDouble();
+                AsyncLocalScope.Value = key;
+                PruneDeadScopes();
+                ReactionScope created = new();
+                AsyncReactionScopes.Add(key, new(created));
+                return created;
+            }
+
+            if (AsyncReactionScopes.TryGetValue(key, out var reactionScopeRef)
+                && reactionScopeRef.TryGetTarget(out var reactionScope))
+            {
+                return reactionScope;
+            }
+
+            ReactionScope fresh = new();
+            AsyncReactionScopes[key] = new(fresh);
+            return fresh;
+        }
+    }
+
+    // The scope targets are weak, but the dictionary entries themselves are not: sweep dead ones
+    // whenever a new scope is registered so the map stays bounded by the number of LIVE flows.
+    // Must be called under Lock.
+    private void PruneDeadScopes()
+    {
+        List<double>? deadKeys = null;
+        foreach (var kvp in AsyncReactionScopes)
+        {
+            if (!kvp.Value.TryGetTarget(out _))
+            {
+                (deadKeys ??= new()).Add(kvp.Key);
+            }
+        }
+
+        if (deadKeys != null)
+        {
+            foreach (var key in deadKeys)
+            {
+                AsyncReactionScopes.Remove(key);
+            }
         }
     }
 
@@ -84,20 +142,21 @@ public class Context
     {
         lock (Lock)
         {
-            var hasCurrentGets = ReactionScope.CurrentGets.Length == 0;
+            // Resolve the scope once: every ReactionScope access re-enters this very lock and
+            // probes the dictionary, and this method runs on every tracked Get.
+            var scope = ReactionScope;
+            var noNewGets = scope.CurrentGets.Length == 0;
 
-            var hasEnoughSources = ReactionScope.CurrentReaction?.Sources?.Length > 0 && ReactionScope.CurrentReaction.Sources.Length >= ReactionScope.CurrentGetsIndex + 1;
-            var currentSourceEqualsThis = hasEnoughSources && ReactionScope.CurrentReaction!.Sources?[ReactionScope.CurrentGetsIndex] == memoHandlR;
+            var hasEnoughSources = scope.CurrentReaction?.Sources?.Length > 0 && scope.CurrentReaction.Sources.Length >= scope.CurrentGetsIndex + 1;
+            var currentSourceEqualsThis = hasEnoughSources && scope.CurrentReaction!.Sources?[scope.CurrentGetsIndex] == memoHandlR;
 
-            if (hasCurrentGets && currentSourceEqualsThis)
+            if (noNewGets && currentSourceEqualsThis)
             {
-                Interlocked.Increment(ref ReactionScope.CurrentGetsIndex);
+                Interlocked.Increment(ref scope.CurrentGetsIndex);
             }
             else
             {
-                ReactionScope.CurrentGets = !ReactionScope.CurrentGets.Any()
-                    ? [memoHandlR]
-                    : [.. ReactionScope.CurrentGets, memoHandlR];
+                scope.CurrentGets = [.. scope.CurrentGets, memoHandlR];
             }
         }
     }
@@ -108,6 +167,7 @@ public class Context
         {
             var key = Random.Shared.NextDouble();
             AsyncLocalScope.Value = key;
+            PruneDeadScopes();
             AsyncReactionScopes.Add(key, new(new()));
             return key;
         }

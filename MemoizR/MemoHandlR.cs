@@ -35,8 +35,6 @@ public abstract class SignalHandlR : IMemoHandlR
         }
     }
 
-    internal bool isStartingComponent;
-
     // Cache-state cell for every node type that participates in invalidation (memos, the
     // concurrent nodes, reactions); see CacheStateCell for the generation-guard protocol. Plain
     // signals never touch it (their writes are Sets under the ContextLock; they have no cached
@@ -56,44 +54,45 @@ public abstract class SignalHandlR : IMemoHandlR
     internal void UpdateSourceAndObserverLinks()
     {
         var self = (IMemoizR)this;
+        // Resolve the scope once: every Context.ReactionScope access takes the context-wide lock
+        // plus a dictionary probe, and this method reads it many times per recompute.
+        var scope = Context.ReactionScope;
 
         // if the sources have changed, update source & observer links
-        if (Context.ReactionScope.CurrentGets.Length > 0)
+        if (scope.CurrentGets.Length > 0)
         {
             // remove all old Sources' .observers links to us
-            RemoveParentObservers(Context.ReactionScope.CurrentGetsIndex);
+            RemoveParentObservers(scope.CurrentGetsIndex);
             // update source up links
-            if (Sources.Any() && Context.ReactionScope.CurrentGetsIndex > 0)
+            if (Sources.Length > 0 && scope.CurrentGetsIndex > 0)
             {
-                Sources = [.. Sources.Take(Context.ReactionScope.CurrentGetsIndex), .. Context.ReactionScope.CurrentGets];
+                Sources = [.. Sources.Take(scope.CurrentGetsIndex), .. scope.CurrentGets];
             }
             else
             {
-                Sources = Context.ReactionScope.CurrentGets;
+                Sources = scope.CurrentGets;
             }
 
-            for (var i = Context.ReactionScope.CurrentGetsIndex; i < Sources.Length; i++)
+            for (var i = scope.CurrentGetsIndex; i < Sources.Length; i++)
             {
                 // Add ourselves to the end of the parent .observers array
                 var source = Sources[i];
-                source.Observers = !source.Observers.Any()
-                    ? [new(self)]
-                    : [.. source.Observers, new(self)];
+                source.Observers = [.. source.Observers, new(self)];
             }
         }
-        else if (Sources.Any() && Context.ReactionScope.CurrentGetsIndex < Sources.Length)
+        else if (Sources.Length > 0 && scope.CurrentGetsIndex < Sources.Length)
         {
             // remove all old Sources' .observers links to us
-            RemoveParentObservers(Context.ReactionScope.CurrentGetsIndex);
-            Sources = [.. Sources.Take(Context.ReactionScope.CurrentGetsIndex)];
+            RemoveParentObservers(scope.CurrentGetsIndex);
+            Sources = [.. Sources.Take(scope.CurrentGetsIndex)];
         }
     }
 
     internal void RemoveParentObservers(int index)
     {
-        if (!Sources.Any()) return;
-        foreach (var source in Sources.Skip(index))
+        for (var i = index; i < Sources.Length; i++)
         {
+            var source = Sources[i];
             source.Observers = [.. source.Observers.Where(x => x.TryGetTarget(out var o) ? !ReferenceEquals(o, this) : false)];
         }
     }
@@ -129,13 +128,13 @@ public abstract class SignalHandlR : IMemoHandlR
         await PropagateStaleToObserversAsync();
     }
 
-    internal async Task PropagateStaleToObserversAsync()
+    internal async Task PropagateStaleToObserversAsync(CacheState state = CacheState.CacheCheck)
     {
         foreach (var observer in Observers)
         {
             if (observer.TryGetTarget(out var o))
             {
-                await o.Stale(CacheState.CacheCheck);
+                await o.Stale(state);
             }
         }
     }

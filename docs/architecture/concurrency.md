@@ -37,6 +37,13 @@ classDiagram
         <<abstract>>
         -valueBox_volatileTearFreeValue
     }
+    class MemoBase~T~ {
+        <<abstract>>
+        +Get() fast path + locked slow path
+        ~UpdateIfNecessary() CacheCheck scan
+        ~Update() generation-guarded recompute
+        ~ComputeAsync()* the only required hook
+    }
     class Signal~T~ {
         +Set(value)
         +Get()
@@ -80,9 +87,10 @@ classDiagram
     SignalHandlR <|-- ReactionBase
     MemoHandlR <|-- Signal
     MemoHandlR <|-- EagerRelativeSignal
-    MemoHandlR <|-- MemoizR
-    MemoHandlR <|-- ConcurrentMap
-    MemoHandlR <|-- ConcurrentMapReduce
+    MemoHandlR <|-- MemoBase
+    MemoBase <|-- MemoizR
+    MemoBase <|-- ConcurrentMap
+    MemoBase <|-- ConcurrentMapReduce
     MemoHandlR <|-- ConcurrentRace
     SignalHandlR --> Context
     Context --> ReactionScope : one per async flow

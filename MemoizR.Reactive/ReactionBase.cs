@@ -121,14 +121,17 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
             return;
         }
 
-        // Evaluate the reactive function body, dynamically capturing any other reactives used.
-        var prevReaction = Context.ReactionScope.CurrentReaction;
-        var prevGets = Context.ReactionScope.CurrentGets;
-        var prevIndex = Context.ReactionScope.CurrentGetsIndex;
+        /* Evaluate the reactive function body, dynamically capturing any other reactives used.
+           Resolve the scope once -- it is stable for the whole evaluation (same flow), and the
+           local additionally keeps the weakly-held scope strongly referenced until restored. */
+        var scope = Context.ReactionScope;
+        var prevReaction = scope.CurrentReaction;
+        var prevGets = scope.CurrentGets;
+        var prevIndex = scope.CurrentGetsIndex;
 
-        Context.ReactionScope.CurrentReaction = this;
-        Context.ReactionScope.CurrentGets = [];
-        Context.ReactionScope.CurrentGetsIndex = 0;
+        scope.CurrentReaction = this;
+        scope.CurrentGets = [];
+        scope.CurrentGetsIndex = 0;
 
         // Mark Evaluating and snapshot the generation so a Stale during Execute escalates past
         // Evaluating (bumping the generation) and blocks the commit below.
@@ -156,9 +159,9 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
         }
         finally
         {
-            Context.ReactionScope.CurrentGets = prevGets;
-            Context.ReactionScope.CurrentReaction = prevReaction;
-            Context.ReactionScope.CurrentGetsIndex = prevIndex;
+            scope.CurrentGets = prevGets;
+            scope.CurrentReaction = prevReaction;
+            scope.CurrentGetsIndex = prevIndex;
         }
 
         // We've rerun with the latest values from all of our Sources, so we no longer need to

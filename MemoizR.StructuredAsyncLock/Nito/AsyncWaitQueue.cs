@@ -50,7 +50,9 @@ internal sealed class DefaultAsyncWaitQueue<T> : IAsyncWaitQueue<T>
 
     Task<T> IAsyncWaitQueue<T>.Enqueue(double lockScope)
     {
-        var tcs = TaskCompletionSourceExtensions.CreateAsyncTaskSource<T>();
+        // RunContinuationsAsynchronously: completing a waiter from a release path must not run
+        // the waiter's continuation inline on the releasing thread.
+        var tcs = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
         _queue.AddToBack((tcs, lockScope));
         return tcs.Task;
     }

@@ -1,10 +1,17 @@
 namespace MemoizR.StructuredConcurrency;
 
+// ConcurrentRace deliberately deviates from the MemoBase<T> protocol: it recomputes on EVERY
+// Get (there is no Clean fast path serving a cached value), so the CacheStateCell generation
+// guard buys it nothing -- a Stale clobbered by its State=CacheClean can never cause a stale
+// READ, because the next Get recomputes regardless. For the same reason its Stale escalates
+// observers straight to CacheDirty: a race result is non-memoized, so observers cannot verify
+// "did it really change?" via a cheap re-check and must recompute. The inherited stateCell is
+// intentionally unused; State here is only a cycle-detection marker.
 public sealed class ConcurrentRace<T, I> : MemoHandlR<T>, IMemoizR, IStateGetR<T>
 {
     private CacheState State { get; set; } = CacheState.CacheDirty;
-    Func<Task<I>> action;
-    private IReadOnlyCollection<Func<IStructuredResourceGroup, I, Task<T>>> fns;
+    private readonly Func<Task<I>> action;
+    private readonly IReadOnlyCollection<Func<IStructuredResourceGroup, I, Task<T>>> fns;
 
     CacheState IMemoizR.State { get => State; set => State = value; }
 
@@ -24,15 +31,15 @@ public sealed class ConcurrentRace<T, I> : MemoHandlR<T>, IMemoizR, IStateGetR<T
 
     public async Task<T> Get()
     {
-        Context.CreateNewScopeIfNeeded();
+        var scope = Context.GetOrCreateScope();
         // Only one thread should evaluate the graph at a time. otherwise the context could get messed up.
         // This should lead to perf gains because memoization can be utilized more efficiently.
         using (await mutex.LockAsync())
-        using (await Context.ReactionScope.ContextLock.UpgradeableLockAsync())
+        using (await scope.ContextLock.UpgradeableLockAsync())
         {
+            var isStartingComponent = Context.CancellationTokenSource == null;
             try
             {
-                isStartingComponent = Context.CancellationTokenSource == null;
                 Context.CancellationTokenSource ??= new();
                 return await Update();
             }
@@ -42,7 +49,6 @@ public sealed class ConcurrentRace<T, I> : MemoHandlR<T>, IMemoizR, IStateGetR<T
                 {
                     Context.CancellationTokenSource = null;
                 }
-                isStartingComponent = false;
             }
         }
     }
@@ -54,32 +60,20 @@ public sealed class ConcurrentRace<T, I> : MemoHandlR<T>, IMemoizR, IStateGetR<T
         var oldValue = Value;
 
         /* Evaluate the reactive function body, dynamically capturing any other reactives used */
-        var prevReaction = Context.ReactionScope.CurrentReaction;
-        var prevGets = Context.ReactionScope.CurrentGets;
-        var prevIndex = Context.ReactionScope.CurrentGetsIndex;
+        var scope = Context.ReactionScope;
+        var prevReaction = scope.CurrentReaction;
+        var prevGets = scope.CurrentGets;
+        var prevIndex = scope.CurrentGetsIndex;
 
-        Context.ReactionScope.CurrentReaction = this;
-        Context.ReactionScope.CurrentGets = [];
-        Context.ReactionScope.CurrentGetsIndex = 0;
+        scope.CurrentReaction = this;
+        scope.CurrentGets = [];
+        scope.CurrentGetsIndex = 0;
 
         try
         {
             State = CacheState.Evaluating;
-            Value = await new StructuredRaceJob<T, I>(action ,fns, Context.CancellationTokenSource!).Run(Context.CancellationTokenSource!.Token);
+            Value = await new StructuredRaceJob<T, I>(action, fns, Context.CancellationTokenSource!).Run(Context.CancellationTokenSource!.Token);
             State = CacheState.CacheClean;
-
-            // if the sources have changed, update source & observer links
-            if (Context.ReactionScope.CurrentGets.Length > 0)
-            {
-                for (var i = Context.ReactionScope.CurrentGetsIndex; i < Sources.Length; i++)
-                {
-                    // Add ourselves to the end of the parent .observers array
-                    var source = Sources[i];
-                    source.Observers = !source.Observers.Any()
-                        ? [new(this)]
-                        : [.. source.Observers, new(this)];
-                }
-            }
         }
         catch
         {
@@ -88,22 +82,15 @@ public sealed class ConcurrentRace<T, I> : MemoHandlR<T>, IMemoizR, IStateGetR<T
         }
         finally
         {
-            Context.ReactionScope.CurrentGets = prevGets;
-            Context.ReactionScope.CurrentReaction = prevReaction;
-            Context.ReactionScope.CurrentGetsIndex = prevIndex;
+            scope.CurrentGets = prevGets;
+            scope.CurrentReaction = prevReaction;
+            scope.CurrentGetsIndex = prevIndex;
         }
 
         // handles diamond dependencies if we're the parent of a diamond.
-        if (!Equals(oldValue, Value) && Observers.Length > 0)
+        if (!Equals(oldValue, Value))
         {
-            // We've changed value, so mark our children as dirty so they'll reevaluate
-            foreach (var observer in Observers)
-            {
-                if (observer.TryGetTarget(out var o))
-                {
-                    o.State = CacheState.CacheDirty;
-                }
-            }
+            MarkObserversDirty();
         }
 
         return Value;
@@ -127,13 +114,7 @@ public sealed class ConcurrentRace<T, I> : MemoHandlR<T>, IMemoizR, IStateGetR<T
 
         State = state;
 
-        foreach (var observer in Observers)
-        {
-            if (observer.TryGetTarget(out var o))
-            {
-                await o.Stale(CacheState.CacheDirty);
-            }
-        }
+        await PropagateStaleToObserversAsync(CacheState.CacheDirty);
     }
 
     Task IMemoizR.Stale(CacheState state)

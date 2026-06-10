@@ -1,4 +1,5 @@
 using xRetry;
+using static MemoizR.Tests.TestHelpers;
 
 namespace MemoizR.Tests;
 
@@ -314,9 +315,6 @@ public class StructuredConcurrencyTests
         Assert.Equal(6, x.ElementAt(2));
     }
 
-    private static Task WaitForConvergenceAsync(Func<bool> converged, int timeoutMs = 5000)
-        => TestHelpers.WaitForConvergenceAsync(converged, timeoutMs);
-
     // Dependency tracking through the reduce job's *parallel* children: unlike the results job,
     // they share the parent flow's scope, and the sources they read are accumulated across
     // concurrently running tasks (CurrentGets under Context.Lock, folded under the job Lock --
@@ -353,35 +351,25 @@ public class StructuredConcurrencyTests
         var f = new MemoFactory();
         var s = f.CreateSignal(0);
 
-        var gateArmed = false;
-        // RunContinuationsAsynchronously: SetResult must not run the test's continuation inline
-        // inside the job's child, where the getter flow holds the node mutex and ContextLock.
-        var readDone = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var proceed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-
+        var gate = new RecomputeGate();
         var cmr = f.CreateConcurrentMapReduce(
             async _ =>
             {
                 var x = await s.Get();
-                if (Volatile.Read(ref gateArmed))
-                {
-                    Volatile.Write(ref gateArmed, false);
-                    readDone.SetResult();
-                    await proceed.Task;
-                }
+                await gate.PauseIfArmedAsync();
                 return x;
             });
 
         await cmr.Get();          // prime: Clean@0, the s -> cmr link is established
         await s.Set(1);           // cmr is now dirty, s == 1
 
-        Volatile.Write(ref gateArmed, true);
+        gate.Arm();
         var getter = Task.Run(async () => await cmr.Get()); // recomputes: child reads s == 1, parks
-        await readDone.Task;
+        await gate.ReadDone;
 
         await s.Set(2);           // invalidate during the parked recompute
 
-        proceed.SetResult();      // the job resumes and tries to commit the stale value (1)
+        gate.Proceed();           // the job resumes and tries to commit the stale value (1)
         await getter;
 
         // The Set(2) must win: the node must reconverge to 2, not cache the clobbered 1.

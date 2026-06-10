@@ -683,7 +683,7 @@ public class ReactiveTests
         await TestHelpers.WaitForConvergenceAsync(() => last == 1); // initial run done
 
         r.Dispose();
-        Assert.DoesNotContain(v1.Observers, w => w.TryGetTarget(out var o) && ReferenceEquals(o, r));
+        Assert.False(TestHelpers.Observes(v1.Observers, r), "the disposed reaction is still observing its source");
 
         await v1.Set(5);
         await Task.Delay(100); // negative assertion: nothing may run -- needs a real window

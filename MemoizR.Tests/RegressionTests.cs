@@ -200,34 +200,24 @@ public class RegressionTests
         var f = new MemoFactory();
         var s = f.CreateSignal(0);
 
-        var gateArmed = false;
-        // RunContinuationsAsynchronously: SetResult must not run the test's continuation inline
-        // inside the memo's fn, where the getter flow holds the node mutex and ContextLock.
-        var readDone = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var proceed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-
+        var gate = new RecomputeGate();
         var m = f.CreateMemoizR(async () =>
         {
             var x = await s.Get();
-            if (Volatile.Read(ref gateArmed))
-            {
-                Volatile.Write(ref gateArmed, false);
-                readDone.SetResult();
-                await proceed.Task;
-            }
+            await gate.PauseIfArmedAsync();
             return x;
         });
 
         await m.Get();            // prime: m is Clean@0 and the s -> m dependency link is established
         await s.Set(1);           // m is now Dirty, s == 1
 
-        Volatile.Write(ref gateArmed, true);
+        gate.Arm();
         var getter = Task.Run(async () => await m.Get()); // recomputes on its own flow: reads s == 1, parks
-        await readDone.Task;      // the recompute has read s == 1 and is parked mid-Update (Evaluating)
+        await gate.ReadDone;      // the recompute has read s == 1 and is parked mid-Update (Evaluating)
 
         await s.Set(2);           // invalidate during the parked recompute: m -> Dirty, s == 2
 
-        proceed.SetResult();      // resume the recompute; it will try to commit the stale value (1)
+        gate.Proceed();           // resume the recompute; it will try to commit the stale value (1)
         await getter;
 
         // The Set(2) that landed during the recompute must win: the memo must reconverge to 2,
@@ -249,21 +239,11 @@ public class RegressionTests
         var f = new MemoFactory();
         var s = f.CreateSignal(0);
 
-        var gateArmed = false;
-        // RunContinuationsAsynchronously: SetResult must not run the test's continuation inline
-        // inside the memo's fn, where the getter flow holds the node mutex and ContextLock.
-        var readDone = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var proceed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-
+        var gate = new RecomputeGate();
         var p = f.CreateMemoizR(async () =>
         {
             var x = await s.Get();
-            if (Volatile.Read(ref gateArmed))
-            {
-                Volatile.Write(ref gateArmed, false);
-                readDone.SetResult();
-                await proceed.Task;
-            }
+            await gate.PauseIfArmedAsync();
             return x / 2; // same value for s=0 and s=1, changes only at s=2
         });
         var c = f.CreateMemoizR(async () => await p.Get());
@@ -271,15 +251,15 @@ public class RegressionTests
         await c.Get();            // prime: s=0 -> p=0 -> c=0, links established
         await s.Set(1);           // cascade: p Dirty, c CacheCheck; p stays 0 once recomputed
 
-        Volatile.Write(ref gateArmed, true);
+        gate.Arm();
         var getter = Task.Run(async () => await c.Get()); // c's CacheCheck scan recomputes p, which parks
-        await readDone.Task;      // p's recompute has read s == 1 and is parked
+        await gate.ReadDone;      // p's recompute has read s == 1 and is parked
 
         await s.Set(2);           // cascade: p escalates (Evaluating -> Dirty), c's Stale(CacheCheck)
                                   // is suppressed (already CacheCheck) -- the generation bump is all
                                   // that protects c's pending commit
 
-        proceed.SetResult();      // p finishes with the unchanged value 0 -> no down-link to c;
+        gate.Proceed();           // p finishes with the unchanged value 0 -> no down-link to c;
                                   // c's scan sees no dirty parent and tries to commit Clean
         await getter;
 

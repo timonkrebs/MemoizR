@@ -8,16 +8,27 @@ public sealed class MemoFactory
     internal Context Context { get; }
     public Lock Lock { get; } = new();
 
+    // The SynchronizationContext reactions built from this factory marshal their Execute to
+    // (set via MemoizR.Reactive's AddSynchronizationContext). Lives on the factory itself so the
+    // association is discoverable and dies with the factory -- it previously sat in a static
+    // side-table in another assembly, which rooted every registered factory forever.
+    internal SynchronizationContext? SynchronizationContext { get; set; }
+
     public MemoFactory(string? contextKey = null)
     {
+        // Default context is mapped to empty string
+        if (string.IsNullOrWhiteSpace(contextKey))
+        {
+            Context = new();
+            return;
+        }
+
         lock (contextsLock)
         {
-            // Default context is mapped to empty string
-            if (string.IsNullOrWhiteSpace(contextKey))
-            {
-                Context = new();
-                return;
-            }
+            // The registry holds contexts weakly; sweep dead entries while we are here so it
+            // stays bounded by the number of live keyed contexts (CleanUpContexts remains for
+            // callers that want an explicit sweep).
+            RemoveDeadContexts();
 
             if (CONTEXTS.TryGetValue(contextKey, out var weakContext))
             {
@@ -36,11 +47,6 @@ public sealed class MemoFactory
                 Context = new();
                 CONTEXTS.Add(contextKey, new(Context));
             }
-
-            if (Context == null)
-            {
-                throw new NullReferenceException("Context can not be null");
-            }
         }
     }
 
@@ -48,16 +54,24 @@ public sealed class MemoFactory
     {
         lock (contextsLock)
         {
-            var keysToRemove = new List<string>();
+            RemoveDeadContexts();
+        }
+    }
 
-            foreach (var kvp in CONTEXTS)
+    // Must be called under contextsLock.
+    private static void RemoveDeadContexts()
+    {
+        List<string>? keysToRemove = null;
+        foreach (var kvp in CONTEXTS)
+        {
+            if (!kvp.Value.TryGetTarget(out _))
             {
-                if (!kvp.Value.TryGetTarget(out _))
-                {
-                    keysToRemove.Add(kvp.Key);
-                }
+                (keysToRemove ??= new()).Add(kvp.Key);
             }
+        }
 
+        if (keysToRemove != null)
+        {
             foreach (var key in keysToRemove)
             {
                 CONTEXTS.Remove(key);
