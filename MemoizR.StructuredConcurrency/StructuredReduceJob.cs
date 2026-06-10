@@ -51,7 +51,7 @@ public sealed class StructuredReduceJob<T> : StructuredJobBase<T>
             if (context.ReactionScope.CurrentGets.Length > 0)
             {
                 // update source up links
-                if (allSources.Any() && context.ReactionScope.CurrentGetsIndex > 0)
+                if (allSources.Count > 0 && context.ReactionScope.CurrentGetsIndex > 0)
                 {
                     allSources = [.. allSources, .. context.ReactionScope.CurrentGets];
                 }
@@ -64,7 +64,7 @@ public sealed class StructuredReduceJob<T> : StructuredJobBase<T>
                 {
                     // Add ourselves to the end of the parent .observers array
                     var source = allSources[i];
-                    source.Observers = !source.Observers.Any()
+                    source.Observers = source.Observers.Length == 0
                         ? [new(@this)]
                         : [.. source.Observers, new(@this)];
                 }

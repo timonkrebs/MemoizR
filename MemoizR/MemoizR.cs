@@ -167,7 +167,7 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR, IStateGetR<T>
             // remove all old Sources' .observers links to us
             RemoveParentObservers(Context.ReactionScope.CurrentGetsIndex);
             // update source up links
-            if (Sources.Any() && Context.ReactionScope.CurrentGetsIndex > 0)
+            if (Sources.Length > 0 && Context.ReactionScope.CurrentGetsIndex > 0)
             {
                 Sources = [.. Sources.Take(Context.ReactionScope.CurrentGetsIndex), .. Context.ReactionScope.CurrentGets];
             }
@@ -180,12 +180,12 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR, IStateGetR<T>
             {
                 // Add ourselves to the end of the parent .observers array
                 var source = Sources[i];
-                source.Observers = !source.Observers.Any()
+                source.Observers = source.Observers.Length == 0
                     ? [new(this)]
                     : [.. source.Observers, new(this)];
             }
         }
-        else if (Sources.Any() && Context.ReactionScope.CurrentGetsIndex < Sources.Length)
+        else if (Sources.Length > 0 && Context.ReactionScope.CurrentGetsIndex < Sources.Length)
         {
             // remove all old Sources' .observers links to us
             RemoveParentObservers(Context.ReactionScope.CurrentGetsIndex);
@@ -209,7 +209,7 @@ public sealed class MemoizR<T> : MemoHandlR<T>, IMemoizR, IStateGetR<T>
 
     private void RemoveParentObservers(int index)
     {
-        if (!Sources.Any()) return;
+        if (Sources.Length == 0) return;
         foreach (var source in Sources.Skip(index))
         {
             source.Observers = [.. source.Observers.Where(x => x.TryGetTarget(out var o) ? o != this : false)];

@@ -86,7 +86,7 @@ public class Context
             }
             else
             {
-                ReactionScope.CurrentGets = !ReactionScope.CurrentGets.Any()
+                ReactionScope.CurrentGets = ReactionScope.CurrentGets.Length == 0
                     ? [memoHandlR]
                     : [.. ReactionScope.CurrentGets, memoHandlR];
             }

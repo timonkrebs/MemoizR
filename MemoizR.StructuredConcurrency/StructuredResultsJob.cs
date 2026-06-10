@@ -51,7 +51,7 @@ public sealed class StructuredResultsJob<T> : StructuredJobBase<ConcurrentDictio
             if (context.ReactionScope.CurrentGets.Length > 0)
             {
                 // update source up links
-                if (allSources.Any() && context.ReactionScope.CurrentGetsIndex > 0)
+                if (allSources.Count > 0 && context.ReactionScope.CurrentGetsIndex > 0)
                 {
                     allSources = [.. allSources, .. context.ReactionScope.CurrentGets];
                 }
@@ -64,7 +64,7 @@ public sealed class StructuredResultsJob<T> : StructuredJobBase<ConcurrentDictio
                 {
                     // Add ourselves to the end of the parent .observers array
                     var source = allSources[j];
-                    source.Observers = !source.Observers.Any()
+                    source.Observers = source.Observers.Length == 0
                         ? [new(@this)]
                         : [.. source.Observers, new(@this)];
                 }

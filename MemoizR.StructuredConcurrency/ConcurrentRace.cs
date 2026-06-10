@@ -75,7 +75,7 @@ public sealed class ConcurrentRace<T, I> : MemoHandlR<T>, IMemoizR, IStateGetR<T
                 {
                     // Add ourselves to the end of the parent .observers array
                     var source = Sources[i];
-                    source.Observers = !source.Observers.Any()
+                    source.Observers = source.Observers.Length == 0
                         ? [new(this)]
                         : [.. source.Observers, new(this)];
                 }
