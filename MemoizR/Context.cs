@@ -55,7 +55,36 @@ public class Context
         }
     }
 
-    public CancellationTokenSource? CancellationTokenSource { get; internal set; }
+    public CancellationTokenSource? CancellationTokenSource { get; private set; }
+
+    private int evaluationDepth;
+
+    // The context-wide CancellationTokenSource is shared by every evaluation in flight (so
+    // Cancel() reaches the whole computation tree), so its lifetime must be refcounted: it is
+    // created by the first root evaluation to enter and torn down by the LAST one to exit.
+    // The previous protocol ("the call that created it nulls it in its finally") lost the source
+    // under concurrency: root A creates it, root B enters while it exists, A finishes and nulls
+    // the shared field while B is still mid-evaluation -- B's later reads then NRE'd and
+    // Cancel() silently stopped working.
+    internal void EnterEvaluationScope()
+    {
+        lock (Lock)
+        {
+            evaluationDepth++;
+            CancellationTokenSource ??= new();
+        }
+    }
+
+    internal void ExitEvaluationScope()
+    {
+        lock (Lock)
+        {
+            if (--evaluationDepth == 0)
+            {
+                CancellationTokenSource = null;
+            }
+        }
+    }
 
     // Pins a scope to the current async flow if it has none yet. Returns whether a scope was
     // created: a caller that pairs this with CleanScope must only clean up when it created the
@@ -105,6 +134,13 @@ public class Context
             AsyncReactionScopes[key] = new(fresh);
             return fresh;
         }
+    }
+
+    // Test hook: the number of registered scope entries (live or dead), for asserting that
+    // PruneDeadScopes keeps the registry bounded.
+    internal int RegisteredScopeCount
+    {
+        get { lock (Lock) { return AsyncReactionScopes.Count; } }
     }
 
     // The scope targets are weak, but the dictionary entries themselves are not: sweep dead ones

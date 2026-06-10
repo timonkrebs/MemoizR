@@ -309,6 +309,81 @@ public class RegressionTests
         Assert.Equal((1000 * 2 + 1) * 3, await m3.Get());
     }
 
+    // The context-wide CancellationTokenSource must survive until the LAST in-flight root
+    // evaluation exits, not until the FIRST one does. Interleaving: root A creates the CTS, root
+    // B enters while it exists (so B is not the creator), A finishes -- if A's exit nulls the
+    // shared CTS, B's later read of it (the structured jobs dereference .Token at compute start)
+    // explodes with a NullReferenceException and Cancel() silently stops working mid-flight.
+    [Fact(Timeout = 10000)]
+    public async Task ConcurrentRootGets_DoNotLoseTheSharedCancellationSource()
+    {
+        var f = new MemoFactory();
+        var s = f.CreateSignal(1);
+
+        var parentGate = new RecomputeGate();
+        var gatedParent = f.CreateMemoizR(async () =>
+        {
+            var x = await s.Get();
+            await parentGate.PauseIfArmedAsync();
+            return x;
+        });
+        // B reads the CTS late (the reduce job dereferences .Token when the compute starts),
+        // with an awaited parent scan in between -- the window the race needs.
+        var b = f.CreateConcurrentMapReduce(async _ => await gatedParent.Get());
+
+        var gateA = new RecomputeGate();
+        var a = f.CreateMemoizR(async () =>
+        {
+            await gateA.PauseIfArmedAsync();
+            return 42;
+        });
+
+        await b.Get();            // prime: links wired, everything clean
+        await s.Set(2);           // gatedParent Dirty, b CacheCheck
+
+        gateA.Arm();
+        var getterA = Task.Run(async () => await a.Get()); // A creates the shared CTS and parks
+        await gateA.ReadDone;
+
+        parentGate.Arm();
+        var getterB = Task.Run(async () => await b.Get()); // B enters (CTS exists), parks in its parent scan
+        await parentGate.ReadDone;
+
+        gateA.Proceed();          // A completes -- the CTS must NOT die here
+        await getterA;
+
+        parentGate.Proceed();     // B proceeds to its compute, which reads the CTS
+        Assert.Equal(2, await getterB);
+    }
+
+    // Null is a legitimate signal value: the equal-value Set branch must treat null==null as
+    // unchanged (no recompute), and null<->value transitions must propagate like any other write.
+    [Fact(Timeout = 2000)]
+    public async Task Signal_WithNullValues_FlowsThroughEqualsAndObservers()
+    {
+        var f = new MemoFactory();
+        var s = f.CreateSignal<string?>(null);
+        var invocations = 0;
+        var m = f.CreateMemoizR(async () =>
+        {
+            invocations++;
+            return (await s.Get() ?? "null") + "!";
+        });
+
+        Assert.Equal("null!", await m.Get());
+        var after = invocations;
+
+        await s.Set(null);               // null -> null: the equal-value branch, no recompute
+        Assert.Equal("null!", await m.Get());
+        Assert.Equal(after, invocations);
+
+        await s.Set("x");                // null -> value recomputes
+        Assert.Equal("x!", await m.Get());
+
+        await s.Set(null);               // value -> null recomputes
+        Assert.Equal("null!", await m.Get());
+    }
+
     // Error-path contract: a throwing computation must surface to the caller, must not poison the
     // node, and must not sever its dependency links. Documented current semantics: with no
     // further invalidation the memo keeps serving the last good value (it does not retry the

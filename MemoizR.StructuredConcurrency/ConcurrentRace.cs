@@ -37,18 +37,14 @@ public sealed class ConcurrentRace<T, I> : MemoHandlR<T>, IMemoizR, IStateGetR<T
         using (await mutex.LockAsync())
         using (await scope.ContextLock.UpgradeableLockAsync())
         {
-            var isStartingComponent = Context.CancellationTokenSource == null;
+            Context.EnterEvaluationScope();
             try
             {
-                Context.CancellationTokenSource ??= new();
                 return await Update();
             }
             finally
             {
-                if (isStartingComponent)
-                {
-                    Context.CancellationTokenSource = null;
-                }
+                Context.ExitEvaluationScope();
             }
         }
     }
@@ -101,7 +97,15 @@ public sealed class ConcurrentRace<T, I> : MemoHandlR<T>, IMemoizR, IStateGetR<T
         using (await mutex.LockAsync())
         using (await Context.ReactionScope.ContextLock.UpgradeableLockAsync())
         {
-            await Update();
+            Context.EnterEvaluationScope();
+            try
+            {
+                await Update();
+            }
+            finally
+            {
+                Context.ExitEvaluationScope();
+            }
         }
     }
 

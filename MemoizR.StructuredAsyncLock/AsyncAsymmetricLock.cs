@@ -250,6 +250,7 @@ public sealed class AsyncAsymmetricLock
         private readonly AsyncAsymmetricLock asyncLock;
         private readonly bool isUpgradeable;
         private readonly bool ignoreDispose;
+        private int disposed;
 
         public LockKey(AsyncAsymmetricLock asyncLock, bool isUpgradeable, bool ignoreDispose = false)
         {
@@ -260,6 +261,14 @@ public sealed class AsyncAsymmetricLock
 
         public void Dispose()
         {
+            // IDisposable contract: a second Dispose must be a no-op. Without the guard it
+            // double-released the lock -- driving locksHeld negative for an exclusive key
+            // (silently wedging every later acquisition) or throwing for an upgradeable one.
+            if (Interlocked.Exchange(ref disposed, 1) != 0)
+            {
+                return;
+            }
+
             if (isUpgradeable)
             {
                 asyncLock.ReleaseUpgradeableLock(ignoreDispose);

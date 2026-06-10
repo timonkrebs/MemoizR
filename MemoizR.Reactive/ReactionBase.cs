@@ -49,7 +49,15 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
             using (await mutex.LockAsync())
             using (await Context.ReactionScope.ContextLock.UpgradeableLockAsync())
             {
-                await UpdateIfNecessary();
+                Context.EnterEvaluationScope();
+                try
+                {
+                    await UpdateIfNecessary();
+                }
+                finally
+                {
+                    Context.ExitEvaluationScope();
+                }
             }
         }
         finally
@@ -152,6 +160,13 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
             catch
             {
                 stateCell.Force(CacheState.CacheDirty);
+                // A reaction has no pull path: if the dependencies captured before the exception
+                // were dropped, no future Set could ever re-trigger it -- a reaction whose FIRST
+                // run throws would be orphaned forever. Wire what was captured (for a later run
+                // this keeps the prefix read before the failure and prunes the rest; the next
+                // successful run rewires the full set). Memos deliberately do NOT do this: they
+                // keep their previous links and retry via the pull path on the next Get.
+                UpdateSourceAndObserverLinks();
                 throw;
             }
 
@@ -214,7 +229,15 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
         using (await mutex.LockAsync())
         using (await Context.ReactionScope.ContextLock.UpgradeableLockAsync())
         {
-            await UpdateIfNecessary();
+            Context.EnterEvaluationScope();
+            try
+            {
+                await UpdateIfNecessary();
+            }
+            finally
+            {
+                Context.ExitEvaluationScope();
+            }
         }
     }
 
@@ -229,7 +252,12 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
             cts?.Cancel();
             cts = new();
 
-            Context.CancellationTokenSource ??= new();
+            // Open the cancellable window NOW, not when the debounced update starts running:
+            // Cancel() must be able to abort an update that is scheduled but still waiting out
+            // its debounce. Every Stale spawns exactly one RunDebouncedUpdateAsync, whose
+            // outermost finally exits the scope (including the superseded-early-return path),
+            // so the refcount stays balanced under coalescing.
+            Context.EnterEvaluationScope();
 
             // Fire-and-forget the debounced update. A newer Stale cancels this token, so a
             // superseded update is skipped entirely instead of running anyway (the previous
@@ -243,39 +271,47 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
 
     private async Task RunDebouncedUpdateAsync(TimeSpan debounceTime, CancellationToken token)
     {
+        // Balances the EnterEvaluationScope performed by the Stale that spawned this task --
+        // on the full-run path AND the superseded-early-return path.
         try
         {
-            await Task.Delay(debounceTime, token).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException)
-        {
-            // Superseded by a newer Stale before the debounce elapsed; nothing to do.
-            return;
-        }
-
-        // The node mutex serializes this update against a concurrent Resume() or another
-        // debounced update of the same reaction (each inherits a different flow's ContextLock, so
-        // the ContextLock alone does not order them): without it, a stale in-flight Execute could
-        // apply its side effects after a newer update finished and committed Clean. Only clean up
-        // the flow scope if we created it -- this task inherits the triggering Set's flow, and
-        // unconditionally removing that scope would tear it down under other debounced updates
-        // (or the Set caller) still using it.
-        var createdScope = Context.CreateNewScopeIfNeeded();
-        try
-        {
-            using (await mutex.LockAsync())
-            using (await Context.ReactionScope.ContextLock.UpgradeableLockAsync())
+            try
             {
-                await UpdateIfNecessary().ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
+                await Task.Delay(debounceTime, token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                // Superseded by a newer Stale before the debounce elapsed; nothing to do.
+                return;
+            }
+
+            // The node mutex serializes this update against a concurrent Resume() or another
+            // debounced update of the same reaction (each inherits a different flow's ContextLock,
+            // so the ContextLock alone does not order them): without it, a stale in-flight Execute
+            // could apply its side effects after a newer update finished and committed Clean. Only
+            // clean up the flow scope if we created it -- this task inherits the triggering Set's
+            // flow, and unconditionally removing that scope would tear it down under other
+            // debounced updates (or the Set caller) still using it.
+            var createdScope = Context.CreateNewScopeIfNeeded();
+            try
+            {
+                using (await mutex.LockAsync())
+                using (await Context.ReactionScope.ContextLock.UpgradeableLockAsync())
+                {
+                    await UpdateIfNecessary().ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
+                }
+            }
+            finally
+            {
+                if (createdScope)
+                {
+                    Context.CleanScope();
+                }
             }
         }
         finally
         {
-            Context.CancellationTokenSource = null;
-            if (createdScope)
-            {
-                Context.CleanScope();
-            }
+            Context.ExitEvaluationScope();
         }
     }
 

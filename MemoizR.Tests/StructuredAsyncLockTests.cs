@@ -1,4 +1,5 @@
 using MemoizR.StructuredAsyncLock;
+using xRetry;
 
 namespace MemoizR.Tests;
 
@@ -256,6 +257,40 @@ public class AsyncAsymmetricLockTests
         Assert.Equal(1, asyncLock.UpgradedLocksHeld);
     }
 
+    // IDisposable contract: disposing a lock key twice must be a no-op, not a bookkeeping
+    // corruption (a double-disposed exclusive key drove locksHeld negative, silently wedging
+    // every later acquisition; a double-disposed upgradeable key threw "Should never happen!").
+    [Fact(Timeout = 2000)]
+    public async Task LockKeys_DoubleDispose_IsIdempotent()
+    {
+        var asyncLock = new AsyncAsymmetricLock();
+
+        var exclusive = await asyncLock.ExclusiveLockAsync();
+        exclusive.Dispose();
+        exclusive.Dispose();
+        Assert.Equal(0, asyncLock.LocksHeld);
+
+        // The lock must still be fully usable afterwards.
+        using (await asyncLock.ExclusiveLockAsync())
+        {
+            Assert.Equal(1, asyncLock.LocksHeld);
+        }
+
+        var upgradeable = await asyncLock.UpgradeableLockAsync();
+        upgradeable.Dispose();
+        upgradeable.Dispose();
+        Assert.Equal(0, asyncLock.UpgradedLocksHeld);
+
+        using (await asyncLock.UpgradeableLockAsync())
+        {
+            Assert.Equal(1, asyncLock.UpgradedLocksHeld);
+        }
+
+        Assert.Equal(0, asyncLock.LocksHeld);
+        Assert.Equal(0, asyncLock.UpgradedLocksHeld);
+        Assert.Equal(0, asyncLock.LockScope);
+    }
+
     // --- Per-flow reentrancy contract ---
 
     [Fact(Timeout = 1000)]
@@ -361,6 +396,50 @@ public class AsyncAsymmetricLockTests
         Assert.Equal(0, asyncLock.LocksHeld);        // both queues fully drained
         Assert.Equal(0, asyncLock.UpgradedLocksHeld);
         Assert.Equal(0, asyncLock.LockScope);
+    }
+
+    // Queued exclusive waiters must be granted in enqueue order (the wait queue is a deque and
+    // ReleaseWaiters dequeues from the front; nothing else pins this fairness contract).
+    [RetryFact(3, 200)]
+    public async Task ExclusiveWaiters_AreGrantedInFifoOrder()
+    {
+        var asyncLock = new AsyncAsymmetricLock();
+        var order = new List<int>();
+        var holderHas = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var holder = Task.Run(async () =>
+        {
+            using (await asyncLock.UpgradeableLockAsync())
+            {
+                holderHas.SetResult();
+                await release.Task;
+            }
+        });
+        await holderHas.Task;
+
+        var waiters = new List<Task>();
+        for (var i = 1; i <= 3; i++)
+        {
+            var id = i;
+            waiters.Add(Task.Run(async () =>
+            {
+                using (await asyncLock.ExclusiveLockAsync())
+                {
+                    lock (order)
+                    {
+                        order.Add(id);
+                    }
+                }
+            }));
+            await Task.Delay(50); // space the enqueues so their order is deterministic
+        }
+
+        release.SetResult();
+        await Task.WhenAll(waiters);
+        await holder;
+
+        Assert.Equal([1, 2, 3], order);
     }
 
     // Liveness: a queued exclusive waiter must not be starved forever by continuous upgradeable

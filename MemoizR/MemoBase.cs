@@ -51,11 +51,9 @@ public abstract class MemoBase<T> : MemoHandlR<T>, IMemoizR, IStateGetR<T>
         using (await mutex.LockAsync())
         using (await scope.ContextLock.UpgradeableLockAsync())
         {
-            var isStartingComponent = Context.CancellationTokenSource == null;
+            Context.EnterEvaluationScope();
             try
             {
-                Context.CancellationTokenSource ??= new();
-
                 if (scope.CurrentReaction != null)
                 {
                     Context.CheckDependenciesTheSame(this);
@@ -71,10 +69,7 @@ public abstract class MemoBase<T> : MemoHandlR<T>, IMemoizR, IStateGetR<T>
             }
             finally
             {
-                if (isStartingComponent)
-                {
-                    Context.CancellationTokenSource = null;
-                }
+                Context.ExitEvaluationScope();
             }
         }
 
@@ -190,7 +185,17 @@ public abstract class MemoBase<T> : MemoHandlR<T>, IMemoizR, IStateGetR<T>
         using (await mutex.LockAsync())
         using (await Context.ReactionScope.ContextLock.UpgradeableLockAsync())
         {
-            await UpdateIfNecessary();
+            // Refcount the shared CancellationTokenSource: this entry point can recompute and is
+            // reached from reaction flows where no root Get holds the evaluation scope.
+            Context.EnterEvaluationScope();
+            try
+            {
+                await UpdateIfNecessary();
+            }
+            finally
+            {
+                Context.ExitEvaluationScope();
+            }
         }
     }
 

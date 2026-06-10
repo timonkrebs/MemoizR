@@ -339,6 +339,99 @@ public class StructuredConcurrencyTests
         Assert.Equal(22, await sum.Get());
     }
 
+    // ConcurrentMap sibling of the CMR test above: its children run on FORCED per-child scopes
+    // (RewireOwnLinks is false -- the results job wires the links), which is the other half of
+    // the structured dependency-tracking design.
+    [Fact(Timeout = 5000)]
+    public async Task ConcurrentMap_ObservesSignalsReadByParallelChildren()
+    {
+        var f = new MemoFactory();
+        var v1 = f.CreateSignal(1);
+        var v2 = f.CreateSignal(10);
+        var map = f.CreateConcurrentMap(
+            async _ => await v1.Get(),
+            async _ => await v2.Get());
+
+        Assert.Equal([1, 10], await map.Get());
+
+        await v1.Set(2);
+        Assert.Equal([2, 10], await map.Get());
+
+        await v2.Set(20);
+        Assert.Equal([2, 20], await map.Get());
+    }
+
+    // ConcurrentMap's ValuesEqual hook (sequence comparison): a recompute that produces an
+    // equal-but-new enumerable must not dirty observers -- the map analog of the record-equality
+    // memo test.
+    [Fact(Timeout = 5000)]
+    public async Task ConcurrentMap_EqualRecomputedSequence_DoesNotDirtyObservers()
+    {
+        var f = new MemoFactory();
+        var s = f.CreateSignal(1);
+        var map = f.CreateConcurrentMap(async _ => await s.Get() / 2);
+
+        var observerInvocations = 0;
+        var observer = f.CreateMemoizR(async () =>
+        {
+            observerInvocations++;
+            return (await map.Get()).Single();
+        });
+
+        Assert.Equal(0, await observer.Get()); // s=1 -> map [0]
+        var runs = observerInvocations;
+
+        await s.Set(0);                        // map recomputes: a NEW [0], SequenceEqual the old
+        Assert.Equal(0, await observer.Get());
+        Assert.Equal(runs, observerInvocations); // observer must not have recomputed
+    }
+
+    // ConcurrentMap mirror of the stale-during-recompute gate (completes the set across all
+    // three cached node types).
+    [Fact(Timeout = 10000)]
+    public async Task ConcurrentMap_StaleDuringRecompute_IsNotClobbered()
+    {
+        var f = new MemoFactory();
+        var s = f.CreateSignal(0);
+
+        var gate = new RecomputeGate();
+        var map = f.CreateConcurrentMap(
+            async _ =>
+            {
+                var x = await s.Get();
+                await gate.PauseIfArmedAsync();
+                return x;
+            });
+
+        Assert.Equal([0], await map.Get());
+        await s.Set(1);
+
+        gate.Arm();
+        var getter = Task.Run(async () => await map.Get()); // child reads s == 1, parks
+        await gate.ReadDone;
+
+        await s.Set(2);           // invalidate during the parked recompute
+
+        gate.Proceed();
+        await getter;
+
+        Assert.Equal([2], await map.Get());
+    }
+
+    // Degenerate input: structured nodes with zero functions must complete, returning the empty
+    // sequence / the reduce seed, not hang or throw.
+    [Fact(Timeout = 2000)]
+    public async Task ZeroFnStructuredNodes_ReturnEmptyOrSeed()
+    {
+        var f = new MemoFactory();
+
+        var map = f.CreateConcurrentMap<int>();
+        Assert.Empty(await map.Get());
+
+        var reduce = f.CreateConcurrentMapReduce<int>();
+        Assert.Equal(0, await reduce.Get());
+    }
+
     // The structured nodes share MemoizR's generation-guard choreography but wire it themselves
     // (BeginEvaluation around the job, the catch -> Force(CacheCheck) path, the double commit
     // around the diamond propagation). Reproduce the cross-flow lost-update deterministically

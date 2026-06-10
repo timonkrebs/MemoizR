@@ -610,6 +610,39 @@ public class ReactiveTests
         GC.KeepAlive(r);
     }
 
+    // AddSynchronizationContext re-registration contract (changed when the static side-table
+    // became a factory property): a second registration REPLACES the context for reactions
+    // built afterwards; reactions built earlier keep the context they captured at build time.
+    [Fact(Timeout = 30000)]
+    public async Task AddSynchronizationContext_ReRegistration_ReplacesForNewReactions()
+    {
+        var ctx1 = new CapturingSynchronizationContext();
+        var ctx2 = new CapturingSynchronizationContext();
+        var f = new MemoFactory().AddSynchronizationContext(ctx1);
+        var v1 = f.CreateSignal(1);
+
+        var last1 = 0;
+        var r1 = f.BuildReaction().CreateReaction(v1, v => last1 = v);
+        await TestHelpers.WaitForConvergenceAsync(() => last1 == 1, timeoutMs: 15000);
+        var ctx1PostsAfterR1 = ctx1.Posted;
+        Assert.True(ctx1PostsAfterR1 > 0, "r1 must execute via ctx1");
+
+        // Re-register: must replace, not throw (the old static-dictionary version threw on Add).
+        f.AddSynchronizationContext(ctx2);
+
+        var last2 = 0;
+        var r2 = f.BuildReaction().CreateReaction(v1, v => last2 = v);
+        await TestHelpers.WaitForConvergenceAsync(() => last2 == 1, timeoutMs: 15000);
+        Assert.True(ctx2.Posted > 0, "r2 must execute via the replacement ctx2");
+
+        // r1 captured ctx1 at build time and keeps using it.
+        await v1.Set(7);
+        await TestHelpers.WaitForConvergenceAsync(() => last1 == 7 && last2 == 7, timeoutMs: 15000);
+        Assert.True(ctx1.Posted > ctx1PostsAfterR1, "r1 must still execute via ctx1 after the re-registration");
+        GC.KeepAlive(r1);
+        GC.KeepAlive(r2);
+    }
+
     // The node mutex must serialize a reaction's updates: two debounced updates inherit
     // *different* flows' ContextLocks (which therefore order nothing between them), and the
     // generation guard protects only the State commit, not Execute's side effects. Overlapping
@@ -667,6 +700,34 @@ public class ReactiveTests
 
         await r.Resume();
         Assert.Equal(5, last); // Resume ran the pending update before returning
+        GC.KeepAlive(r);
+    }
+
+    // A reaction whose INITIAL run throws must still end up wired to the dependencies it read
+    // before throwing. A reaction has no pull path: if the captured links are dropped on the
+    // error path, no future Set can ever wake it -- the reaction is orphaned forever.
+    [Fact(Timeout = 10000)]
+    public async Task Reaction_InitialRunThrows_StillWiresDependencies_AndRecovers()
+    {
+        var f = new MemoFactory();
+        var v1 = f.CreateSignal(1);
+        var last = -1;
+        var shouldThrow = true;
+        var r = f.BuildReaction().CreateReaction(v1, v =>
+        {
+            if (Volatile.Read(ref shouldThrow)) throw new InvalidOperationException("initial boom");
+            last = v;
+        });
+
+        // Let the initial (throwing) run complete and fail; the exception is swallowed by the
+        // fire-and-forget debounce, so observe via the side effect staying unset.
+        await Task.Delay(150);
+        Assert.Equal(-1, last);
+
+        Volatile.Write(ref shouldThrow, false);
+        await v1.Set(5);
+        await TestHelpers.WaitForConvergenceAsync(() => last == 5);
+        Assert.Equal(5, last);
         GC.KeepAlive(r);
     }
 
