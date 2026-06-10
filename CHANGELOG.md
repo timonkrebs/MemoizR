@@ -16,6 +16,12 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
   CausalityStamp is now a canonical, persistent event tree over the id space (uniform regions
   collapse; joins share subtrees; equal maps have identical representations) — plus a compact,
   deterministic binary wire format (Serialize/Deserialize) with defensive validation.
+- Causality Trigger Clock, phase 3 (#39): reset resilience via per-context incarnation epochs
+  (stamps from a restarted graph are never equal/consistent with, and refuse to join, their
+  pre-reset incarnation), the wire format frozen at version 2 (epoch in the header), and the
+  public read surface for a distributed sync layer: IStampedGetR<T>.GetWithStamp() on all
+  value nodes, public Stamp/SourceStamps/Id on every node, and the public CausalityStamp type
+  (creation stays internal).
    
 ### Changed
 - Reactions now evaluate their separate-parameter dependencies in parallel on the thread pool; with a SynchronizationContext registered, only the action (with the already-evaluated values) is marshalled to the context, and `CreateAdvancedReaction` keeps running its whole body on the context (#13)

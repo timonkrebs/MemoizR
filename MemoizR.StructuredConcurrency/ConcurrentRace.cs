@@ -7,7 +7,7 @@ namespace MemoizR.StructuredConcurrency;
 // observers straight to CacheDirty: a race result is non-memoized, so observers cannot verify
 // "did it really change?" via a cheap re-check and must recompute. The inherited stateCell is
 // intentionally unused; State here is only a cycle-detection marker.
-public sealed class ConcurrentRace<T, I> : MemoHandlR<T>, IMemoizR, IStateGetR<T>
+public sealed class ConcurrentRace<T, I> : MemoHandlR<T>, IMemoizR, IStampedGetR<T>
 {
     private CacheState State { get; set; } = CacheState.CacheDirty;
     private readonly Func<Task<I>> action;
@@ -31,6 +31,11 @@ public sealed class ConcurrentRace<T, I> : MemoHandlR<T>, IMemoizR, IStateGetR<T
 
     public async Task<T> Get()
     {
+        return (await GetWithStamp()).Value;
+    }
+
+    public async Task<(T Value, CausalityStamp Stamp)> GetWithStamp()
+    {
         var scope = Context.GetOrCreateScope();
         try
         {
@@ -42,7 +47,10 @@ public sealed class ConcurrentRace<T, I> : MemoHandlR<T>, IMemoizR, IStateGetR<T
                 Context.EnterEvaluationScope();
                 try
                 {
-                    return await Update();
+                    await Update();
+                    // The node mutex is still held: nothing can republish between the update and
+                    // this box read, so the pair is the one this update produced.
+                    return ValueAndStamp;
                 }
                 finally
                 {
@@ -59,7 +67,7 @@ public sealed class ConcurrentRace<T, I> : MemoHandlR<T>, IMemoizR, IStateGetR<T
     }
 
     /** run the computation fn, updating the cached value */
-    private async Task<T> Update()
+    private async Task Update()
     {
         if (State == CacheState.Evaluating) throw new InvalidOperationException("Cyclic behavior detected");
         var oldValue = Value;
@@ -106,8 +114,6 @@ public sealed class ConcurrentRace<T, I> : MemoHandlR<T>, IMemoizR, IStateGetR<T
         {
             MarkObserversDirty();
         }
-
-        return Value;
     }
 
     async Task IMemoizR.UpdateIfNecessary()

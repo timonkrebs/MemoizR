@@ -90,6 +90,14 @@ public class Context
     // stamps (issue #39) and derived nodes key their per-source stamp maps by.
     private int nextNodeId;
 
+    // The incarnation epoch every causality stamp of this context carries: ids and triggers
+    // restart when a process (and so its context) restarts, so a recreated graph reissues
+    // (id, trigger) pairs that already escaped over the wire -- the random nonzero epoch is
+    // what keeps pre- and post-reset observations from ever being confused (see
+    // CausalityStamp). Drawn per Context: within a living context a "reset" node is simply a
+    // new node, with a fresh id that was never handed out before.
+    internal long Epoch { get; } = Random.Shared.NextInt64(1, long.MaxValue);
+
     /** causality-stamp capture (issue #39): while a node evaluates, the stamps observed on its
     * tracked source reads accumulate here, keyed by the EVALUATING NODE rather than by flow.
     * Structured-concurrency children read on child flows/scopes but evaluate on behalf of the

@@ -1,12 +1,12 @@
 namespace MemoizR;
 
-public sealed class EagerRelativeSignal<T> : MemoHandlR<T>, IStateGetR<T>
+public sealed class EagerRelativeSignal<T> : MemoHandlR<T>, IStampedGetR<T>
 {
     private Lock Lock { get; } = new();
 
     internal EagerRelativeSignal(T value, Context context) : base(context)
     {
-        SetValueAndStamp(value, CausalityStamp.ForSignal(Id, 0));
+        SetValueAndStamp(value, CausalityStamp.ForSignal(Id, 0, context.Epoch));
     }
 
     public async Task Set(Func<T, T> fn)
@@ -26,7 +26,7 @@ public sealed class EagerRelativeSignal<T> : MemoHandlR<T>, IStateGetR<T>
                     // (there is no equality short-cut here), so the trigger mirrors exactly what
                     // observers are told. Same atomic read-modify-write-under-Lock as Signal.Set.
                     Stamp.TryGetTrigger(Id, out var trigger);
-                    SetValueAndStamp(fn(Value), CausalityStamp.ForSignal(Id, trigger + 1));
+                    SetValueAndStamp(fn(Value), CausalityStamp.ForSignal(Id, trigger + 1, Context.Epoch));
                 }
 
                 await PropagateStaleToObserversAsync(CacheState.CacheDirty);
@@ -40,17 +40,22 @@ public sealed class EagerRelativeSignal<T> : MemoHandlR<T>, IStateGetR<T>
 
     public async Task<T> Get()
     {
+        return (await GetWithStamp()).Value;
+    }
+
+    public async Task<(T Value, CausalityStamp Stamp)> GetWithStamp()
+    {
         // An unpinned flow can have no capturing reaction (its scope would be freshly minted),
         // so the read needs no scope at all.
         if (!Context.HasFlowScope)
         {
-            return Value;
+            return ValueAndStamp;
         }
 
         var scope = Context.GetOrCreateScope();
         if (scope.CurrentReaction == null)
         {
-            return Value;
+            return ValueAndStamp;
         }
 
         // Only one thread should evaluate the graph at a time. otherwise the context could get messed up.
@@ -62,11 +67,12 @@ public sealed class EagerRelativeSignal<T> : MemoHandlR<T>, IStateGetR<T>
             {
                 Context.CheckDependenciesTheSame(this);
 
-                // One box read: the stamp recorded for the capturing evaluation must describe
-                // exactly the value returned (a concurrent Set must not split the pair).
+                // One box read: the stamp recorded for the capturing evaluation -- and the one
+                // returned to the caller -- must describe exactly the value returned (a concurrent
+                // Set must not split the pair).
                 var (value, stamp) = ValueAndStamp;
                 Context.RecordSourceStamp(scope.CurrentReaction, Id, stamp);
-                return value;
+                return (value, stamp);
             }
         }
         finally

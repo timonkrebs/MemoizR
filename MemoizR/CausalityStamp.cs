@@ -1,16 +1,23 @@
 namespace MemoizR;
 
-// Phase 1+2 of the Causality Trigger Clock (CTC, issue #39): an immutable map from signal id to
-// that signal's trigger value (a per-signal version counter, bumped on every value-changing
-// Set). A signal's stamp is the single entry { #id: trigger }; a derived node's stamp is the
-// join of the stamps it observed on its tracked source reads during its last completed
-// evaluation -- the set of signal versions its current state reflects ({ #6: { 2:7, 3:2 } } in
-// the issue's notation).
+// The Causality Trigger Clock stamp (CTC, issue #39): an immutable map from signal id to that
+// signal's trigger value (a per-signal version counter, bumped on every value-changing Set),
+// tagged with the incarnation epoch of the context that produced it. A signal's stamp is the
+// single entry { #id: trigger }; a derived node's stamp is the join of the stamps it observed
+// on its tracked source reads during its last completed evaluation -- the set of signal
+// versions its current state reflects ({ #6: { 2:7, 3:2 } } in the issue's notation).
 //
 // Two stamps are "consistent" when they agree on every signal they both track -- the
 // glitch-freedom check a distributed consumer runs across its inputs' stamps. Within one
-// process the locking layers already guarantee glitch-freedom; stamps are the preparation for
-// verifying it where locks cannot reach (distributed graphs).
+// process the locking layers already guarantee glitch-freedom; stamps make that property
+// checkable where locks cannot reach (distributed graphs).
+//
+// Reset resilience: ids and triggers restart when a process (and so its Context) restarts, so
+// a recreated graph reissues (id, trigger) pairs that already escaped over the wire. Every
+// stamp therefore carries the random nonzero EPOCH of its context incarnation: stamps from
+// different incarnations are never equal, never report consistency, and refuse to join --
+// observing an epoch change is the sync layer's signal to discard its stale state for that
+// peer, not to merge. The empty stamp claims nothing and is epoch-agnostic (epoch 0).
 //
 // Capture discipline (enforced by the graph integration, relied on by consumers): a stamp is
 // taken from the same volatile box publication as the value it describes, so a (value, stamp)
@@ -20,43 +27,50 @@ namespace MemoizR;
 // reflect; the conservative direction (a node that skips recomputing because a parent's value
 // came out unchanged keeps its older stamp) only costs a spurious recheck.
 //
-// Representation (phase 2, inspired by Interval Tree Clocks): a canonical binary event tree
-// over the id space [0, 2^spanBits), where the value stored at an id is the sum of the N fields
-// along its path. The stored value encodes "untracked" as 0 and "tracked at trigger t" as
-// t + 1, which turns the stamp into a total function with default 0 -- exactly the shape ITC
-// event trees compress: uniform regions (untracked gaps, batches of fresh signals at trigger 0,
+// Representation (inspired by Interval Tree Clocks): a canonical binary event tree over the id
+// space [0, 2^spanBits), where the value stored at an id is the sum of the N fields along its
+// path. The stored value encodes "untracked" as 0 and "tracked at trigger t" as t + 1, which
+// turns the stamp into a total function with default 0 -- exactly the shape ITC event trees
+// compress: uniform regions (untracked gaps, batches of fresh signals at trigger 0,
 // lockstep-updated ranges) collapse into single leaves, and shared minimums are lifted into
 // parents. Trees are persistent: Join reuses whole subtrees of its operands. The normal form
-// (see MkNode/Trim) is unique per logical map, so structural equality is semantic equality and
-// serialization is deterministic. Reset resilience is phase 3.
-internal sealed class CausalityStamp : IEquatable<CausalityStamp>
+// (see MkNode/FromCanonicalTree) is unique per logical map, so structural equality is semantic
+// equality and serialization is deterministic.
+public sealed class CausalityStamp : IEquatable<CausalityStamp>
 {
-    public static CausalityStamp Empty { get; } = new(EventTree.Zero, 0);
+    public static CausalityStamp Empty { get; } = new(EventTree.Zero, 0, 0);
 
-    private readonly EventTree root; // canonical (normal-form, trimmed) -- see MkNode/Trim
+    private readonly EventTree root; // canonical (normal-form, trimmed) -- see MkNode/FromCanonicalTree
     private readonly int spanBits;   // root covers ids [0, 2^spanBits); 0 means just id 0
 
-    private CausalityStamp(EventTree root, int spanBits)
+    // The incarnation that produced this stamp's observations: random and nonzero per Context,
+    // 0 only on the empty stamp. Triggers are only comparable within one epoch.
+    public long Epoch { get; }
+
+    private CausalityStamp(EventTree root, int spanBits, long epoch)
     {
         this.root = root;
         this.spanBits = spanBits;
+        Epoch = epoch;
     }
 
     private bool IsEmpty => root.IsLeaf && root.N == 0;
 
-    public static CausalityStamp ForSignal(int signalId, long trigger)
+    internal static CausalityStamp ForSignal(int signalId, long trigger, long epoch)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(signalId);
         ArgumentOutOfRangeException.ThrowIfNegative(trigger);
+        ArgumentOutOfRangeException.ThrowIfZero(epoch);
 
         var bits = 0;
         while (signalId >> bits != 0)
         {
             bits++;
         }
-        return new(EventTree.Singleton(signalId, bits, trigger + 1), bits);
+        return new(EventTree.Singleton(signalId, bits, trigger + 1), bits, epoch);
     }
 
+    // Diagnostic view; materialized per call (one entry per tracked signal).
     public IReadOnlyDictionary<int, long> Triggers
     {
         get
@@ -86,7 +100,9 @@ internal sealed class CausalityStamp : IEquatable<CausalityStamp>
 
     // Least upper bound: pointwise max over the union of tracked signals. Associative,
     // commutative and idempotent, so the accumulation order across parallel source reads
-    // (structured-concurrency children) cannot affect the result.
+    // (structured-concurrency children) cannot affect the result. Joining across epochs throws:
+    // triggers of different incarnations are incomparable, and a mismatch reaching a join means
+    // the caller skipped the reset detection it owes (discard the stale side instead).
     public CausalityStamp Join(CausalityStamp other)
     {
         if (IsEmpty)
@@ -97,13 +113,18 @@ internal sealed class CausalityStamp : IEquatable<CausalityStamp>
         {
             return this;
         }
+        if (Epoch != other.Epoch)
+        {
+            throw new InvalidOperationException(
+                "Causality stamps from different incarnation epochs cannot be joined: one side observed a peer that has since reset. Discard the stale stamp instead of merging it.");
+        }
 
         var bits = Math.Max(spanBits, other.spanBits);
         var joined = EventTree.Join(root.Grow(spanBits, bits), other.root.Grow(other.spanBits, bits));
-        return FromCanonicalTree(joined, bits);
+        return FromCanonicalTree(joined, bits, Epoch);
     }
 
-    public static CausalityStamp JoinAll(IEnumerable<CausalityStamp> stamps)
+    internal static CausalityStamp JoinAll(IEnumerable<CausalityStamp> stamps)
     {
         var result = Empty;
         foreach (var stamp in stamps)
@@ -114,9 +135,20 @@ internal sealed class CausalityStamp : IEquatable<CausalityStamp>
     }
 
     // The glitch detector: two stamps are consistent when they agree on every signal both
-    // track. Disjoint stamps are trivially consistent (no shared causality to disagree about).
+    // track. Disjoint stamps are trivially consistent (no shared causality to disagree about);
+    // stamps from different incarnation epochs never are (their triggers count different write
+    // histories, so identical numbers are not agreement).
     public bool IsConsistentWith(CausalityStamp other)
     {
+        if (IsEmpty || other.IsEmpty)
+        {
+            return true;
+        }
+        if (Epoch != other.Epoch)
+        {
+            return false;
+        }
+
         var bits = Math.Max(spanBits, other.spanBits);
         return EventTree.Consistent(root.Grow(spanBits, bits), 0, other.root.Grow(other.spanBits, bits), 0);
     }
@@ -128,33 +160,39 @@ internal sealed class CausalityStamp : IEquatable<CausalityStamp>
             return false;
         }
         // Canonical form is unique per logical map, so structural equality decides.
-        return spanBits == other.spanBits && EventTree.StructurallyEqual(root, other.root);
+        return Epoch == other.Epoch && spanBits == other.spanBits && EventTree.StructurallyEqual(root, other.root);
     }
 
     public override bool Equals(object? obj) => Equals(obj as CausalityStamp);
 
-    public override int GetHashCode() => HashCode.Combine(spanBits, root.ComputeHash());
+    public override int GetHashCode() => HashCode.Combine(Epoch, spanBits, root.ComputeHash());
 
-    public override string ToString() =>
-        "{" + string.Join(", ", Triggers.OrderBy(t => t.Key).Select(t => $"#{t.Key}: {t.Value}")) + "}";
+    public override string ToString()
+    {
+        var map = "{" + string.Join(", ", Triggers.OrderBy(t => t.Key).Select(t => $"#{t.Key}: {t.Value}")) + "}";
+        return IsEmpty ? map : $"{map}@{Epoch:x}";
+    }
 
-    // Wire format (subject to revision until the distributed sync layer freezes it in phase 3):
-    //   stamp  := version:byte spanBits:byte node
+    // Wire format, FROZEN at version 2 (any future change bumps the version byte; Deserialize
+    // rejects versions it does not know):
+    //   stamp  := version:byte varint(epoch) spanBits:byte node
     //   node   := varint(N << 1 | isLeaf) [node node]   -- children present iff isLeaf bit is 0
     //   varint := little-endian base-128, high bit = continuation
     // Serialization of the canonical tree is deterministic: equal stamps yield equal bytes.
-    private const byte FormatVersion = 1;
+    private const byte FormatVersion = 2;
 
     public byte[] Serialize()
     {
-        var bytes = new List<byte> { FormatVersion, (byte)spanBits };
+        var bytes = new List<byte> { FormatVersion };
+        WriteVarint(bytes, (ulong)Epoch);
+        bytes.Add((byte)spanBits);
         root.WriteTo(bytes);
         return [.. bytes];
     }
 
     public static CausalityStamp Deserialize(ReadOnlySpan<byte> bytes)
     {
-        if (bytes.Length < 2)
+        if (bytes.Length == 0)
         {
             throw new FormatException("Causality stamp payload is truncated.");
         }
@@ -162,13 +200,19 @@ internal sealed class CausalityStamp : IEquatable<CausalityStamp>
         {
             throw new FormatException($"Unknown causality stamp format version {bytes[0]}.");
         }
-        int bits = bytes[1];
+
+        var position = 1;
+        var epoch = (long)ReadVarint(bytes, ref position);
+        if (position >= bytes.Length)
+        {
+            throw new FormatException("Causality stamp payload is truncated.");
+        }
+        int bits = bytes[position++];
         if (bits > 31)
         {
             throw new FormatException($"Causality stamp span 2^{bits} exceeds the id space.");
         }
 
-        var position = 2;
         var tree = EventTree.ReadFrom(bytes, ref position, bits);
         if (position != bytes.Length)
         {
@@ -177,14 +221,20 @@ internal sealed class CausalityStamp : IEquatable<CausalityStamp>
 
         // Re-canonicalize defensively: our own serializer only emits canonical trees, but the
         // equality/serialization guarantees must hold for any parseable input.
-        return FromCanonicalTree(tree.Canonicalize(), bits);
+        var stamp = FromCanonicalTree(tree.Canonicalize(), bits, epoch);
+        if (!stamp.IsEmpty && stamp.Epoch == 0)
+        {
+            throw new FormatException("Non-empty causality stamp lacks an incarnation epoch.");
+        }
+        return stamp;
     }
 
     // Trims a canonical tree to its minimal span: an all-zero upper half is dropped (the root
     // is then Node(0, lower, Leaf 0) -- a root with N > 0 tracks every id in its span and an
     // all-zero subtree always collapses to Leaf 0, so this test is exhaustive). Equal logical
-    // maps thereby get identical (root, spanBits) pairs regardless of construction order.
-    private static CausalityStamp FromCanonicalTree(EventTree tree, int bits)
+    // maps thereby get identical (root, spanBits) pairs regardless of construction order. An
+    // all-zero tree claims nothing, so it canonicalizes to the epoch-agnostic Empty.
+    private static CausalityStamp FromCanonicalTree(EventTree tree, int bits, long epoch)
     {
         while (bits > 0 && !tree.IsLeaf && tree.N == 0 && tree.Right!.IsLeaf && tree.Right.N == 0)
         {
@@ -195,7 +245,36 @@ internal sealed class CausalityStamp : IEquatable<CausalityStamp>
         {
             return Empty;
         }
-        return new(tree, bits);
+        return new(tree, bits, epoch);
+    }
+
+    private static void WriteVarint(List<byte> bytes, ulong value)
+    {
+        while (value >= 0x80)
+        {
+            bytes.Add((byte)(value | 0x80));
+            value >>= 7;
+        }
+        bytes.Add((byte)value);
+    }
+
+    private static ulong ReadVarint(ReadOnlySpan<byte> bytes, ref int position)
+    {
+        var value = 0UL;
+        for (var shift = 0; shift < 64; shift += 7)
+        {
+            if (position >= bytes.Length)
+            {
+                throw new FormatException("Causality stamp payload is truncated.");
+            }
+            var b = bytes[position++];
+            value |= (ulong)(b & 0x7F) << shift;
+            if ((b & 0x80) == 0)
+            {
+                return value;
+            }
+        }
+        throw new FormatException("Causality stamp varint is malformed.");
     }
 
     // The ITC-style event tree. Value at id = sum of N along the path; a leaf is uniform over
@@ -405,35 +484,6 @@ internal sealed class CausalityStamp : IEquatable<CausalityStamp>
             var left = ReadFrom(bytes, ref position, bits - 1);
             var right = ReadFrom(bytes, ref position, bits - 1);
             return new(n, left, right);
-        }
-
-        private static void WriteVarint(List<byte> bytes, ulong value)
-        {
-            while (value >= 0x80)
-            {
-                bytes.Add((byte)(value | 0x80));
-                value >>= 7;
-            }
-            bytes.Add((byte)value);
-        }
-
-        private static ulong ReadVarint(ReadOnlySpan<byte> bytes, ref int position)
-        {
-            var value = 0UL;
-            for (var shift = 0; shift < 64; shift += 7)
-            {
-                if (position >= bytes.Length)
-                {
-                    throw new FormatException("Causality stamp payload is truncated.");
-                }
-                var b = bytes[position++];
-                value |= (ulong)(b & 0x7F) << shift;
-                if ((b & 0x80) == 0)
-                {
-                    return value;
-                }
-            }
-            throw new FormatException("Causality stamp varint is malformed.");
         }
     }
 }

@@ -10,7 +10,7 @@ namespace MemoizR;
 //
 // Deliberately NOT on this base: ReactionBase (push-driven, no Get, debounce-scheduled commits)
 // and ConcurrentRace (uncached -- it recomputes on every Get, so the guard buys it nothing).
-public abstract class MemoBase<T> : MemoHandlR<T>, IMemoizR, IStateGetR<T>
+public abstract class MemoBase<T> : MemoHandlR<T>, IMemoizR, IStampedGetR<T>
 {
     // State is read on the lock-free Get fast path (alongside the volatile CurrentReaction); the
     // inherited cell exposes a lock-free volatile read and guards transitions so a concurrent
@@ -40,19 +40,26 @@ public abstract class MemoBase<T> : MemoHandlR<T>, IMemoizR, IStateGetR<T>
 
     public async Task<T> Get()
     {
+        return (await GetWithStamp()).Value;
+    }
+
+    public async Task<(T Value, CausalityStamp Stamp)> GetWithStamp()
+    {
         // An UNPINNED flow's scope would be freshly minted with CurrentReaction == null by
         // construction, so a clean read from one needs no scope at all: two volatile reads and
         // out -- no lock, no allocation. (Without this, every top-level Get minted and
         // registered a scope just to look at a field that is always null.)
         if (State == CacheState.CacheClean && !Context.HasFlowScope)
         {
-            return Value;
+            return ValueAndStamp;
         }
 
         var scope = Context.GetOrCreateScope();
         if (State == CacheState.CacheClean && scope.CurrentReaction == null)
         {
-            return Value;
+            // The lock-free fast path: one volatile box read -- a linearizable (value, stamp)
+            // snapshot (see MemoHandlR).
+            return ValueAndStamp;
         }
 
         // Only one thread should evaluate the graph at a time. otherwise the context could get messed up.
@@ -77,11 +84,11 @@ public abstract class MemoBase<T> : MemoHandlR<T>, IMemoizR, IStateGetR<T>
                     }
 
                     // One box read: the stamp recorded for the capturing evaluation (if this read is
-                    // tracked) must describe exactly the value returned -- a concurrent recompute or
-                    // Set must not split the pair.
+                    // tracked) -- and the one returned to the caller -- must describe exactly the
+                    // value returned; a concurrent recompute or Set must not split the pair.
                     var (value, stamp) = ValueAndStamp;
                     Context.RecordSourceStamp(scope.CurrentReaction, Id, stamp);
-                    return value;
+                    return (value, stamp);
                 }
                 finally
                 {

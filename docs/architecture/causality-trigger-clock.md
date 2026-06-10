@@ -12,7 +12,11 @@ Phase 1 delivers the semantics: node identity, per-signal trigger counters, per-
 captured at source-read time, and the untorn `(value, stamp)` publication. Phase 2 (§6)
 replaces the naive dictionary inside `CausalityStamp` with the ITC-inspired canonical event
 tree and adds the compact wire format — same API, byte-deterministic serialization. Phase 3
-adds reset resilience and the public API for a distributed sync layer.
+adds reset resilience via **incarnation epochs** (§1, §6), freezes the wire format at
+version 2, and opens the **public read surface** a sync layer consumes: `GetWithStamp()`
+(the `IStampedGetR<T>` interface on every value node), `Stamp`, `SourceStamps` and `Id` on
+every node, and the public `CausalityStamp` type (creation stays internal — the sync layer
+reads, compares and transports stamps, it never mints them).
 
 ---
 
@@ -35,10 +39,20 @@ adds reset resilience and the public API for a distributed sync layer.
   keyed by source id) — "every Node keeps a Stamp for each of its Sources" — the data a future
   distributed sync protocol exchanges.
 
-Two stamps are **consistent** (`IsConsistentWith`) when they agree on every signal both track;
-disjoint stamps are trivially consistent. That predicate is the glitch detector: a node whose
-inputs carry stamps that disagree on a shared signal would combine values from different
-versions of the same write history.
+- Every stamp carries the **incarnation epoch** of the context that produced it — a random
+  nonzero value drawn per `Context` (the empty stamp claims nothing and is epoch-agnostic).
+  Ids and triggers restart when a process restarts, so a recreated graph reissues
+  `(id, trigger)` pairs that already escaped over the wire; the epoch is what keeps pre- and
+  post-reset observations apart: cross-epoch stamps are never equal, never consistent, and
+  `Join` refuses them outright — observing an epoch change is the sync layer's cue to discard
+  its stale state for that peer, not to merge
+  (`RestartedGraph_IsNeverConfusedWithItsPreResetIncarnation`). Within a *living* context a
+  "reset" node is simply a new node: ids are never reused, so no epoch is needed there.
+
+Two stamps are **consistent** (`IsConsistentWith`) when they share an epoch and agree on every
+signal both track; disjoint stamps are trivially consistent. That predicate is the glitch
+detector: a node whose inputs carry stamps that disagree on a shared signal would combine
+values from different versions of the same write history.
 
 The issue's example, as reproduced by `Issue39_DiamondExample_ReproducesIssueStamps`:
 
@@ -123,14 +137,22 @@ ordering requirements. A recompute whose Clean commit is refused by the generati
 already published an honest `(value, stamp)` pair — both describe the same (now superseded)
 reads — and the node stays dirty, so the next `Get` replaces both.
 
-## 5. What is deliberately left out (phase 3)
+## 5. What is deliberately left to the sync layer
 
-- **Reset resilience**: plain counters are not reset-safe — a restarted signal would
-  reissue lower triggers. This needs epochs/incarnations or ITC-style id forking, plus the
-  public API (`GetWithStamp()`-shaped) for the sync layer. Everything is `internal` until then,
-  and the wire format below may still be revved (with a version bump) until phase 3 freezes it.
 - **Enforcement**: no local code path *acts* on an inconsistency — locally, the locks already
-  prevent glitches; the stamps maintain and expose the evidence.
+  prevent glitches; the stamps maintain and expose the evidence. Reacting to a failed
+  consistency check (re-pull, defer, resubscribe) is distributed-protocol behavior.
+- **Cross-peer id management**: ids are per-context; a protocol that merges stamps from
+  multiple peers must namespace or partition the id space (the ITC fork/join discipline lives
+  at that layer). This is also why `Join` treats an epoch mismatch as a protocol error rather
+  than resolving it: triggers of different incarnations are incomparable, and the correct
+  response (discard the stale side) is operational, not algebraic.
+- **Public surface** (frozen alongside the wire format): `IStampedGetR<T>.GetWithStamp()` —
+  the `(value, stamp)` pair of one publication — on signals, memos and the
+  structured-concurrency nodes; `Stamp`, `SourceStamps` and `Id` on every node (reactions have
+  no value, so they expose only these); `CausalityStamp` with `Epoch`, `Triggers`,
+  `TryGetTrigger`, `Join`, `IsConsistentWith`, value equality, `Serialize`/`Deserialize`.
+  Stamp *creation* stays internal.
 
 ## 6. The encoding (phase 2): a canonical event tree
 
@@ -159,16 +181,18 @@ Structural equality is therefore semantic equality, and serialization is **deter
 randomized model test (`RandomizedJoins_MatchTheDictionaryModel`) checks every operation
 against the naive dictionary semantics phase 1 shipped with.
 
-**Wire format** (`Serialize`/`Deserialize`):
+**Wire format** (`Serialize`/`Deserialize`), **frozen at version 2** — any future change
+arrives as a deliberate version bump, and unknown versions are rejected:
 
 ```
-stamp  := version:byte spanBits:byte node
+stamp  := version:byte varint(epoch) spanBits:byte node
 node   := varint(N << 1 | isLeaf) [node node]   -- children present iff the isLeaf bit is 0
 varint := little-endian base-128, high bit = continuation
 ```
 
-A preorder walk with varint-coded headers: the common leaf costs one byte. `Deserialize`
-validates structurally — version, `spanBits ≤ 31`, a node spanning a single id must be a leaf
-(which also bounds the recursion), no truncation, no trailing bytes — and **re-canonicalizes**
+A preorder walk with varint-coded headers: the common leaf costs one byte (a real-world epoch
+adds ~9 bytes per stamp). `Deserialize` validates structurally — version, `spanBits ≤ 31`, a
+node spanning a single id must be a leaf (which also bounds the recursion), no truncation, no
+trailing bytes, and a non-empty stamp must carry a nonzero epoch — and **re-canonicalizes**
 defensively, so the equality and determinism guarantees hold for any parseable input, not just
 payloads we produced (`Deserialize_CanonicalizesForeignInput`).

@@ -45,21 +45,24 @@ public abstract class SignalHandlR : IMemoHandlR
 
     // Stable per-context identity for causality stamps (issue #39): signals appear in stamps
     // under this id, and derived nodes key their per-source stamp map by it.
-    internal int Id { get; }
+    public int Id { get; }
+
+    // Backs SourceStamps: swap-published as a whole map that is never mutated after publish;
+    // volatile so readers get a coherent reference without a lock. Written by the evaluation
+    // paths of MemoHandlR (value nodes) and ReactionBase (hence internal, not private).
+    internal volatile IReadOnlyDictionary<int, CausalityStamp> sourceStamps = NoSourceStamps;
 
     // "Every Node keeps a Stamp for each of its Sources" (issue #39): the stamp observed on
-    // each tracked source read of the last completed evaluation, keyed by source id.
-    // Swap-published as a whole map that is never mutated after publish; volatile so diagnostic
-    // readers and the future distributed sync layer get a coherent reference without a lock.
-    // Signals keep the empty map.
-    internal volatile IReadOnlyDictionary<int, CausalityStamp> SourceStamps = NoSourceStamps;
+    // each tracked source read of the last completed evaluation, keyed by source id -- the data
+    // a distributed sync layer exchanges. Signals keep the empty map.
+    public IReadOnlyDictionary<int, CausalityStamp> SourceStamps => sourceStamps;
 
     // The node's own published stamp: which signal versions its current state reflects. Value
     // nodes override Stamp to read it from the same volatile box as the value (an untorn
     // pair); this base field carries it for reactions, which have no value box.
     internal volatile CausalityStamp ownStamp = CausalityStamp.Empty;
 
-    internal virtual CausalityStamp Stamp => ownStamp;
+    public virtual CausalityStamp Stamp => ownStamp;
 
     public string Label { get; init; } = "Label";
 
@@ -242,7 +245,7 @@ public abstract class MemoHandlR<T> : SignalHandlR
 
     internal T Value => valueBox.Value;
 
-    internal override CausalityStamp Stamp => valueBox.Stamp;
+    public override CausalityStamp Stamp => valueBox.Stamp;
 
     // The (value, stamp) pair of one publication -- a single volatile box read, never torn.
     internal (T Value, CausalityStamp Stamp) ValueAndStamp
@@ -268,7 +271,7 @@ public abstract class MemoHandlR<T> : SignalHandlR
     {
         var captured = Context.TakeStampCapture(this);
         SetValueAndStamp(value, CausalityStamp.JoinAll(captured.Values));
-        SourceStamps = captured;
+        sourceStamps = captured;
     }
 
     internal MemoHandlR(Context context) : base(context)

@@ -254,7 +254,7 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
 
             var captured = Context.TakeStampCapture(this);
             ownStamp = CausalityStamp.JoinAll(captured.Values);
-            SourceStamps = captured;
+            sourceStamps = captured;
 
             UpdateSourceAndObserverLinks();
         }

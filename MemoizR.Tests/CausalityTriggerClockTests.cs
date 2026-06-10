@@ -6,13 +6,16 @@ namespace MemoizR.Tests;
 // causality stamps captured at source-read time, and the untorn (value, stamp) publication.
 public class CausalityTriggerClockTests
 {
+    // A fixed incarnation epoch for the pure-algebra tests (graph tests use the node's own).
+    private const long TestEpoch = 5;
+
     // Builds the expected stamp in the issue's notation, e.g. Stamp((s2, 7), (s3, 2)) == {#2: 7, #3: 2}.
     private static CausalityStamp Stamp(params (SignalHandlR Node, long Trigger)[] entries)
     {
         var stamp = CausalityStamp.Empty;
         foreach (var (node, trigger) in entries)
         {
-            stamp = stamp.Join(CausalityStamp.ForSignal(node.Id, trigger));
+            stamp = stamp.Join(CausalityStamp.ForSignal(node.Id, trigger, node.Context.Epoch));
         }
         return stamp;
     }
@@ -33,7 +36,7 @@ public class CausalityTriggerClockTests
     [Fact]
     public void Stamp_ForSignal_TracksSingleEntry()
     {
-        var stamp = CausalityStamp.ForSignal(3, 7);
+        var stamp = CausalityStamp.ForSignal(3, 7, TestEpoch);
         Assert.True(stamp.TryGetTrigger(3, out var trigger));
         Assert.Equal(7, trigger);
         Assert.Single(stamp.Triggers);
@@ -42,20 +45,20 @@ public class CausalityTriggerClockTests
     [Fact]
     public void Stamp_Join_TakesPointwiseMaxOverUnion()
     {
-        var a = CausalityStamp.ForSignal(1, 4).Join(CausalityStamp.ForSignal(2, 1));
-        var b = CausalityStamp.ForSignal(2, 7).Join(CausalityStamp.ForSignal(3, 2));
+        var a = CausalityStamp.ForSignal(1, 4, TestEpoch).Join(CausalityStamp.ForSignal(2, 1, TestEpoch));
+        var b = CausalityStamp.ForSignal(2, 7, TestEpoch).Join(CausalityStamp.ForSignal(3, 2, TestEpoch));
 
         var joined = a.Join(b);
 
-        Assert.Equal(CausalityStamp.ForSignal(1, 4).Join(CausalityStamp.ForSignal(2, 7)).Join(CausalityStamp.ForSignal(3, 2)), joined);
+        Assert.Equal(CausalityStamp.ForSignal(1, 4, TestEpoch).Join(CausalityStamp.ForSignal(2, 7, TestEpoch)).Join(CausalityStamp.ForSignal(3, 2, TestEpoch)), joined);
     }
 
     [Fact]
     public void Stamp_Join_IsCommutativeAssociativeIdempotent()
     {
-        var a = CausalityStamp.ForSignal(1, 4).Join(CausalityStamp.ForSignal(2, 1));
-        var b = CausalityStamp.ForSignal(2, 7);
-        var c = CausalityStamp.ForSignal(3, 2);
+        var a = CausalityStamp.ForSignal(1, 4, TestEpoch).Join(CausalityStamp.ForSignal(2, 1, TestEpoch));
+        var b = CausalityStamp.ForSignal(2, 7, TestEpoch);
+        var c = CausalityStamp.ForSignal(3, 2, TestEpoch);
 
         Assert.Equal(a.Join(b), b.Join(a));
         Assert.Equal(a.Join(b).Join(c), a.Join(b.Join(c)));
@@ -69,31 +72,31 @@ public class CausalityTriggerClockTests
     {
         // The issue's example: memo #5 {1:4, 2:7, 3:2} and memo #6 {2:7, 3:2} agree on the
         // shared signals -> a glitch-free pair of inputs.
-        var m5 = CausalityStamp.ForSignal(1, 4).Join(CausalityStamp.ForSignal(2, 7)).Join(CausalityStamp.ForSignal(3, 2));
-        var m6 = CausalityStamp.ForSignal(2, 7).Join(CausalityStamp.ForSignal(3, 2));
+        var m5 = CausalityStamp.ForSignal(1, 4, TestEpoch).Join(CausalityStamp.ForSignal(2, 7, TestEpoch)).Join(CausalityStamp.ForSignal(3, 2, TestEpoch));
+        var m6 = CausalityStamp.ForSignal(2, 7, TestEpoch).Join(CausalityStamp.ForSignal(3, 2, TestEpoch));
         Assert.True(m5.IsConsistentWith(m6));
         Assert.True(m6.IsConsistentWith(m5));
 
         // One input reflecting a newer write of signal 2 than the other -> glitched.
-        var m6Newer = CausalityStamp.ForSignal(2, 8).Join(CausalityStamp.ForSignal(3, 2));
+        var m6Newer = CausalityStamp.ForSignal(2, 8, TestEpoch).Join(CausalityStamp.ForSignal(3, 2, TestEpoch));
         Assert.False(m5.IsConsistentWith(m6Newer));
         Assert.False(m6Newer.IsConsistentWith(m5));
 
         // No shared causality -> trivially consistent.
-        Assert.True(CausalityStamp.ForSignal(1, 4).IsConsistentWith(CausalityStamp.ForSignal(2, 9)));
+        Assert.True(CausalityStamp.ForSignal(1, 4, TestEpoch).IsConsistentWith(CausalityStamp.ForSignal(2, 9, TestEpoch)));
         Assert.True(CausalityStamp.Empty.IsConsistentWith(m5));
     }
 
     [Fact]
     public void Stamp_ValueEquality_IsOrderIndependent()
     {
-        var a = CausalityStamp.ForSignal(1, 4).Join(CausalityStamp.ForSignal(2, 7));
-        var b = CausalityStamp.ForSignal(2, 7).Join(CausalityStamp.ForSignal(1, 4));
+        var a = CausalityStamp.ForSignal(1, 4, TestEpoch).Join(CausalityStamp.ForSignal(2, 7, TestEpoch));
+        var b = CausalityStamp.ForSignal(2, 7, TestEpoch).Join(CausalityStamp.ForSignal(1, 4, TestEpoch));
 
         Assert.Equal(a, b);
         Assert.Equal(a.GetHashCode(), b.GetHashCode());
-        Assert.NotEqual(a, CausalityStamp.ForSignal(1, 4));
-        Assert.NotEqual(a, a.Join(CausalityStamp.ForSignal(2, 8)));
+        Assert.NotEqual(a, CausalityStamp.ForSignal(1, 4, TestEpoch));
+        Assert.NotEqual(a, a.Join(CausalityStamp.ForSignal(2, 8, TestEpoch)));
     }
 
     [Fact]
