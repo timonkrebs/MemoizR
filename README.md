@@ -162,9 +162,25 @@ The same discipline is checked at **build time** by analyzers bundled in the NuG
 | `MZR002` | A computation writing captured locals, fields, or statics — lift that state into a `Signal` |
 | `MZR003` | `Signal.Set` inside a computation, which throws `InvalidOperationException` at runtime |
 
-See [ADR 0003](docs/adr/0003-sendable-checking-and-isolation-assertions.md) (runtime layer) and
-[ADR 0004](docs/adr/0004-compile-time-data-race-diagnostics.md) (analyzers) for the design and
-its limits.
+Reaction side effects can be pinned to an **executor** — the analog of Swift's custom actor
+executors (SE-0392). `AddSynchronizationContext(uiContext)` covers UI threads;
+`AddExecutor(new DedicatedThreadExecutor())` gives a single-threaded isolation seat whose
+installed `SynchronizationContext` keeps async continuations on its thread; any custom
+`IExecutor` works, per factory or per `BuildReaction()`:
+
+```cs
+using var executor = new DedicatedThreadExecutor();
+var f = new MemoFactory().AddExecutor(executor);
+var r = f.BuildReaction().CreateReaction(m1, v =>
+{
+    executor.AssertIsolated(); // the executor-flavored preconditionIsolated()
+    // touch executor-isolated state safely
+});
+```
+
+See [ADR 0003](docs/adr/0003-sendable-checking-and-isolation-assertions.md) (runtime layer),
+[ADR 0004](docs/adr/0004-compile-time-data-race-diagnostics.md) (analyzers), and
+[ADR 0005](docs/adr/0005-custom-executors.md) (executors) for the design and its limits.
 
 Try it out!https:
 Experiment with MemoizR online: https://dotnetfiddle.net/Widget/EWtptc

@@ -27,3 +27,17 @@ f.AddSynchronizationContext(UISyncContext);
 
 var r1 = f.CreateReaction(m1, m2, (val1, val2) => val1 + val2);
 ```
+
+Reactions can be pinned to any `IExecutor` (the analog of Swift's custom actor executors), per
+factory or per builder — e.g. a `DedicatedThreadExecutor`, whose installed
+`SynchronizationContext` keeps async continuations on its single thread:
+
+```csharp
+using var executor = new DedicatedThreadExecutor();
+var f = new MemoFactory().AddExecutor(executor);
+
+var r1 = f.BuildReaction().CreateReaction(m1, val =>
+{
+    executor.AssertIsolated(); // throws when not running on the executor
+});
+```

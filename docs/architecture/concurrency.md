@@ -588,7 +588,7 @@ sequenceDiagram
     participant W as Set (writer flow)
     participant R as ReactionBase
     participant D as debounced task (inherits writer's flow)
-    participant SC as SynchronizationContext (optional)
+    participant SC as Executor (optional — e.g. a UI SynchronizationContext)
 
     W->>R: Stale(CacheDirty)
     activate R
@@ -600,10 +600,10 @@ sequenceDiagram
     D->>D: mutex.LockAsync  ⟵ serializes vs Resume() and<br/>other in-flight debounced updates of THIS reaction
     D->>D: ContextLock.Upgradeable (own flow)
     D->>D: UpdateIfNecessary: Clean? → no-op (coalesced)
-    alt SynchronizationContext supplied
-        D->>SC: Post(Execute)
-        SC->>SC: Execute (user code on the context)
-        SC-->>D: TCS completed (RunContinuationsAsynchronously —<br/>bookkeeping does NOT run inline in the post)
+    alt executor supplied (AddExecutor / AddSynchronizationContext)
+        D->>SC: Enqueue(Execute)
+        SC->>SC: Execute (user code on the executor)
+        SC-->>D: TCS completed (RunContinuationsAsynchronously —<br/>bookkeeping does NOT run inline in the executor's slot)
     else none
         D->>D: Execute inline
     end
@@ -624,10 +624,12 @@ Design points, each pinned by a test:
   `Dirty`. `Resume` runs the pending update inline under mutex + ContextLock and cleans up only
   a scope it created — calling it from inside an active evaluation must not destroy the
   enclosing flow's scope (`Reaction_ResumeInsideActiveEvaluation_DoesNotDestroyEnclosingScope`).
-- **SynchronizationContext marshalling**: `Execute` is posted to the supplied context (UI
-  thread); its completion TCS uses `RunContinuationsAsynchronously` so commit/cleanup never runs
-  inside the context's callback, and the callback completes the TCS **exactly once** — a
-  `SetResult` after `SetException` would escape the `async void` and crash the process
+- **Executor marshalling**: `Execute` is enqueued to the supplied `IExecutor` (a UI
+  `SynchronizationContext` wrapped by `AddSynchronizationContext`, a `DedicatedThreadExecutor`,
+  or a custom seat — the SE-0392 analog, [ADR 0005](../adr/0005-custom-executors.md)); its
+  completion TCS uses `RunContinuationsAsynchronously` so commit/cleanup never runs inside the
+  executor's slot, and the callback completes the TCS **exactly once** — a `SetResult` after
+  `SetException` would escape the `async void` and crash the process
   (`Reaction_ExecuteThrowsUnderSynchronizationContext_FaultsResumeWithoutCrashingContext`).
 - **Error semantics**: a throwing `Execute` re-marks the reaction `Dirty` (`Force`) and the
   exception propagates to `Resume` callers / is swallowed by the fire-and-forget debounce; the

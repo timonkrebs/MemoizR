@@ -22,8 +22,17 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
   (`Signal.Set` inside a computation, which throws at runtime, reported at build time).
   Reference types with a non-private settable (non-init) property now count as non-Sendable
   in both the analyzer and `SendableChecker`.
+- Custom executors for reactive side effects (issue #36, the Swift SE-0392 analog, see ADR
+  0005): `IExecutor` (`Enqueue`/`IsCurrent`) with `executor.AssertIsolated()`,
+  `SynchronizationContextExecutor`, a `DedicatedThreadExecutor` whose installed
+  SynchronizationContext keeps async continuations on its thread (a true serial isolation
+  seat), `MemoFactory.AddExecutor(...)`, and a per-builder `ReactionBuilder.AddExecutor(...)`
+  override.
 
 ### Changed
+- `ReactionBuilder`'s public constructor takes `IExecutor?` instead of
+  `SynchronizationContext?`. `BuildReaction()` / `AddSynchronizationContext` callers are
+  unaffected (the context is wrapped in a `SynchronizationContextExecutor`).
 
 ### Fixed
 

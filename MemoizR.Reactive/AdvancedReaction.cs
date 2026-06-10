@@ -6,8 +6,8 @@ public sealed class AdvancedReaction : ReactionBase
 
     internal AdvancedReaction(Func<Task> fn,
     Context context,
-    SynchronizationContext? synchronizationContext = null)
-    : base(context, synchronizationContext)
+    IExecutor? executor = null)
+    : base(context, executor)
     {
         this.fn = fn;
 

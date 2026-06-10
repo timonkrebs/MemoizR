@@ -6,8 +6,8 @@ public sealed class Reaction : ReactionBase
 
     internal Reaction(Func<Task> action,
                       Context context,
-                      SynchronizationContext? synchronizationContext = null)
-        : base(context, synchronizationContext)
+                      IExecutor? executor = null)
+        : base(context, executor)
     {
         this.action = action;
 
