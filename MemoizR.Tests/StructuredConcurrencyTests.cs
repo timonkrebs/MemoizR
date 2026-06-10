@@ -305,17 +305,8 @@ public class StructuredConcurrencyTests
         Assert.Equal(6, x.ElementAt(2));
     }
 
-    // Polls until the reactive graph has settled on the expected state, or a generous timeout
-    // elapses (after which the caller's assertions fail with a meaningful diff). Async, debounced
-    // propagation can take a variable number of recompute cycles, so a fixed delay is flaky.
-    private static async Task WaitForConvergenceAsync(Func<bool> converged, int timeoutMs = 5000)
-    {
-        var sw = System.Diagnostics.Stopwatch.StartNew();
-        while (!converged() && sw.ElapsedMilliseconds < timeoutMs)
-        {
-            await Task.Delay(10);
-        }
-    }
+    private static Task WaitForConvergenceAsync(Func<bool> converged, int timeoutMs = 5000)
+        => TestHelpers.WaitForConvergenceAsync(converged, timeoutMs);
 
     [Fact(Timeout = 1000)]
     public async Task TestChildExecptionCancelationHandling()

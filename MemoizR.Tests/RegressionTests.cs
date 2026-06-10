@@ -109,10 +109,19 @@ public class RegressionTests
         using var cts = new CancellationTokenSource();
         var readers = Enumerable.Range(0, 8).Select(_ => Task.Run(async () =>
         {
+            // Writes are serialized (sequential awaited Sets recomputed under the node mutex), so
+            // the published values are monotonically increasing; a reader observing a smaller
+            // value after a larger one would mean the fast path returned a stale snapshot. (An
+            // int read can't tear, so an "is even" style check could never fail.)
+            var lastSeen = 0;
             while (!cts.IsCancellationRequested)
             {
                 var r = await m1.Get();
-                Assert.True(r % 2 == 0, $"memo is v1*2 and must always be even, saw {r}");
+                Assert.True(r >= lastSeen, $"fast path went backwards: saw {r} after {lastSeen}");
+                lastSeen = r;
+                // Yield so 8 readers don't pin the whole thread pool (the CacheClean fast path
+                // completes synchronously) and starve the writer's continuations on small CI runners.
+                await Task.Yield();
             }
         })).ToArray();
 
@@ -156,6 +165,9 @@ public class RegressionTests
             {
                 var p = await m1.Get();
                 Assert.True(p.A == p.B, $"torn read: halves came from different writes ({p.A} != {p.B})");
+                // Yield so 8 readers don't pin the whole thread pool (the CacheClean fast path
+                // completes synchronously) and starve the writer's continuations on small CI runners.
+                await Task.Yield();
             }
         })).ToArray();
 
@@ -186,8 +198,10 @@ public class RegressionTests
         var s = f.CreateSignal(0);
 
         var gateArmed = false;
-        var readDone = new TaskCompletionSource();
-        var proceed = new TaskCompletionSource();
+        // RunContinuationsAsynchronously: SetResult must not run the test's continuation inline
+        // inside the memo's fn, where the getter flow holds the node mutex and ContextLock.
+        var readDone = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var proceed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
         var m = f.CreateMemoizR(async () =>
         {
@@ -216,5 +230,57 @@ public class RegressionTests
         // The Set(2) that landed during the recompute must win: the memo must reconverge to 2,
         // not stay stuck at the clobbered 1.
         Assert.Equal(2, await m.Get());
+    }
+
+    // Deterministic reproduction of the *suppressed*-Stale variant of the lost-update race.
+    // Chain s -> p -> c with p = s/2, so p's value is the same for s=0 and s=1 (no diamond
+    // down-link rescues c). While c's CacheCheck scan is parked inside p's recompute, a second
+    // Set lands: its cascade reaches c as Stale(CacheCheck), but c is already CacheCheck, so the
+    // state does not escalate. The generation must be bumped anyway -- if the suppressed Stale
+    // leaves no trace, c's pending commit marks it Clean over a Dirty parent, and because the
+    // cascade also stops at already-dirty nodes, nothing ever re-dirties c: it caches the stale
+    // value forever.
+    [Fact(Timeout = 10000)]
+    public async Task Memo_SuppressedStaleDuringParentCheck_IsNotClobbered()
+    {
+        var f = new MemoFactory();
+        var s = f.CreateSignal(0);
+
+        var gateArmed = false;
+        // RunContinuationsAsynchronously: SetResult must not run the test's continuation inline
+        // inside the memo's fn, where the getter flow holds the node mutex and ContextLock.
+        var readDone = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var proceed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var p = f.CreateMemoizR(async () =>
+        {
+            var x = await s.Get();
+            if (Volatile.Read(ref gateArmed))
+            {
+                Volatile.Write(ref gateArmed, false);
+                readDone.SetResult();
+                await proceed.Task;
+            }
+            return x / 2; // same value for s=0 and s=1, changes only at s=2
+        });
+        var c = f.CreateMemoizR(async () => await p.Get());
+
+        await c.Get();            // prime: s=0 -> p=0 -> c=0, links established
+        await s.Set(1);           // cascade: p Dirty, c CacheCheck; p stays 0 once recomputed
+
+        Volatile.Write(ref gateArmed, true);
+        var getter = Task.Run(async () => await c.Get()); // c's CacheCheck scan recomputes p, which parks
+        await readDone.Task;      // p's recompute has read s == 1 and is parked
+
+        await s.Set(2);           // cascade: p escalates (Evaluating -> Dirty), c's Stale(CacheCheck)
+                                  // is suppressed (already CacheCheck) -- the generation bump is all
+                                  // that protects c's pending commit
+
+        proceed.SetResult();      // p finishes with the unchanged value 0 -> no down-link to c;
+                                  // c's scan sees no dirty parent and tries to commit Clean
+        await getter;
+
+        // s == 2 must win: p recomputes to 1 and c must follow, not stay cached at 0.
+        Assert.Equal(1, await c.Get());
     }
 }

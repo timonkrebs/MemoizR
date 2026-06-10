@@ -20,7 +20,8 @@ public sealed class AsyncAsymmetricLock
     readonly IAsyncWaitQueue<IDisposable> exclusive = new DefaultAsyncWaitQueue<IDisposable>();
 
     /// <summary>
-    /// Number of exclusive locks held; negative if upgradeable lock are held; 0 if no locks are held.
+    /// Number of exclusive locks held; 0 if none. Upgradeable holds are tracked separately in
+    /// <see cref="upgradedLocksHeld"/> (this field never goes negative).
     /// </summary>
     // Every read/write of these counters happens inside lock (Lock) (the LocksHeld/
     // UpgradedLocksHeld getters lock, and the Interlocked mutations run under that same lock),
@@ -76,7 +77,11 @@ public sealed class AsyncAsymmetricLock
     /// <returns>A disposable that releases the lock when disposed.</returns>
     private Task<IDisposable> RequestExclusiveLockAsync(double lockScope)
     {
-        if (LockScope == lockScope && LocksHeld < 0)
+        // Upgradeable holds are counted in upgradedLocksHeld (locksHeld never goes negative), so
+        // that is what an exclusive acquire in the same scope must be checked against; checking
+        // `LocksHeld < 0` here was dead code that let this case fall through to the generic
+        // "Should never happen!" invariant branch.
+        if (LockScope == lockScope && UpgradedLocksHeld > 0)
         {
             throw new InvalidOperationException("Can not aquire recursive exclusive lock in the scope of an upgradeable lock");
         }

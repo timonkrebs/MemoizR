@@ -5,12 +5,16 @@ namespace MemoizR;
 public class ReactionScope
 {
     // CurrentReaction is read on the lock-free Get fast path (e.g. MemoizR.Get), so it stays
-    // volatile for that read's visibility. CurrentGets/CurrentGetsIndex are only ever touched
-    // while the graph is serialized by the ContextLock (and CheckDependenciesTheSame's
-    // Context.Lock / Interlocked), so they don't need volatile.
+    // volatile for that read's visibility. CurrentGets/CurrentGetsIndex are volatile because no
+    // single monitor covers all their accesses: writes go through CheckDependenciesTheSame under
+    // Context.Lock, but StructuredReduceJob's parallel children (which share their parent flow's
+    // scope -- only StructuredResultsJob forces per-child scopes) read them under the job's own
+    // Lock, and the per-flow-reentrant ContextLock grants all those children concurrently, so it
+    // serializes none of this. volatile supplies the missing release/acquire pairing (ADR 0001
+    // rule 2); writes are whole-array swaps, so the reference publish is atomic.
     internal volatile IMemoHandlR? CurrentReaction = null;
-    internal IMemoHandlR[] CurrentGets = [];
-    internal int CurrentGetsIndex;
+    internal volatile IMemoHandlR[] CurrentGets = [];
+    internal volatile int CurrentGetsIndex;
     internal AsyncAsymmetricLock ContextLock = new();
 }
 
@@ -49,17 +53,22 @@ public class Context
 
     public CancellationTokenSource? CancellationTokenSource { get; internal set; }
 
-    internal void CreateNewScopeIfNeeded()
+    // Pins a scope to the current async flow if it has none yet. Returns whether a scope was
+    // created: a caller that pairs this with CleanScope must only clean up when it created the
+    // scope, otherwise it destroys a live scope an enclosing evaluation on the same flow is
+    // still using (its dependency capture would silently resolve to a fresh empty scope).
+    internal bool CreateNewScopeIfNeeded()
     {
         lock (Lock)
         {
             if (AsyncLocalScope.Value != 0)
             {
-                return;
+                return false;
             }
             var key = Random.Shared.NextDouble();
             AsyncLocalScope.Value = key;
             AsyncReactionScopes.Add(key, new(new()));
+            return true;
         }
     }
 

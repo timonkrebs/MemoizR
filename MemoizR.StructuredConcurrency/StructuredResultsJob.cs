@@ -4,14 +4,10 @@ namespace MemoizR.StructuredConcurrency;
 
 public sealed class StructuredResultsJob<T> : StructuredJobBase<ConcurrentDictionary<int, T>>
 {
-    private IList<IMemoHandlR> allSources = [];
-
-
     private readonly IReadOnlyCollection<Func<IStructuredResourceGroup, Task<T>>> fns;
     private readonly Context context;
     private readonly ConcurrentMap<T> @this;
     private readonly CancellationTokenSource cancellationTokenSource;
-    private Lock Lock { get; } = new();
 
     public StructuredResultsJob(IReadOnlyCollection<Func<IStructuredResourceGroup, Task<T>>> fns, Context context, ConcurrentMap<T> @this)
     {
@@ -29,9 +25,9 @@ public sealed class StructuredResultsJob<T> : StructuredJobBase<ConcurrentDictio
         return Task.CompletedTask;
     }
 
-    // Runs one mapped function on its own scope, records its result, and rewires source/observer
-    // links under Lock. Extracted from the AddConcurrentWork lambda to keep Cognitive Complexity
-    // in budget.
+    // Runs one mapped function on its own scope, records its result, and hands the captured
+    // sources to the shared accumulator. Extracted from the AddConcurrentWork lambda to keep
+    // Cognitive Complexity in budget.
     private async Task ExecuteFn(Func<IStructuredResourceGroup, Task<T>> x, int i, StructuredResourceGroup resourceGroup)
     {
         context.ForceNewScope();
@@ -45,31 +41,7 @@ public sealed class StructuredResultsJob<T> : StructuredJobBase<ConcurrentDictio
             cancellationTokenSource.Cancel();
             throw;
         }
-        lock (Lock)
-        {
-            // if the sources have changed, update source & observer links
-            if (context.ReactionScope.CurrentGets.Length > 0)
-            {
-                // update source up links
-                if (allSources.Any() && context.ReactionScope.CurrentGetsIndex > 0)
-                {
-                    allSources = [.. allSources, .. context.ReactionScope.CurrentGets];
-                }
-                else
-                {
-                    allSources = context.ReactionScope.CurrentGets;
-                }
-
-                for (var j = context.ReactionScope.CurrentGetsIndex; j < allSources.Count(); j++)
-                {
-                    // Add ourselves to the end of the parent .observers array
-                    var source = allSources[j];
-                    source.Observers = !source.Observers.Any()
-                        ? [new(@this)]
-                        : [.. source.Observers, new(@this)];
-                }
-            }
-        }
+        AccumulateSourcesAndObservers(context, @this);
     }
 
     protected override void HandleSubscriptions()

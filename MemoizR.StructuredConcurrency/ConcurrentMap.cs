@@ -2,10 +2,9 @@ namespace MemoizR.StructuredConcurrency;
 
 public sealed class ConcurrentMap<T> : MemoHandlR<IEnumerable<T>>, IMemoizR, IStateGetR<IEnumerable<T>>
 {
-    // Read on the lock-free Get fast path (alongside the volatile CurrentReaction); the cell
-    // exposes a lock-free volatile read and guards transitions so a concurrent Stale can't be
-    // clobbered by an in-flight recompute committing Clean (see CacheStateCell).
-    private readonly CacheStateCell stateCell = new(CacheState.CacheClean);
+    // Read on the lock-free Get fast path (alongside the volatile CurrentReaction); the inherited
+    // cell exposes a lock-free volatile read and guards transitions so a concurrent Stale can't
+    // be clobbered by an in-flight recompute committing Clean (see CacheStateCell).
     private CacheState State => stateCell.State;
     private IReadOnlyCollection<Func<IStructuredResourceGroup, Task<T>>> fns;
 
@@ -109,8 +108,9 @@ public sealed class ConcurrentMap<T> : MemoHandlR<IEnumerable<T>>, IMemoizR, ISt
         if (State == CacheState.Evaluating) throw new InvalidOperationException("Cyclic behavior detected");
 
         // By now, we're clean -- unless a Stale invalidated us along the way, in which case leave
-        // the node dirty so the next Get recomputes instead of caching a stale value.
-        stateCell.TryCommitClean(token);
+        // the node dirty so the next Get recomputes instead of caching a stale value (and
+        // re-notify observers that may have committed Clean against our pre-invalidation value).
+        await CommitCleanOrRenotifyAsync(token);
     }
 
     /** run the computation fn, updating the cached value */
@@ -146,24 +146,18 @@ public sealed class ConcurrentMap<T> : MemoHandlR<IEnumerable<T>>, IMemoizR, ISt
             Context.ReactionScope.CurrentReaction = prevReaction;
             Context.ReactionScope.CurrentGetsIndex = prevIndex;
         }
-        
-            // handles diamond dependencies if we're the parent of a diamond.
-            if (Observers.Length > 0 && !oldValue.SequenceEqual(Value ?? []))
-            {
-                // We've changed value, so mark our children as dirty so they'll reevaluate
-                foreach (var observer in Observers)
-                {
-                    if (observer.TryGetTarget(out var o))
-                    {
-                        o.State = CacheState.CacheDirty;
-                    }
-                }
+
+        // handles diamond dependencies if we're the parent of a diamond.
+        if (!oldValue.SequenceEqual(Value ?? []))
+        {
+            MarkObserversDirty();
         }
 
         // We've rerun with the latest values from all of our Sources, so we no longer need to
         // update until a signal changes -- unless a Stale invalidated us mid-evaluation, in which
-        // case the commit is dropped and the node stays dirty for the next Get.
-        stateCell.TryCommitClean(token);
+        // case the commit is dropped, the node stays dirty for the next Get, and observers that
+        // raced us to Clean are re-notified.
+        await CommitCleanOrRenotifyAsync(token);
     }
 
     async Task IMemoizR.UpdateIfNecessary()
@@ -175,22 +169,9 @@ public sealed class ConcurrentMap<T> : MemoHandlR<IEnumerable<T>>, IMemoizR, ISt
         }
     }
 
-    internal async Task Stale(CacheState state)
+    internal Task Stale(CacheState state)
     {
-        // Escalate atomically and bump the generation so an in-flight recompute on another flow
-        // cannot commit Clean over this invalidation. No change => already at least this dirty.
-        if (!stateCell.Invalidate(state))
-        {
-            return;
-        }
-
-        foreach (var observer in Observers)
-        {
-            if (observer.TryGetTarget(out var o))
-            {
-                await o.Stale(CacheState.CacheCheck);
-            }
-        }
+        return InvalidateAndPropagateAsync(state);
     }
 
     Task IMemoizR.Stale(CacheState state)

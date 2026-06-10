@@ -4,11 +4,11 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
 {
     private CancellationTokenSource cts = new();
     // State is invalidated by Stale (under lock(this), driven by a Set on another flow) and
-    // committed by the recompute under the ContextLock. The cell's generation guard stops the
-    // recompute from committing Clean over a Stale that arrived mid-evaluation -- the cross-flow
-    // lost-update race, which for a reaction means a missed trigger (see CacheStateCell). isPaused
-    // is written by Pause/Resume from arbitrary threads and read in Update, so it stays volatile.
-    private readonly CacheStateCell stateCell = new(CacheState.CacheClean);
+    // committed by the recompute under the node mutex + ContextLock. The inherited cell's
+    // generation guard stops the recompute from committing Clean over a Stale that arrived
+    // mid-evaluation -- the cross-flow lost-update race, which for a reaction means a missed
+    // trigger (see CacheStateCell). isPaused is written by Pause/Resume from arbitrary threads
+    // and read in Update, so it stays volatile.
     private CacheState State => stateCell.State;
     private SynchronizationContext? synchronizationContext;
     private volatile bool isPaused;
@@ -33,14 +33,20 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
     public async Task Resume()
     {
         isPaused = false;
-        // Go through the ContextLock like every other update entry point (Get,
-        // IMemoizR.UpdateIfNecessary, RunDebouncedUpdateAsync). Calling the internal
-        // UpdateIfNecessary directly recomputes the node and rewires Sources/Observers and the
-        // shared ReactionScope with no lock held, racing a concurrent Signal.Set on the same
-        // context. volatile only restores visibility, not mutual exclusion, so serialize here.
-        Context.CreateNewScopeIfNeeded();
+        // Serialize like the debounced update path: the node mutex ensures only one update of
+        // this reaction runs at a time (Resume vs concurrent debounced updates -- without it, a
+        // stale in-flight Execute could apply its side effects after a newer one finished), and
+        // the ContextLock serializes graph evaluation within this flow. The ContextLock is
+        // per-flow, so it does NOT order this update against Sets on other flows; cross-flow
+        // correctness comes from the CacheStateCell generation guard plus the whole-array swaps
+        // behind the IMemoHandlR setters (see ADR 0001/0002). Like the debounced path, the
+        // reaction body must not call Signal.Set on its own flow (exclusive-inside-upgradeable
+        // is rejected by the lock). Only clean up the flow scope if we created it -- Resume can
+        // be called from inside an active evaluation whose scope must survive this call.
+        var createdScope = Context.CreateNewScopeIfNeeded();
         try
         {
+            using (await mutex.LockAsync())
             using (await Context.ReactionScope.ContextLock.UpgradeableLockAsync())
             {
                 await UpdateIfNecessary();
@@ -48,7 +54,10 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
         }
         finally
         {
-            Context.CleanScope();
+            if (createdScope)
+            {
+                Context.CleanScope();
+            }
         }
     }
 
@@ -168,16 +177,18 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
 
             async void SendOrPostCallback(object? _)
             {
+                // Complete the TCS exactly once: SetResult after SetException would throw
+                // InvalidOperationException out of this async void and crash the process via the
+                // SynchronizationContext instead of faulting the awaited task.
                 try
                 {
                     await Execute();
+                    tcs.SetResult();
                 }
                 catch (Exception e)
                 {
                     tcs.SetException(e);
                 }
-
-                tcs.SetResult();
             }
 
             synchronizationContext.Post(SendOrPostCallback, null);
@@ -189,53 +200,9 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
         }
     }
 
-    // Rewire our source up-links and the parents' observer down-links to match the Sources captured
-    // during this evaluation. Extracted from Update to keep its Cognitive Complexity in budget.
-    private void UpdateSourceAndObserverLinks()
-    {
-        // If the Sources have changed, update source & observer links.
-        if (Context.ReactionScope.CurrentGets.Length > 0)
-        {
-            // remove all old Sources' .observers links to us
-            RemoveParentObservers(Context.ReactionScope.CurrentGetsIndex);
-            // Update source up links.
-            if (Sources.Any() && Context.ReactionScope.CurrentGetsIndex > 0)
-            {
-                Sources = [.. Sources.Take(Context.ReactionScope.CurrentGetsIndex), .. Context.ReactionScope.CurrentGets];
-            }
-            else
-            {
-                Sources = Context.ReactionScope.CurrentGets;
-            }
-
-            for (var i = Context.ReactionScope.CurrentGetsIndex; i < Sources.Length; i++)
-            {
-                // Add ourselves to the end of the parent .observers array.
-                var source = Sources[i];
-                source.Observers = !source.Observers.Any()
-                    ? [new(this)]
-                    : [.. source.Observers, new(this)];
-            }
-        }
-        else if (Sources.Any() && Context.ReactionScope.CurrentGetsIndex < Sources.Length)
-        {
-            // remove all old Sources' .observers links to us
-            RemoveParentObservers(Context.ReactionScope.CurrentGetsIndex);
-            Sources = [.. Sources.Take(Context.ReactionScope.CurrentGetsIndex)];
-        }
-    }
-
-    private void RemoveParentObservers(int index)
-    {
-        if (!Sources.Any()) return;
-        foreach (var source in Sources.Skip(index))
-        {
-            source.Observers = [.. source.Observers.Where(x => x.TryGetTarget(out var o) ? o != this : false)];
-        }
-    }
-
     async Task IMemoizR.UpdateIfNecessary()
     {
+        using (await mutex.LockAsync())
         using (await Context.ReactionScope.ContextLock.UpgradeableLockAsync())
         {
             await UpdateIfNecessary();
@@ -277,9 +244,17 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
             return;
         }
 
-        Context.CreateNewScopeIfNeeded();
+        // The node mutex serializes this update against a concurrent Resume() or another
+        // debounced update of the same reaction (each inherits a different flow's ContextLock, so
+        // the ContextLock alone does not order them): without it, a stale in-flight Execute could
+        // apply its side effects after a newer update finished and committed Clean. Only clean up
+        // the flow scope if we created it -- this task inherits the triggering Set's flow, and
+        // unconditionally removing that scope would tear it down under other debounced updates
+        // (or the Set caller) still using it.
+        var createdScope = Context.CreateNewScopeIfNeeded();
         try
         {
+            using (await mutex.LockAsync())
             using (await Context.ReactionScope.ContextLock.UpgradeableLockAsync())
             {
                 await UpdateIfNecessary().ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
@@ -288,7 +263,10 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
         finally
         {
             Context.CancellationTokenSource = null;
-            Context.CleanScope();
+            if (createdScope)
+            {
+                Context.CleanScope();
+            }
         }
     }
 

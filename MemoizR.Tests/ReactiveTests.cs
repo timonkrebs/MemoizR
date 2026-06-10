@@ -452,11 +452,12 @@ public class ReactiveTests
         Assert.Equal(168, result2);
     }
 
-    // Resume() recomputes the reaction and rewires Sources/Observers + the shared ReactionScope.
-    // It now goes through the ContextLock like every other update path, so running it
-    // concurrently with a flood of Set() calls must serialize cleanly: no exception, no deadlock,
-    // and the reaction must still converge on the final write. (Before the fix Resume ran the
-    // update with no lock held, racing a concurrent Set on the same context.)
+    // Resume() recomputes the reaction under the node mutex + ContextLock like the debounced
+    // update path, so running it concurrently with a flood of Set() calls must serialize cleanly:
+    // no exception, no deadlock, and the reaction must still converge on the final write. The
+    // node mutex is what orders Resume against the concurrently scheduled debounced updates --
+    // without it, a stale in-flight Execute could apply its side effects after the newest update
+    // finished, and the reaction would settle on the wrong value with nothing re-running it.
     [Fact(Timeout = 10000)]
     public async Task Reaction_ResumeConcurrentWithSet_DoesNotThrowAndConverges()
     {
@@ -475,13 +476,35 @@ public class ReactiveTests
         await v1.Set(1000);
 
         // The debounced reaction must settle on the last write.
-        var sw = System.Diagnostics.Stopwatch.StartNew();
-        while (last != 1000 && sw.ElapsedMilliseconds < 5000)
-        {
-            await Task.Delay(20);
-        }
+        await TestHelpers.WaitForConvergenceAsync(() => last == 1000);
 
         Assert.Equal(1000, last);
+        GC.KeepAlive(r);
+    }
+
+    // Resume() called from inside an active evaluation (here: a memo's fn) must not tear down
+    // the flow's ReactionScope -- it did not create it. With the old unconditional CleanScope,
+    // the enclosing memo's dependency capture silently resolved to a fresh empty scope, its
+    // Sources were never wired, and later Sets never invalidated it.
+    [Fact(Timeout = 10000)]
+    public async Task Reaction_ResumeInsideActiveEvaluation_DoesNotDestroyEnclosingScope()
+    {
+        var f = new MemoFactory();
+        var v1 = f.CreateSignal(1);
+        var r = f.BuildReaction().CreateReaction(v1, _ => { });
+        r.Pause();
+
+        var m = f.CreateMemoizR(async () =>
+        {
+            var x = await v1.Get();
+            await r.Resume();
+            return x * 2;
+        });
+
+        Assert.Equal(2, await m.Get());
+        await v1.Set(5);
+        // Dependency tracking must have survived the nested Resume: the Set must dirty m.
+        Assert.Equal(10, await m.Get());
         GC.KeepAlive(r);
     }
 }

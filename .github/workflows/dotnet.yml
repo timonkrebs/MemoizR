@@ -19,7 +19,10 @@ jobs:
       matrix:
         os: [ubuntu-latest, ubuntu-24.04-arm, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 2
+    # Generous ceiling: restore + build + Coyote install/rewrite plus the concurrency stress
+    # tests (individual budgets up to 20s, convergence polls up to 5s) can exceed a tight limit
+    # on the slow matrix legs (ubuntu-24.04-arm, macos-latest) even when every test passes.
+    timeout-minutes: 10
 
     steps:
     - uses: actions/checkout@v6

@@ -242,11 +242,15 @@ public class AsyncAsymmetricLockTests
         using var upgradeable = await asyncLock.UpgradeableLockAsync();
 
         // Taking an exclusive lock while already holding an upgradeable one in the same scope
-        // would deadlock, so it must throw instead of blocking.
-        await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+        // would deadlock, so it must throw instead of blocking. Assert the message so the
+        // dedicated guard stays honest: before the guard checked UpgradedLocksHeld, this case
+        // fell through to the generic "Should never happen!" invariant branch, and a type-only
+        // assertion green-lit that accidental path.
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
         {
             using var exclusive = await asyncLock.ExclusiveLockAsync();
         });
+        Assert.Contains("in the scope of an upgradeable", ex.Message);
 
         Assert.Equal(0, asyncLock.LocksHeld);
         Assert.Equal(1, asyncLock.UpgradedLocksHeld);
@@ -310,11 +314,13 @@ public class AsyncAsymmetricLockTests
     public async Task ReleasingFlow_DoesNotCorruptScope_WhenHandingOffToWaiter()
     {
         var asyncLock = new AsyncAsymmetricLock();
-        var holderAcquired = new TaskCompletionSource();
-        var waiterEnqueued = new TaskCompletionSource();
-        var waiterAcquired = new TaskCompletionSource();
-        var releaseWaiter = new TaskCompletionSource();
-        var reacquireOutcome = new TaskCompletionSource<string>();
+        // RunContinuationsAsynchronously: SetResult must not run the other flow's continuation
+        // inline on the setter's stack, where it could contend the very lock the setter holds.
+        var holderAcquired = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var waiterEnqueued = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var waiterAcquired = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseWaiter = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var reacquireOutcome = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
 
         // Holder runs in its own flow (its own scope).
         var holderTask = Task.Run(async () =>

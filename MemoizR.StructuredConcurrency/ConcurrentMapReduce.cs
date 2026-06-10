@@ -2,10 +2,9 @@ namespace MemoizR.StructuredConcurrency;
 
 public sealed class ConcurrentMapReduce<T> : MemoHandlR<T>, IMemoizR, IStateGetR<T>
 {
-    // Read on the lock-free Get fast path (alongside the volatile CurrentReaction); the cell
-    // exposes a lock-free volatile read and guards transitions so a concurrent Stale can't be
-    // clobbered by an in-flight recompute committing Clean (see CacheStateCell).
-    private readonly CacheStateCell stateCell = new(CacheState.CacheClean);
+    // Read on the lock-free Get fast path (alongside the volatile CurrentReaction); the inherited
+    // cell exposes a lock-free volatile read and guards transitions so a concurrent Stale can't
+    // be clobbered by an in-flight recompute committing Clean (see CacheStateCell).
     private CacheState State => stateCell.State;
     private IReadOnlyCollection<Func<IStructuredResourceGroup, Task<T>>> fns;
     private readonly Func<T, T, T?> reduce;
@@ -111,8 +110,9 @@ public sealed class ConcurrentMapReduce<T> : MemoHandlR<T>, IMemoizR, IStateGetR
         if (State == CacheState.Evaluating) throw new InvalidOperationException("Cyclic behavior detected");
 
         // By now, we're clean -- unless a Stale invalidated us along the way, in which case leave
-        // the node dirty so the next Get recomputes instead of caching a stale value.
-        stateCell.TryCommitClean(token);
+        // the node dirty so the next Get recomputes instead of caching a stale value (and
+        // re-notify observers that may have committed Clean against our pre-invalidation value).
+        await CommitCleanOrRenotifyAsync(token);
     }
 
     /** run the computation fn, updating the cached value */
@@ -159,68 +159,9 @@ public sealed class ConcurrentMapReduce<T> : MemoHandlR<T>, IMemoizR, IStateGetR
 
         // We've rerun with the latest values from all of our Sources, so we no longer need to
         // update until a signal changes -- unless a Stale invalidated us mid-evaluation, in which
-        // case the commit is dropped and the node stays dirty for the next Get.
-        stateCell.TryCommitClean(token);
-    }
-
-    // Rewire our source up-links and the parents' observer down-links to match the Sources captured
-    // during this evaluation (Context.ReactionScope.CurrentGets). Extracted from Update to keep its
-    // Cognitive Complexity in budget; only ever runs under the ContextLock-serialized evaluation.
-    private void UpdateSourceAndObserverLinks()
-    {
-        // if the sources have changed, update source & observer links
-        if (Context.ReactionScope.CurrentGets.Length > 0)
-        {
-            // remove all old Sources' .observers links to us
-            RemoveParentObservers(Context.ReactionScope.CurrentGetsIndex);
-            // update source up links
-            if (Sources.Any() && Context.ReactionScope.CurrentGetsIndex > 0)
-            {
-                Sources = [.. Sources.Take(Context.ReactionScope.CurrentGetsIndex), .. Context.ReactionScope.CurrentGets];
-            }
-            else
-            {
-                Sources = Context.ReactionScope.CurrentGets;
-            }
-
-            for (var i = Context.ReactionScope.CurrentGetsIndex; i < Sources.Length; i++)
-            {
-                // Add ourselves to the end of the parent .observers array
-                var source = Sources[i];
-                source.Observers = !source.Observers.Any()
-                    ? [new(this)]
-                    : [.. source.Observers, new(this)];
-            }
-        }
-        else if (Sources.Any() && Context.ReactionScope.CurrentGetsIndex < Sources.Length)
-        {
-            // remove all old Sources' .observers links to us
-            RemoveParentObservers(Context.ReactionScope.CurrentGetsIndex);
-            Sources = [.. Sources.Take(Context.ReactionScope.CurrentGetsIndex)];
-        }
-    }
-
-    // Mark our observers dirty so they re-evaluate (the diamond down-link). Iterating an empty
-    // Observers array is a no-op, so the caller's value-changed guard is all that's needed.
-    private void MarkObserversDirty()
-    {
-        // We've changed value, so mark our children as dirty so they'll reevaluate
-        foreach (var observer in Observers)
-        {
-            if (observer.TryGetTarget(out var o))
-            {
-                o.State = CacheState.CacheDirty;
-            }
-        }
-    }
-
-    private void RemoveParentObservers(int index)
-    {
-        if (!Sources.Any()) return;
-        foreach (var source in Sources.Skip(index))
-        {
-            source.Observers = [.. source.Observers.Where(x => x.TryGetTarget(out var o) ? o != this : false)];
-        }
+        // case the commit is dropped, the node stays dirty for the next Get, and observers that
+        // raced us to Clean are re-notified.
+        await CommitCleanOrRenotifyAsync(token);
     }
 
     async Task IMemoizR.UpdateIfNecessary()
@@ -232,22 +173,9 @@ public sealed class ConcurrentMapReduce<T> : MemoHandlR<T>, IMemoizR, IStateGetR
         }
     }
 
-    internal async Task Stale(CacheState state)
+    internal Task Stale(CacheState state)
     {
-        // Escalate atomically and bump the generation so an in-flight recompute on another flow
-        // cannot commit Clean over this invalidation. No change => already at least this dirty.
-        if (!stateCell.Invalidate(state))
-        {
-            return;
-        }
-
-        foreach (var observer in Observers)
-        {
-            if (observer.TryGetTarget(out var o))
-            {
-                await o.Stale(CacheState.CacheCheck);
-            }
-        }
+        return InvalidateAndPropagateAsync(state);
     }
 
     Task IMemoizR.Stale(CacheState state)
