@@ -4,6 +4,15 @@
     <ProjectReference Include="..\MemoizR.StructuredAsyncLock\MemoizR.StructuredAsyncLock.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- The compile-time half of the data-race safety layer (ADR 0004): the MZR001-003
+         analyzers ship inside this package so every consumer gets them on build.
+         ReferenceOutputAssembly=false because the library has no runtime dependency on them;
+         the ProjectReference only orders the build so the dll below exists when packing. -->
+    <ProjectReference Include="..\MemoizR.Analyzers\MemoizR.Analyzers.csproj" ReferenceOutputAssembly="false" PrivateAssets="all" />
+    <None Include="..\MemoizR.Analyzers\bin\$(Configuration)\netstandard2.0\MemoizR.Analyzers.dll" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
+  </ItemGroup>
+
   <PropertyGroup>
     <TargetFramework>net9.0</TargetFramework>
     <PackageId>MemoizR</PackageId>

@@ -153,7 +153,17 @@ serialized graph evaluation can assert it dynamically — the `preconditionIsola
 f.AssertEvaluationIsolated(); // throws outside a Get/Set/recompute/reaction update
 ```
 
-See [ADR 0003](docs/adr/0003-sendable-checking-and-isolation-assertions.md) for the design and
+The same discipline is checked at **build time** by analyzers bundled in the NuGet package
+(severity configurable per rule via `.editorconfig`):
+
+| Rule | Flags |
+|------|-------|
+| `MZR001` | A non-Sendable value type at a `Create*` call — the compile-time mirror of strict mode |
+| `MZR002` | A computation writing captured locals, fields, or statics — lift that state into a `Signal` |
+| `MZR003` | `Signal.Set` inside a computation, which throws `InvalidOperationException` at runtime |
+
+See [ADR 0003](docs/adr/0003-sendable-checking-and-isolation-assertions.md) (runtime layer) and
+[ADR 0004](docs/adr/0004-compile-time-data-race-diagnostics.md) (analyzers) for the design and
 its limits.
 
 Try it out!https:

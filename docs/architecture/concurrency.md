@@ -670,7 +670,10 @@ recorded in [ADR 0003](../adr/0003-sendable-checking-and-isolation-assertions.md
   `UpdateSourceAndObserverLinks` mechanically pins its documented "only inside a
   ContextLock-serialized evaluation" contract on every recompute of every Debug test run.
 
-These are boundary checks, not new synchronization: they change nothing in layers 1–5.
+These are boundary checks, not new synchronization: they change nothing in layers 1–5. The same
+discipline is enforced at build time by the bundled `MemoizR.Analyzers` rules — MZR001
+(non-Sendable creation type), MZR002 (computation writes captured/shared state), MZR003 (`Set`
+inside a computation) — see [ADR 0004](../adr/0004-compile-time-data-race-diagnostics.md).
 
 ## 14. How this is verified
 

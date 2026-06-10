@@ -2,6 +2,10 @@
 
 - Status: Accepted
 - Date: 2026-06-10
+- Updated: 2026-06-10 — the reference-type rule gained a settable-property surface (a non-private
+  non-init setter rejects the type), kept in lockstep with the MZR001 analyzer where that rule is
+  what catches metadata types whose private fields the compiler does not import; the planned
+  compile-time layer shipped as [ADR 0004](0004-compile-time-data-race-diagnostics.md).
 - Deciders: MemoizR maintainers
 - Issue: [#36 — Strengthen data-race safety guarantees](https://github.com/timonkrebs/MemoizR/issues/36)
 
@@ -111,10 +115,10 @@ The `AsyncAsymmetricLock` already converts impossible same-flow waits into excep
 
 ## Known limitations (and the planned next layers)
 
-- **No compile-time enforcement.** A Roslyn analyzer package is the planned second layer
-  (issue #36 roadmap): non-Sendable type arguments as build diagnostics, captured-mutable-state
-  detection in computation lambdas (the SE-0412 analog — the fix is "lift it into a Signal"),
-  and `Set`-inside-reaction as a compile-time warning instead of a runtime lock exception.
+- **No compile-time enforcement.** ~~A Roslyn analyzer package is the planned second layer~~ —
+  shipped as [ADR 0004](0004-compile-time-data-race-diagnostics.md): MZR001 (non-Sendable type
+  arguments), MZR002 (captured-mutable-state writes in computation lambdas, the SE-0412 analog),
+  MZR003 (`Set` inside a computation as a build diagnostic instead of a runtime lock exception).
 - **Subclass smuggling.** A non-sealed class is judged by its declared structure; a mutable
   subclass behind an upcast is not caught at creation time. Swift closes this by requiring
   Sendable classes to be final; rejecting all non-sealed classes here would reject most records

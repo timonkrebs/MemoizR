@@ -19,7 +19,9 @@ namespace MemoizR;
 ///    writable: every read of a struct value yields a private copy, so only references reachable
 ///    from the copy can alias shared state);
 ///  - reference types whose instance fields are all readonly (init-only counts) AND of Sendable
-///    type, checked across the whole inheritance chain;
+///    type, with no non-private settable (non-init) properties, checked across the whole
+///    inheritance chain -- the property rule is shared with the MZR001 analyzer, where it is
+///    what catches metadata types whose private fields the compiler does not import;
 ///  - anything marked <see cref="SendableAttribute"/> (trusted, like Swift's @unchecked Sendable).
 ///
 /// Interfaces, abstract classes, object, delegates, and arrays are not Sendable: the first three
@@ -186,22 +188,10 @@ public static class SendableChecker
         {
             for (var t = type; t != null && t != typeof(object) && t != typeof(ValueType); t = t.BaseType)
             {
-                foreach (var field in t.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.DeclaredOnly))
+                var reason = CheckDeclaredMembers(type, t, inProgress);
+                if (reason != null)
                 {
-                    // A reference type shares one instance among all consumers, so every field
-                    // must be readonly. A value type is copied on every read, so a writable field
-                    // only mutates the reader's private copy -- but the field's TYPE must still be
-                    // Sendable, because a copied reference aliases the same object.
-                    if (!type.IsValueType && !field.IsInitOnly)
-                    {
-                        return $"{Pretty(type)} has writable instance {FieldDisplay(field)}";
-                    }
-
-                    var inner = CheckCached(field.FieldType, inProgress);
-                    if (inner != null)
-                    {
-                        return $"{Pretty(type)}'s {FieldDisplay(field)} is of non-Sendable type {Pretty(field.FieldType)} ({inner})";
-                    }
+                    return reason;
                 }
             }
 
@@ -211,6 +201,76 @@ public static class SendableChecker
         {
             inProgress.Remove(type);
         }
+    }
+
+    private static string? CheckDeclaredMembers(Type type, Type declaringLevel, HashSet<Type> inProgress)
+    {
+        if (!type.IsValueType)
+        {
+            var settable = CheckProperties(type, declaringLevel);
+            if (settable != null)
+            {
+                return settable;
+            }
+        }
+
+        foreach (var field in declaringLevel.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.DeclaredOnly))
+        {
+            // A reference type shares one instance among all consumers, so every field must be
+            // readonly. A value type is copied on every read, so a writable field only mutates
+            // the reader's private copy -- but the field's TYPE must still be Sendable, because a
+            // copied reference aliases the same object.
+            if (!type.IsValueType && !field.IsInitOnly)
+            {
+                return $"{Pretty(type)} has writable instance {FieldDisplay(field)}";
+            }
+
+            var inner = CheckCached(field.FieldType, inProgress);
+            if (inner != null)
+            {
+                return $"{Pretty(type)}'s {FieldDisplay(field)} is of non-Sendable type {Pretty(field.FieldType)} ({inner})";
+            }
+        }
+
+        return null;
+    }
+
+    // A settable (non-init) property that is not private is a mutation surface on the shared
+    // instance, whatever the backing storage looks like. Kept in lockstep with the MZR001
+    // analyzer's rule, where it carries extra weight: the compiler does not import private
+    // metadata fields, so List<int> is caught there by its settable Capacity/indexer rather
+    // than by its invisible '_items'. Value types are exempt for the same reason as writable
+    // fields: a setter mutates the reader's private copy.
+    private static string? CheckProperties(Type type, Type declaringLevel)
+    {
+        foreach (var property in declaringLevel.GetProperties(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.DeclaredOnly))
+        {
+            var setter = property.SetMethod;
+            if (setter is null || setter.IsPrivate || IsInitOnly(setter))
+            {
+                continue;
+            }
+
+            return property.GetIndexParameters().Length > 0
+                ? $"{Pretty(type)} has a settable indexer"
+                : $"{Pretty(type)} has settable property '{property.Name}' (use init or get-only)";
+        }
+
+        return null;
+    }
+
+    // init accessors are ordinary setters carrying a modreq of IsExternalInit on their return.
+    private static bool IsInitOnly(MethodInfo setter)
+    {
+        foreach (var modifier in setter.ReturnParameter.GetRequiredCustomModifiers())
+        {
+            if (modifier.FullName == "System.Runtime.CompilerServices.IsExternalInit")
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static string? CheckTypeArguments(Type type, HashSet<Type> inProgress)

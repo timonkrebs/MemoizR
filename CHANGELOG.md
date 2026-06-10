@@ -15,6 +15,13 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
   `AsyncAsymmetricLock.IsHeldByCurrentFlow`, `Context.IsEvaluationIsolated`,
   `MemoFactory.AssertEvaluationIsolated()`, and a DEBUG-only assert that graph rewiring only
   ever happens inside a ContextLock-serialized evaluation.
+- Compile-time data-race diagnostics (issue #36 second layer, see ADR 0004): a
+  `MemoizR.Analyzers` Roslyn package bundled inside the MemoizR NuGet package — MZR001
+  (non-Sendable value type at a factory creation site, mirroring strict mode), MZR002 (a
+  reactive computation writes captured/shared state; lift it into a Signal), MZR003
+  (`Signal.Set` inside a computation, which throws at runtime, reported at build time).
+  Reference types with a non-private settable (non-init) property now count as non-Sendable
+  in both the analyzer and `SendableChecker`.
 
 ### Changed
 
