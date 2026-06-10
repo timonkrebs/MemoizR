@@ -8,11 +8,11 @@ locking layers already guarantee glitch-freedom (see
 [concurrency.md](concurrency.md)); stamps make that property *checkable* where locks cannot
 reach — across process boundaries, in dynamically changing graphs.
 
-Phase 1 (this document) delivers the semantics with a naive dictionary representation:
-node identity, per-signal trigger counters, per-node stamps captured at source-read time, and
-the untorn `(value, stamp)` publication. Phase 2 swaps in the ITC-inspired space-efficient
-encoding plus serialization; phase 3 adds reset resilience and the public API for a
-distributed sync layer.
+Phase 1 delivers the semantics: node identity, per-signal trigger counters, per-node stamps
+captured at source-read time, and the untorn `(value, stamp)` publication. Phase 2 (§6)
+replaces the naive dictionary inside `CausalityStamp` with the ITC-inspired canonical event
+tree and adds the compact wire format — same API, byte-deterministic serialization. Phase 3
+adds reset resilience and the public API for a distributed sync layer.
 
 ---
 
@@ -123,13 +123,52 @@ ordering requirements. A recompute whose Clean commit is refused by the generati
 already published an honest `(value, stamp)` pair — both describe the same (now superseded)
 reads — and the node stays dirty, so the next `Get` replaces both.
 
-## 5. What phase 1 deliberately leaves out
+## 5. What is deliberately left out (phase 3)
 
-- **Space-efficient encoding & serialization** (phase 2): `CausalityStamp` is a plain
-  dictionary; the ITC-style interval/tree compression of the id space and a compact wire format
-  come when a distributed consumer exists.
-- **Reset resilience** (phase 3): plain counters are not reset-safe — a restarted signal would
+- **Reset resilience**: plain counters are not reset-safe — a restarted signal would
   reissue lower triggers. This needs epochs/incarnations or ITC-style id forking, plus the
-  public API (`GetWithStamp()`-shaped) for the sync layer. Everything is `internal` until then.
+  public API (`GetWithStamp()`-shaped) for the sync layer. Everything is `internal` until then,
+  and the wire format below may still be revved (with a version bump) until phase 3 freezes it.
 - **Enforcement**: no local code path *acts* on an inconsistency — locally, the locks already
-  prevent glitches; phase 1 only maintains and exposes the evidence.
+  prevent glitches; the stamps maintain and expose the evidence.
+
+## 6. The encoding (phase 2): a canonical event tree
+
+`CausalityStamp` stores the id→trigger map as an ITC-style **event tree** over the id space
+`[0, 2^spanBits)`. The value of an id is the **sum of the `N` fields along its path**; a leaf
+is uniform over its whole span. "Untracked" is encoded as value `0` and "tracked at trigger t"
+as `t + 1`, which turns the finitely-supported map into a total function with default 0 —
+exactly the shape ITC event trees compress:
+
+- **untracked gaps** and **batches of fresh signals** (created together → contiguous ids, all
+  at trigger 0 → uniform value 1) collapse into single leaves — 64 contiguous fresh signals
+  serialize to a handful of bytes (`ContiguousFreshSignals_CollapseToAHandfulOfBytes`);
+- a region whose triggers all advanced shares the common minimum in its parent (`min`-lifting),
+  compressing even when the exact values differ;
+- trees are **persistent**: `Join` reuses whole subtrees of its operands, so a memo's stamp
+  shares structure with its sources' stamps, and reference-equal subtrees short-circuit joins
+  and consistency walks.
+
+**Normal form** (every tree is built through the normalizing constructor): an internal node's
+children carry `min(left.N, right.N) == 0` — so a subtree's minimum value *is* its root `N`,
+which is what makes `min`-lifting O(1) — and two equal leaf children collapse into their
+parent. The stamp additionally **trims** the root: an all-zero upper half is dropped, giving
+equal logical maps identical `(tree, spanBits)` pairs regardless of construction order.
+Structural equality is therefore semantic equality, and serialization is **deterministic**
+(`CanonicalForm_MakesSerializationJoinOrderIndependent` pins this byte-for-byte). The
+randomized model test (`RandomizedJoins_MatchTheDictionaryModel`) checks every operation
+against the naive dictionary semantics phase 1 shipped with.
+
+**Wire format** (`Serialize`/`Deserialize`):
+
+```
+stamp  := version:byte spanBits:byte node
+node   := varint(N << 1 | isLeaf) [node node]   -- children present iff the isLeaf bit is 0
+varint := little-endian base-128, high bit = continuation
+```
+
+A preorder walk with varint-coded headers: the common leaf costs one byte. `Deserialize`
+validates structurally — version, `spanBits ≤ 31`, a node spanning a single id must be a leaf
+(which also bounds the recursion), no truncation, no trailing bytes — and **re-canonicalizes**
+defensively, so the equality and determinism guarantees hold for any parseable input, not just
+payloads we produced (`Deserialize_CanonicalizesForeignInput`).

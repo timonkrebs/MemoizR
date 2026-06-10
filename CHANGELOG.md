@@ -12,6 +12,10 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
   trigger counters bumped on value-changing Sets, and per-node causality stamps (own stamp +
   one stamp per source) captured at source-read time and published atomically with the value.
   See docs/architecture/causality-trigger-clock.md.
+- Causality Trigger Clock, phase 2 (#39, internal): the ITC-inspired space-efficient encoding —
+  CausalityStamp is now a canonical, persistent event tree over the id space (uniform regions
+  collapse; joins share subtrees; equal maps have identical representations) — plus a compact,
+  deterministic binary wire format (Serialize/Deserialize) with defensive validation.
    
 ### Changed
 - Reactions now evaluate their separate-parameter dependencies in parallel on the thread pool; with a SynchronizationContext registered, only the action (with the already-evaluated values) is marshalled to the context, and `CreateAdvancedReaction` keeps running its whole body on the context (#13)

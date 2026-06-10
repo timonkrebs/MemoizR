@@ -1,6 +1,6 @@
 namespace MemoizR;
 
-// Phase 1 of the Causality Trigger Clock (CTC, issue #39): an immutable map from signal id to
+// Phase 1+2 of the Causality Trigger Clock (CTC, issue #39): an immutable map from signal id to
 // that signal's trigger value (a per-signal version counter, bumped on every value-changing
 // Set). A signal's stamp is the single entry { #id: trigger }; a derived node's stamp is the
 // join of the stamps it observed on its tracked source reads during its last completed
@@ -20,46 +20,87 @@ namespace MemoizR;
 // reflect; the conservative direction (a node that skips recomputing because a parent's value
 // came out unchanged keeps its older stamp) only costs a spurious recheck.
 //
-// Naive dictionary representation by design in phase 1; the ITC-inspired space-efficient
-// encoding and serialization are phase 2, reset resilience is phase 3.
+// Representation (phase 2, inspired by Interval Tree Clocks): a canonical binary event tree
+// over the id space [0, 2^spanBits), where the value stored at an id is the sum of the N fields
+// along its path. The stored value encodes "untracked" as 0 and "tracked at trigger t" as
+// t + 1, which turns the stamp into a total function with default 0 -- exactly the shape ITC
+// event trees compress: uniform regions (untracked gaps, batches of fresh signals at trigger 0,
+// lockstep-updated ranges) collapse into single leaves, and shared minimums are lifted into
+// parents. Trees are persistent: Join reuses whole subtrees of its operands. The normal form
+// (see MkNode/Trim) is unique per logical map, so structural equality is semantic equality and
+// serialization is deterministic. Reset resilience is phase 3.
 internal sealed class CausalityStamp : IEquatable<CausalityStamp>
 {
-    public static CausalityStamp Empty { get; } = new(new Dictionary<int, long>());
+    public static CausalityStamp Empty { get; } = new(EventTree.Zero, 0);
 
-    // Never mutated after construction; the stamp is published across threads by reference.
-    private readonly Dictionary<int, long> triggers;
+    private readonly EventTree root; // canonical (normal-form, trimmed) -- see MkNode/Trim
+    private readonly int spanBits;   // root covers ids [0, 2^spanBits); 0 means just id 0
 
-    private CausalityStamp(Dictionary<int, long> triggers)
+    private CausalityStamp(EventTree root, int spanBits)
     {
-        this.triggers = triggers;
+        this.root = root;
+        this.spanBits = spanBits;
     }
 
-    public static CausalityStamp ForSignal(int signalId, long trigger) => new(new() { [signalId] = trigger });
+    private bool IsEmpty => root.IsLeaf && root.N == 0;
 
-    public IReadOnlyDictionary<int, long> Triggers => triggers;
+    public static CausalityStamp ForSignal(int signalId, long trigger)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(signalId);
+        ArgumentOutOfRangeException.ThrowIfNegative(trigger);
 
-    public bool TryGetTrigger(int signalId, out long trigger) => triggers.TryGetValue(signalId, out trigger);
+        var bits = 0;
+        while (signalId >> bits != 0)
+        {
+            bits++;
+        }
+        return new(EventTree.Singleton(signalId, bits, trigger + 1), bits);
+    }
+
+    public IReadOnlyDictionary<int, long> Triggers
+    {
+        get
+        {
+            var triggers = new Dictionary<int, long>();
+            root.CollectTracked(spanBits, 0, 0, triggers);
+            return triggers;
+        }
+    }
+
+    public bool TryGetTrigger(int signalId, out long trigger)
+    {
+        trigger = 0;
+        if (signalId < 0 || signalId >> spanBits != 0)
+        {
+            return false;
+        }
+
+        var value = root.ValueAt(signalId, spanBits);
+        if (value == 0)
+        {
+            return false;
+        }
+        trigger = value - 1;
+        return true;
+    }
 
     // Least upper bound: pointwise max over the union of tracked signals. Associative,
     // commutative and idempotent, so the accumulation order across parallel source reads
     // (structured-concurrency children) cannot affect the result.
     public CausalityStamp Join(CausalityStamp other)
     {
-        if (triggers.Count == 0)
+        if (IsEmpty)
         {
             return other;
         }
-        if (other.triggers.Count == 0)
+        if (other.IsEmpty)
         {
             return this;
         }
 
-        var merged = new Dictionary<int, long>(triggers);
-        foreach (var (id, trigger) in other.triggers)
-        {
-            merged[id] = merged.TryGetValue(id, out var existing) && existing >= trigger ? existing : trigger;
-        }
-        return new(merged);
+        var bits = Math.Max(spanBits, other.spanBits);
+        var joined = EventTree.Join(root.Grow(spanBits, bits), other.root.Grow(other.spanBits, bits));
+        return FromCanonicalTree(joined, bits);
     }
 
     public static CausalityStamp JoinAll(IEnumerable<CausalityStamp> stamps)
@@ -76,50 +117,323 @@ internal sealed class CausalityStamp : IEquatable<CausalityStamp>
     // track. Disjoint stamps are trivially consistent (no shared causality to disagree about).
     public bool IsConsistentWith(CausalityStamp other)
     {
-        var (smaller, larger) = triggers.Count <= other.triggers.Count
-            ? (triggers, other.triggers)
-            : (other.triggers, triggers);
-
-        foreach (var (id, trigger) in smaller)
-        {
-            if (larger.TryGetValue(id, out var otherTrigger) && otherTrigger != trigger)
-            {
-                return false;
-            }
-        }
-        return true;
+        var bits = Math.Max(spanBits, other.spanBits);
+        return EventTree.Consistent(root.Grow(spanBits, bits), 0, other.root.Grow(other.spanBits, bits), 0);
     }
 
     public bool Equals(CausalityStamp? other)
     {
-        if (other is null || triggers.Count != other.triggers.Count)
+        if (other is null)
         {
             return false;
         }
-
-        foreach (var (id, trigger) in triggers)
-        {
-            if (!other.triggers.TryGetValue(id, out var otherTrigger) || otherTrigger != trigger)
-            {
-                return false;
-            }
-        }
-        return true;
+        // Canonical form is unique per logical map, so structural equality decides.
+        return spanBits == other.spanBits && EventTree.StructurallyEqual(root, other.root);
     }
 
     public override bool Equals(object? obj) => Equals(obj as CausalityStamp);
 
-    public override int GetHashCode()
-    {
-        // Order-independent combine so equal stamps hash equal regardless of insertion order.
-        var hash = 0;
-        foreach (var (id, trigger) in triggers)
-        {
-            hash ^= HashCode.Combine(id, trigger);
-        }
-        return hash;
-    }
+    public override int GetHashCode() => HashCode.Combine(spanBits, root.ComputeHash());
 
     public override string ToString() =>
-        "{" + string.Join(", ", triggers.OrderBy(t => t.Key).Select(t => $"#{t.Key}: {t.Value}")) + "}";
+        "{" + string.Join(", ", Triggers.OrderBy(t => t.Key).Select(t => $"#{t.Key}: {t.Value}")) + "}";
+
+    // Wire format (subject to revision until the distributed sync layer freezes it in phase 3):
+    //   stamp  := version:byte spanBits:byte node
+    //   node   := varint(N << 1 | isLeaf) [node node]   -- children present iff isLeaf bit is 0
+    //   varint := little-endian base-128, high bit = continuation
+    // Serialization of the canonical tree is deterministic: equal stamps yield equal bytes.
+    private const byte FormatVersion = 1;
+
+    public byte[] Serialize()
+    {
+        var bytes = new List<byte> { FormatVersion, (byte)spanBits };
+        root.WriteTo(bytes);
+        return [.. bytes];
+    }
+
+    public static CausalityStamp Deserialize(ReadOnlySpan<byte> bytes)
+    {
+        if (bytes.Length < 2)
+        {
+            throw new FormatException("Causality stamp payload is truncated.");
+        }
+        if (bytes[0] != FormatVersion)
+        {
+            throw new FormatException($"Unknown causality stamp format version {bytes[0]}.");
+        }
+        int bits = bytes[1];
+        if (bits > 31)
+        {
+            throw new FormatException($"Causality stamp span 2^{bits} exceeds the id space.");
+        }
+
+        var position = 2;
+        var tree = EventTree.ReadFrom(bytes, ref position, bits);
+        if (position != bytes.Length)
+        {
+            throw new FormatException("Causality stamp payload has trailing bytes.");
+        }
+
+        // Re-canonicalize defensively: our own serializer only emits canonical trees, but the
+        // equality/serialization guarantees must hold for any parseable input.
+        return FromCanonicalTree(tree.Canonicalize(), bits);
+    }
+
+    // Trims a canonical tree to its minimal span: an all-zero upper half is dropped (the root
+    // is then Node(0, lower, Leaf 0) -- a root with N > 0 tracks every id in its span and an
+    // all-zero subtree always collapses to Leaf 0, so this test is exhaustive). Equal logical
+    // maps thereby get identical (root, spanBits) pairs regardless of construction order.
+    private static CausalityStamp FromCanonicalTree(EventTree tree, int bits)
+    {
+        while (bits > 0 && !tree.IsLeaf && tree.N == 0 && tree.Right!.IsLeaf && tree.Right.N == 0)
+        {
+            tree = tree.Left!;
+            bits--;
+        }
+        if (tree.IsLeaf && tree.N == 0)
+        {
+            return Empty;
+        }
+        return new(tree, bits);
+    }
+
+    // The ITC-style event tree. Value at id = sum of N along the path; a leaf is uniform over
+    // its whole span. Normal form (every tree built through MkNode): (1) an internal node's
+    // children have Math.Min(Left.N, Right.N) == 0 -- the shared minimum is lifted into the
+    // parent, so a subtree's minimum value IS its root N; (2) no internal node has two leaf
+    // children with equal N (collapsed to a leaf). Nodes are immutable and freely shared.
+    private sealed class EventTree
+    {
+        public static readonly EventTree Zero = new(0, null, null);
+
+        public readonly long N;
+        public readonly EventTree? Left;  // null iff leaf (always together with Right)
+        public readonly EventTree? Right;
+
+        private EventTree(long n, EventTree? left, EventTree? right)
+        {
+            N = n;
+            Left = left;
+            Right = right;
+        }
+
+        public bool IsLeaf => Left == null;
+
+        private static EventTree Leaf(long n) => n == 0 ? Zero : new(n, null, null);
+
+        // Normalizing constructor: assumes canonical children, returns a canonical tree.
+        private static EventTree MkNode(long n, EventTree left, EventTree right)
+        {
+            if (left.IsLeaf && right.IsLeaf && left.N == right.N)
+            {
+                return Leaf(n + left.N);
+            }
+
+            var min = Math.Min(left.N, right.N);
+            if (min != 0)
+            {
+                return new(n + min, left.Sink(min), right.Sink(min));
+            }
+            return new(n, left, right);
+        }
+
+        private EventTree Sink(long by) => IsLeaf ? Leaf(N - by) : new(N - by, Left, Right);
+
+        private EventTree Lift(long by) => by == 0 ? this : IsLeaf ? Leaf(N + by) : new(N + by, Left, Right);
+
+        public static EventTree Singleton(int id, int bits, long value)
+        {
+            if (bits == 0)
+            {
+                return Leaf(value);
+            }
+
+            var half = 1 << (bits - 1);
+            return id < half
+                ? MkNode(0, Singleton(id, bits - 1, value), Zero)
+                : MkNode(0, Zero, Singleton(id - half, bits - 1, value));
+        }
+
+        // Widens the span from 2^fromBits to 2^toBits; the new upper ids are untracked.
+        public EventTree Grow(int fromBits, int toBits)
+        {
+            var tree = this;
+            for (var bits = fromBits; bits < toBits; bits++)
+            {
+                tree = MkNode(0, tree, Zero);
+            }
+            return tree;
+        }
+
+        public long ValueAt(int id, int bits)
+        {
+            var value = N;
+            var tree = this;
+            while (!tree.IsLeaf)
+            {
+                var half = 1 << --bits;
+                tree = id < half ? tree.Left! : tree.Right!;
+                if (id >= half)
+                {
+                    id -= half;
+                }
+                value += tree.N;
+            }
+            return value;
+        }
+
+        // Pointwise max of two same-span trees (the ITC event join, with the smaller base
+        // lifted into the larger side's children).
+        public static EventTree Join(EventTree a, EventTree b)
+        {
+            if (ReferenceEquals(a, b))
+            {
+                return a;
+            }
+            if (a.IsLeaf && b.IsLeaf)
+            {
+                return Leaf(Math.Max(a.N, b.N));
+            }
+
+            if (a.N > b.N)
+            {
+                (a, b) = (b, a);
+            }
+            var lift = b.N - a.N;
+            var aLeft = a.IsLeaf ? Zero : a.Left!;
+            var aRight = a.IsLeaf ? Zero : a.Right!;
+            var bLeft = (b.IsLeaf ? Zero : b.Left!).Lift(lift);
+            var bRight = (b.IsLeaf ? Zero : b.Right!).Lift(lift);
+            return MkNode(a.N, Join(aLeft, bLeft), Join(aRight, bRight));
+        }
+
+        // Do the two same-span trees agree wherever BOTH are nonzero? accA/accB carry the path
+        // sums; a uniform-zero region on either side can never conflict, so it prunes the walk.
+        public static bool Consistent(EventTree a, long accA, EventTree b, long accB)
+        {
+            if (a.IsLeaf && accA + a.N == 0)
+            {
+                return true;
+            }
+            if (b.IsLeaf && accB + b.N == 0)
+            {
+                return true;
+            }
+            if (a.IsLeaf && b.IsLeaf)
+            {
+                return accA + a.N == accB + b.N;
+            }
+            if (ReferenceEquals(a, b) && accA == accB)
+            {
+                return true;
+            }
+
+            var nextA = accA + a.N;
+            var nextB = accB + b.N;
+            return Consistent(a.IsLeaf ? Zero : a.Left!, nextA, b.IsLeaf ? Zero : b.Left!, nextB)
+                && Consistent(a.IsLeaf ? Zero : a.Right!, nextA, b.IsLeaf ? Zero : b.Right!, nextB);
+        }
+
+        public static bool StructurallyEqual(EventTree a, EventTree b)
+        {
+            if (ReferenceEquals(a, b))
+            {
+                return true;
+            }
+            if (a.N != b.N || a.IsLeaf != b.IsLeaf)
+            {
+                return false;
+            }
+            return a.IsLeaf || (StructurallyEqual(a.Left!, b.Left!) && StructurallyEqual(a.Right!, b.Right!));
+        }
+
+        public int ComputeHash() =>
+            IsLeaf ? HashCode.Combine(N) : HashCode.Combine(N, Left!.ComputeHash(), Right!.ComputeHash());
+
+        // Restores the normal-form invariants of a parseable but possibly non-canonical tree.
+        public EventTree Canonicalize() =>
+            IsLeaf ? Leaf(N) : MkNode(N, Left!.Canonicalize(), Right!.Canonicalize());
+
+        public void CollectTracked(int bits, int baseId, long acc, Dictionary<int, long> into)
+        {
+            var value = acc + N;
+            if (IsLeaf)
+            {
+                if (value == 0)
+                {
+                    return;
+                }
+                // Long arithmetic: a leaf can span the full 31-bit id space, where 1 << bits
+                // overflows int.
+                for (var id = (long)baseId; id < baseId + (1L << bits); id++)
+                {
+                    into[(int)id] = value - 1;
+                }
+                return;
+            }
+
+            Left!.CollectTracked(bits - 1, baseId, value, into);
+            Right!.CollectTracked(bits - 1, baseId + (1 << (bits - 1)), value, into);
+        }
+
+        public void WriteTo(List<byte> bytes)
+        {
+            WriteVarint(bytes, ((ulong)N << 1) | (IsLeaf ? 1UL : 0UL));
+            if (!IsLeaf)
+            {
+                Left!.WriteTo(bytes);
+                Right!.WriteTo(bytes);
+            }
+        }
+
+        // bits is the remaining span: a node spanning a single id (bits == 0) must be a leaf,
+        // which both validates the payload and bounds the recursion at the 31-bit id space.
+        public static EventTree ReadFrom(ReadOnlySpan<byte> bytes, ref int position, int bits)
+        {
+            var header = ReadVarint(bytes, ref position);
+            var n = (long)(header >> 1);
+            if ((header & 1) != 0)
+            {
+                return Leaf(n);
+            }
+            if (bits == 0)
+            {
+                throw new FormatException("Causality stamp tree is deeper than its span.");
+            }
+
+            var left = ReadFrom(bytes, ref position, bits - 1);
+            var right = ReadFrom(bytes, ref position, bits - 1);
+            return new(n, left, right);
+        }
+
+        private static void WriteVarint(List<byte> bytes, ulong value)
+        {
+            while (value >= 0x80)
+            {
+                bytes.Add((byte)(value | 0x80));
+                value >>= 7;
+            }
+            bytes.Add((byte)value);
+        }
+
+        private static ulong ReadVarint(ReadOnlySpan<byte> bytes, ref int position)
+        {
+            var value = 0UL;
+            for (var shift = 0; shift < 64; shift += 7)
+            {
+                if (position >= bytes.Length)
+                {
+                    throw new FormatException("Causality stamp payload is truncated.");
+                }
+                var b = bytes[position++];
+                value |= (ulong)(b & 0x7F) << shift;
+                if ((b & 0x80) == 0)
+                {
+                    return value;
+                }
+            }
+            throw new FormatException("Causality stamp varint is malformed.");
+        }
+    }
 }
