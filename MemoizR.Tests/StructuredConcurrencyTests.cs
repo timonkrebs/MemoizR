@@ -341,6 +341,53 @@ public class StructuredConcurrencyTests
         Assert.Equal(22, await sum.Get());
     }
 
+    // The structured nodes share MemoizR's generation-guard choreography but wire it themselves
+    // (BeginEvaluation around the job, the catch -> Force(CacheCheck) path, the double commit
+    // around the diamond propagation). Reproduce the cross-flow lost-update deterministically
+    // for ConcurrentMapReduce, like Memo_StaleDuringRecompute_IsNotClobbered does for MemoizR:
+    // the job's child reads the source, parks, a newer Set lands, the job resumes and tries to
+    // commit the stale result.
+    [Fact(Timeout = 10000)]
+    public async Task ConcurrentMapReduce_StaleDuringRecompute_IsNotClobbered()
+    {
+        var f = new MemoFactory();
+        var s = f.CreateSignal(0);
+
+        var gateArmed = false;
+        // RunContinuationsAsynchronously: SetResult must not run the test's continuation inline
+        // inside the job's child, where the getter flow holds the node mutex and ContextLock.
+        var readDone = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var proceed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var cmr = f.CreateConcurrentMapReduce(
+            async _ =>
+            {
+                var x = await s.Get();
+                if (Volatile.Read(ref gateArmed))
+                {
+                    Volatile.Write(ref gateArmed, false);
+                    readDone.SetResult();
+                    await proceed.Task;
+                }
+                return x;
+            });
+
+        await cmr.Get();          // prime: Clean@0, the s -> cmr link is established
+        await s.Set(1);           // cmr is now dirty, s == 1
+
+        Volatile.Write(ref gateArmed, true);
+        var getter = Task.Run(async () => await cmr.Get()); // recomputes: child reads s == 1, parks
+        await readDone.Task;
+
+        await s.Set(2);           // invalidate during the parked recompute
+
+        proceed.SetResult();      // the job resumes and tries to commit the stale value (1)
+        await getter;
+
+        // The Set(2) must win: the node must reconverge to 2, not cache the clobbered 1.
+        Assert.Equal(2, await cmr.Get());
+    }
+
     [Fact(Timeout = 1000)]
     public async Task TestChildExecptionCancelationHandling()
     {

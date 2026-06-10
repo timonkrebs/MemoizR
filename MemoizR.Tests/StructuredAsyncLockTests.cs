@@ -363,6 +363,65 @@ public class AsyncAsymmetricLockTests
         Assert.Equal(0, asyncLock.LockScope);
     }
 
+    // Liveness: a queued exclusive waiter must not be starved forever by continuous upgradeable
+    // traffic (ReleaseWaiters prefers upgradeable waiters, so this is the adversarial case), and
+    // must acquire promptly once traffic stops (no lost wake-up in mixed handoff).
+    [Fact(Timeout = 20000)]
+    public async Task ExclusiveWaiter_AcquiresDespiteUpgradeableTraffic()
+    {
+        var asyncLock = new AsyncAsymmetricLock();
+        using var trafficCts = new CancellationTokenSource();
+
+        var holderHas = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var holderReleased = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var holder = Task.Run(async () =>
+        {
+            using (await asyncLock.UpgradeableLockAsync())
+            {
+                holderHas.SetResult();
+                await holderReleased.Task;
+            }
+        });
+        await holderHas.Task;
+
+        // The exclusive enqueues behind the holder.
+        var exclusiveWaiter = Task.Run(async () =>
+        {
+            using (await asyncLock.ExclusiveLockAsync())
+            {
+            }
+        });
+        await Task.Delay(50); // let it enqueue
+
+        // Four competing upgradeable streams from distinct flows keep the upgradeable queue busy.
+        var streams = Enumerable.Range(0, 4).Select(_ => Task.Run(async () =>
+        {
+            while (!trafficCts.IsCancellationRequested)
+            {
+                using (await asyncLock.UpgradeableLockAsync())
+                {
+                    await Task.Yield();
+                }
+            }
+        })).ToArray();
+
+        holderReleased.SetResult();
+
+        var winner = await Task.WhenAny(exclusiveWaiter, Task.Delay(5000));
+        var acquiredDuringTraffic = winner == exclusiveWaiter;
+
+        trafficCts.Cancel();
+        await Task.WhenAll(streams);
+        await exclusiveWaiter; // must complete once traffic stops, at the very latest
+        await holder;
+
+        Assert.True(acquiredDuringTraffic,
+            "the exclusive waiter starved while upgradeable traffic continued");
+        Assert.Equal(0, asyncLock.LocksHeld);
+        Assert.Equal(0, asyncLock.UpgradedLocksHeld);
+        Assert.Equal(0, asyncLock.LockScope);
+    }
+
     // --- Regression: releasing a lock must not corrupt the releasing flow's own scope ---
 
     [Fact(Timeout = 5000)]

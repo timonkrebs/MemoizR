@@ -669,4 +669,49 @@ public class ReactiveTests
         Assert.Equal(5, last); // Resume ran the pending update before returning
         GC.KeepAlive(r);
     }
+
+    // Dispose contract: a disposed reaction must be unsubscribed from its sources (no observer
+    // entry keeping it in the graph) and must never execute again.
+    [Fact(Timeout = 10000)]
+    public async Task Reaction_Dispose_StopsTriggeringAndUnsubscribes()
+    {
+        var f = new MemoFactory();
+        var v1 = f.CreateSignal(1);
+        var last = -1;
+        var r = f.BuildReaction().CreateReaction(v1, v => last = v);
+
+        await TestHelpers.WaitForConvergenceAsync(() => last == 1); // initial run done
+
+        r.Dispose();
+        Assert.DoesNotContain(v1.Observers, w => w.TryGetTarget(out var o) && ReferenceEquals(o, r));
+
+        await v1.Set(5);
+        await Task.Delay(100); // negative assertion: nothing may run -- needs a real window
+        Assert.Equal(1, last);
+        GC.KeepAlive(r);
+    }
+
+    // The multi-source CreateReaction overload family shares one wiring path; pin it with two
+    // sources: the reaction triggers on either source and the action sees both current values.
+    [Fact(Timeout = 10000)]
+    public async Task Reaction_TwoSources_TriggersOnEitherAndSeesBothValues()
+    {
+        var f = new MemoFactory();
+        var v1 = f.CreateSignal(1);
+        var v2 = f.CreateSignal(10);
+        var sum = -1;
+        var r = f.BuildReaction().CreateReaction(v1, v2, (x, y) => sum = x + y);
+
+        await TestHelpers.WaitForConvergenceAsync(() => sum == 11);
+        Assert.Equal(11, sum);
+
+        await v1.Set(2);
+        await TestHelpers.WaitForConvergenceAsync(() => sum == 12);
+        Assert.Equal(12, sum);
+
+        await v2.Set(20);
+        await TestHelpers.WaitForConvergenceAsync(() => sum == 22);
+        Assert.Equal(22, sum);
+        GC.KeepAlive(r);
+    }
 }
