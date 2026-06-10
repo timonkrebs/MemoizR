@@ -79,7 +79,7 @@ public class RegressionTests
             .AddDebounceTime(TimeSpan.FromMilliseconds(50))
             .CreateReaction(v1, v => { Interlocked.Increment(ref invocations); last = v; });
 
-        await Task.Delay(200);
+        await TestHelpers.WaitForConvergenceAsync(() => Volatile.Read(ref invocations) >= 1);
         var afterInitial = invocations; // the initial reaction run
 
         for (var i = 1; i <= 10; i++)
@@ -87,7 +87,10 @@ public class RegressionTests
             await v1.Set(i);
         }
 
-        await Task.Delay(300);
+        // Wait for the coalesced run to land on the final value, then keep a fixed quiescence
+        // window (4x the 50ms debounce) for the negative half: no FURTHER invocation may follow.
+        await TestHelpers.WaitForConvergenceAsync(() => last == 10);
+        await Task.Delay(200);
 
         Assert.Equal(10, last);
         Assert.Equal(afterInitial + 1, invocations);
@@ -109,10 +112,19 @@ public class RegressionTests
         using var cts = new CancellationTokenSource();
         var readers = Enumerable.Range(0, 8).Select(_ => Task.Run(async () =>
         {
+            // Writes are serialized (sequential awaited Sets recomputed under the node mutex), so
+            // the published values are monotonically increasing; a reader observing a smaller
+            // value after a larger one would mean the fast path returned a stale snapshot. (An
+            // int read can't tear, so an "is even" style check could never fail.)
+            var lastSeen = 0;
             while (!cts.IsCancellationRequested)
             {
                 var r = await m1.Get();
-                Assert.True(r % 2 == 0, $"memo is v1*2 and must always be even, saw {r}");
+                Assert.True(r >= lastSeen, $"fast path went backwards: saw {r} after {lastSeen}");
+                lastSeen = r;
+                // Yield so 8 readers don't pin the whole thread pool (the CacheClean fast path
+                // completes synchronously) and starve the writer's continuations on small CI runners.
+                await Task.Yield();
             }
         })).ToArray();
 
@@ -156,6 +168,9 @@ public class RegressionTests
             {
                 var p = await m1.Get();
                 Assert.True(p.A == p.B, $"torn read: halves came from different writes ({p.A} != {p.B})");
+                // Yield so 8 readers don't pin the whole thread pool (the CacheClean fast path
+                // completes synchronously) and starve the writer's continuations on small CI runners.
+                await Task.Yield();
             }
         })).ToArray();
 
@@ -185,36 +200,219 @@ public class RegressionTests
         var f = new MemoFactory();
         var s = f.CreateSignal(0);
 
-        var gateArmed = false;
-        var readDone = new TaskCompletionSource();
-        var proceed = new TaskCompletionSource();
-
+        var gate = new RecomputeGate();
         var m = f.CreateMemoizR(async () =>
         {
             var x = await s.Get();
-            if (Volatile.Read(ref gateArmed))
-            {
-                Volatile.Write(ref gateArmed, false);
-                readDone.SetResult();
-                await proceed.Task;
-            }
+            await gate.PauseIfArmedAsync();
             return x;
         });
 
         await m.Get();            // prime: m is Clean@0 and the s -> m dependency link is established
         await s.Set(1);           // m is now Dirty, s == 1
 
-        Volatile.Write(ref gateArmed, true);
+        gate.Arm();
         var getter = Task.Run(async () => await m.Get()); // recomputes on its own flow: reads s == 1, parks
-        await readDone.Task;      // the recompute has read s == 1 and is parked mid-Update (Evaluating)
+        await gate.ReadDone;      // the recompute has read s == 1 and is parked mid-Update (Evaluating)
 
         await s.Set(2);           // invalidate during the parked recompute: m -> Dirty, s == 2
 
-        proceed.SetResult();      // resume the recompute; it will try to commit the stale value (1)
+        gate.Proceed();           // resume the recompute; it will try to commit the stale value (1)
         await getter;
 
         // The Set(2) that landed during the recompute must win: the memo must reconverge to 2,
         // not stay stuck at the clobbered 1.
         Assert.Equal(2, await m.Get());
+    }
+
+    // Deterministic reproduction of the *suppressed*-Stale variant of the lost-update race.
+    // Chain s -> p -> c with p = s/2, so p's value is the same for s=0 and s=1 (no diamond
+    // down-link rescues c). While c's CacheCheck scan is parked inside p's recompute, a second
+    // Set lands: its cascade reaches c as Stale(CacheCheck), but c is already CacheCheck, so the
+    // state does not escalate. The generation must be bumped anyway -- if the suppressed Stale
+    // leaves no trace, c's pending commit marks it Clean over a Dirty parent, and because the
+    // cascade also stops at already-dirty nodes, nothing ever re-dirties c: it caches the stale
+    // value forever.
+    [Fact(Timeout = 10000)]
+    public async Task Memo_SuppressedStaleDuringParentCheck_IsNotClobbered()
+    {
+        var f = new MemoFactory();
+        var s = f.CreateSignal(0);
+
+        var gate = new RecomputeGate();
+        var p = f.CreateMemoizR(async () =>
+        {
+            var x = await s.Get();
+            await gate.PauseIfArmedAsync();
+            return x / 2; // same value for s=0 and s=1, changes only at s=2
+        });
+        var c = f.CreateMemoizR(async () => await p.Get());
+
+        await c.Get();            // prime: s=0 -> p=0 -> c=0, links established
+        await s.Set(1);           // cascade: p Dirty, c CacheCheck; p stays 0 once recomputed
+
+        gate.Arm();
+        var getter = Task.Run(async () => await c.Get()); // c's CacheCheck scan recomputes p, which parks
+        await gate.ReadDone;      // p's recompute has read s == 1 and is parked
+
+        await s.Set(2);           // cascade: p escalates (Evaluating -> Dirty), c's Stale(CacheCheck)
+                                  // is suppressed (already CacheCheck) -- the generation bump is all
+                                  // that protects c's pending commit
+
+        gate.Proceed();           // p finishes with the unchanged value 0 -> no down-link to c;
+                                  // c's scan sees no dirty parent and tries to commit Clean
+        await getter;
+
+        // s == 2 must win: p recomputes to 1 and c must follow, not stay cached at 0.
+        Assert.Equal(1, await c.Get());
+    }
+
+    // Stress for the whole lost-update class across a multi-level chain: concurrent readers pull
+    // recomputes through every level on their own flows while a writer keeps invalidating from
+    // another, exercising the cascade-suppression, generation-bump and renotify paths at every
+    // depth. Whatever interleavings occur, the chain must reflect the last write once quiescent,
+    // and a fresh write afterwards must still propagate through every level (a node silently
+    // stuck Clean-but-stale would fail both).
+    [Fact(Timeout = 30000)]
+    public async Task MemoChain_ConcurrentSetsAndReads_AlwaysReconverges()
+    {
+        var f = new MemoFactory();
+        var s = f.CreateSignal(0);
+        var m1 = f.CreateMemoizR(async () => await s.Get() * 2);
+        var m2 = f.CreateMemoizR(async () => await m1.Get() + 1);
+        var m3 = f.CreateMemoizR(async () => await m2.Get() * 3);
+        await m3.Get(); // prime the whole chain
+
+        using var cts = new CancellationTokenSource();
+        var readers = new[] { (IStateGetR<int>)m1, m2, m3 }.Select(node => Task.Run(async () =>
+        {
+            while (!cts.IsCancellationRequested)
+            {
+                await node.Get();
+                await Task.Yield();
+            }
+        })).ToArray();
+
+        for (var i = 1; i <= 300; i++)
+        {
+            await s.Set(i);
+        }
+
+        cts.Cancel();
+        await Task.WhenAll(readers);
+
+        // Quiescent: every level must serve the value derived from the last write.
+        Assert.Equal((300 * 2 + 1) * 3, await m3.Get());
+
+        // And a write after quiescence must still reach the deepest node.
+        await s.Set(1000);
+        Assert.Equal((1000 * 2 + 1) * 3, await m3.Get());
+    }
+
+    // The context-wide CancellationTokenSource must survive until the LAST in-flight root
+    // evaluation exits, not until the FIRST one does. Interleaving: root A creates the CTS, root
+    // B enters while it exists (so B is not the creator), A finishes -- if A's exit nulls the
+    // shared CTS, B's later read of it (the structured jobs dereference .Token at compute start)
+    // explodes with a NullReferenceException and Cancel() silently stops working mid-flight.
+    [Fact(Timeout = 10000)]
+    public async Task ConcurrentRootGets_DoNotLoseTheSharedCancellationSource()
+    {
+        var f = new MemoFactory();
+        var s = f.CreateSignal(1);
+
+        var parentGate = new RecomputeGate();
+        var gatedParent = f.CreateMemoizR(async () =>
+        {
+            var x = await s.Get();
+            await parentGate.PauseIfArmedAsync();
+            return x;
+        });
+        // B reads the CTS late (the reduce job dereferences .Token when the compute starts),
+        // with an awaited parent scan in between -- the window the race needs.
+        var b = f.CreateConcurrentMapReduce(async _ => await gatedParent.Get());
+
+        var gateA = new RecomputeGate();
+        var a = f.CreateMemoizR(async () =>
+        {
+            await gateA.PauseIfArmedAsync();
+            return 42;
+        });
+
+        await b.Get();            // prime: links wired, everything clean
+        await s.Set(2);           // gatedParent Dirty, b CacheCheck
+
+        gateA.Arm();
+        var getterA = Task.Run(async () => await a.Get()); // A creates the shared CTS and parks
+        await gateA.ReadDone;
+
+        parentGate.Arm();
+        var getterB = Task.Run(async () => await b.Get()); // B enters (CTS exists), parks in its parent scan
+        await parentGate.ReadDone;
+
+        gateA.Proceed();          // A completes -- the CTS must NOT die here
+        await getterA;
+
+        parentGate.Proceed();     // B proceeds to its compute, which reads the CTS
+        Assert.Equal(2, await getterB);
+    }
+
+    // Null is a legitimate signal value: the equal-value Set branch must treat null==null as
+    // unchanged (no recompute), and null<->value transitions must propagate like any other write.
+    [Fact(Timeout = 2000)]
+    public async Task Signal_WithNullValues_FlowsThroughEqualsAndObservers()
+    {
+        var f = new MemoFactory();
+        var s = f.CreateSignal<string?>(null);
+        var invocations = 0;
+        var m = f.CreateMemoizR(async () =>
+        {
+            invocations++;
+            return (await s.Get() ?? "null") + "!";
+        });
+
+        Assert.Equal("null!", await m.Get());
+        var after = invocations;
+
+        await s.Set(null);               // null -> null: the equal-value branch, no recompute
+        Assert.Equal("null!", await m.Get());
+        Assert.Equal(after, invocations);
+
+        await s.Set("x");                // null -> value recomputes
+        Assert.Equal("x!", await m.Get());
+
+        await s.Set(null);               // value -> null recomputes
+        Assert.Equal("null!", await m.Get());
+    }
+
+    // Error-path contract: a throwing computation must surface to the caller, must not poison the
+    // node, and must not sever its dependency links. Documented current semantics: with no
+    // further invalidation the memo keeps serving the last good value (it does not retry the
+    // failed computation on its own); the next write recomputes and recovers.
+    [Fact(Timeout = 10000)]
+    public async Task Memo_TransientException_DoesNotPoisonNode()
+    {
+        var f = new MemoFactory();
+        var v1 = f.CreateSignal(1);
+        var m = f.CreateMemoizR(async () =>
+        {
+            var x = await v1.Get();
+            if (x == 13) throw new InvalidOperationException("boom13");
+            return x * 2;
+        });
+
+        Assert.Equal(2, await m.Get());
+
+        await v1.Set(13);
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => m.Get());
+        Assert.Contains("boom13", ex.Message);
+
+        // No further invalidation: the memo serves the last good value rather than rethrowing
+        // or returning default.
+        Assert.Equal(2, await m.Get());
+
+        // The failed evaluation must not have unhooked the memo from its source: a new write
+        // still dirties it and the recompute succeeds.
+        await v1.Set(7);
+        Assert.Equal(14, await m.Get());
     }
 }

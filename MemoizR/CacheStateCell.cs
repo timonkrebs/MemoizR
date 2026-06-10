@@ -35,15 +35,22 @@ internal sealed class CacheStateCell(CacheState initial)
         }
     }
 
-    // Escalate dirtiness (Stale). Bumps the generation so an in-flight evaluation cannot commit
-    // Clean over it. Returns false if the node was already at least this dirty (no change).
+    // Escalate dirtiness (Stale). ALWAYS bumps the generation -- even when the state is already at
+    // least this dirty -- so an in-flight evaluation can never commit Clean over an invalidation
+    // it has not observed. (A suppressed bump would let a node sitting in CacheCheck commit Clean
+    // over a Stale that arrived mid-parent-check and cache a stale value with no recovery, because
+    // the cascade also stops at already-dirty nodes.) Returns false if the state did not change
+    // (the node was already at least this dirty); callers use that to skip re-propagating to
+    // observers, which were already notified when this node first reached that state -- an
+    // observer that commits Clean inside the race window is re-notified by the failed commit
+    // instead (see SignalHandlR.CommitCleanOrRenotifyAsync).
     public bool Invalidate(CacheState newState)
     {
         lock (gate)
         {
+            generation++;
             if (newState <= state) return false;
             state = newState;
-            generation++;
             return true;
         }
     }

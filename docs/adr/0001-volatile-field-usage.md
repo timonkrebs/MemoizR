@@ -7,6 +7,10 @@
 - Updated: 2026-06-06 — corrected the `ContextLock` scope description (it is per-flow, not
   per-`Context`) and documented the generation guard that closes the cross-flow lost-update
   race it leaves open (see "Cross-flow state coordination" below).
+- Updated: 2026-06-10 — hardened the generation guard (unconditional bump on `Invalidate`,
+  observer re-notification on a refused commit) and moved `CurrentGets`/`CurrentGetsIndex`
+  back to rule 2: `StructuredReduceJob`'s parallel children share their parent flow's scope, so
+  no single monitor covers all their accesses (review findings, PR follow-up).
 - Deciders: MemoizR maintainers
 
 ## Context
@@ -58,20 +62,29 @@ We adopt the following rules for `volatile` in this codebase:
 1. **A field accessed only under a lock does not get `volatile`.** The monitor (`lock (Lock)`)
    and the `ContextLock` already provide the necessary fences and atomicity. Adding `volatile`
    is redundant and misleads readers into thinking the field is accessed lock-free.
-   - Applies to: `locksHeld`, `upgradedLocksHeld`, `ReactionScope.CurrentGets`,
-     `ReactionScope.CurrentGetsIndex`.
+   - Applies to: `locksHeld`, `upgradedLocksHeld`. ("Only under a lock" means one *consistent*
+     lock for every access — see the `CurrentGets` correction under rule 2.)
 
-2. **A field that is read on the lock-free fast path is `volatile`** (or accessed via
+2. **A field whose accesses no single monitor covers is `volatile`** (or accessed via
    `Volatile.Read`/`Volatile.Write`) so the read has acquire visibility and the write has
    release visibility. They are kept consistent: if one field on a fast-path expression is
    volatile, all of them are.
    - Applies to: `ReactionScope.CurrentReaction` and `State` (in `MemoizR`, `ConcurrentMap`,
-     `ConcurrentMapReduce`). `State` is backed by a `CacheStateCell` — a `volatile` field for the
-     lock-free read, plus a `gate` monitor that serializes its transitions (the generation guard,
-     see "Cross-flow state coordination") — behind an unchanged property so call sites are
+     `ConcurrentMapReduce`), both read on the lock-free fast path. `State` is backed by the
+     shared `SignalHandlR.stateCell` (`CacheStateCell`) — a `volatile` field for the lock-free
+     read, plus a `gate` monitor that serializes its transitions (the generation guard, see
+     "Cross-flow state coordination") — behind an unchanged property so call sites are
      untouched. `ReactionBase`'s `State` goes through the same cell; its `isPaused` is a plain
      `volatile bool` because it is written by `Pause`/`Resume` from arbitrary threads and read in
      `Update` with no lock.
+   - Also applies to: `ReactionScope.CurrentGets` / `CurrentGetsIndex`. These were briefly
+     demoted to rule 1 on the claim that the `ContextLock` serializes them, but that claim is
+     false for `StructuredReduceJob`: its parallel children do **not** `ForceNewScope` (only
+     `StructuredResultsJob`'s do), so they share their parent flow's scope, and the per-flow
+     ContextLock grants all of them *recursively and concurrently*. Writes then go through
+     `CheckDependenciesTheSame` under `Context.Lock` while the job's accumulator reads under the
+     job's own `Lock` — two different monitors, no happens-before edge. `volatile` supplies the
+     missing release/acquire pairing; writes stay whole-array swaps (rule 3).
 
 3. **`volatile` is never used as a substitute for atomicity.** Compound read-modify-write
    operations (e.g. `CurrentGets = [.. CurrentGets, x]`, incrementing `CurrentGetsIndex`,
@@ -114,13 +127,27 @@ reproduced deterministically (`Memo_StaleDuringRecompute_IsNotClobbered`) and on
 
 - The current state is exposed through a plain `volatile` read, so the lock-free `Get` fast path
   stays lock-free. Only the writers take the cell's gate.
-- An **invalidation** (`Stale`) escalates the state and **bumps the generation**.
+- An **invalidation** (`Stale`) escalates the state and **always bumps the generation — even when
+  the state was already at least that dirty**. The bump must be unconditional: a node sitting in
+  `CacheCheck` whose suppressed `Stale` left no trace would commit `Clean` over a pending dirty
+  parent, and because the cascade also stops at already-dirty nodes, nothing would ever re-dirty
+  it (reproduced deterministically in `Memo_SuppressedStaleDuringParentCheck_IsNotClobbered`).
+  When the state did not escalate, propagation to observers is still skipped — they were notified
+  when the node first reached that state — which is safe only because of the re-notify rule below.
 - An **evaluation** snapshots the generation before it commits: `UpdateIfNecessary` snapshots it up
   front via `Generation` (covering the parent-check phase), and `Update` re-snapshots via
   `BeginEvaluation` (which also marks `Evaluating`) so a `Stale` during the recompute itself is
   caught. It only commits `CacheClean` if the snapshotted generation is unchanged
   (`TryCommitClean`). If a `Stale` bumped it meanwhile, the commit is dropped and the node stays
   dirty for the next `Get` / the debounced reaction update to recompute.
+- A **refused commit re-notifies the observers**
+  (`SignalHandlR.CommitCleanOrRenotifyAsync`): when the final commit of an evaluation loses to a
+  concurrent invalidation, an observer may have committed `Clean` against this node's
+  pre-invalidation value inside the same window (its own cascade notification can have been
+  suppressed at an already-dirty ancestor). Re-propagating `Stale(CacheCheck)` to observers
+  closes that descendant-level window; for a reaction observer it also re-schedules the
+  debounced update. This only runs on actual commit failures, so it terminates and adds no work
+  to the uncontended path.
 - The **diamond down-link** (a parent marking an observer dirty after it recomputed, via the
   `IMemoizR.State` setter → `InvalidateFromParent`) escalates the state **without** bumping the
   generation. When it fires during the observer's own same-flow evaluation — the observer is
@@ -129,9 +156,15 @@ reproduced deterministically (`Memo_StaleDuringRecompute_IsNotClobbered`) and on
   diamond propagation from a real cross-flow `Set`).
 
 This is node-local and changes no locking, so it cannot deadlock the structured-concurrency
-fork/join. Applies to `MemoizR`, `ConcurrentMap`, `ConcurrentMapReduce`, and `ReactionBase`.
-`ConcurrentRace` is exempt: it recomputes on every `Get`, so a clobbered `Clean` never yields a
-stale read.
+fork/join. The cell and the commit/notify protocol live once on `SignalHandlR` and are used by
+`MemoizR`, `ConcurrentMap`, `ConcurrentMapReduce`, and `ReactionBase`. `ConcurrentRace` is
+exempt: it recomputes on every `Get`, so a clobbered `Clean` never yields a stale read.
+
+Reactions add one more layer: their updates (the debounced update, `Resume()`, and
+`IMemoizR.UpdateIfNecessary`) are also serialized per node by the inherited `mutex`, because two
+debounced updates inherit *different* flows' ContextLocks and the generation guard protects only
+the `State` commit, not the ordering of `Execute`'s side effects — without the mutex, a stale
+in-flight `Execute` could apply its effects after a newer update finished and committed `Clean`.
 
 ## Consequences
 
@@ -172,8 +205,12 @@ Clarifications / non-issues:
 - **Leave `Value` as a plain field and accept stale/torn reads.** This was the previous
   position. Rejected: a large struct `T` can tear, and "eventually consistent" is a weaker
   guarantee than the rest of the graph provides. The immutable box closes the gap at the cost of
-  one small allocation per write (writes are far rarer than reads on a memo, and `Update`
-  already allocates), with no allocation on the read path.
+  one small allocation per write, with no allocation on the read path. Note the cost lands on
+  `Signal.Set` too — the write hot path — because `Signal<T>` inherits `MemoHandlR<T>`; this is
+  an **accepted trade-off** (one Gen0 box per `Set`, against `Set`'s existing lock + cascade
+  costs) rather than an oversight. If profiling ever shows it matters, the box can be restricted
+  to nodes with a lock-free Clean fast path (signals have none — `Signal.Get` reads under
+  program-order/lock edges).
 - **Use `Volatile.Read`/`Volatile.Write` at call sites instead of the `volatile` keyword.**
   Equivalent semantics and more explicit per access; the keyword was kept for the per-field
   fields for brevity. Note this is not an option for `Value`: the generic `Volatile.Read<T>`

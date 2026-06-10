@@ -25,7 +25,10 @@
   </PropertyGroup>
 
   <ItemGroup Condition="'$(MeasureCognitiveComplexity)' == 'true'">
-    <PackageReference Include="SonarAnalyzer.CSharp" Version="*">
+    <!-- Pinned (not floating) so the CI gate is deterministic and reproducible locally: a new
+         analyzer release changing S3776 scoring must arrive as a deliberate version bump, not
+         silently fail an unrelated PR. -->
+    <PackageReference Include="SonarAnalyzer.CSharp" Version="10.27.0.140913">
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>

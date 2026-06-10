@@ -14,17 +14,20 @@ public sealed class AsyncAsymmetricLock
 
     /// <summary>
     /// The queue of TCSs that other tasks are awaiting to acquire the lock as exclusive.
-    /// Exclusive can not enter upgradeable locks. If they try InvalidOperationException will be thrown, because otherwise it will lead to deadlocks.
-    /// Exclusive can execute with as many other exclusive locks simultaneously.
+    /// Only one exclusive lock can be held at a time; exclusive acquisitions queue behind any
+    /// held or waiting upgradeable lock. Exclusive holders can not enter upgradeable locks of
+    /// another scope; trying to acquire an exclusive lock recursively (or inside an upgradeable
+    /// lock of the same scope) throws InvalidOperationException, because it would deadlock.
     /// </summary>
     readonly IAsyncWaitQueue<IDisposable> exclusive = new DefaultAsyncWaitQueue<IDisposable>();
 
     /// <summary>
-    /// Number of exclusive locks held; negative if upgradeable lock are held; 0 if no locks are held.
+    /// Number of exclusive locks held; 0 if none. Upgradeable holds are tracked separately in
+    /// <see cref="upgradedLocksHeld"/> (this field never goes negative).
     /// </summary>
-    // Every read/write of these counters happens inside lock (Lock) (the LocksHeld/
-    // UpgradedLocksHeld getters lock, and the Interlocked mutations run under that same lock),
-    // so the monitor already provides the fences and atomicity. No `volatile` is needed.
+    // Every read/write of these fields happens inside lock (Lock) (the LocksHeld/
+    // UpgradedLocksHeld/LockScope getters lock for outside readers, and all mutations run under
+    // that same lock), so the monitor already provides the fences and atomicity.
     private int locksHeld;
     private int upgradedLocksHeld;
     private double lockScope;
@@ -37,13 +40,6 @@ public sealed class AsyncAsymmetricLock
             lock (Lock)
             {
                 return lockScope;
-            }
-        }
-        set
-        {
-            lock (Lock)
-            {
-                lockScope = value;
             }
         }
     }
@@ -71,32 +67,55 @@ public sealed class AsyncAsymmetricLock
     }
 
     /// <summary>
+    /// Returns the current flow's lock scope, minting and pinning a fresh one onto the
+    /// AsyncLocal if the flow has none yet. Must be called under <see cref="Lock"/>.
+    /// </summary>
+    private static double GetOrMintLockScope()
+    {
+        var lockScope = AsyncLocalScope.Value;
+        if (lockScope == 0)
+        {
+            do
+            {
+                lockScope = Random.Shared.NextDouble();
+            } while (lockScope == 0);
+            AsyncLocalScope.Value = lockScope;
+        }
+        return lockScope;
+    }
+
+    /// <summary>
     /// Asynchronously acquires the lock as a exclusive. Returns a disposable that releases the lock when disposed.
+    /// Must be called under <see cref="Lock"/>; reads the bookkeeping fields directly for that reason.
     /// </summary>
     /// <returns>A disposable that releases the lock when disposed.</returns>
-    private Task<IDisposable> RequestExclusiveLockAsync(double lockScope)
+    private Task<IDisposable> RequestExclusiveLockAsync(double requestScope)
     {
-        if (LockScope == lockScope && LocksHeld < 0)
+        // Upgradeable holds are counted in upgradedLocksHeld (locksHeld never goes negative), so
+        // that is what an exclusive acquire in the same scope must be checked against; an
+        // exclusive that waited here would wait for its own flow to release -- a deadlock -- so
+        // it throws instead.
+        if (lockScope == requestScope && upgradedLocksHeld > 0)
         {
             throw new InvalidOperationException("Can not aquire recursive exclusive lock in the scope of an upgradeable lock");
         }
 
-        if (LockScope == lockScope && LocksHeld > 0)
+        if (lockScope == requestScope && locksHeld > 0)
         {
             throw new InvalidOperationException("Can not aquire recursive exclusive locks in the same scope");
         }
 
         // If the lock is available and there are no waiting upgradeable, or upgrading upgradeable, take it immediately.
-        if (LocksHeld == 0 && upgradeable.IsEmpty && UpgradedLocksHeld == 0)
+        if (locksHeld == 0 && upgradeable.IsEmpty && upgradedLocksHeld == 0)
         {
-            Interlocked.Increment(ref locksHeld);
-            LockScope = lockScope;
-            return Task.FromResult<IDisposable>(new ExclusivePrioKey(this));
+            locksHeld++;
+            lockScope = requestScope;
+            return Task.FromResult<IDisposable>(new LockKey(this, isUpgradeable: false));
         }
-        else if (LockScope != lockScope)
+        else if (lockScope != requestScope)
         {
             // Wait for the lock to become available or cancellation.
-            return exclusive.Enqueue(lockScope);
+            return exclusive.Enqueue(requestScope);
         }
         else
         {
@@ -110,46 +129,37 @@ public sealed class AsyncAsymmetricLock
     /// <returns>A disposable that releases the lock when disposed.</returns>
     public Task<IDisposable> ExclusiveLockAsync()
     {
-        double lockScope;
         lock (Lock)
         {
-            lockScope = AsyncLocalScope.Value;
-            if (lockScope == 0)
-            {
-                do
-                {
-                    lockScope = Random.Shared.NextDouble();
-                } while (lockScope == 0);
-                AsyncLocalScope.Value = lockScope;
-            }
             // Return a plain Task<IDisposable> rather than the custom AwaitableDisposable
             // wrapper: Coyote's binary rewriter corrupts custom awaitables (it cannot resolve
             // AwaitableDisposable.GetAwaiter), which made every lock-using test throw
             // MissingMethodException under the CI `coyote rewrite` step.
-            return RequestExclusiveLockAsync(lockScope);
+            return RequestExclusiveLockAsync(GetOrMintLockScope());
         }
     }
 
     /// <summary>
     /// Asynchronously acquires the lock as a upgradeable. Returns a disposable that releases the lock when disposed.
+    /// Must be called under <see cref="Lock"/>; reads the bookkeeping fields directly for that reason.
     /// </summary>
-    /// <param name="cancellationToken">The cancellation token used to cancel the lock. If this is already set, then this method will attempt to take the lock immediately (succeeding if the lock is currently available).</param>
     /// <returns>A disposable that releases the lock when disposed.</returns>
-    private Task<IDisposable> RequestUpgradeableLockAsync(double lockScope)
+    private Task<IDisposable> RequestUpgradeableLockAsync(double requestScope)
     {
-        if (LocksHeld == 0 && UpgradedLocksHeld == 0)
+        if (locksHeld == 0 && upgradedLocksHeld == 0)
         {
-            Interlocked.Increment(ref upgradedLocksHeld);
-            LockScope = lockScope;
-            return Task.FromResult<IDisposable>(new UpgradeableKey(this, false));
+            upgradedLocksHeld++;
+            lockScope = requestScope;
+            return Task.FromResult<IDisposable>(new LockKey(this, isUpgradeable: true));
         }
-        else if (LockScope == lockScope)
+        else if (lockScope == requestScope)
         {
-            Interlocked.Increment(ref upgradedLocksHeld);
-            return Task.FromResult<IDisposable>(new UpgradeableKey(this, true));
+            // Recursive acquisition within the same flow.
+            upgradedLocksHeld++;
+            return Task.FromResult<IDisposable>(new LockKey(this, isUpgradeable: true, ignoreDispose: true));
         }
 
-        return upgradeable.Enqueue(lockScope);
+        return upgradeable.Enqueue(requestScope);
     }
 
     /// <summary>
@@ -158,46 +168,32 @@ public sealed class AsyncAsymmetricLock
     /// <returns>A disposable that releases the lock when disposed.</returns>
     public Task<IDisposable> UpgradeableLockAsync()
     {
-        double lockScope;
         lock (Lock)
         {
-            lockScope = AsyncLocalScope.Value;
-            if (lockScope == 0)
-            {
-                do
-                {
-                    lockScope = Random.Shared.NextDouble();
-                } while (lockScope == 0);
-                AsyncLocalScope.Value = lockScope;
-            }
-            return RequestUpgradeableLockAsync(lockScope);
+            return RequestUpgradeableLockAsync(GetOrMintLockScope());
         }
     }
 
     /// <summary>
-    /// Grants lock(s) to waiting tasks. This method assumes the sync lock is already held.
+    /// Grants lock(s) to waiting tasks. Must be called under <see cref="Lock"/>.
     /// </summary>
-    public void ReleaseWaiters()
+    private void ReleaseWaiters()
     {
-        if (!upgradeable.IsEmpty && LocksHeld == 0 && UpgradedLocksHeld == 0)
+        if (!upgradeable.IsEmpty && locksHeld == 0 && upgradedLocksHeld == 0)
         {
-            Interlocked.Increment(ref upgradedLocksHeld);
-            // The lock-wide LockScope field is the source of truth for recursion checks.
+            upgradedLocksHeld++;
+            // The lock-wide lockScope field is the source of truth for recursion checks.
             // We must NOT touch AsyncLocalScope here: this runs on the *releasing* flow, and
             // AsyncLocal mutations never propagate to the already-suspended waiter being woken.
             // The waiter still carries the scope it set before enqueueing, so writing it here
             // only corrupts the releaser's flow (and could let a later acquire on that flow be
             // falsely granted as recursive).
-            LockScope = upgradeable.Dequeue(new UpgradeableKey(this, false));
+            lockScope = upgradeable.Dequeue(new LockKey(this, isUpgradeable: true));
         }
-        else if (!exclusive.IsEmpty && LocksHeld == 0 && UpgradedLocksHeld == 0)
+        else if (!exclusive.IsEmpty && locksHeld == 0 && upgradedLocksHeld == 0)
         {
-            Interlocked.Increment(ref locksHeld);
-            LockScope = exclusive.Dequeue(new ExclusivePrioKey(this));
-        }
-        else if ((!upgradeable.IsEmpty || !exclusive.IsEmpty) && LocksHeld == 0 && UpgradedLocksHeld == 0)
-        {
-            throw new InvalidOperationException();
+            locksHeld++;
+            lockScope = exclusive.Dequeue(new LockKey(this, isUpgradeable: false));
         }
     }
 
@@ -208,10 +204,10 @@ public sealed class AsyncAsymmetricLock
     {
         lock (Lock)
         {
-            Interlocked.Decrement(ref locksHeld);
-            if (LocksHeld == 0)
+            locksHeld--;
+            if (locksHeld == 0)
             {
-                LockScope = 0;
+                lockScope = 0;
             }
             ReleaseWaiters();
         }
@@ -224,12 +220,12 @@ public sealed class AsyncAsymmetricLock
     {
         lock (Lock)
         {
-            if (UpgradedLocksHeld > 0)
+            if (upgradedLocksHeld > 0)
             {
-                Interlocked.Decrement(ref upgradedLocksHeld);
-                if (UpgradedLocksHeld == 0 && LocksHeld == 0)
+                upgradedLocksHeld--;
+                if (upgradedLocksHeld == 0 && locksHeld == 0)
                 {
-                    LockScope = 0;
+                    lockScope = 0;
                 }
             }
             else
@@ -240,53 +236,47 @@ public sealed class AsyncAsymmetricLock
             {
                 ReleaseWaiters();
             }
-
         }
     }
 
     /// <summary>
-    /// The disposable which releases the exclusive lock.
+    /// The disposable that releases a held lock. One class serves both modes: an exclusive key
+    /// releases via <see cref="ReleaseExclusiveLock"/>, an upgradeable key via
+    /// <see cref="ReleaseUpgradeableLock"/> (recursive upgradeable grants pass ignoreDispose so
+    /// the nested release does not wake waiters).
     /// </summary>
-    private sealed class ExclusivePrioKey : IDisposable
+    private sealed class LockKey : IDisposable
     {
-        private readonly AsyncAsymmetricLock asyncPriorityLock;
-
-        /// <summary>
-        /// Creates the key for a lock.
-        /// </summary>
-        /// <param name="asyncPriorityLock">The lock to release. May not be <c>null</c>.</param>
-        public ExclusivePrioKey(AsyncAsymmetricLock asyncPriorityLock)
-        {
-            this.asyncPriorityLock = asyncPriorityLock;
-        }
-
-        public void Dispose()
-        {
-            asyncPriorityLock.ReleaseExclusiveLock();
-        }
-    }
-
-    /// <summary>
-    /// The disposable which releases the upgradeable lock.
-    /// </summary>
-    private sealed class UpgradeableKey : IDisposable
-    {
-        private readonly AsyncAsymmetricLock asyncPriorityLock;
+        private readonly AsyncAsymmetricLock asyncLock;
+        private readonly bool isUpgradeable;
         private readonly bool ignoreDispose;
+        private int disposed;
 
-        /// <summary>
-        /// Creates the key for a lock.
-        /// </summary>
-        /// <param name="asyncPriorityLock">The lock to release. May not be <c>null</c>.</param>
-        public UpgradeableKey(AsyncAsymmetricLock asyncPriorityLock, bool ignoreDispose)
+        public LockKey(AsyncAsymmetricLock asyncLock, bool isUpgradeable, bool ignoreDispose = false)
         {
-            this.asyncPriorityLock = asyncPriorityLock;
+            this.asyncLock = asyncLock;
+            this.isUpgradeable = isUpgradeable;
             this.ignoreDispose = ignoreDispose;
         }
 
         public void Dispose()
         {
-            asyncPriorityLock.ReleaseUpgradeableLock(ignoreDispose);
+            // IDisposable contract: a second Dispose must be a no-op. Without the guard it
+            // double-released the lock -- driving locksHeld negative for an exclusive key
+            // (silently wedging every later acquisition) or throwing for an upgradeable one.
+            if (Interlocked.Exchange(ref disposed, 1) != 0)
+            {
+                return;
+            }
+
+            if (isUpgradeable)
+            {
+                asyncLock.ReleaseUpgradeableLock(ignoreDispose);
+            }
+            else
+            {
+                asyncLock.ReleaseExclusiveLock();
+            }
         }
     }
 }

@@ -19,23 +19,17 @@ public sealed class EagerRelativeSignal<T> : MemoHandlR<T>, IStateGetR<T>
             // only updating the value should be locked
             lock (Lock)
             {
-                Value = fn(Value);   
+                Value = fn(Value);
             }
 
-            for (int i = 0; i < Observers.Length; i++)
-            {
-                if (Observers[i].TryGetTarget(out var o))
-                {
-                    await o.Stale(CacheState.CacheDirty);
-                }
-            }
+            await PropagateStaleToObserversAsync(CacheState.CacheDirty);
         }
     }
-    
+
     public async Task<T> Get()
     {
-        Context.CreateNewScopeIfNeeded();
-        if (Context.ReactionScope.CurrentReaction == null)
+        var scope = Context.GetOrCreateScope();
+        if (scope.CurrentReaction == null)
         {
             return Value;
         }
@@ -43,7 +37,7 @@ public sealed class EagerRelativeSignal<T> : MemoHandlR<T>, IStateGetR<T>
         // Only one thread should evaluate the graph at a time. otherwise the context could get messed up.
         // This should lead to perf gains because memoization can be utilized more efficiently.
         using (await mutex.LockAsync())
-        using (await Context.ReactionScope.ContextLock.UpgradeableLockAsync())
+        using (await scope.ContextLock.UpgradeableLockAsync())
         {
             Context.CheckDependenciesTheSame(this);
         }

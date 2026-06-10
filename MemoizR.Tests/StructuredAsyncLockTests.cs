@@ -1,4 +1,5 @@
 using MemoizR.StructuredAsyncLock;
+using xRetry;
 
 namespace MemoizR.Tests;
 
@@ -242,14 +243,79 @@ public class AsyncAsymmetricLockTests
         using var upgradeable = await asyncLock.UpgradeableLockAsync();
 
         // Taking an exclusive lock while already holding an upgradeable one in the same scope
-        // would deadlock, so it must throw instead of blocking.
-        await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+        // would deadlock, so it must throw instead of blocking. Assert the message so the
+        // dedicated guard stays honest: before the guard checked UpgradedLocksHeld, this case
+        // fell through to the generic "Should never happen!" invariant branch, and a type-only
+        // assertion green-lit that accidental path.
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
         {
             using var exclusive = await asyncLock.ExclusiveLockAsync();
         });
+        Assert.Contains("in the scope of an upgradeable", ex.Message);
 
         Assert.Equal(0, asyncLock.LocksHeld);
         Assert.Equal(1, asyncLock.UpgradedLocksHeld);
+    }
+
+    // IDisposable contract: disposing a lock key twice must be a no-op, not a bookkeeping
+    // corruption (a double-disposed exclusive key drove locksHeld negative, silently wedging
+    // every later acquisition; a double-disposed upgradeable key threw "Should never happen!").
+    [Fact(Timeout = 2000)]
+    public async Task LockKeys_DoubleDispose_IsIdempotent()
+    {
+        var asyncLock = new AsyncAsymmetricLock();
+
+        var exclusive = await asyncLock.ExclusiveLockAsync();
+        exclusive.Dispose();
+        exclusive.Dispose();
+        Assert.Equal(0, asyncLock.LocksHeld);
+
+        // The lock must still be fully usable afterwards.
+        using (await asyncLock.ExclusiveLockAsync())
+        {
+            Assert.Equal(1, asyncLock.LocksHeld);
+        }
+
+        var upgradeable = await asyncLock.UpgradeableLockAsync();
+        upgradeable.Dispose();
+        upgradeable.Dispose();
+        Assert.Equal(0, asyncLock.UpgradedLocksHeld);
+
+        using (await asyncLock.UpgradeableLockAsync())
+        {
+            Assert.Equal(1, asyncLock.UpgradedLocksHeld);
+        }
+
+        Assert.Equal(0, asyncLock.LocksHeld);
+        Assert.Equal(0, asyncLock.UpgradedLocksHeld);
+        Assert.Equal(0, asyncLock.LockScope);
+    }
+
+    // --- Per-flow reentrancy contract ---
+
+    [Fact(Timeout = 1000)]
+    public async Task UpgradeableLock_RecursiveInSameScope_IsGranted()
+    {
+        var asyncLock = new AsyncAsymmetricLock();
+
+        using (await asyncLock.UpgradeableLockAsync())
+        {
+            Assert.Equal(1, asyncLock.UpgradedLocksHeld);
+
+            // Same async flow (same lock scope): the upgradeable lock is reentrant -- this is
+            // what lets nested Get/UpdateIfNecessary on one flow not self-deadlock.
+            using (await asyncLock.UpgradeableLockAsync())
+            {
+                Assert.Equal(2, asyncLock.UpgradedLocksHeld);
+            }
+
+            Assert.Equal(1, asyncLock.UpgradedLocksHeld);
+        }
+
+        // Fully drained: nothing leaked, the scope is released.
+        Assert.Equal(0, asyncLock.UpgradedLocksHeld);
+        Assert.Equal(0, asyncLock.LocksHeld);
+        Assert.Equal(0, asyncLock.LockScope);
     }
 
     // --- Mutual exclusion / no lost wake-ups (fail loudly if a refactoring breaks the lock) ---
@@ -304,17 +370,150 @@ public class AsyncAsymmetricLockTests
         Assert.Equal(0, asyncLock.LockScope);
     }
 
+    // Mixed-mode stress: exclusive and upgradeable acquirers from independent flows interleave
+    // arbitrarily. Cross-scope they must all mutually exclude, and the wake-up chain through
+    // ReleaseWaiters must drain both queues -- a priority/handoff bug between the two waiter
+    // queues only surfaces in mixed mode, which the single-mode stress tests never enter.
+    [Fact(Timeout = 10000)]
+    public async Task MixedLocks_ManyConcurrent_SerializeWithoutLostUpdatesOrLeaks()
+    {
+        var asyncLock = new AsyncAsymmetricLock();
+        var counter = 0;
+
+        var tasks = Enumerable.Range(0, 100).Select(i => Task.Run(async () =>
+        {
+            using (await (i % 2 == 0 ? asyncLock.ExclusiveLockAsync() : asyncLock.UpgradeableLockAsync()))
+            {
+                var snapshot = counter;
+                await Task.Yield();
+                counter = snapshot + 1;
+            }
+        }));
+
+        await Task.WhenAll(tasks);
+
+        Assert.Equal(100, counter);                  // full mutual exclusion across both modes
+        Assert.Equal(0, asyncLock.LocksHeld);        // both queues fully drained
+        Assert.Equal(0, asyncLock.UpgradedLocksHeld);
+        Assert.Equal(0, asyncLock.LockScope);
+    }
+
+    // Queued exclusive waiters must be granted in enqueue order (the wait queue is a deque and
+    // ReleaseWaiters dequeues from the front; nothing else pins this fairness contract).
+    [RetryFact(3, 200)]
+    public async Task ExclusiveWaiters_AreGrantedInFifoOrder()
+    {
+        var asyncLock = new AsyncAsymmetricLock();
+        var order = new List<int>();
+        var holderHas = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var holder = Task.Run(async () =>
+        {
+            using (await asyncLock.UpgradeableLockAsync())
+            {
+                holderHas.SetResult();
+                await release.Task;
+            }
+        });
+        await holderHas.Task;
+
+        var waiters = new List<Task>();
+        for (var i = 1; i <= 3; i++)
+        {
+            var id = i;
+            waiters.Add(Task.Run(async () =>
+            {
+                using (await asyncLock.ExclusiveLockAsync())
+                {
+                    lock (order)
+                    {
+                        order.Add(id);
+                    }
+                }
+            }));
+            await Task.Delay(50); // space the enqueues so their order is deterministic
+        }
+
+        release.SetResult();
+        await Task.WhenAll(waiters);
+        await holder;
+
+        Assert.Equal([1, 2, 3], order);
+    }
+
+    // Liveness: a queued exclusive waiter must not be starved forever by continuous upgradeable
+    // traffic (ReleaseWaiters prefers upgradeable waiters, so this is the adversarial case), and
+    // must acquire promptly once traffic stops (no lost wake-up in mixed handoff).
+    [Fact(Timeout = 20000)]
+    public async Task ExclusiveWaiter_AcquiresDespiteUpgradeableTraffic()
+    {
+        var asyncLock = new AsyncAsymmetricLock();
+        using var trafficCts = new CancellationTokenSource();
+
+        var holderHas = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var holderReleased = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var holder = Task.Run(async () =>
+        {
+            using (await asyncLock.UpgradeableLockAsync())
+            {
+                holderHas.SetResult();
+                await holderReleased.Task;
+            }
+        });
+        await holderHas.Task;
+
+        // The exclusive enqueues behind the holder.
+        var exclusiveWaiter = Task.Run(async () =>
+        {
+            using (await asyncLock.ExclusiveLockAsync())
+            {
+            }
+        });
+        await Task.Delay(50); // let it enqueue
+
+        // Four competing upgradeable streams from distinct flows keep the upgradeable queue busy.
+        var streams = Enumerable.Range(0, 4).Select(_ => Task.Run(async () =>
+        {
+            while (!trafficCts.IsCancellationRequested)
+            {
+                using (await asyncLock.UpgradeableLockAsync())
+                {
+                    await Task.Yield();
+                }
+            }
+        })).ToArray();
+
+        holderReleased.SetResult();
+
+        var winner = await Task.WhenAny(exclusiveWaiter, Task.Delay(5000));
+        var acquiredDuringTraffic = winner == exclusiveWaiter;
+
+        trafficCts.Cancel();
+        await Task.WhenAll(streams);
+        await exclusiveWaiter; // must complete once traffic stops, at the very latest
+        await holder;
+
+        Assert.True(acquiredDuringTraffic,
+            "the exclusive waiter starved while upgradeable traffic continued");
+        Assert.Equal(0, asyncLock.LocksHeld);
+        Assert.Equal(0, asyncLock.UpgradedLocksHeld);
+        Assert.Equal(0, asyncLock.LockScope);
+    }
+
     // --- Regression: releasing a lock must not corrupt the releasing flow's own scope ---
 
     [Fact(Timeout = 5000)]
     public async Task ReleasingFlow_DoesNotCorruptScope_WhenHandingOffToWaiter()
     {
         var asyncLock = new AsyncAsymmetricLock();
-        var holderAcquired = new TaskCompletionSource();
-        var waiterEnqueued = new TaskCompletionSource();
-        var waiterAcquired = new TaskCompletionSource();
-        var releaseWaiter = new TaskCompletionSource();
-        var reacquireOutcome = new TaskCompletionSource<string>();
+        // RunContinuationsAsynchronously: SetResult must not run the other flow's continuation
+        // inline on the setter's stack, where it could contend the very lock the setter holds.
+        var holderAcquired = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var waiterEnqueued = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var waiterAcquired = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseWaiter = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var reacquireOutcome = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
 
         // Holder runs in its own flow (its own scope).
         var holderTask = Task.Run(async () =>

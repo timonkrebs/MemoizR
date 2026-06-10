@@ -94,9 +94,12 @@ Choose by answering, in order:
 **`Nito.AsyncEx.AsyncLock` (`mutex`)** — serialize a single node's / job's work that spans awaits,
 plain mutual exclusion:
 
-- `SignalHandlR.mutex` (inherited by every `MemoHandlR<T>` node — the memos, `ConcurrentMap`,
-  `ConcurrentMapReduce`, `ConcurrentRace`) — ensures only one evaluation of a given node runs at a
-  time, held across the awaited recompute.
+- `SignalHandlR.mutex` (inherited by every node — the memos, `ConcurrentMap`,
+  `ConcurrentMapReduce`, `ConcurrentRace`, and `ReactionBase`) — ensures only one evaluation of a
+  given node runs at a time, held across the awaited recompute. For reactions this is what orders
+  `Resume()` against concurrently scheduled debounced updates: those inherit *different* flows'
+  ContextLocks, and the generation guard protects only the `State` commit, not the ordering of
+  `Execute`'s side effects.
 - `StructuredJobBase.mutex`.
 
 **`AsyncAsymmetricLock` (`ContextLock`)** — serialize evaluation of the reactive graph, held across
@@ -133,7 +136,11 @@ exactly one, applied to every access:
      unsynchronized: `StructuredReduceJob` folds into its `result` under the job's `lock (Lock)`,
      while `StructuredResultsJob`'s `result` is a `ConcurrentDictionary` written with `TryAdd`
      (the collection's own internal synchronization — discipline (1) applied by the collection).
-     Both jobs accumulate `allSources` and rewire observer links under `lock (Lock)`.
+     Both jobs accumulate `allSources` and rewire observer links under the shared
+     `StructuredJobBase.Lock` (`AccumulateSourcesAndObservers`). Note the *inputs* to that
+     accumulation, `ReactionScope.CurrentGets`/`CurrentGetsIndex`, are written under
+     `Context.Lock` — a different monitor — which is why those two fields are `volatile`
+     (discipline (2); see ADR 0001 rule 2).
    - `SignalHandlR.Sources` / `Observers` are mutated and read **lock-free during normal graph
      evaluation**, which is serialized per flow by the `ContextLock`; writes are also whole-array
      swaps (an atomic reference publish). The `SignalHandlR.Lock` on the `IMemoHandlR` interface
