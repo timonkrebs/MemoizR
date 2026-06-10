@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 - Reactions built with a SynchronizationContext now evaluate their dependencies on the thread pool and marshal only the action (with the already-evaluated values) to the context; `CreateAdvancedReaction` keeps running its whole body on the context (#13)
  
 ### Fixed
+- Debounced reaction updates no longer capture the scheduling thread's SynchronizationContext for their continuation, so creating a reaction (or setting a signal) on a UI thread no longer evaluates the dependency graph on that thread (#13)
 
 ## [0.1.0] - 2023-10-06
  

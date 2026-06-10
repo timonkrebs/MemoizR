@@ -334,13 +334,17 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
         try
         {
             // Hop off the caller's stack first: with a zero debounce, Task.Delay completes
-            // synchronously and this "fire-and-forget" would otherwise run the WHOLE update --
-            // including the user's Execute body -- inline inside Stale's monitor (and, for the
-            // constructor-triggered initial run, inside the builder's factory lock).
-            await Task.Yield();
+            // synchronously (plain ConfigureAwait(false) does not yield on a completed task)
+            // and this "fire-and-forget" would otherwise run the WHOLE update -- including the
+            // user's Execute body -- inline inside Stale's monitor (and, for the initial run,
+            // inside the builder's factory lock). ForceYielding instead of an extra Task.Yield:
+            // it always yields AND never captures the scheduling thread's SynchronizationContext
+            // (Task.Yield does), so a Stale raised on a UI thread -- Set callers and reaction
+            // builders under MemoizR.Wpf -- continues on the thread pool instead of queueing the
+            // whole dependency-graph evaluation back onto the UI thread (#13).
             try
             {
-                await Task.Delay(debounceTime, token).ConfigureAwait(false);
+                await Task.Delay(debounceTime, token).ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
             }
             catch (OperationCanceledException)
             {

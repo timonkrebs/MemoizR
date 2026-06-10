@@ -691,6 +691,42 @@ public class ReactiveTests
         GC.KeepAlive(r);
     }
 
+    // Creating a reaction must not run its eager initial evaluation inline on the creating
+    // thread: reactions are typically created on UI threads (see MemoizR.Wpf), where the
+    // dependency evaluation belongs on the thread pool even for the initial run. The
+    // zero-debounce initial Stale used to continue inline off the already-completed
+    // Task.Delay(0) (ConfigureAwait(false) does not yield on completed tasks), evaluating the
+    // whole graph on the creating thread before CreateReaction returned -- pinned here by the
+    // ForceYielding in RunDebouncedUpdateAsync. (Its companion guarantee -- the yield must not
+    // re-queue to the creating thread's SynchronizationContext like Task.Yield would -- needs a
+    // real UI context to observe and is covered by MemoizR.Wpf.Tests.)
+    [Fact(Timeout = 10000)]
+    public async Task Reaction_InitialRun_DoesNotEvaluateDependenciesInlineOnCreatingThread()
+    {
+        var f = new MemoFactory();
+        var v1 = f.CreateSignal(1);
+        var creatingThreadId = Environment.CurrentManagedThreadId;
+        var creating = true;
+        var ranInlineOnCreatingThread = false;
+        var m1 = f.CreateMemoizR(async () =>
+        {
+            // Same thread AND still inside the creation call: only the inline path can observe
+            // both (the creating thread cannot serve queued pool work while it is still inside
+            // CreateReaction), so a pool-scheduled run can never trip this flag.
+            ranInlineOnCreatingThread |= Environment.CurrentManagedThreadId == creatingThreadId && Volatile.Read(ref creating);
+            return await v1.Get();
+        });
+
+        var last = 0;
+        var r = f.BuildReaction().CreateReaction(m1, v => last = v);
+        Volatile.Write(ref creating, false);
+
+        await TestHelpers.WaitForConvergenceAsync(() => last == 1);
+        Assert.Equal(1, last);
+        Assert.False(ranInlineOnCreatingThread, "the initial run evaluated dependencies inline on the creating thread");
+        GC.KeepAlive(r);
+    }
+
     // AddSynchronizationContext re-registration contract (changed when the static side-table
     // became a factory property): a second registration REPLACES the context for reactions
     // built afterwards; reactions built earlier keep the context they captured at build time.
