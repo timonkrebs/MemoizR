@@ -17,11 +17,11 @@ public class ReactionScope
 public class Context
 {
     private Lock Lock { get; } = new();
-    private static readonly AsyncLocal<double> AsyncLocalScope = new();
+    private static readonly AsyncLocal<Guid> AsyncLocalScope = new();
 
     /** current capture context for identifying sources (other memoizR elements)
     * - active while evaluating a memoizR function body  */
-    private Dictionary<double, WeakReference<ReactionScope>> AsyncReactionScopes = new();
+    private Dictionary<Guid, WeakReference<ReactionScope>> AsyncReactionScopes = new();
 
     public ReactionScope ReactionScope
     {
@@ -29,7 +29,7 @@ public class Context
         {
             lock (Lock)
             {
-                var key = AsyncLocalScope.Value == 0 ? Random.Shared.NextDouble() : AsyncLocalScope.Value;
+                var key = AsyncLocalScope.Value == Guid.Empty ? Guid.NewGuid() : AsyncLocalScope.Value;
                 ReactionScope reactionScope;
                 if (!AsyncReactionScopes.TryGetValue(key, out var reactionScopeRef))
                 {
@@ -53,11 +53,11 @@ public class Context
     {
         lock (Lock)
         {
-            if (AsyncLocalScope.Value != 0)
+            if (AsyncLocalScope.Value != Guid.Empty)
             {
                 return;
             }
-            var key = Random.Shared.NextDouble();
+            var key = Guid.NewGuid();
             AsyncLocalScope.Value = key;
             AsyncReactionScopes.Add(key, new(new()));
         }
@@ -93,11 +93,11 @@ public class Context
         }
     }
 
-    internal double ForceNewScope()
+    internal Guid ForceNewScope()
     {
         lock (Lock)
         {
-            var key = Random.Shared.NextDouble();
+            var key = Guid.NewGuid();
             AsyncLocalScope.Value = key;
             AsyncReactionScopes.Add(key, new(new()));
             return key;

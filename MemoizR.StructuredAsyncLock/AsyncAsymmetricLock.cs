@@ -27,10 +27,10 @@ public sealed class AsyncAsymmetricLock
     // so the monitor already provides the fences and atomicity. No `volatile` is needed.
     private int locksHeld;
     private int upgradedLocksHeld;
-    private double lockScope;
-    private static readonly AsyncLocal<double> AsyncLocalScope = new();
+    private Guid lockScope;
+    private static readonly AsyncLocal<Guid> AsyncLocalScope = new();
 
-    internal double LockScope
+    internal Guid LockScope
     {
         get
         {
@@ -74,7 +74,7 @@ public sealed class AsyncAsymmetricLock
     /// Asynchronously acquires the lock as a exclusive. Returns a disposable that releases the lock when disposed.
     /// </summary>
     /// <returns>A disposable that releases the lock when disposed.</returns>
-    private Task<IDisposable> RequestExclusiveLockAsync(double lockScope)
+    private Task<IDisposable> RequestExclusiveLockAsync(Guid lockScope)
     {
         if (LockScope == lockScope && LocksHeld < 0)
         {
@@ -110,16 +110,13 @@ public sealed class AsyncAsymmetricLock
     /// <returns>A disposable that releases the lock when disposed.</returns>
     public Task<IDisposable> ExclusiveLockAsync()
     {
-        double lockScope;
+        Guid lockScope;
         lock (Lock)
         {
             lockScope = AsyncLocalScope.Value;
-            if (lockScope == 0)
+            if (lockScope == Guid.Empty)
             {
-                do
-                {
-                    lockScope = Random.Shared.NextDouble();
-                } while (lockScope == 0);
+                lockScope = Guid.NewGuid();
                 AsyncLocalScope.Value = lockScope;
             }
             // Return a plain Task<IDisposable> rather than the custom AwaitableDisposable
@@ -135,7 +132,7 @@ public sealed class AsyncAsymmetricLock
     /// </summary>
     /// <param name="cancellationToken">The cancellation token used to cancel the lock. If this is already set, then this method will attempt to take the lock immediately (succeeding if the lock is currently available).</param>
     /// <returns>A disposable that releases the lock when disposed.</returns>
-    private Task<IDisposable> RequestUpgradeableLockAsync(double lockScope)
+    private Task<IDisposable> RequestUpgradeableLockAsync(Guid lockScope)
     {
         if (LocksHeld == 0 && UpgradedLocksHeld == 0)
         {
@@ -158,16 +155,13 @@ public sealed class AsyncAsymmetricLock
     /// <returns>A disposable that releases the lock when disposed.</returns>
     public Task<IDisposable> UpgradeableLockAsync()
     {
-        double lockScope;
+        Guid lockScope;
         lock (Lock)
         {
             lockScope = AsyncLocalScope.Value;
-            if (lockScope == 0)
+            if (lockScope == Guid.Empty)
             {
-                do
-                {
-                    lockScope = Random.Shared.NextDouble();
-                } while (lockScope == 0);
+                lockScope = Guid.NewGuid();
                 AsyncLocalScope.Value = lockScope;
             }
             return RequestUpgradeableLockAsync(lockScope);
@@ -211,7 +205,7 @@ public sealed class AsyncAsymmetricLock
             Interlocked.Decrement(ref locksHeld);
             if (LocksHeld == 0)
             {
-                LockScope = 0;
+                LockScope = Guid.Empty;
             }
             ReleaseWaiters();
         }
@@ -229,7 +223,7 @@ public sealed class AsyncAsymmetricLock
                 Interlocked.Decrement(ref upgradedLocksHeld);
                 if (UpgradedLocksHeld == 0 && LocksHeld == 0)
                 {
-                    LockScope = 0;
+                    LockScope = Guid.Empty;
                 }
             }
             else

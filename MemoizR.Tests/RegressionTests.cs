@@ -25,7 +25,7 @@ public class RegressionTests
 
         Assert.Equal(0, asyncLock.LocksHeld);
         Assert.Equal(0, asyncLock.UpgradedLocksHeld);
-        Assert.Equal(0, asyncLock.LockScope);
+        Assert.Equal(Guid.Empty, asyncLock.LockScope);
     }
 
     // Scope keys are generated with a thread-safe RNG (Random.Shared). Previously a static

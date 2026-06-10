@@ -18,14 +18,14 @@ internal interface IAsyncWaitQueue<T>
     /// Creates a new entry and queues it to this wait queue. The returned task must support both synchronous and asynchronous waits.
     /// </summary>
     /// <returns>The queued task.</returns>
-    Task<T> Enqueue(double lockScope);
+    Task<T> Enqueue(Guid lockScope);
 
     /// <summary>
     /// Removes a single entry in the wait queue and completes it. This method may only be called if <see cref="IsEmpty"/> is <c>false</c>. The task continuations for the completed task must be executed asynchronously.
     /// </summary>
     /// <param name="result">The result used to complete the wait queue entry. If this isn't needed, use <c>default(T)</c>.</param>
     /// <returns>The lock scope associated with the completed entry.</returns>
-    double Dequeue(T? result = default);
+    Guid Dequeue(T? result = default);
 }
 
 /// <summary>
@@ -36,7 +36,7 @@ internal interface IAsyncWaitQueue<T>
 [DebuggerTypeProxy(typeof(DefaultAsyncWaitQueue<>.DebugView))]
 internal sealed class DefaultAsyncWaitQueue<T> : IAsyncWaitQueue<T>
 {
-    private readonly Deque<(TaskCompletionSource<T>, double)> _queue = new();
+    private readonly Deque<(TaskCompletionSource<T>, Guid)> _queue = new();
 
     private int Count
     {
@@ -48,14 +48,14 @@ internal sealed class DefaultAsyncWaitQueue<T> : IAsyncWaitQueue<T>
         get { return Count == 0; }
     }
 
-    Task<T> IAsyncWaitQueue<T>.Enqueue(double lockScope)
+    Task<T> IAsyncWaitQueue<T>.Enqueue(Guid lockScope)
     {
         var tcs = TaskCompletionSourceExtensions.CreateAsyncTaskSource<T>();
         _queue.AddToBack((tcs, lockScope));
         return tcs.Task;
     }
 
-    double IAsyncWaitQueue<T>.Dequeue(T? result)
+    Guid IAsyncWaitQueue<T>.Dequeue(T? result)
     {
         var res = _queue.RemoveFromFront();
 
