@@ -10,6 +10,9 @@ interleavings with diagrams.
 - [ADR 0002 — Choosing a lock](../adr/0002-choosing-a-lock.md)
 - [Performance Notes](performance.md) — the measured cost of these mechanisms and the
   optimizations applied on top of them.
+- [Causality Trigger Clock](causality-trigger-clock.md) — the per-node causality stamps
+  (issue #39) that piggyback on the evaluation windows described here; they add no new states
+  or ordering requirements, only an extra field in the `ValueBox` publication (§7).
 
 All diagrams are [Mermaid](https://mermaid.js.org/) and render on GitHub.
 

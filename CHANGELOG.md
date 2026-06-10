@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 ### Added
 - `CreateReaction(...)` convenience overloads directly on the factory — sugar for `BuildReaction().CreateReaction(...)` with the default label and debounce
 - MemoizR.Wpf package: `AddWpfDispatcher` routes reaction actions to the WPF UI thread (via `Application.Current.Dispatcher` or an explicit `Dispatcher`) while the dependency graph keeps evaluating on the thread pool (#13)
+- Causality Trigger Clock, phase 1 (#39, internal): stable per-context node ids, per-signal
+  trigger counters bumped on value-changing Sets, and per-node causality stamps (own stamp +
+  one stamp per source) captured at source-read time and published atomically with the value.
+  See docs/architecture/causality-trigger-clock.md.
    
 ### Changed
 - Reactions now evaluate their separate-parameter dependencies in parallel on the thread pool; with a SynchronizationContext registered, only the action (with the already-evaluated values) is marshalled to the context, and `CreateAdvancedReaction` keeps running its whole body on the context (#13)

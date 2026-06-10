@@ -74,10 +74,17 @@ public sealed class ConcurrentRace<T, I> : MemoHandlR<T>, IMemoizR, IStateGetR<T
         scope.CurrentGets = [];
         scope.CurrentGetsIndex = 0;
 
+        // Tracked reads by the racing branches (the parent-flow action plus the child tasks,
+        // which inherit this scope) record the source stamps they observed to this node's
+        // bucket; a loser that reads after the winner published finds the bucket closed and is
+        // dropped, so the published stamp only ever describes reads that fed this publication.
+        Context.BeginStampCapture(this);
+
         try
         {
             State = CacheState.Evaluating;
-            Value = await new StructuredRaceJob<T, I>(action, fns, Context.CancellationTokenSource!).Run(Context.CancellationTokenSource!.Token);
+            var newValue = await new StructuredRaceJob<T, I>(action, fns, Context.CancellationTokenSource!).Run(Context.CancellationTokenSource!.Token);
+            PublishValueWithCapturedStamps(newValue);
             State = CacheState.CacheClean;
         }
         catch
@@ -87,6 +94,8 @@ public sealed class ConcurrentRace<T, I> : MemoHandlR<T>, IMemoizR, IStateGetR<T
         }
         finally
         {
+            // Drop a capture left open by the failure paths; no-op after a successful publish.
+            Context.DiscardStampCapture(this);
             scope.CurrentGets = prevGets;
             scope.CurrentReaction = prevReaction;
             scope.CurrentGetsIndex = prevIndex;

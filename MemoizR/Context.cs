@@ -86,6 +86,70 @@ public class Context
 
     public CancellationTokenSource? CancellationTokenSource { get; private set; }
 
+    // Monotonic node-id source: the stable per-context identity signals carry in causality
+    // stamps (issue #39) and derived nodes key their per-source stamp maps by.
+    private int nextNodeId;
+
+    /** causality-stamp capture (issue #39): while a node evaluates, the stamps observed on its
+    * tracked source reads accumulate here, keyed by the EVALUATING NODE rather than by flow.
+    * Structured-concurrency children read on child flows/scopes but evaluate on behalf of the
+    * owning node (their CurrentReaction), so per-flow storage would scatter one evaluation's
+    * capture across scopes; keying by node collects it in one bucket. It also makes nested
+    * evaluations naturally disjoint (an inner memo's reads record to the inner node's bucket
+    * while its CurrentReaction is installed) with no push/pop, and the per-node mutex
+    * (invariant I1) guarantees at most one open capture per node. All access under Lock; a
+    * record against a node with no open bucket is dropped (e.g. a superseded race loser reading
+    * after the winner already published and closed the bucket). */
+    private readonly Dictionary<IMemoHandlR, Dictionary<int, CausalityStamp>> stampCaptures = new();
+
+    internal int NextNodeId() => Interlocked.Increment(ref nextNodeId);
+
+    internal void BeginStampCapture(IMemoHandlR node)
+    {
+        lock (Lock)
+        {
+            stampCaptures[node] = new();
+        }
+    }
+
+    internal void RecordSourceStamp(IMemoHandlR? evaluatingNode, int sourceId, CausalityStamp stamp)
+    {
+        if (evaluatingNode == null)
+        {
+            return;
+        }
+
+        lock (Lock)
+        {
+            if (!stampCaptures.TryGetValue(evaluatingNode, out var bucket))
+            {
+                return;
+            }
+
+            // Re-reads of the same source within one evaluation join: the computed value may
+            // have consumed both publications, and the join is their monotone upper bound.
+            bucket[sourceId] = bucket.TryGetValue(sourceId, out var existing) ? existing.Join(stamp) : stamp;
+        }
+    }
+
+    internal Dictionary<int, CausalityStamp> TakeStampCapture(IMemoHandlR node)
+    {
+        lock (Lock)
+        {
+            return stampCaptures.Remove(node, out var bucket) ? bucket : new();
+        }
+    }
+
+    // Close a capture without consuming it -- the failure paths, where the node keeps its
+    // previous stamp. A no-op when the bucket was already taken.
+    internal void DiscardStampCapture(IMemoHandlR node)
+    {
+        lock (Lock)
+        {
+            stampCaptures.Remove(node);
+        }
+    }
+
     private int evaluationDepth;
 
     // The context-wide CancellationTokenSource is shared by every evaluation in flight (so
