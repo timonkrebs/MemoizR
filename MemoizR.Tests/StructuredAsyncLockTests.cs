@@ -11,7 +11,7 @@ public class AsyncAsymmetricLockTests
         // Arrange
         var asyncLock = new AsyncAsymmetricLock();
         var cancellationTokenSource = new CancellationTokenSource();
-        Assert.Equal(0, asyncLock.LockScope);
+        Assert.Equal(Guid.Empty, asyncLock.LockScope);
 
         // Act
         using (var disposable = await asyncLock.ExclusiveLockAsync())
@@ -21,7 +21,7 @@ public class AsyncAsymmetricLockTests
             Assert.NotNull(disposable);
             Assert.Equal(1, asyncLock.LocksHeld);
             Assert.Equal(0, asyncLock.UpgradedLocksHeld);
-            Assert.NotEqual(0, lockScope);
+            Assert.NotEqual(Guid.Empty, lockScope);
 
             await Assert.ThrowsAsync<InvalidOperationException>(async () =>
             {
@@ -35,7 +35,7 @@ public class AsyncAsymmetricLockTests
     {
         // Arrange
         var asyncLock = new AsyncAsymmetricLock();
-        Assert.Equal(0, asyncLock.LockScope);
+        Assert.Equal(Guid.Empty, asyncLock.LockScope);
 
         // Act
         using (var disposable = await asyncLock.UpgradeableLockAsync())
@@ -45,7 +45,7 @@ public class AsyncAsymmetricLockTests
             Assert.NotNull(disposable);
             Assert.Equal(0, asyncLock.LocksHeld);
             Assert.Equal(1, asyncLock.UpgradedLocksHeld);
-            Assert.NotEqual(0, lockScope);
+            Assert.NotEqual(Guid.Empty, lockScope);
 
             using (var disposable2 = await asyncLock.UpgradeableLockAsync())
             {
@@ -62,7 +62,7 @@ public class AsyncAsymmetricLockTests
 
         Assert.Equal(0, asyncLock.LocksHeld);
         Assert.Equal(0, asyncLock.UpgradedLocksHeld);
-        Assert.Equal(0, asyncLock.LockScope);
+        Assert.Equal(Guid.Empty, asyncLock.LockScope);
     }
 
     [Fact(Timeout = 500)]
@@ -77,7 +77,7 @@ public class AsyncAsymmetricLockTests
         // Assert
         Assert.Equal(0, asyncLock.LocksHeld);
         Assert.Equal(1, asyncLock.UpgradedLocksHeld);
-        Assert.NotEqual(0, asyncLock.LockScope);
+        Assert.NotEqual(Guid.Empty, asyncLock.LockScope);
 
         await Assert.ThrowsAsync<InvalidOperationException>(async () =>
         {
@@ -98,7 +98,7 @@ public class AsyncAsymmetricLockTests
         var lockScope = asyncLock.LockScope;
         Assert.Equal(1, asyncLock.LocksHeld);
         Assert.Equal(0, asyncLock.UpgradedLocksHeld);
-        Assert.NotEqual(0, lockScope);
+        Assert.NotEqual(Guid.Empty, lockScope);
 
         using (var disposable = await asyncLock.UpgradeableLockAsync())
         {
@@ -118,7 +118,7 @@ public class AsyncAsymmetricLockTests
 
         Assert.Equal(1, asyncLock.LocksHeld);
         Assert.Equal(0, asyncLock.UpgradedLocksHeld);
-        Assert.NotEqual(0, lockScope);
+        Assert.NotEqual(Guid.Empty, lockScope);
     }
 
     [Fact(Timeout = 10000)]
@@ -127,7 +127,7 @@ public class AsyncAsymmetricLockTests
         // Arrange
         var asyncLock = new AsyncAsymmetricLock();
 
-        Assert.Equal(0, asyncLock.LockScope);
+        Assert.Equal(Guid.Empty, asyncLock.LockScope);
 
         var task1 = SimulateGet(asyncLock);
         await Task.Delay(10);
@@ -148,7 +148,7 @@ public class AsyncAsymmetricLockTests
         await Task.WhenAll([task1, task2, task3, .. tasks]);
         Assert.Equal(0, asyncLock.LocksHeld);
         Assert.Equal(0, asyncLock.UpgradedLocksHeld);
-        Assert.Equal(0, asyncLock.LockScope);
+        Assert.Equal(Guid.Empty, asyncLock.LockScope);
     }
 
     private async Task SimulateGet(AsyncAsymmetricLock asyncLock)
@@ -160,15 +160,15 @@ public class AsyncAsymmetricLockTests
             Assert.NotNull(upgradeableDisposable2);
             Assert.Equal(0, asyncLock.LocksHeld);
             Assert.Equal(1, asyncLock.UpgradedLocksHeld);
-            Assert.NotEqual(0, asyncLock.LockScope);
+            Assert.NotEqual(Guid.Empty, asyncLock.LockScope);
             await Task.Delay(5);
         }
     }
 
     private async Task SimulateReaction(AsyncAsymmetricLock asyncLock)
     {
-        var oldLockScope = asyncLock.LockScope == 0 ? 42 : asyncLock.LockScope;
-        double lockScope = 0;
+        var oldLockScope = asyncLock.LockScope == Guid.Empty ? Guid.NewGuid() : asyncLock.LockScope;
+        Guid lockScope = Guid.Empty;
 
         // Act
         using (var exclusive = await asyncLock.ExclusiveLockAsync())
@@ -176,7 +176,7 @@ public class AsyncAsymmetricLockTests
             // Assert
             await Task.Delay(5);
             lockScope = asyncLock.LockScope;
-            Assert.NotEqual(0, lockScope);
+            Assert.NotEqual(Guid.Empty, lockScope);
             Assert.NotEqual(oldLockScope, lockScope);
             Assert.Equal(1, asyncLock.LocksHeld);
             Assert.Equal(0, asyncLock.UpgradedLocksHeld);
@@ -288,7 +288,7 @@ public class AsyncAsymmetricLockTests
 
         Assert.Equal(0, asyncLock.LocksHeld);
         Assert.Equal(0, asyncLock.UpgradedLocksHeld);
-        Assert.Equal(0, asyncLock.LockScope);
+        Assert.Equal(Guid.Empty, asyncLock.LockScope);
     }
 
     // --- Per-flow reentrancy contract ---
@@ -315,7 +315,7 @@ public class AsyncAsymmetricLockTests
         // Fully drained: nothing leaked, the scope is released.
         Assert.Equal(0, asyncLock.UpgradedLocksHeld);
         Assert.Equal(0, asyncLock.LocksHeld);
-        Assert.Equal(0, asyncLock.LockScope);
+        Assert.Equal(Guid.Empty, asyncLock.LockScope);
     }
 
     // --- Mutual exclusion / no lost wake-ups (fail loudly if a refactoring breaks the lock) ---
@@ -343,7 +343,7 @@ public class AsyncAsymmetricLockTests
         Assert.Equal(100, counter);                  // mutual exclusion held => no lost updates
         Assert.Equal(0, asyncLock.LocksHeld);        // every acquire released => no leak
         Assert.Equal(0, asyncLock.UpgradedLocksHeld);
-        Assert.Equal(0, asyncLock.LockScope);        // fully drained => no lost wake-up / deadlock
+        Assert.Equal(Guid.Empty, asyncLock.LockScope);        // fully drained => no lost wake-up / deadlock
     }
 
     [Fact(Timeout = 10000)]
@@ -367,7 +367,7 @@ public class AsyncAsymmetricLockTests
         Assert.Equal(100, counter);
         Assert.Equal(0, asyncLock.LocksHeld);
         Assert.Equal(0, asyncLock.UpgradedLocksHeld);
-        Assert.Equal(0, asyncLock.LockScope);
+        Assert.Equal(Guid.Empty, asyncLock.LockScope);
     }
 
     // Mixed-mode stress: exclusive and upgradeable acquirers from independent flows interleave
@@ -395,7 +395,7 @@ public class AsyncAsymmetricLockTests
         Assert.Equal(100, counter);                  // full mutual exclusion across both modes
         Assert.Equal(0, asyncLock.LocksHeld);        // both queues fully drained
         Assert.Equal(0, asyncLock.UpgradedLocksHeld);
-        Assert.Equal(0, asyncLock.LockScope);
+        Assert.Equal(Guid.Empty, asyncLock.LockScope);
     }
 
     // Queued exclusive waiters must be granted in enqueue order (the wait queue is a deque and
@@ -498,7 +498,7 @@ public class AsyncAsymmetricLockTests
             "the exclusive waiter starved while upgradeable traffic continued");
         Assert.Equal(0, asyncLock.LocksHeld);
         Assert.Equal(0, asyncLock.UpgradedLocksHeld);
-        Assert.Equal(0, asyncLock.LockScope);
+        Assert.Equal(Guid.Empty, asyncLock.LockScope);
     }
 
     // --- Regression: releasing a lock must not corrupt the releasing flow's own scope ---
@@ -559,6 +559,6 @@ public class AsyncAsymmetricLockTests
         await Task.WhenAll(holderTask, waiterTask);
         Assert.Equal(0, asyncLock.LocksHeld);
         Assert.Equal(0, asyncLock.UpgradedLocksHeld);
-        Assert.Equal(0, asyncLock.LockScope);
+        Assert.Equal(Guid.Empty, asyncLock.LockScope);
     }
 }

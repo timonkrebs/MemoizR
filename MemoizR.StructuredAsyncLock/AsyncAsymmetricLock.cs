@@ -30,10 +30,10 @@ public sealed class AsyncAsymmetricLock
     // that same lock), so the monitor already provides the fences and atomicity.
     private int locksHeld;
     private int upgradedLocksHeld;
-    private double lockScope;
-    private static readonly AsyncLocal<double> AsyncLocalScope = new();
+    private Guid lockScope;
+    private static readonly AsyncLocal<Guid> AsyncLocalScope = new();
 
-    internal double LockScope
+    internal Guid LockScope
     {
         get
         {
@@ -70,15 +70,15 @@ public sealed class AsyncAsymmetricLock
     /// Returns the current flow's lock scope, minting and pinning a fresh one onto the
     /// AsyncLocal if the flow has none yet. Must be called under <see cref="Lock"/>.
     /// </summary>
-    private static double GetOrMintLockScope()
+    private static Guid GetOrMintLockScope()
     {
         var lockScope = AsyncLocalScope.Value;
-        if (lockScope == 0)
+        if (lockScope == Guid.Empty)
         {
             do
             {
-                lockScope = Random.Shared.NextDouble();
-            } while (lockScope == 0);
+                lockScope = Guid.NewGuid();
+            } while (lockScope == Guid.Empty);
             AsyncLocalScope.Value = lockScope;
         }
         return lockScope;
@@ -89,7 +89,7 @@ public sealed class AsyncAsymmetricLock
     /// Must be called under <see cref="Lock"/>; reads the bookkeeping fields directly for that reason.
     /// </summary>
     /// <returns>A disposable that releases the lock when disposed.</returns>
-    private Task<IDisposable> RequestExclusiveLockAsync(double requestScope)
+    private Task<IDisposable> RequestExclusiveLockAsync(Guid requestScope)
     {
         // Upgradeable holds are counted in upgradedLocksHeld (locksHeld never goes negative), so
         // that is what an exclusive acquire in the same scope must be checked against; an
@@ -144,7 +144,7 @@ public sealed class AsyncAsymmetricLock
     /// Must be called under <see cref="Lock"/>; reads the bookkeeping fields directly for that reason.
     /// </summary>
     /// <returns>A disposable that releases the lock when disposed.</returns>
-    private Task<IDisposable> RequestUpgradeableLockAsync(double requestScope)
+    private Task<IDisposable> RequestUpgradeableLockAsync(Guid requestScope)
     {
         if (locksHeld == 0 && upgradedLocksHeld == 0)
         {
@@ -207,7 +207,7 @@ public sealed class AsyncAsymmetricLock
             locksHeld--;
             if (locksHeld == 0)
             {
-                lockScope = 0;
+                lockScope = Guid.Empty;
             }
             ReleaseWaiters();
         }
@@ -225,7 +225,7 @@ public sealed class AsyncAsymmetricLock
                 upgradedLocksHeld--;
                 if (upgradedLocksHeld == 0 && locksHeld == 0)
                 {
-                    lockScope = 0;
+                    lockScope = Guid.Empty;
                 }
             }
             else

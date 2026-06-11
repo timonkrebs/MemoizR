@@ -110,7 +110,7 @@ A `MemoFactory` owns one `Context`; factories constructed with the same context 
 
 Concurrency in MemoizR is organized around **async flows**, not threads. A flow is the chain of
 continuations descending from one logical operation; work hops threads freely across `await`.
-Flow identity is carried by `AsyncLocal<double>` keys:
+Flow identity is carried by `AsyncLocal<Guid>` keys:
 
 - `Context.CreateNewScopeIfNeeded()` pins a scope to the current flow if it has none and reports
   whether it created one — **only the creator cleans up** (`CleanScope`), because a flow can be
@@ -458,7 +458,7 @@ sequenceDiagram
 ## 8. `AsyncAsymmetricLock`: the per-flow graph lock
 
 The `ContextLock` is a custom async lock with two modes and *flow-scoped reentrancy*. Scope
-identity is an `AsyncLocal<double>` key minted on first acquisition, so reentrancy follows the
+identity is an `AsyncLocal<Guid>` key minted on first acquisition, so reentrancy follows the
 async flow — not the thread (work hops threads across `await`).
 
 | held \ requested | exclusive, same scope | exclusive, other scope | upgradeable, same scope | upgradeable, other scope |

@@ -21,17 +21,17 @@ public class ReactionScope
 public class Context
 {
     private Lock Lock { get; } = new();
-    private static readonly AsyncLocal<double> AsyncLocalScope = new();
+    private static readonly AsyncLocal<Guid> AsyncLocalScope = new();
 
     /** current capture context for identifying sources (other memoizR elements)
     * - active while evaluating a memoizR function body  */
-    private Dictionary<double, WeakReference<ReactionScope>> AsyncReactionScopes = new();
+    private Dictionary<Guid, WeakReference<ReactionScope>> AsyncReactionScopes = new();
 
     public ReactionScope ReactionScope
     {
         get
         {
-            if (AsyncLocalScope.Value == 0)
+            if (AsyncLocalScope.Value == Guid.Empty)
             {
                 // No scope is pinned to this flow, so the scope could never be looked up again:
                 // registering it would only leak a dictionary entry per access. Hand out a
@@ -94,11 +94,11 @@ public class Context
     {
         lock (Lock)
         {
-            if (AsyncLocalScope.Value != 0)
+            if (AsyncLocalScope.Value != Guid.Empty)
             {
                 return false;
             }
-            var key = Random.Shared.NextDouble();
+            var key = Guid.NewGuid();
             AsyncLocalScope.Value = key;
             PruneDeadScopes();
             AsyncReactionScopes.Add(key, new(new()));
@@ -114,9 +114,9 @@ public class Context
         lock (Lock)
         {
             var key = AsyncLocalScope.Value;
-            if (key == 0)
+            if (key == Guid.Empty)
             {
-                key = Random.Shared.NextDouble();
+                key = Guid.NewGuid();
                 AsyncLocalScope.Value = key;
                 PruneDeadScopes();
                 ReactionScope created = new();
@@ -148,7 +148,7 @@ public class Context
     // Must be called under Lock.
     private void PruneDeadScopes()
     {
-        List<double>? deadKeys = null;
+        List<Guid>? deadKeys = null;
         foreach (var kvp in AsyncReactionScopes)
         {
             if (!kvp.Value.TryGetTarget(out _))
@@ -197,11 +197,11 @@ public class Context
         }
     }
 
-    internal double ForceNewScope()
+    internal Guid ForceNewScope()
     {
         lock (Lock)
         {
-            var key = Random.Shared.NextDouble();
+            var key = Guid.NewGuid();
             AsyncLocalScope.Value = key;
             PruneDeadScopes();
             AsyncReactionScopes.Add(key, new(new()));

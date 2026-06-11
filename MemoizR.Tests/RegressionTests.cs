@@ -25,10 +25,10 @@ public class RegressionTests
 
         Assert.Equal(0, asyncLock.LocksHeld);
         Assert.Equal(0, asyncLock.UpgradedLocksHeld);
-        Assert.Equal(0, asyncLock.LockScope);
+        Assert.Equal(Guid.Empty, asyncLock.LockScope);
     }
 
-    // Scope keys are generated with a thread-safe RNG (Random.Shared). Previously a static
+    // Scope keys are generated with a cryptographically secure Guid. Previously a static
     // `new Random()` shared across all contexts but guarded only by a per-instance lock could
     // be corrupted by concurrent access and hand out colliding/zero scope keys. Many contexts
     // built and exercised in parallel must each compute correctly.
