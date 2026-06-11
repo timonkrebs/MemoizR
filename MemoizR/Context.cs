@@ -86,8 +86,16 @@ public class Context
 
     public CancellationTokenSource? CancellationTokenSource { get; private set; }
 
-    // Monotonic node-id source: the stable per-context identity signals carry in causality
-    // stamps (issue #39) and derived nodes key their per-source stamp maps by.
+    // The node-id slice this context allocates from: ids are handed out monotonically in
+    // [IdRangeStart, IdRangeEnd). They are the stable per-context identity signals carry in
+    // causality stamps (issue #39) and derived nodes key their per-source stamp maps by.
+    // Distributed peers carve the shared 31-bit id space into DISJOINT slices so stamps merged
+    // across peers can never collide on an id -- and a contiguous slice keeps merged stamps
+    // compact, because each peer occupies its own subtree of the interval encoding. Exhausting
+    // the slice throws rather than silently bleeding into a neighbour's ids, which would
+    // corrupt causality tracking.
+    internal int IdRangeStart { get; }
+    internal int IdRangeEnd { get; }
     private int nextNodeId;
 
     // The incarnation epoch every causality stamp of this context carries: ids and triggers
@@ -97,6 +105,15 @@ public class Context
     // CausalityStamp). Drawn per Context: within a living context a "reset" node is simply a
     // new node, with a fresh id that was never handed out before.
     internal long Epoch { get; } = Random.Shared.NextInt64(1, long.MaxValue);
+
+    internal Context(int idRangeStart = 1, int idRangeEnd = int.MaxValue)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(idRangeStart);
+        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(idRangeEnd, idRangeStart);
+        IdRangeStart = idRangeStart;
+        IdRangeEnd = idRangeEnd;
+        nextNodeId = idRangeStart - 1;
+    }
 
     /** causality-stamp capture (issue #39): while a node evaluates, the stamps observed on its
     * tracked source reads accumulate here, keyed by the EVALUATING NODE rather than by flow.
@@ -110,7 +127,17 @@ public class Context
     * after the winner already published and closed the bucket). */
     private readonly Dictionary<IMemoHandlR, Dictionary<int, CausalityStamp>> stampCaptures = new();
 
-    internal int NextNodeId() => Interlocked.Increment(ref nextNodeId);
+    internal int NextNodeId()
+    {
+        var id = Interlocked.Increment(ref nextNodeId);
+        // The lower-bound check also catches int wrap-around past int.MaxValue.
+        if (id < IdRangeStart || id >= IdRangeEnd)
+        {
+            throw new InvalidOperationException(
+                $"The context exhausted its node-id slice [{IdRangeStart}, {IdRangeEnd}). Distributed peers must be provisioned with slices sized for their graphs.");
+        }
+        return id;
+    }
 
     internal void BeginStampCapture(IMemoHandlR node)
     {

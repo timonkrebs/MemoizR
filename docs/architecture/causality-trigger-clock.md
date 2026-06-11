@@ -54,6 +54,13 @@ signal both track; disjoint stamps are trivially consistent. That predicate is t
 detector: a node whose inputs carry stamps that disagree on a shared signal would combine
 values from different versions of the same write history.
 
+**Dominance** (`IsDominatedBy`) is the lattice order under `Join`: a stamp is dominated when
+the other reflects every signal version it reflects, at least as new. A sync layer uses it to
+order observations of one peer — a delivery whose stamp is dominated by the already-known one
+is old news (late, duplicated or reordered) and droppable, and the undominated side of a
+glitched pair is the one to wait for. Cross-epoch stamps are incomparable, matching
+consistency.
+
 The issue's example, as reproduced by `Issue39_DiamondExample_ReproducesIssueStamps`:
 
 ```mermaid
@@ -142,17 +149,26 @@ reads — and the node stays dirty, so the next `Get` replaces both.
 - **Enforcement**: no local code path *acts* on an inconsistency — locally, the locks already
   prevent glitches; the stamps maintain and expose the evidence. Reacting to a failed
   consistency check (re-pull, defer, resubscribe) is distributed-protocol behavior.
-- **Cross-peer id management**: ids are per-context; a protocol that merges stamps from
-  multiple peers must namespace or partition the id space (the ITC fork/join discipline lives
-  at that layer). This is also why `Join` treats an epoch mismatch as a protocol error rather
-  than resolving it: triggers of different incarnations are incomparable, and the correct
-  response (discard the stale side) is operational, not algebraic.
+- **Cross-peer id management**: the core primitive exists — `MemoFactory(contextKey,
+  idRangeStart, idRangeEnd)` pins a context to a node-id slice, so peers carve the shared
+  31-bit id space into disjoint contiguous ranges: merged stamps can never collide on an id,
+  each peer occupies its own subtree of the interval encoding (compact joins), and exhausting a
+  slice throws instead of silently bleeding into a neighbour's. *Allocating* the slices —
+  including the ITC fork/join discipline for peers joining and leaving — is the sync layer's
+  job. Likewise, `Join` treats an epoch mismatch as a protocol error rather than resolving it:
+  triggers of different incarnations are incomparable, and the correct response (discard the
+  stale side) is operational, not algebraic.
+- **Multi-peer stamps**: a stamp currently carries ONE epoch, which is right for every stamp a
+  single graph produces — but a consumer-side stamp joining sources replicated from several
+  peers spans several incarnations. The planned evolution is an epoch *table* keyed by id-range
+  (slices are contiguous, so the table stays one entry per peer), arriving as wire-format v3
+  together with the bridge layer.
 - **Public surface** (frozen alongside the wire format): `IStampedGetR<T>.GetWithStamp()` —
   the `(value, stamp)` pair of one publication — on signals, memos and the
   structured-concurrency nodes; `Stamp`, `SourceStamps` and `Id` on every node (reactions have
   no value, so they expose only these); `CausalityStamp` with `Epoch`, `Triggers`,
-  `TryGetTrigger`, `Join`, `IsConsistentWith`, value equality, `Serialize`/`Deserialize`.
-  Stamp *creation* stays internal.
+  `TryGetTrigger`, `Join`, `IsConsistentWith`, `IsDominatedBy`, value equality,
+  `Serialize`/`Deserialize`. Stamp *creation* stays internal.
 
 ## 6. The encoding (phase 2): a canonical event tree
 

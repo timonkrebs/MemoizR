@@ -197,7 +197,7 @@ public class CausalityStampEpochAndPublicApiTests
         {
             Assert.NotNull(typeof(CausalityStamp).GetProperty(member, BindingFlags.Public | BindingFlags.Instance));
         }
-        foreach (var member in new[] { "TryGetTrigger", "Join", "IsConsistentWith", "Serialize" })
+        foreach (var member in new[] { "TryGetTrigger", "Join", "IsConsistentWith", "IsDominatedBy", "Serialize" })
         {
             Assert.NotNull(typeof(CausalityStamp).GetMethod(member, BindingFlags.Public | BindingFlags.Instance));
         }

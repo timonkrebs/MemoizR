@@ -22,6 +22,10 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
   public read surface for a distributed sync layer: IStampedGetR<T>.GetWithStamp() on all
   value nodes, public Stamp/SourceStamps/Id on every node, and the public CausalityStamp type
   (creation stays internal).
+- Distributed-graph primitives (#39): CausalityStamp.IsDominatedBy (the lattice order under
+  Join -- lets a sync layer drop late/duplicate deliveries and identify the stale side of a
+  glitched pair) and per-context node-id slices (MemoFactory(contextKey, idRangeStart,
+  idRangeEnd)) so peers' merged stamps can never collide on an id; exhausting a slice throws.
    
 ### Changed
 - Reactions now evaluate their separate-parameter dependencies in parallel on the thread pool; with a SynchronizationContext registered, only the action (with the already-evaluated values) is marshalled to the context, and `CreateAdvancedReaction` keeps running its whole body on the context (#13)

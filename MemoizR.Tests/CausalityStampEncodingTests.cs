@@ -44,6 +44,9 @@ public class CausalityStampEncodingTests
             return true;
         }
 
+        public bool IsDominatedBy(ReferenceStamp other) =>
+            Triggers.All(t => other.Triggers.TryGetValue(t.Key, out var v) && v >= t.Value);
+
         public bool SameMapAs(ReferenceStamp other) =>
             Triggers.Count == other.Triggers.Count
             && Triggers.All(t => other.Triggers.TryGetValue(t.Key, out var v) && v == t.Value);
@@ -89,6 +92,10 @@ public class CausalityStampEncodingTests
                     var b = rng.Next(stamps.Count);
                     stamps.Add(stamps[a].Join(stamps[b]));
                     references.Add(references[a].Join(references[b]));
+
+                    // The join is the least upper bound: it dominates both operands.
+                    Assert.True(stamps[a].IsDominatedBy(stamps[^1]));
+                    Assert.True(stamps[b].IsDominatedBy(stamps[^1]));
                 }
 
                 AssertMatchesReference(stamps[^1], references[^1]);
@@ -102,6 +109,8 @@ public class CausalityStampEncodingTests
                 var b = rng.Next(stamps.Count);
                 Assert.Equal(references[a].IsConsistentWith(references[b]), stamps[a].IsConsistentWith(stamps[b]));
                 Assert.Equal(references[b].IsConsistentWith(references[a]), stamps[b].IsConsistentWith(stamps[a]));
+                Assert.Equal(references[a].IsDominatedBy(references[b]), stamps[a].IsDominatedBy(stamps[b]));
+                Assert.Equal(references[b].IsDominatedBy(references[a]), stamps[b].IsDominatedBy(stamps[a]));
 
                 var mapsEqual = references[a].SameMapAs(references[b]);
                 Assert.Equal(mapsEqual, stamps[a].Equals(stamps[b]));

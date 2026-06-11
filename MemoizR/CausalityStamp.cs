@@ -153,6 +153,29 @@ public sealed class CausalityStamp : IEquatable<CausalityStamp>
         return EventTree.Consistent(root.Grow(spanBits, bits), 0, other.root.Grow(other.spanBits, bits), 0);
     }
 
+    // Causal dominance, the lattice order under Join: does `other` reflect every signal version
+    // this stamp reflects -- each tracked signal also tracked by `other` with an at-least-as-new
+    // trigger? Equal stamps dominate each other; the empty stamp claims nothing and is dominated
+    // by everything. A sync layer uses this to order observations of one peer: an incoming
+    // publication whose stamp is dominated by the already-known one is old news (late, duplicated
+    // or reordered delivery) and can be dropped, and the undominated side of a glitched pair is
+    // the one to wait for. Non-empty stamps of different incarnation epochs are incomparable
+    // (false either way), matching IsConsistentWith.
+    public bool IsDominatedBy(CausalityStamp other)
+    {
+        if (IsEmpty)
+        {
+            return true;
+        }
+        if (other.IsEmpty || Epoch != other.Epoch)
+        {
+            return false;
+        }
+
+        var bits = Math.Max(spanBits, other.spanBits);
+        return EventTree.Leq(root.Grow(spanBits, bits), 0, other.root.Grow(other.spanBits, bits), 0);
+    }
+
     public bool Equals(CausalityStamp? other)
     {
         if (other is null)
@@ -412,6 +435,26 @@ public sealed class CausalityStamp : IEquatable<CausalityStamp>
             var nextB = accB + b.N;
             return Consistent(a.IsLeaf ? Zero : a.Left!, nextA, b.IsLeaf ? Zero : b.Left!, nextB)
                 && Consistent(a.IsLeaf ? Zero : a.Right!, nextA, b.IsLeaf ? Zero : b.Right!, nextB);
+        }
+
+        // Pointwise ≤ of two same-span trees. A shared subtree compares by base alone, and a
+        // uniform (leaf) left side compares against the right side's MINIMUM in O(1) -- in
+        // normal form a subtree's minimum value is exactly its root N.
+        public static bool Leq(EventTree a, long accA, EventTree b, long accB)
+        {
+            if (ReferenceEquals(a, b))
+            {
+                return accA <= accB;
+            }
+            if (a.IsLeaf)
+            {
+                return accA + a.N <= accB + b.N;
+            }
+
+            var nextA = accA + a.N;
+            var nextB = accB + b.N;
+            return Leq(a.Left!, nextA, b.IsLeaf ? Zero : b.Left!, nextB)
+                && Leq(a.Right!, nextA, b.IsLeaf ? Zero : b.Right!, nextB);
         }
 
         public static bool StructurallyEqual(EventTree a, EventTree b)
