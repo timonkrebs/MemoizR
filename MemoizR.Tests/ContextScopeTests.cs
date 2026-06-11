@@ -84,6 +84,36 @@ public class ContextScopeTests
         Assert.Same(reused, ctx.GetOrCreateScope());
     }
 
+    // The PRODUCTION path version of the boundedness test: no explicit PruneDeadScopes call --
+    // the amortized sweep built into scope registration itself must clear the dead entries.
+    // The trigger fires once the registrations since the last sweep reach max(64, tableSize/2),
+    // so with 200 dead entries it is guaranteed to fire within ~263 further registrations
+    // (since >= (200 + since)/2 once since >= 200). Without the sweep the registry would hold
+    // ~500 entries at the end; with it, only the post-GC registrations survive.
+    [RetryFact(3, 200)]
+    public async Task ScopeRegistry_StaysBounded_ViaAmortizedRegistrationSweep()
+    {
+        var ctx = new Context();
+
+        for (var i = 0; i < 200; i++)
+        {
+            await Task.Run(() => ctx.GetOrCreateScope());
+        }
+
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        GC.Collect();
+
+        // Drive ONLY the production path: registrations must trigger the sweep on their own.
+        for (var i = 0; i < 300; i++)
+        {
+            await Task.Run(() => ctx.GetOrCreateScope());
+        }
+
+        Assert.True(ctx.RegisteredScopeCount <= 350,
+            $"scope registry held {ctx.RegisteredScopeCount} entries; the amortized registration sweep never cleared the 200 dead flows");
+    }
+
     // The registry holds scopes weakly, but the ENTRIES are pruned on each new registration:
     // many short-lived flows must not grow it without bound.
     [RetryFact(3, 200)]

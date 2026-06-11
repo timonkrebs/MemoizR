@@ -2,7 +2,12 @@ namespace MemoizR.Reactive;
 
 public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
 {
+    // Guards the debounce scheduling state (cts swap + invalidate + spawn). A dedicated lock
+    // object, NOT lock(this): the reaction instance is public, so user code locking it could
+    // deadlock the whole invalidation cascade.
+    private readonly Lock staleLock = new();
     private CancellationTokenSource cts = new();
+    private volatile bool disposed;
     // State is invalidated by Stale (under lock(this), driven by a Set on another flow) and
     // committed by the recompute under the node mutex + ContextLock. The inherited cell's
     // generation guard stops the recompute from committing Clean over a Stale that arrived
@@ -44,10 +49,13 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
         // is rejected by the lock). Only clean up the flow scope if we created it -- Resume can
         // be called from inside an active evaluation whose scope must survive this call.
         var createdScope = Context.CreateNewScopeIfNeeded();
+        // Strong root for the weakly-registered scope: keeps the held lock's identity stable for
+        // the whole update (a collected scope would resurrect with a fresh, free ContextLock).
+        var scope = Context.ReactionScope;
         try
         {
             using (await mutex.LockAsync())
-            using (await Context.ReactionScope.ContextLock.UpgradeableLockAsync())
+            using (await scope.ContextLock.UpgradeableLockAsync())
             {
                 Context.EnterEvaluationScope();
                 try
@@ -66,12 +74,23 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
             {
                 Context.CleanScope();
             }
+            GC.KeepAlive(scope);
         }
     }
 
     public void Dispose()
     {
+        disposed = true;
         Pause();
+        CancellationTokenSource pending;
+        lock (staleLock)
+        {
+            pending = cts;
+        }
+        // Cancel OUTSIDE the monitor: canceling runs the pending debounced update's delay
+        // continuation inline on this stack. Dropping it means the dead reaction's update never
+        // re-acquires locks or re-runs the parent scan.
+        pending.Cancel();
         RemoveParentObservers(0);
     }
 
@@ -90,13 +109,16 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
         var token = stateCell.Generation;
 
         // If we are potentially dirty, check if we have a parent who has actually changed value.
+        var parentFaulted = false;
         if (State == CacheState.CacheCheck)
         {
             foreach (var source in Sources)
             {
                 if (source is IMemoizR memoizR)
                 {
-                    await memoizR.UpdateIfNecessary().ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing); // updateIfNecessary() can change state.
+                    var update = memoizR.UpdateIfNecessary(); // updateIfNecessary() can change state.
+                    await update.ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
+                    parentFaulted |= update.IsFaulted;
                 }
 
                 if (State == CacheState.CacheDirty)
@@ -113,6 +135,14 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
         if (State == CacheState.CacheDirty)
         {
             await Update();
+        }
+
+        // A parent that faulted never resolved this node's CacheCheck: committing Clean over it
+        // would stop all future re-checks (nothing re-dirties us). Stay CacheCheck so the next
+        // trigger re-attempts the parent.
+        if (parentFaulted)
+        {
+            return;
         }
 
         // By now, we're clean -- unless a Stale invalidated us along the way, in which case stay
@@ -160,13 +190,18 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
             catch
             {
                 stateCell.Force(CacheState.CacheDirty);
-                // A reaction has no pull path: if the dependencies captured before the exception
-                // were dropped, no future Set could ever re-trigger it -- a reaction whose FIRST
-                // run throws would be orphaned forever. Wire what was captured (for a later run
-                // this keeps the prefix read before the failure and prunes the rest; the next
-                // successful run rewires the full set). Memos deliberately do NOT do this: they
-                // keep their previous links and retry via the pull path on the next Get.
-                UpdateSourceAndObserverLinks();
+                // A reaction has no pull path: if a FIRST run throws with no links wired, no
+                // future Set could ever re-trigger it -- orphaned forever -- so wire whatever it
+                // captured. A RE-run that throws keeps its previous links untouched instead:
+                // rewiring from the partial capture would strip the not-yet-read tail (or
+                // everything, when the body threw before its first read), and a Set on those
+                // sources would never revive the reaction. Stale-but-kept links only cost a
+                // spurious re-run, which the next successful pass prunes. Memos deliberately do
+                // neither: they keep their links and retry via the pull path on the next Get.
+                if (Sources.Length == 0)
+                {
+                    UpdateSourceAndObserverLinks();
+                }
                 throw;
             }
 
@@ -226,37 +261,53 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
 
     async Task IMemoizR.UpdateIfNecessary()
     {
-        using (await mutex.LockAsync())
-        using (await Context.ReactionScope.ContextLock.UpgradeableLockAsync())
+        // Strong root for the weakly-registered scope (see Resume).
+        var scope = Context.GetOrCreateScope();
+        try
         {
-            Context.EnterEvaluationScope();
-            try
+            using (await mutex.LockAsync())
+            using (await scope.ContextLock.UpgradeableLockAsync())
             {
-                await UpdateIfNecessary();
+                Context.EnterEvaluationScope();
+                try
+                {
+                    await UpdateIfNecessary();
+                }
+                finally
+                {
+                    Context.ExitEvaluationScope();
+                }
             }
-            finally
-            {
-                Context.ExitEvaluationScope();
-            }
+        }
+        finally
+        {
+            GC.KeepAlive(scope);
         }
     }
 
     internal Task Stale(CacheState state, TimeSpan debounceTime)
     {
-        // Add Scheduling
-        lock (this)
+        if (disposed)
+        {
+            return Task.CompletedTask;
+        }
+
+        CancellationTokenSource superseded;
+        lock (staleLock)
         {
             // Escalate and bump the generation so an in-flight recompute can't commit Clean over
             // this invalidation; the debounce below still (re)schedules the update regardless.
             stateCell.Invalidate(state);
-            cts?.Cancel();
+            superseded = cts;
             cts = new();
 
             // Open the cancellable window NOW, not when the debounced update starts running:
             // Cancel() must be able to abort an update that is scheduled but still waiting out
             // its debounce. Every Stale spawns exactly one RunDebouncedUpdateAsync, whose
             // outermost finally exits the scope (including the superseded-early-return path),
-            // so the refcount stays balanced under coalescing.
+            // so the refcount stays balanced under coalescing. Entering BEFORE cancelling the
+            // superseded task below also keeps the refcount from dipping to zero mid-supersession
+            // (a dip tears down the shared CancellationTokenSource under live evaluations).
             Context.EnterEvaluationScope();
 
             // Fire-and-forget the debounced update. A newer Stale cancels this token, so a
@@ -264,9 +315,13 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
             // ContinueWith ran even on cancellation, flooding the thread pool with redundant
             // updates and starving it).
             _ = RunDebouncedUpdateAsync(debounceTime, cts.Token);
-
-            return Task.CompletedTask;
         }
+
+        // Cancel OUTSIDE the monitor: cancellation runs the superseded task's delay continuation
+        // inline on this stack, and that continuation takes other locks (ExitEvaluationScope).
+        superseded.Cancel();
+
+        return Task.CompletedTask;
     }
 
     private async Task RunDebouncedUpdateAsync(TimeSpan debounceTime, CancellationToken token)
@@ -275,6 +330,11 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
         // on the full-run path AND the superseded-early-return path.
         try
         {
+            // Hop off the caller's stack first: with a zero debounce, Task.Delay completes
+            // synchronously and this "fire-and-forget" would otherwise run the WHOLE update --
+            // including the user's Execute body -- inline inside Stale's monitor (and, for the
+            // constructor-triggered initial run, inside the builder's factory lock).
+            await Task.Yield();
             try
             {
                 await Task.Delay(debounceTime, token).ConfigureAwait(false);
@@ -286,27 +346,29 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
             }
 
             // The node mutex serializes this update against a concurrent Resume() or another
-            // debounced update of the same reaction (each inherits a different flow's ContextLock,
-            // so the ContextLock alone does not order them): without it, a stale in-flight Execute
-            // could apply its side effects after a newer update finished and committed Clean. Only
-            // clean up the flow scope if we created it -- this task inherits the triggering Set's
-            // flow, and unconditionally removing that scope would tear it down under other
-            // debounced updates (or the Set caller) still using it.
-            var createdScope = Context.CreateNewScopeIfNeeded();
+            // debounced update of the same reaction (each may run on a different flow, so the
+            // ContextLock alone does not order them): without it, a stale in-flight Execute
+            // could apply its side effects after a newer update finished and committed Clean.
+            //
+            // The update runs on a scope it OWNS (ForceNewScope), never the inherited one: this
+            // detached task inherits the triggering Set's AsyncLocal flow, and two debounced
+            // updates sharing that flow would each be granted the flow's ContextLock as a
+            // "recursive" same-scope acquisition -- running concurrently on one ReactionScope and
+            // corrupting each other's dependency capture. The local is also the scope's only
+            // strong root (the registry holds it weakly).
+            var scope = Context.ForceNewScope();
             try
             {
                 using (await mutex.LockAsync())
-                using (await Context.ReactionScope.ContextLock.UpgradeableLockAsync())
+                using (await scope.ContextLock.UpgradeableLockAsync())
                 {
                     await UpdateIfNecessary().ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
                 }
             }
             finally
             {
-                if (createdScope)
-                {
-                    Context.CleanScope();
-                }
+                Context.CleanScope();
+                GC.KeepAlive(scope);
             }
         }
         finally
@@ -318,5 +380,17 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
     Task IMemoizR.Stale(CacheState state)
     {
         return Stale(state, DebounceTime);
+    }
+
+    // Eager-run contract: a reaction executes once on creation (SolidJS-style effect semantics),
+    // scheduled through the same invalidation/debounce machinery as every other trigger.
+    // TimeSpan.Zero deliberately bypasses the configured DebounceTime -- the initial run should
+    // not wait out a debounce window meant for write coalescing. Called by the BUILDER after the
+    // object initializer completes, never from a constructor: a Set racing the construction
+    // reaches IMemoizR.Stale, which reads DebounceTime, and from inside the constructor it would
+    // observe the unassigned default.
+    internal void ScheduleInitialRun()
+    {
+        Stale(CacheState.CacheDirty, TimeSpan.Zero);
     }
 }

@@ -10,30 +10,48 @@ public sealed class Signal<T> : MemoHandlR<T>, IStateGetR<T?>
 
     public async Task Set(T value)
     {
-        // There can be multiple threads updating the CacheState at the same time but no reads should be possible while in the process.
-        // Must be Upgradeable because it could change to "Writeble-Lock" if something synchronously reactive is listening.
-        using (await Context.ReactionScope.ContextLock.ExclusiveLockAsync())
+        // Resolve the scope once and keep it strongly rooted for the whole write: repeated getter
+        // access can resolve different instances (weak registry + resurrection), which would hand
+        // the body a ContextLock other than the one held here.
+        var scope = Context.ReactionScope;
+        try
         {
-            if (Equals(Value, value))
+            // There can be multiple threads updating the CacheState at the same time but no reads should be possible while in the process.
+            using (await scope.ContextLock.ExclusiveLockAsync())
             {
-                // The value did not change, but observers may still be mid-check: tell them to
-                // re-verify rather than marking them dirty.
-                await PropagateStaleToObserversAsync(CacheState.CacheCheck);
-                return;
-            }
+                if (Equals(Value, value))
+                {
+                    // The value did not change: nothing derived from this signal can have become
+                    // stale, so do not notify. (Propagating CacheCheck here bumped observer
+                    // generations and refused their in-flight commits -- under an equal-value
+                    // write storm a long recompute could never commit at all.)
+                    return;
+                }
 
-            // only updating the value should be locked
-            lock (Lock)
-            {
-                Value = value;
-            }
+                // only updating the value should be locked
+                lock (Lock)
+                {
+                    Value = value;
+                }
 
-            await PropagateStaleToObserversAsync(CacheState.CacheDirty);
+                await PropagateStaleToObserversAsync(CacheState.CacheDirty);
+            }
+        }
+        finally
+        {
+            GC.KeepAlive(scope);
         }
     }
 
     public async Task<T?> Get()
     {
+        // An unpinned flow can have no capturing reaction (its scope would be freshly minted),
+        // so the read needs no scope at all.
+        if (!Context.HasFlowScope)
+        {
+            return Value;
+        }
+
         var scope = Context.GetOrCreateScope();
         if (scope.CurrentReaction == null)
         {
@@ -46,6 +64,7 @@ public sealed class Signal<T> : MemoHandlR<T>, IStateGetR<T?>
         {
             Context.CheckDependenciesTheSame(this);
         }
+        GC.KeepAlive(scope); // strong root: the lock identity must outlive the tracked read
 
         return Value;
     }

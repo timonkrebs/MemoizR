@@ -16,7 +16,11 @@ public sealed class ConcurrentMap<T> : MemoBase<IEnumerable<T>>
 
     internal override async Task<IEnumerable<T>> ComputeAsync()
     {
-        return (await new StructuredResultsJob<T>(fns, Context!, this).Run(Context.CancellationTokenSource!.Token)).Select(x => x.Value);
+        var results = await new StructuredResultsJob<T>(fns, Context!, this).Run(Context.CancellationTokenSource!.Token);
+        // Materialized, in fns order: ConcurrentDictionary enumeration order is an implementation
+        // detail (bucket order), and a lazy Select would re-enumerate -- and could re-order --
+        // on every read and every ValuesEqual comparison.
+        return results.OrderBy(x => x.Key).Select(x => x.Value).ToArray();
     }
 
     // The results job's parallel children capture and wire the source/observer links themselves
@@ -31,8 +35,7 @@ public sealed class ConcurrentMap<T> : MemoBase<IEnumerable<T>>
         return (oldValue ?? []).SequenceEqual(newValue ?? []);
     }
 
-    ~ConcurrentMap()
-    {
-        Cancel();
-    }
+    // Deliberately NO finalizer: the CancellationTokenSource is CONTEXT-wide and shared by every
+    // evaluation in flight, so a finalizer calling Cancel() would abort unrelated work at an
+    // arbitrary GC-determined moment on the finalizer thread.
 }

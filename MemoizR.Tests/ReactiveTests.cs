@@ -712,17 +712,21 @@ public class ReactiveTests
         var f = new MemoFactory();
         var v1 = f.CreateSignal(1);
         var last = -1;
+        var attempts = 0;
         var shouldThrow = true;
         var r = f.BuildReaction().CreateReaction(v1, v =>
         {
+            Interlocked.Increment(ref attempts);
             if (Volatile.Read(ref shouldThrow)) throw new InvalidOperationException("initial boom");
             last = v;
         });
 
-        // Let the initial (throwing) run complete and fail; the exception is swallowed by the
-        // fire-and-forget debounce, so observe via the side effect staying unset.
-        await Task.Delay(150);
-        Assert.Equal(-1, last);
+        // Wait until the initial run has ACTUALLY attempted (and thrown) before disarming: a
+        // fixed delay raced the fire-and-forget initial run -- when the flip won, the initial run
+        // succeeded and the catch-path wiring this test exists to pin never executed at all.
+        await TestHelpers.WaitForConvergenceAsync(() => Volatile.Read(ref attempts) >= 1);
+        Assert.True(Volatile.Read(ref attempts) >= 1, "the initial run never executed");
+        Assert.Equal(-1, last); // the throwing run must not have produced the side effect
 
         Volatile.Write(ref shouldThrow, false);
         await v1.Set(5);
