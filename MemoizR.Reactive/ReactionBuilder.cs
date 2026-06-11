@@ -27,7 +27,7 @@ public sealed class ReactionBuilder
     // source reaches IMemoizR.Stale, which reads DebounceTime, and observed the unassigned
     // default. No SynchronizationContext is passed to the Reaction: a Reaction's marshalling is
     // owned by its composed body (the CreateReaction overloads evaluate the dependencies on the
-    // calling flow and post only the user action through InvokeActionAsync) -- base-level
+    // thread pool and post only the user action through InvokeActionAsync) -- base-level
     // whole-Execute posting would put graph evaluation back on the context and nest a second
     // post around the action's own. CreateAdvancedReaction below is the path for bodies that
     // must run on the context as a whole.
@@ -146,13 +146,49 @@ public sealed class ReactionBuilder
         await tcs.Task;
     }
 
-    // Dependencies are separate parameters (not read inside one opaque body) so they can be
-    // evaluated independently of the action: the composed body resolves every dependency on the
-    // calling flow -- the thread pool for the debounce-scheduled updates -- and only then runs
-    // action(v1, ..) through InvokeActionAsync. With a UI SynchronizationContext registered on
-    // the factory this is the WPF contract of #13: graph evaluation never occupies the UI
-    // thread; the UI thread only ever sees the action with the already-computed values. A body
-    // that must run on the context as a whole belongs in CreateAdvancedReaction instead.
+    // Register one dependency in the reaction's capture: deterministic parameter-order tracking
+    // plus the eager observer subscription a tracked Get would perform, minus the evaluation.
+    // Performed for ALL parameters BEFORE the parallel evaluation starts, so a Set landing
+    // mid-evaluation already sees this reaction as observer and refuses the stale commit, and a
+    // faulting first run still leaves every parameter wired (the sequential composition only
+    // wired the prefix read before the fault). Non-graph IStateGetR implementations are skipped,
+    // exactly as their untracked Get would be.
+    private void RegisterDependency(object dependency)
+    {
+        if (dependency is IMemoHandlR handler)
+        {
+            memoFactory.Context.CheckDependenciesTheSame(handler);
+        }
+    }
+
+    // Evaluate one dependency on its own pinned scope. The parallel sibling evaluations and the
+    // reaction's own update flow must not share a ReactionScope: concurrent evaluation on a
+    // single scope corrupts dependency capture (see ReactionBase.RunDebouncedUpdateAsync), while
+    // per-evaluation scopes make this exactly the supported concurrent-root-Gets pattern --
+    // dirty dependencies recompute in isolation under the cross-flow rules (per-node mutex,
+    // generation guards). The local is the weakly-registered scope's only strong root.
+    private async Task<T> EvaluateOnOwnScopeAsync<T>(IStateGetR<T> memo)
+    {
+        var scope = memoFactory.Context.ForceNewScope();
+        try
+        {
+            return await memo.Get();
+        }
+        finally
+        {
+            memoFactory.Context.CleanScope();
+            GC.KeepAlive(scope);
+        }
+    }
+
+    // Dependencies are separate parameters (not reads inside one opaque body) so they can be
+    // evaluated independently of each other and of the action (#13): every dependency is
+    // registered up front in parameter order (RegisterDependency), the values are then computed
+    // IN PARALLEL on isolated scopes (EvaluateOnOwnScopeAsync) -- a dirty dependency costs the
+    // slowest recompute instead of the sum -- and only action(v1, ..) is marshalled to the
+    // SynchronizationContext when the factory carries one: with MemoizR.Wpf the UI thread sees
+    // nothing but the action with the already-computed values. A body that must run on the
+    // context as a whole belongs in CreateAdvancedReaction instead.
 
     public Reaction CreateReaction<T>(IStateGetR<T> memo, Action<T> action)
     {
@@ -167,8 +203,13 @@ public sealed class ReactionBuilder
     {
         return Build(async () =>
         {
-            var v1 = await memo1.Get();
-            var v2 = await memo2.Get();
+            RegisterDependency(memo1);
+            RegisterDependency(memo2);
+            var t1 = EvaluateOnOwnScopeAsync(memo1);
+            var t2 = EvaluateOnOwnScopeAsync(memo2);
+            await Task.WhenAll(t1, t2);
+            var v1 = await t1;
+            var v2 = await t2;
             await InvokeActionAsync(() => action(v1, v2));
         });
     }
@@ -177,9 +218,16 @@ public sealed class ReactionBuilder
     {
         return Build(async () =>
         {
-            var v1 = await memo1.Get();
-            var v2 = await memo2.Get();
-            var v3 = await memo3.Get();
+            RegisterDependency(memo1);
+            RegisterDependency(memo2);
+            RegisterDependency(memo3);
+            var t1 = EvaluateOnOwnScopeAsync(memo1);
+            var t2 = EvaluateOnOwnScopeAsync(memo2);
+            var t3 = EvaluateOnOwnScopeAsync(memo3);
+            await Task.WhenAll(t1, t2, t3);
+            var v1 = await t1;
+            var v2 = await t2;
+            var v3 = await t3;
             await InvokeActionAsync(() => action(v1, v2, v3));
         });
     }
@@ -188,10 +236,19 @@ public sealed class ReactionBuilder
     {
         return Build(async () =>
         {
-            var v1 = await memo1.Get();
-            var v2 = await memo2.Get();
-            var v3 = await memo3.Get();
-            var v4 = await memo4.Get();
+            RegisterDependency(memo1);
+            RegisterDependency(memo2);
+            RegisterDependency(memo3);
+            RegisterDependency(memo4);
+            var t1 = EvaluateOnOwnScopeAsync(memo1);
+            var t2 = EvaluateOnOwnScopeAsync(memo2);
+            var t3 = EvaluateOnOwnScopeAsync(memo3);
+            var t4 = EvaluateOnOwnScopeAsync(memo4);
+            await Task.WhenAll(t1, t2, t3, t4);
+            var v1 = await t1;
+            var v2 = await t2;
+            var v3 = await t3;
+            var v4 = await t4;
             await InvokeActionAsync(() => action(v1, v2, v3, v4));
         });
     }
@@ -200,11 +257,22 @@ public sealed class ReactionBuilder
     {
         return Build(async () =>
         {
-            var v1 = await memo1.Get();
-            var v2 = await memo2.Get();
-            var v3 = await memo3.Get();
-            var v4 = await memo4.Get();
-            var v5 = await memo5.Get();
+            RegisterDependency(memo1);
+            RegisterDependency(memo2);
+            RegisterDependency(memo3);
+            RegisterDependency(memo4);
+            RegisterDependency(memo5);
+            var t1 = EvaluateOnOwnScopeAsync(memo1);
+            var t2 = EvaluateOnOwnScopeAsync(memo2);
+            var t3 = EvaluateOnOwnScopeAsync(memo3);
+            var t4 = EvaluateOnOwnScopeAsync(memo4);
+            var t5 = EvaluateOnOwnScopeAsync(memo5);
+            await Task.WhenAll(t1, t2, t3, t4, t5);
+            var v1 = await t1;
+            var v2 = await t2;
+            var v3 = await t3;
+            var v4 = await t4;
+            var v5 = await t5;
             await InvokeActionAsync(() => action(v1, v2, v3, v4, v5));
         });
     }
@@ -213,12 +281,25 @@ public sealed class ReactionBuilder
     {
         return Build(async () =>
         {
-            var v1 = await memo1.Get();
-            var v2 = await memo2.Get();
-            var v3 = await memo3.Get();
-            var v4 = await memo4.Get();
-            var v5 = await memo5.Get();
-            var v6 = await memo6.Get();
+            RegisterDependency(memo1);
+            RegisterDependency(memo2);
+            RegisterDependency(memo3);
+            RegisterDependency(memo4);
+            RegisterDependency(memo5);
+            RegisterDependency(memo6);
+            var t1 = EvaluateOnOwnScopeAsync(memo1);
+            var t2 = EvaluateOnOwnScopeAsync(memo2);
+            var t3 = EvaluateOnOwnScopeAsync(memo3);
+            var t4 = EvaluateOnOwnScopeAsync(memo4);
+            var t5 = EvaluateOnOwnScopeAsync(memo5);
+            var t6 = EvaluateOnOwnScopeAsync(memo6);
+            await Task.WhenAll(t1, t2, t3, t4, t5, t6);
+            var v1 = await t1;
+            var v2 = await t2;
+            var v3 = await t3;
+            var v4 = await t4;
+            var v5 = await t5;
+            var v6 = await t6;
             await InvokeActionAsync(() => action(v1, v2, v3, v4, v5, v6));
         });
     }
@@ -227,13 +308,28 @@ public sealed class ReactionBuilder
     {
         return Build(async () =>
         {
-            var v1 = await memo1.Get();
-            var v2 = await memo2.Get();
-            var v3 = await memo3.Get();
-            var v4 = await memo4.Get();
-            var v5 = await memo5.Get();
-            var v6 = await memo6.Get();
-            var v7 = await memo7.Get();
+            RegisterDependency(memo1);
+            RegisterDependency(memo2);
+            RegisterDependency(memo3);
+            RegisterDependency(memo4);
+            RegisterDependency(memo5);
+            RegisterDependency(memo6);
+            RegisterDependency(memo7);
+            var t1 = EvaluateOnOwnScopeAsync(memo1);
+            var t2 = EvaluateOnOwnScopeAsync(memo2);
+            var t3 = EvaluateOnOwnScopeAsync(memo3);
+            var t4 = EvaluateOnOwnScopeAsync(memo4);
+            var t5 = EvaluateOnOwnScopeAsync(memo5);
+            var t6 = EvaluateOnOwnScopeAsync(memo6);
+            var t7 = EvaluateOnOwnScopeAsync(memo7);
+            await Task.WhenAll(t1, t2, t3, t4, t5, t6, t7);
+            var v1 = await t1;
+            var v2 = await t2;
+            var v3 = await t3;
+            var v4 = await t4;
+            var v5 = await t5;
+            var v6 = await t6;
+            var v7 = await t7;
             await InvokeActionAsync(() => action(v1, v2, v3, v4, v5, v6, v7));
         });
     }
@@ -242,14 +338,31 @@ public sealed class ReactionBuilder
     {
         return Build(async () =>
         {
-            var v1 = await memo1.Get();
-            var v2 = await memo2.Get();
-            var v3 = await memo3.Get();
-            var v4 = await memo4.Get();
-            var v5 = await memo5.Get();
-            var v6 = await memo6.Get();
-            var v7 = await memo7.Get();
-            var v8 = await memo8.Get();
+            RegisterDependency(memo1);
+            RegisterDependency(memo2);
+            RegisterDependency(memo3);
+            RegisterDependency(memo4);
+            RegisterDependency(memo5);
+            RegisterDependency(memo6);
+            RegisterDependency(memo7);
+            RegisterDependency(memo8);
+            var t1 = EvaluateOnOwnScopeAsync(memo1);
+            var t2 = EvaluateOnOwnScopeAsync(memo2);
+            var t3 = EvaluateOnOwnScopeAsync(memo3);
+            var t4 = EvaluateOnOwnScopeAsync(memo4);
+            var t5 = EvaluateOnOwnScopeAsync(memo5);
+            var t6 = EvaluateOnOwnScopeAsync(memo6);
+            var t7 = EvaluateOnOwnScopeAsync(memo7);
+            var t8 = EvaluateOnOwnScopeAsync(memo8);
+            await Task.WhenAll(t1, t2, t3, t4, t5, t6, t7, t8);
+            var v1 = await t1;
+            var v2 = await t2;
+            var v3 = await t3;
+            var v4 = await t4;
+            var v5 = await t5;
+            var v6 = await t6;
+            var v7 = await t7;
+            var v8 = await t8;
             await InvokeActionAsync(() => action(v1, v2, v3, v4, v5, v6, v7, v8));
         });
     }
@@ -258,15 +371,34 @@ public sealed class ReactionBuilder
     {
         return Build(async () =>
         {
-            var v1 = await memo1.Get();
-            var v2 = await memo2.Get();
-            var v3 = await memo3.Get();
-            var v4 = await memo4.Get();
-            var v5 = await memo5.Get();
-            var v6 = await memo6.Get();
-            var v7 = await memo7.Get();
-            var v8 = await memo8.Get();
-            var v9 = await memo9.Get();
+            RegisterDependency(memo1);
+            RegisterDependency(memo2);
+            RegisterDependency(memo3);
+            RegisterDependency(memo4);
+            RegisterDependency(memo5);
+            RegisterDependency(memo6);
+            RegisterDependency(memo7);
+            RegisterDependency(memo8);
+            RegisterDependency(memo9);
+            var t1 = EvaluateOnOwnScopeAsync(memo1);
+            var t2 = EvaluateOnOwnScopeAsync(memo2);
+            var t3 = EvaluateOnOwnScopeAsync(memo3);
+            var t4 = EvaluateOnOwnScopeAsync(memo4);
+            var t5 = EvaluateOnOwnScopeAsync(memo5);
+            var t6 = EvaluateOnOwnScopeAsync(memo6);
+            var t7 = EvaluateOnOwnScopeAsync(memo7);
+            var t8 = EvaluateOnOwnScopeAsync(memo8);
+            var t9 = EvaluateOnOwnScopeAsync(memo9);
+            await Task.WhenAll(t1, t2, t3, t4, t5, t6, t7, t8, t9);
+            var v1 = await t1;
+            var v2 = await t2;
+            var v3 = await t3;
+            var v4 = await t4;
+            var v5 = await t5;
+            var v6 = await t6;
+            var v7 = await t7;
+            var v8 = await t8;
+            var v9 = await t9;
             await InvokeActionAsync(() => action(v1, v2, v3, v4, v5, v6, v7, v8, v9));
         });
     }
@@ -275,16 +407,37 @@ public sealed class ReactionBuilder
     {
         return Build(async () =>
         {
-            var v1 = await memo1.Get();
-            var v2 = await memo2.Get();
-            var v3 = await memo3.Get();
-            var v4 = await memo4.Get();
-            var v5 = await memo5.Get();
-            var v6 = await memo6.Get();
-            var v7 = await memo7.Get();
-            var v8 = await memo8.Get();
-            var v9 = await memo9.Get();
-            var v10 = await memo10.Get();
+            RegisterDependency(memo1);
+            RegisterDependency(memo2);
+            RegisterDependency(memo3);
+            RegisterDependency(memo4);
+            RegisterDependency(memo5);
+            RegisterDependency(memo6);
+            RegisterDependency(memo7);
+            RegisterDependency(memo8);
+            RegisterDependency(memo9);
+            RegisterDependency(memo10);
+            var t1 = EvaluateOnOwnScopeAsync(memo1);
+            var t2 = EvaluateOnOwnScopeAsync(memo2);
+            var t3 = EvaluateOnOwnScopeAsync(memo3);
+            var t4 = EvaluateOnOwnScopeAsync(memo4);
+            var t5 = EvaluateOnOwnScopeAsync(memo5);
+            var t6 = EvaluateOnOwnScopeAsync(memo6);
+            var t7 = EvaluateOnOwnScopeAsync(memo7);
+            var t8 = EvaluateOnOwnScopeAsync(memo8);
+            var t9 = EvaluateOnOwnScopeAsync(memo9);
+            var t10 = EvaluateOnOwnScopeAsync(memo10);
+            await Task.WhenAll(t1, t2, t3, t4, t5, t6, t7, t8, t9, t10);
+            var v1 = await t1;
+            var v2 = await t2;
+            var v3 = await t3;
+            var v4 = await t4;
+            var v5 = await t5;
+            var v6 = await t6;
+            var v7 = await t7;
+            var v8 = await t8;
+            var v9 = await t9;
+            var v10 = await t10;
             await InvokeActionAsync(() => action(v1, v2, v3, v4, v5, v6, v7, v8, v9, v10));
         });
     }
@@ -293,17 +446,40 @@ public sealed class ReactionBuilder
     {
         return Build(async () =>
         {
-            var v1 = await memo1.Get();
-            var v2 = await memo2.Get();
-            var v3 = await memo3.Get();
-            var v4 = await memo4.Get();
-            var v5 = await memo5.Get();
-            var v6 = await memo6.Get();
-            var v7 = await memo7.Get();
-            var v8 = await memo8.Get();
-            var v9 = await memo9.Get();
-            var v10 = await memo10.Get();
-            var v11 = await memo11.Get();
+            RegisterDependency(memo1);
+            RegisterDependency(memo2);
+            RegisterDependency(memo3);
+            RegisterDependency(memo4);
+            RegisterDependency(memo5);
+            RegisterDependency(memo6);
+            RegisterDependency(memo7);
+            RegisterDependency(memo8);
+            RegisterDependency(memo9);
+            RegisterDependency(memo10);
+            RegisterDependency(memo11);
+            var t1 = EvaluateOnOwnScopeAsync(memo1);
+            var t2 = EvaluateOnOwnScopeAsync(memo2);
+            var t3 = EvaluateOnOwnScopeAsync(memo3);
+            var t4 = EvaluateOnOwnScopeAsync(memo4);
+            var t5 = EvaluateOnOwnScopeAsync(memo5);
+            var t6 = EvaluateOnOwnScopeAsync(memo6);
+            var t7 = EvaluateOnOwnScopeAsync(memo7);
+            var t8 = EvaluateOnOwnScopeAsync(memo8);
+            var t9 = EvaluateOnOwnScopeAsync(memo9);
+            var t10 = EvaluateOnOwnScopeAsync(memo10);
+            var t11 = EvaluateOnOwnScopeAsync(memo11);
+            await Task.WhenAll(t1, t2, t3, t4, t5, t6, t7, t8, t9, t10, t11);
+            var v1 = await t1;
+            var v2 = await t2;
+            var v3 = await t3;
+            var v4 = await t4;
+            var v5 = await t5;
+            var v6 = await t6;
+            var v7 = await t7;
+            var v8 = await t8;
+            var v9 = await t9;
+            var v10 = await t10;
+            var v11 = await t11;
             await InvokeActionAsync(() => action(v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11));
         });
     }
@@ -312,18 +488,43 @@ public sealed class ReactionBuilder
     {
         return Build(async () =>
         {
-            var v1 = await memo1.Get();
-            var v2 = await memo2.Get();
-            var v3 = await memo3.Get();
-            var v4 = await memo4.Get();
-            var v5 = await memo5.Get();
-            var v6 = await memo6.Get();
-            var v7 = await memo7.Get();
-            var v8 = await memo8.Get();
-            var v9 = await memo9.Get();
-            var v10 = await memo10.Get();
-            var v11 = await memo11.Get();
-            var v12 = await memo12.Get();
+            RegisterDependency(memo1);
+            RegisterDependency(memo2);
+            RegisterDependency(memo3);
+            RegisterDependency(memo4);
+            RegisterDependency(memo5);
+            RegisterDependency(memo6);
+            RegisterDependency(memo7);
+            RegisterDependency(memo8);
+            RegisterDependency(memo9);
+            RegisterDependency(memo10);
+            RegisterDependency(memo11);
+            RegisterDependency(memo12);
+            var t1 = EvaluateOnOwnScopeAsync(memo1);
+            var t2 = EvaluateOnOwnScopeAsync(memo2);
+            var t3 = EvaluateOnOwnScopeAsync(memo3);
+            var t4 = EvaluateOnOwnScopeAsync(memo4);
+            var t5 = EvaluateOnOwnScopeAsync(memo5);
+            var t6 = EvaluateOnOwnScopeAsync(memo6);
+            var t7 = EvaluateOnOwnScopeAsync(memo7);
+            var t8 = EvaluateOnOwnScopeAsync(memo8);
+            var t9 = EvaluateOnOwnScopeAsync(memo9);
+            var t10 = EvaluateOnOwnScopeAsync(memo10);
+            var t11 = EvaluateOnOwnScopeAsync(memo11);
+            var t12 = EvaluateOnOwnScopeAsync(memo12);
+            await Task.WhenAll(t1, t2, t3, t4, t5, t6, t7, t8, t9, t10, t11, t12);
+            var v1 = await t1;
+            var v2 = await t2;
+            var v3 = await t3;
+            var v4 = await t4;
+            var v5 = await t5;
+            var v6 = await t6;
+            var v7 = await t7;
+            var v8 = await t8;
+            var v9 = await t9;
+            var v10 = await t10;
+            var v11 = await t11;
+            var v12 = await t12;
             await InvokeActionAsync(() => action(v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12));
         });
     }
@@ -332,19 +533,46 @@ public sealed class ReactionBuilder
     {
         return Build(async () =>
         {
-            var v1 = await memo1.Get();
-            var v2 = await memo2.Get();
-            var v3 = await memo3.Get();
-            var v4 = await memo4.Get();
-            var v5 = await memo5.Get();
-            var v6 = await memo6.Get();
-            var v7 = await memo7.Get();
-            var v8 = await memo8.Get();
-            var v9 = await memo9.Get();
-            var v10 = await memo10.Get();
-            var v11 = await memo11.Get();
-            var v12 = await memo12.Get();
-            var v13 = await memo13.Get();
+            RegisterDependency(memo1);
+            RegisterDependency(memo2);
+            RegisterDependency(memo3);
+            RegisterDependency(memo4);
+            RegisterDependency(memo5);
+            RegisterDependency(memo6);
+            RegisterDependency(memo7);
+            RegisterDependency(memo8);
+            RegisterDependency(memo9);
+            RegisterDependency(memo10);
+            RegisterDependency(memo11);
+            RegisterDependency(memo12);
+            RegisterDependency(memo13);
+            var t1 = EvaluateOnOwnScopeAsync(memo1);
+            var t2 = EvaluateOnOwnScopeAsync(memo2);
+            var t3 = EvaluateOnOwnScopeAsync(memo3);
+            var t4 = EvaluateOnOwnScopeAsync(memo4);
+            var t5 = EvaluateOnOwnScopeAsync(memo5);
+            var t6 = EvaluateOnOwnScopeAsync(memo6);
+            var t7 = EvaluateOnOwnScopeAsync(memo7);
+            var t8 = EvaluateOnOwnScopeAsync(memo8);
+            var t9 = EvaluateOnOwnScopeAsync(memo9);
+            var t10 = EvaluateOnOwnScopeAsync(memo10);
+            var t11 = EvaluateOnOwnScopeAsync(memo11);
+            var t12 = EvaluateOnOwnScopeAsync(memo12);
+            var t13 = EvaluateOnOwnScopeAsync(memo13);
+            await Task.WhenAll(t1, t2, t3, t4, t5, t6, t7, t8, t9, t10, t11, t12, t13);
+            var v1 = await t1;
+            var v2 = await t2;
+            var v3 = await t3;
+            var v4 = await t4;
+            var v5 = await t5;
+            var v6 = await t6;
+            var v7 = await t7;
+            var v8 = await t8;
+            var v9 = await t9;
+            var v10 = await t10;
+            var v11 = await t11;
+            var v12 = await t12;
+            var v13 = await t13;
             await InvokeActionAsync(() => action(v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13));
         });
     }
@@ -353,20 +581,49 @@ public sealed class ReactionBuilder
     {
         return Build(async () =>
         {
-            var v1 = await memo1.Get();
-            var v2 = await memo2.Get();
-            var v3 = await memo3.Get();
-            var v4 = await memo4.Get();
-            var v5 = await memo5.Get();
-            var v6 = await memo6.Get();
-            var v7 = await memo7.Get();
-            var v8 = await memo8.Get();
-            var v9 = await memo9.Get();
-            var v10 = await memo10.Get();
-            var v11 = await memo11.Get();
-            var v12 = await memo12.Get();
-            var v13 = await memo13.Get();
-            var v14 = await memo14.Get();
+            RegisterDependency(memo1);
+            RegisterDependency(memo2);
+            RegisterDependency(memo3);
+            RegisterDependency(memo4);
+            RegisterDependency(memo5);
+            RegisterDependency(memo6);
+            RegisterDependency(memo7);
+            RegisterDependency(memo8);
+            RegisterDependency(memo9);
+            RegisterDependency(memo10);
+            RegisterDependency(memo11);
+            RegisterDependency(memo12);
+            RegisterDependency(memo13);
+            RegisterDependency(memo14);
+            var t1 = EvaluateOnOwnScopeAsync(memo1);
+            var t2 = EvaluateOnOwnScopeAsync(memo2);
+            var t3 = EvaluateOnOwnScopeAsync(memo3);
+            var t4 = EvaluateOnOwnScopeAsync(memo4);
+            var t5 = EvaluateOnOwnScopeAsync(memo5);
+            var t6 = EvaluateOnOwnScopeAsync(memo6);
+            var t7 = EvaluateOnOwnScopeAsync(memo7);
+            var t8 = EvaluateOnOwnScopeAsync(memo8);
+            var t9 = EvaluateOnOwnScopeAsync(memo9);
+            var t10 = EvaluateOnOwnScopeAsync(memo10);
+            var t11 = EvaluateOnOwnScopeAsync(memo11);
+            var t12 = EvaluateOnOwnScopeAsync(memo12);
+            var t13 = EvaluateOnOwnScopeAsync(memo13);
+            var t14 = EvaluateOnOwnScopeAsync(memo14);
+            await Task.WhenAll(t1, t2, t3, t4, t5, t6, t7, t8, t9, t10, t11, t12, t13, t14);
+            var v1 = await t1;
+            var v2 = await t2;
+            var v3 = await t3;
+            var v4 = await t4;
+            var v5 = await t5;
+            var v6 = await t6;
+            var v7 = await t7;
+            var v8 = await t8;
+            var v9 = await t9;
+            var v10 = await t10;
+            var v11 = await t11;
+            var v12 = await t12;
+            var v13 = await t13;
+            var v14 = await t14;
             await InvokeActionAsync(() => action(v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14));
         });
     }
@@ -375,21 +632,52 @@ public sealed class ReactionBuilder
     {
         return Build(async () =>
         {
-            var v1 = await memo1.Get();
-            var v2 = await memo2.Get();
-            var v3 = await memo3.Get();
-            var v4 = await memo4.Get();
-            var v5 = await memo5.Get();
-            var v6 = await memo6.Get();
-            var v7 = await memo7.Get();
-            var v8 = await memo8.Get();
-            var v9 = await memo9.Get();
-            var v10 = await memo10.Get();
-            var v11 = await memo11.Get();
-            var v12 = await memo12.Get();
-            var v13 = await memo13.Get();
-            var v14 = await memo14.Get();
-            var v15 = await memo15.Get();
+            RegisterDependency(memo1);
+            RegisterDependency(memo2);
+            RegisterDependency(memo3);
+            RegisterDependency(memo4);
+            RegisterDependency(memo5);
+            RegisterDependency(memo6);
+            RegisterDependency(memo7);
+            RegisterDependency(memo8);
+            RegisterDependency(memo9);
+            RegisterDependency(memo10);
+            RegisterDependency(memo11);
+            RegisterDependency(memo12);
+            RegisterDependency(memo13);
+            RegisterDependency(memo14);
+            RegisterDependency(memo15);
+            var t1 = EvaluateOnOwnScopeAsync(memo1);
+            var t2 = EvaluateOnOwnScopeAsync(memo2);
+            var t3 = EvaluateOnOwnScopeAsync(memo3);
+            var t4 = EvaluateOnOwnScopeAsync(memo4);
+            var t5 = EvaluateOnOwnScopeAsync(memo5);
+            var t6 = EvaluateOnOwnScopeAsync(memo6);
+            var t7 = EvaluateOnOwnScopeAsync(memo7);
+            var t8 = EvaluateOnOwnScopeAsync(memo8);
+            var t9 = EvaluateOnOwnScopeAsync(memo9);
+            var t10 = EvaluateOnOwnScopeAsync(memo10);
+            var t11 = EvaluateOnOwnScopeAsync(memo11);
+            var t12 = EvaluateOnOwnScopeAsync(memo12);
+            var t13 = EvaluateOnOwnScopeAsync(memo13);
+            var t14 = EvaluateOnOwnScopeAsync(memo14);
+            var t15 = EvaluateOnOwnScopeAsync(memo15);
+            await Task.WhenAll(t1, t2, t3, t4, t5, t6, t7, t8, t9, t10, t11, t12, t13, t14, t15);
+            var v1 = await t1;
+            var v2 = await t2;
+            var v3 = await t3;
+            var v4 = await t4;
+            var v5 = await t5;
+            var v6 = await t6;
+            var v7 = await t7;
+            var v8 = await t8;
+            var v9 = await t9;
+            var v10 = await t10;
+            var v11 = await t11;
+            var v12 = await t12;
+            var v13 = await t13;
+            var v14 = await t14;
+            var v15 = await t15;
             await InvokeActionAsync(() => action(v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15));
         });
     }
@@ -398,22 +686,55 @@ public sealed class ReactionBuilder
     {
         return Build(async () =>
         {
-            var v1 = await memo1.Get();
-            var v2 = await memo2.Get();
-            var v3 = await memo3.Get();
-            var v4 = await memo4.Get();
-            var v5 = await memo5.Get();
-            var v6 = await memo6.Get();
-            var v7 = await memo7.Get();
-            var v8 = await memo8.Get();
-            var v9 = await memo9.Get();
-            var v10 = await memo10.Get();
-            var v11 = await memo11.Get();
-            var v12 = await memo12.Get();
-            var v13 = await memo13.Get();
-            var v14 = await memo14.Get();
-            var v15 = await memo15.Get();
-            var v16 = await memo16.Get();
+            RegisterDependency(memo1);
+            RegisterDependency(memo2);
+            RegisterDependency(memo3);
+            RegisterDependency(memo4);
+            RegisterDependency(memo5);
+            RegisterDependency(memo6);
+            RegisterDependency(memo7);
+            RegisterDependency(memo8);
+            RegisterDependency(memo9);
+            RegisterDependency(memo10);
+            RegisterDependency(memo11);
+            RegisterDependency(memo12);
+            RegisterDependency(memo13);
+            RegisterDependency(memo14);
+            RegisterDependency(memo15);
+            RegisterDependency(memo16);
+            var t1 = EvaluateOnOwnScopeAsync(memo1);
+            var t2 = EvaluateOnOwnScopeAsync(memo2);
+            var t3 = EvaluateOnOwnScopeAsync(memo3);
+            var t4 = EvaluateOnOwnScopeAsync(memo4);
+            var t5 = EvaluateOnOwnScopeAsync(memo5);
+            var t6 = EvaluateOnOwnScopeAsync(memo6);
+            var t7 = EvaluateOnOwnScopeAsync(memo7);
+            var t8 = EvaluateOnOwnScopeAsync(memo8);
+            var t9 = EvaluateOnOwnScopeAsync(memo9);
+            var t10 = EvaluateOnOwnScopeAsync(memo10);
+            var t11 = EvaluateOnOwnScopeAsync(memo11);
+            var t12 = EvaluateOnOwnScopeAsync(memo12);
+            var t13 = EvaluateOnOwnScopeAsync(memo13);
+            var t14 = EvaluateOnOwnScopeAsync(memo14);
+            var t15 = EvaluateOnOwnScopeAsync(memo15);
+            var t16 = EvaluateOnOwnScopeAsync(memo16);
+            await Task.WhenAll(t1, t2, t3, t4, t5, t6, t7, t8, t9, t10, t11, t12, t13, t14, t15, t16);
+            var v1 = await t1;
+            var v2 = await t2;
+            var v3 = await t3;
+            var v4 = await t4;
+            var v5 = await t5;
+            var v6 = await t6;
+            var v7 = await t7;
+            var v8 = await t8;
+            var v9 = await t9;
+            var v10 = await t10;
+            var v11 = await t11;
+            var v12 = await t12;
+            var v13 = await t13;
+            var v14 = await t14;
+            var v15 = await t15;
+            var v16 = await t16;
             await InvokeActionAsync(() => action(v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16));
         });
     }

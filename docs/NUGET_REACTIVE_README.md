@@ -21,7 +21,7 @@ var r1 = f.BuildReaction().CreateReaction(m1, m2, (val1, val2) => val1 + val2);
 
 Register the UI thread's SynchronizationContext (from the UI thread) and reactions deliver
 their action on it, while the dependencies — passed as separate parameters so they can be
-evaluated independently of the action — keep evaluating on the thread pool:
+evaluated independently — are computed in parallel on the thread pool:
 
 ```csharp
 // e.g. in a UI app: capture the UI SynchronizationContext on the UI thread

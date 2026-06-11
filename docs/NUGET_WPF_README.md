@@ -10,8 +10,8 @@ var f = new MemoFactory().AddWpfDispatcher(); // uses Application.Current.Dispat
 var v1 = f.CreateSignal(1);
 var m1 = f.CreateMemoizR(async () => await v1.Get() * 2); // computed on worker threads
 
-// Dependencies are separate parameters so they are evaluated independently of the action;
-// only the action below runs on the UI thread, with the already-computed values.
+// Dependencies are separate parameters so they are evaluated in parallel on the thread
+// pool; only the action below runs on the UI thread, with the already-computed values.
 var r1 = f.BuildReaction().CreateReaction(m1, v => viewModel.Value = v);
 
 await v1.Set(5); // safe from any thread

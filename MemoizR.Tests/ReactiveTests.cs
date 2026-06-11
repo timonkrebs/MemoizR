@@ -727,6 +727,74 @@ public class ReactiveTests
         GC.KeepAlive(r);
     }
 
+    // Separate-parameter dependencies must be evaluated IN PARALLEL (issue #13: "so that they
+    // can be evaluated independently"): each runs on its own pinned scope, so a dirty update
+    // costs the slowest dependency instead of the sum. The two memos here deadlock unless both
+    // computations are in flight at once -- each releases the other's gate before reading its
+    // signal -- so a sequential composition times out the gates and never converges.
+    [Fact(Timeout = 30000)]
+    public async Task Reaction_MultiDependency_EvaluatesDependenciesInParallel()
+    {
+        var f = new MemoFactory();
+        var v1 = f.CreateSignal(1);
+        var v2 = f.CreateSignal(2);
+        var entered1 = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var entered2 = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var m1 = f.CreateMemoizR(async () =>
+        {
+            entered1.TrySetResult();
+            await entered2.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            return await v1.Get();
+        });
+        var m2 = f.CreateMemoizR(async () =>
+        {
+            entered2.TrySetResult();
+            await entered1.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            return await v2.Get();
+        });
+
+        var last = 0;
+        var r = f.BuildReaction().CreateReaction(m1, m2, (a, b) => last = a + b);
+
+        await TestHelpers.WaitForConvergenceAsync(() => last == 3, timeoutMs: 15000);
+        Assert.Equal(3, last);
+        GC.KeepAlive(r);
+    }
+
+    // Every parameter is registered (and eagerly subscribed) BEFORE evaluation starts, so a
+    // dependency faulting on the reaction's first run leaves ALL parameters wired: a Set on any
+    // of them revives the reaction. The sequential composition only wired the prefix read before
+    // the fault -- here m1 faults first, so v2 was never wired and its Set was lost forever.
+    [Fact(Timeout = 30000)]
+    public async Task Reaction_DependencyFaultsOnFirstRun_AllParametersStillWired_AndRecovers()
+    {
+        var f = new MemoFactory();
+        var v1 = f.CreateSignal(1);
+        var v2 = f.CreateSignal(10);
+        var attempts = 0;
+        var shouldThrow = true;
+        var m1 = f.CreateMemoizR(async () =>
+        {
+            Interlocked.Increment(ref attempts);
+            if (Volatile.Read(ref shouldThrow)) throw new InvalidOperationException("dep boom");
+            return await v1.Get();
+        });
+
+        var last = 0;
+        var r = f.BuildReaction().CreateReaction(m1, v2, (a, b) => last = a + b);
+
+        // Wait until the initial run has actually attempted (and faulted) before disarming.
+        await TestHelpers.WaitForConvergenceAsync(() => Volatile.Read(ref attempts) >= 1);
+        Assert.True(Volatile.Read(ref attempts) >= 1, "the initial run never executed");
+        Assert.Equal(0, last); // the faulted run must not have produced the side effect
+
+        Volatile.Write(ref shouldThrow, false);
+        await v2.Set(20); // revive via the dependency AFTER the faulting one
+        await TestHelpers.WaitForConvergenceAsync(() => last == 21, timeoutMs: 15000);
+        Assert.Equal(21, last);
+        GC.KeepAlive(r);
+    }
+
     // AddSynchronizationContext re-registration contract (changed when the static side-table
     // became a factory property): a second registration REPLACES the context for reactions
     // built afterwards; reactions built earlier keep the context they captured at build time.
