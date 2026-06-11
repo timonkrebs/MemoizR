@@ -306,7 +306,7 @@ public class ConcurrencyHardeningTests
 
         await Task.WhenAll(Enumerable.Range(0, 16).Select(_ => Task.Run(() => source.AddObserver(m))));
 
-        Assert.Equal(1, s.Observers.Length);
+        Assert.Single(s.Observers);
         GC.KeepAlive(m);
     }
 
