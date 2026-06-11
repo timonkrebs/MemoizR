@@ -66,7 +66,10 @@ public abstract class SignalHandlR : IMemoHandlR
             // update source up links
             if (Sources.Length > 0 && scope.CurrentGetsIndex > 0)
             {
-                Sources = [.. Sources.Take(scope.CurrentGetsIndex), .. scope.CurrentGets];
+                var newSources = new IMemoHandlR[scope.CurrentGetsIndex + scope.CurrentGets.Length];
+                Array.Copy(Sources, newSources, scope.CurrentGetsIndex);
+                Array.Copy(scope.CurrentGets, 0, newSources, scope.CurrentGetsIndex, scope.CurrentGets.Length);
+                Sources = newSources;
             }
             else
             {
@@ -77,14 +80,20 @@ public abstract class SignalHandlR : IMemoHandlR
             {
                 // Add ourselves to the end of the parent .observers array
                 var source = Sources[i];
-                source.Observers = [.. source.Observers, new(self)];
+                var oldObservers = source.Observers;
+                var newObservers = new WeakReference<IMemoizR>[oldObservers.Length + 1];
+                Array.Copy(oldObservers, newObservers, oldObservers.Length);
+                newObservers[oldObservers.Length] = new(self);
+                source.Observers = newObservers;
             }
         }
         else if (Sources.Length > 0 && scope.CurrentGetsIndex < Sources.Length)
         {
             // remove all old Sources' .observers links to us
             RemoveParentObservers(scope.CurrentGetsIndex);
-            Sources = [.. Sources.Take(scope.CurrentGetsIndex)];
+            var newSources = new IMemoHandlR[scope.CurrentGetsIndex];
+            Array.Copy(Sources, newSources, scope.CurrentGetsIndex);
+            Sources = newSources;
         }
     }
 
@@ -93,7 +102,24 @@ public abstract class SignalHandlR : IMemoHandlR
         for (var i = index; i < Sources.Length; i++)
         {
             var source = Sources[i];
-            source.Observers = [.. source.Observers.Where(x => x.TryGetTarget(out var o) ? !ReferenceEquals(o, this) : false)];
+
+            var len = source.Observers.Length;
+            int c = 0;
+            for (int j = 0; j < len; j++)
+            {
+                if (source.Observers[j].TryGetTarget(out var o) && ReferenceEquals(o, this)) continue;
+                c++;
+            }
+
+            var newObservers = new WeakReference<IMemoizR>[c];
+            c = 0;
+            for (int j = 0; j < len; j++)
+            {
+                if (source.Observers[j].TryGetTarget(out var o) && ReferenceEquals(o, this)) continue;
+                newObservers[c++] = source.Observers[j];
+            }
+
+            source.Observers = newObservers;
         }
     }
 
