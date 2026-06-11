@@ -40,6 +40,15 @@ public abstract class MemoBase<T> : MemoHandlR<T>, IMemoizR, IStateGetR<T>
 
     public async Task<T> Get()
     {
+        // An UNPINNED flow's scope would be freshly minted with CurrentReaction == null by
+        // construction, so a clean read from one needs no scope at all: two volatile reads and
+        // out -- no lock, no allocation. (Without this, every top-level Get minted and
+        // registered a scope just to look at a field that is always null.)
+        if (State == CacheState.CacheClean && !Context.HasFlowScope)
+        {
+            return Value;
+        }
+
         var scope = Context.GetOrCreateScope();
         if (State == CacheState.CacheClean && scope.CurrentReaction == null)
         {

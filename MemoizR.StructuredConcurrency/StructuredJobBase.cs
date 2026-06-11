@@ -39,11 +39,14 @@ public abstract class StructuredJobBase<T>
 
                 for (var i = context.ReactionScope.CurrentGetsIndex; i < allSources.Count; i++)
                 {
-                    // Add ourselves to the end of the parent .observers array
+                    // Add ourselves to the parent .observers array (add-if-absent: capture-time
+                    // eager subscription in CheckDependenciesTheSame usually did this already).
                     var source = allSources[i];
-                    source.Observers = !source.Observers.Any()
-                        ? [new(owner)]
-                        : [.. source.Observers, new(owner)];
+                    if (owner is SignalHandlR node && node.IsObserving(source))
+                    {
+                        continue;
+                    }
+                    source.Observers = [.. source.Observers, new(owner)];
                 }
             }
         }
@@ -52,24 +55,43 @@ public abstract class StructuredJobBase<T>
     public async Task<T> Run(CancellationToken token)
     {
         var resourceGroup = new StructuredResourceGroup(token);
+        // Built exactly once and reused by the catch path: the old code re-ran the Select there,
+        // allocating a second full set of unwrap wrappers over the same children -- and could
+        // even await never-started cold tasks if AddConcurrentWork itself had thrown.
+        var completion = Task.CompletedTask;
         try
         {
-            List<Task<Task>> tasks;
             using (await mutex.LockAsync())
             {
                 this.tasks = new();
                 await AddConcurrentWork(resourceGroup);
-                tasks = this.tasks;
                 // Start the cold tasks on the thread pool without blocking the calling thread.
                 // (A synchronous mutex.Lock() held across awaits plus a blocking Parallel.ForEach
                 // were starving the thread pool, which surfaced as flaky test timeouts.)
+                // A sibling that starts and fails INSTANTLY cancels the group token while this
+                // loop is still running, which transitions the not-yet-started cold tasks to
+                // Canceled -- and Start() on a completed task throws. Such a task behaves
+                // exactly like a child canceled mid-run, so skip it; the catch guards the
+                // unavoidable window between the status check and Start.
                 foreach (var task in tasks)
                 {
-                    task.Start(TaskScheduler.Default);
+                    if (task.Status != TaskStatus.Created)
+                    {
+                        continue;
+                    }
+                    try
+                    {
+                        task.Start(TaskScheduler.Default);
+                    }
+                    catch (InvalidOperationException)
+                    {
+                        // Canceled between the check and Start: equivalent to the skip above.
+                    }
                 }
+                completion = Task.WhenAll(tasks.Select(async t => await await t));
             }
 
-            await Task.WhenAll(tasks.Select(async t => await await t));
+            await completion;
             HandleSubscriptions();
             return result!;
         }
@@ -80,18 +102,17 @@ public abstract class StructuredJobBase<T>
             // We use an explicit try/catch rather than ConfigureAwaitOptions.SuppressThrowing,
             // which the Coyote rewriter does not honour (under instrumentation it rethrew a
             // single unwrapped exception, breaking AggregateException expectations).
-            var all = Task.WhenAll(tasks.Select(async t => await await t));
             try
             {
-                await all;
+                await completion;
             }
             catch
             {
                 // Ignored: rethrown aggregated below.
             }
-            if (all.Exception != null)
+            if (completion.Exception != null)
             {
-                throw all.Exception;
+                throw completion.Exception;
             }
             throw;
         }

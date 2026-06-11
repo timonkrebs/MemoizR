@@ -24,32 +24,61 @@ public class Context
     private static readonly AsyncLocal<double> AsyncLocalScope = new();
 
     /** current capture context for identifying sources (other memoizR elements)
-    * - active while evaluating a memoizR function body  */
-    private Dictionary<double, WeakReference<ReactionScope>> AsyncReactionScopes = new();
+    * - active while evaluating a memoizR function body
+    * ConcurrentDictionary so the hot read paths resolve scopes lock-free; Lock guards only the
+    * dependency-capture mutation (CheckDependenciesTheSame) and the evaluation refcount. */
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<double, WeakReference<ReactionScope>> AsyncReactionScopes = new();
+    private int scopeRegistrationsSinceLastPrune;
+
+    // Whether the current async flow has a pinned scope. An UNPINNED flow's scope would be
+    // freshly minted, so its CurrentReaction is null by construction -- which lets the Get fast
+    // paths skip scope resolution (and the mint!) entirely for clean reads.
+    internal bool HasFlowScope => AsyncLocalScope.Value != 0;
 
     public ReactionScope ReactionScope
     {
         get
         {
-            if (AsyncLocalScope.Value == 0)
+            var key = AsyncLocalScope.Value;
+            if (key == 0)
             {
                 // No scope is pinned to this flow, so the scope could never be looked up again:
                 // registering it would only leak a dictionary entry per access. Hand out a
-                // throwaway (no lock needed -- nothing shared is touched).
+                // throwaway.
                 return new();
             }
 
-            lock (Lock)
-            {
-                var key = AsyncLocalScope.Value;
-                if (AsyncReactionScopes.TryGetValue(key, out var reactionScopeRef)
-                    && reactionScopeRef.TryGetTarget(out var reactionScope))
-                {
-                    return reactionScope;
-                }
+            return GetScopeForKey(key);
+        }
+    }
 
-                ReactionScope fresh = new();
-                AsyncReactionScopes[key] = new(fresh);
+    // Lock-free resolve-or-resurrect for a pinned key. The resurrection must be atomic: several
+    // tasks can share one flow key concurrently (debounced reaction updates inherit the
+    // triggering Set's flow), and two of them racing a dead entry must agree on ONE fresh scope
+    // -- a last-write-wins overwrite would hand them different ContextLocks.
+    private ReactionScope GetScopeForKey(double key)
+    {
+        if (AsyncReactionScopes.TryGetValue(key, out var reactionScopeRef)
+            && reactionScopeRef.TryGetTarget(out var reactionScope))
+        {
+            return reactionScope;
+        }
+
+        ReactionScope fresh = new();
+        WeakReference<ReactionScope> freshRef = new(fresh);
+        while (true)
+        {
+            var existing = AsyncReactionScopes.GetOrAdd(key, freshRef);
+            if (ReferenceEquals(existing, freshRef))
+            {
+                return fresh;
+            }
+            if (existing.TryGetTarget(out var live))
+            {
+                return live;
+            }
+            if (AsyncReactionScopes.TryUpdate(key, freshRef, existing))
+            {
                 return fresh;
             }
         }
@@ -92,86 +121,70 @@ public class Context
     // still using (its dependency capture would silently resolve to a fresh empty scope).
     internal bool CreateNewScopeIfNeeded()
     {
-        lock (Lock)
+        if (AsyncLocalScope.Value != 0)
         {
-            if (AsyncLocalScope.Value != 0)
-            {
-                return false;
-            }
-            var key = Random.Shared.NextDouble();
-            AsyncLocalScope.Value = key;
-            PruneDeadScopes();
-            AsyncReactionScopes.Add(key, new(new()));
-            return true;
+            return false;
         }
+        var key = Random.Shared.NextDouble();
+        AsyncLocalScope.Value = key;
+        RegisterScope(key, new());
+        return true;
     }
 
-    // Pins a scope if needed and returns it -- one lock acquisition where CreateNewScopeIfNeeded
-    // followed by the ReactionScope getter would take two. Used by the Get fast paths, where the
-    // context-wide Lock is the contention point.
+    // Pins a scope if needed and returns it. Used by the Get slow paths; the resolution is
+    // lock-free (ConcurrentDictionary), so this is cheap even under cross-flow contention.
     internal ReactionScope GetOrCreateScope()
     {
-        lock (Lock)
+        var key = AsyncLocalScope.Value;
+        if (key == 0)
         {
-            var key = AsyncLocalScope.Value;
-            if (key == 0)
-            {
-                key = Random.Shared.NextDouble();
-                AsyncLocalScope.Value = key;
-                PruneDeadScopes();
-                ReactionScope created = new();
-                AsyncReactionScopes.Add(key, new(created));
-                return created;
-            }
+            key = Random.Shared.NextDouble();
+            AsyncLocalScope.Value = key;
+            ReactionScope created = new();
+            RegisterScope(key, created);
+            return created;
+        }
 
-            if (AsyncReactionScopes.TryGetValue(key, out var reactionScopeRef)
-                && reactionScopeRef.TryGetTarget(out var reactionScope))
-            {
-                return reactionScope;
-            }
+        return GetScopeForKey(key);
+    }
 
-            ReactionScope fresh = new();
-            AsyncReactionScopes[key] = new(fresh);
-            return fresh;
+    private void RegisterScope(double key, ReactionScope scope)
+    {
+        AsyncReactionScopes.TryAdd(key, new(scope)); // fresh random key: cannot collide
+
+        // Amortized sweep: pruning on every registration is O(table) per mint, which goes
+        // quadratic under sustained traffic from unpinned flows (every top-level operation mints
+        // a scope). Sweep only when the registrations since the last sweep rival the table size,
+        // making each registration O(1) amortized. Concurrent double-sweeps are harmless.
+        var registrations = Interlocked.Increment(ref scopeRegistrationsSinceLastPrune);
+        if (registrations >= 64 && registrations >= AsyncReactionScopes.Count / 2)
+        {
+            Interlocked.Exchange(ref scopeRegistrationsSinceLastPrune, 0);
+            PruneDeadScopes();
         }
     }
 
     // Test hook: the number of registered scope entries (live or dead), for asserting that
     // PruneDeadScopes keeps the registry bounded.
-    internal int RegisteredScopeCount
-    {
-        get { lock (Lock) { return AsyncReactionScopes.Count; } }
-    }
+    internal int RegisteredScopeCount => AsyncReactionScopes.Count;
 
-    // The scope targets are weak, but the dictionary entries themselves are not: sweep dead ones
-    // whenever a new scope is registered so the map stays bounded by the number of LIVE flows.
-    // Must be called under Lock.
-    private void PruneDeadScopes()
+    // The scope targets are weak, but the dictionary entries themselves are not: sweep the dead
+    // ones so the map stays bounded by the number of LIVE flows. The conditional TryRemove only
+    // removes the exact dead entry, so it can never race away a concurrently resurrected scope.
+    internal void PruneDeadScopes()
     {
-        List<double>? deadKeys = null;
         foreach (var kvp in AsyncReactionScopes)
         {
             if (!kvp.Value.TryGetTarget(out _))
             {
-                (deadKeys ??= new()).Add(kvp.Key);
-            }
-        }
-
-        if (deadKeys != null)
-        {
-            foreach (var key in deadKeys)
-            {
-                AsyncReactionScopes.Remove(key);
+                ((System.Collections.Generic.ICollection<KeyValuePair<double, WeakReference<ReactionScope>>>)AsyncReactionScopes).Remove(kvp);
             }
         }
     }
 
     internal void CleanScope()
     {
-        lock (Lock)
-        {
-            AsyncReactionScopes.Remove(AsyncLocalScope.Value);
-        }
+        AsyncReactionScopes.TryRemove(AsyncLocalScope.Value, out _);
     }
 
     internal void CheckDependenciesTheSame(IMemoHandlR memoHandlR)
@@ -193,20 +206,30 @@ public class Context
             else
             {
                 scope.CurrentGets = [.. scope.CurrentGets, memoHandlR];
+
+                // Subscribe EAGERLY, at capture time, not after the evaluation completes: a Set
+                // landing between this read and the deferred link rewiring would otherwise see no
+                // observer and notify nobody -- the node would commit a value computed from the
+                // pre-Set read with no Stale ever bumping its generation (the first-evaluation
+                // subscription window). With the link in place immediately, that Set reaches the
+                // node mid-evaluation, the commit is refused, and the normal machinery re-runs.
+                // (Prefix-matched re-reads above are already subscribed from the previous run.)
+                if (scope.CurrentReaction is IMemoizR reaction
+                    && scope.CurrentReaction is SignalHandlR node
+                    && !node.IsObserving(memoHandlR))
+                {
+                    memoHandlR.Observers = [.. memoHandlR.Observers, new(reaction)];
+                }
             }
         }
     }
 
     internal double ForceNewScope()
     {
-        lock (Lock)
-        {
-            var key = Random.Shared.NextDouble();
-            AsyncLocalScope.Value = key;
-            PruneDeadScopes();
-            AsyncReactionScopes.Add(key, new(new()));
-            return key;
-        }
+        var key = Random.Shared.NextDouble();
+        AsyncLocalScope.Value = key;
+        RegisterScope(key, new());
+        return key;
     }
 
     public T Untrack<T>(Func<T> fn)

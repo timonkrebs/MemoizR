@@ -28,6 +28,13 @@ public sealed class EagerRelativeSignal<T> : MemoHandlR<T>, IStateGetR<T>
 
     public async Task<T> Get()
     {
+        // An unpinned flow can have no capturing reaction (its scope would be freshly minted),
+        // so the read needs no scope at all.
+        if (!Context.HasFlowScope)
+        {
+            return Value;
+        }
+
         var scope = Context.GetOrCreateScope();
         if (scope.CurrentReaction == null)
         {

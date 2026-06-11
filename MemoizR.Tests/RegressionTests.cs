@@ -309,6 +309,38 @@ public class RegressionTests
         Assert.Equal((1000 * 2 + 1) * 3, await m3.Get());
     }
 
+    // The first-evaluation subscription window: a node wires itself into a source's observer
+    // list at CAPTURE time (the moment the source is first read), not after the evaluation
+    // completes. A Set landing between the read and a deferred wiring would see no observer and
+    // notify nobody -- the node would commit a value computed from the pre-Set read with no
+    // Stale ever bumping its generation, caching stale until some LATER write happens to land.
+    [Fact(Timeout = 10000)]
+    public async Task Memo_FirstEvaluation_SetDuringSubscriptionWindow_IsNotLost()
+    {
+        var f = new MemoFactory();
+        var s = f.CreateSignal(1);
+
+        var gate = new RecomputeGate();
+        var m = f.CreateMemoizR(async () =>
+        {
+            var x = await s.Get();      // capture: m must ALREADY be observing s here
+            await gate.PauseIfArmedAsync();
+            return x;
+        });
+
+        gate.Arm();
+        var firstGet = Task.Run(async () => await m.Get()); // FIRST evaluation: reads s == 1, parks
+        await gate.ReadDone;
+
+        await s.Set(2);                 // lands inside the subscription window
+
+        gate.Proceed();
+        await firstGet;                 // tries to commit the value computed from s == 1
+
+        // The Set must not have been lost: m must reconverge to 2, not cache 1 forever.
+        Assert.Equal(2, await m.Get());
+    }
+
     // The context-wide CancellationTokenSource must survive until the LAST in-flight root
     // evaluation exits, not until the FIRST one does. Interleaving: root A creates the CTS, root
     // B enters while it exists (so B is not the creator), A finishes -- if A's exit nulls the

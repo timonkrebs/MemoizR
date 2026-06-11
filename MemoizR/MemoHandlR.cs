@@ -75,9 +75,15 @@ public abstract class SignalHandlR : IMemoHandlR
 
             for (var i = scope.CurrentGetsIndex; i < Sources.Length; i++)
             {
-                // Add ourselves to the end of the parent .observers array
+                // Add ourselves to the parent .observers array. Usually already done eagerly at
+                // capture time (CheckDependenciesTheSame -- closing the subscription window), so
+                // only re-add if RemoveParentObservers above stripped it (a source that moved
+                // position between runs).
                 var source = Sources[i];
-                source.Observers = [.. source.Observers, new(self)];
+                if (!IsObserving(source))
+                {
+                    source.Observers = [.. source.Observers, new(self)];
+                }
             }
         }
         else if (Sources.Length > 0 && scope.CurrentGetsIndex < Sources.Length)
@@ -95,6 +101,19 @@ public abstract class SignalHandlR : IMemoHandlR
             var source = Sources[i];
             source.Observers = [.. source.Observers.Where(x => x.TryGetTarget(out var o) ? !ReferenceEquals(o, this) : false)];
         }
+    }
+
+    // Whether this node is already in `source`'s observer down-links.
+    internal bool IsObserving(IMemoHandlR source)
+    {
+        foreach (var observer in source.Observers)
+        {
+            if (observer.TryGetTarget(out var o) && ReferenceEquals(o, this))
+            {
+                return true;
+            }
+        }
+        return false;
     }
 
     // The diamond down-link: after this node recomputed to a changed value, mark our observers
@@ -118,14 +137,16 @@ public abstract class SignalHandlR : IMemoHandlR
     // dirty (see CacheStateCell.Invalidate); propagation is skipped then because the observers
     // were already notified when this node first reached that state -- an observer that commits
     // Clean inside the race window is re-notified by CommitCleanOrRenotifyAsync instead.
-    internal async Task InvalidateAndPropagateAsync(CacheState state)
+    // Non-async on purpose: the suppressed case is the common one under write storms and should
+    // not pay for an async state machine.
+    internal Task InvalidateAndPropagateAsync(CacheState state)
     {
         if (!stateCell.Invalidate(state))
         {
-            return;
+            return Task.CompletedTask;
         }
 
-        await PropagateStaleToObserversAsync();
+        return PropagateStaleToObserversAsync();
     }
 
     internal async Task PropagateStaleToObserversAsync(CacheState state = CacheState.CacheCheck)
@@ -146,20 +167,24 @@ public abstract class SignalHandlR : IMemoHandlR
     // entirely), so re-notify the observers; for a reaction observer this also re-schedules its
     // debounced update. Without this, a node whose commit lost the race could leave a descendant
     // cached-stale with nothing ever re-dirtying it.
-    internal async Task CommitCleanOrRenotifyAsync(int token)
+    // Non-async, with a lock-free pre-check: if the state is already Clean, either this very
+    // token's early commit succeeded (every invalidation escalates the state away from Clean, so
+    // Clean here implies an unchanged generation) or a newer evaluation committed -- in both
+    // cases there is nothing to do, and the common recompute path skips the gate entirely.
+    internal Task CommitCleanOrRenotifyAsync(int token)
     {
-        if (stateCell.TryCommitClean(token))
+        if (stateCell.State == CacheState.CacheClean || stateCell.TryCommitClean(token))
         {
-            return;
+            return Task.CompletedTask;
         }
 
         if (stateCell.State == CacheState.CacheClean)
         {
             // A newer evaluation already committed; nothing is pending and observers are consistent.
-            return;
+            return Task.CompletedTask;
         }
 
-        await PropagateStaleToObserversAsync();
+        return PropagateStaleToObserversAsync();
     }
 }
 
