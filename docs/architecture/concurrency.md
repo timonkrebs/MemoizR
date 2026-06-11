@@ -120,8 +120,13 @@ Flow identity is carried by `AsyncLocal<double>` keys:
   a memo's fn).
 - `Context.ForceNewScope()` unconditionally mints a fresh scope — used by structured-concurrency
   children that must *not* share their parent's dependency capture (§8).
-- The `Context.ReactionScope` getter resolves the current flow's scope from a dictionary of weak
-  references (under `Context.Lock`); a flow with no pinned key gets a throwaway scope per access.
+- The `Context.ReactionScope` getter is **lock-free**: it resolves the current flow's scope from
+  a `ConcurrentDictionary` of weak references (resurrecting a collected scope atomically via a
+  `GetOrAdd`/`TryUpdate` loop); a flow with no pinned key gets a throwaway scope per access.
+  `Context.Lock` is *not* involved — nothing may assume scope resolution is serialized with
+  `CheckDependenciesTheSame`. Because entries are only weakly held, every evaluation keeps its
+  scope in a strong local (with `GC.KeepAlive`) for as long as it relies on the scope's — and
+  thus its `ContextLock`'s — identity.
 
 Each `ReactionScope` carries the flow's **dependency-capture state** (`CurrentReaction`,
 `CurrentGets`, `CurrentGetsIndex`) and the flow's **`ContextLock`**. The lock being *per-flow* is

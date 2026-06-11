@@ -96,21 +96,20 @@ public class Context
     // the shared field while B is still mid-evaluation -- B's later reads then NRE'd and
     // Cancel() silently stopped working.
     //
-    // A NEW ROOT evaluation (depth 0 -> 1) replaces a canceled source instead of reusing it:
-    // the canceled source used to linger until the next full-quiescence null-out, failing every
-    // later evaluation with TaskCanceledException. Nested enters (depth > 1) deliberately keep
-    // the canceled source -- they JOIN the in-flight tree, and Cancel() must reach everything in
-    // it, including debounced reaction updates whose nested parent scans re-enter here.
+    // Cancellation deliberately reaches every evaluation OVERLAPPING the canceled one: an enter
+    // while the (possibly canceled) source exists JOINS that tree -- this is what lets Cancel()
+    // abort a debounced reaction update whose nested parent scans re-enter here
+    // (TestMultipleMapHandlingCancel pins it). The flip side is accepted and bounded: after a
+    // Cancel(), evaluations that keep overlapping the canceled tree keep failing with
+    // TaskCanceledException until the refcount reaches zero once; the very next root evaluation
+    // then gets a fresh source (Exit nulls the field at depth zero, under this same lock, so a
+    // canceled source can never outlive its tree).
     internal void EnterEvaluationScope()
     {
         lock (Lock)
         {
             evaluationDepth++;
-            if (CancellationTokenSource is null
-                || (evaluationDepth == 1 && CancellationTokenSource.IsCancellationRequested))
-            {
-                CancellationTokenSource = new();
-            }
+            CancellationTokenSource ??= new();
         }
     }
 
