@@ -727,6 +727,26 @@ public class ReactiveTests
         GC.KeepAlive(r);
     }
 
+    // Factory-level convenience: f.CreateReaction(..) must behave exactly like
+    // f.BuildReaction().CreateReaction(..) with the default label and debounce.
+    [Fact(Timeout = 10000)]
+    public async Task Factory_CreateReaction_Convenience_TriggersLikeBuilderForm()
+    {
+        var f = new MemoFactory();
+        var v1 = f.CreateSignal(1);
+        var m1 = f.CreateMemoizR(async () => await v1.Get() * 2);
+        var last = 0;
+        var r = f.CreateReaction(m1, v1, (a, b) => last = a + b);
+
+        await TestHelpers.WaitForConvergenceAsync(() => last == 3);
+        Assert.Equal(3, last);
+
+        await v1.Set(5);
+        await TestHelpers.WaitForConvergenceAsync(() => last == 15);
+        Assert.Equal(15, last);
+        GC.KeepAlive(r);
+    }
+
     // Separate-parameter dependencies must be evaluated IN PARALLEL (issue #13: "so that they
     // can be evaluated independently"): each runs on its own pinned scope, so a dirty update
     // costs the slowest dependency instead of the sum. The two memos here deadlock unless both

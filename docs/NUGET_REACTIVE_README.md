@@ -14,8 +14,11 @@ var f = new MemoFactory();
 var v1 = f.CreateSignal(1);
 var m1 = f.CreateMemoizR(async() => await v1.Get());
 var m2 = f.CreateMemoizR(async() => await v1.Get() * 2);
-var r1 = f.BuildReaction().CreateReaction(m1, m2, (val1, val2) => val1 + val2);
+var r1 = f.CreateReaction(m1, m2, (val1, val2) => val1 + val2);
 ```
+
+A custom label or debounce time goes through the builder:
+`f.BuildReaction("MyReaction").AddDebounceTime(TimeSpan.FromMilliseconds(16)).CreateReaction(...)`.
 
 ## UI threads
 
@@ -30,7 +33,7 @@ var f = new MemoFactory();
 f.AddSynchronizationContext(UISyncContext);
 
 // m1 and m2 are computed on worker threads; only the action runs on the UI thread.
-var r1 = f.BuildReaction().CreateReaction(m1, m2, (val1, val2) => val1 + val2);
+var r1 = f.CreateReaction(m1, m2, (val1, val2) => val1 + val2);
 ```
 
 For WPF, the MemoizR.Wpf package wires this up directly from `Application.Current.Dispatcher`
