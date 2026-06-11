@@ -149,6 +149,29 @@ public class SendableTypeArgumentAnalyzerTests
     }
 
     [Fact]
+    public async Task ActorEngineCreations_AreChecked()
+    {
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    f.CreateActorSignal(new List<int>());
+                    f.CreateActorMemoizR(async () => new Dictionary<string, int>());
+                    f.CreateActorSignal(1); // fine
+                }
+            }
+            """);
+
+        Assert.Equal(2, diagnostics.Length);
+        Assert.All(diagnostics, d => Assert.Equal("MZR001", d.Id));
+    }
+
+    [Fact]
     public async Task ConcurrentMap_ElementType_IsChecked()
     {
         var diagnostics = await AnalyzeAsync("""

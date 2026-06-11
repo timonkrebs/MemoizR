@@ -29,10 +29,26 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
   seat), `MemoFactory.AddExecutor(...)`, and a per-builder `ReactionBuilder.AddExecutor(...)`
   override.
 
+- EXPERIMENTAL actor engine (issue #36 layer 5, see ADR 0006): `CreateActorSignal` /
+  `CreateActorMemoizR` nodes whose graph bookkeeping runs as synchronous turns of a per-context
+  `GraphActor` (a serial channel loop that also implements `IExecutor`) instead of under locks —
+  same observable semantics (lazy memoization, generation-guarded commits, diamond absorption,
+  dynamic rewiring, lock-free clean fast path), no monitors, no deadlock surface, plus a
+  read-evidence guard (`(source, generation)` pairs re-verified at commit) that closes the
+  late-wired-observer staleness hole.
+
 ### Changed
 - `ReactionBuilder`'s public constructor takes `IExecutor?` instead of
   `SynchronizationContext?`. `BuildReaction()` / `AddSynchronizationContext` callers are
   unaffected (the context is wrapped in a `SynchronizationContextExecutor`).
+
+### Known issues
+- The lock-based engine can permanently strand a memo Clean-but-stale when its observer link
+  wires while the source is already dirty (an UN-primed graph evaluated mid-storm): cascade
+  suppression at already-dirty nodes silences late-wired observers forever. Discovered by the
+  actor-engine work; reproducer quarantined as
+  `RegressionTests.LockEngine_UnprimedChainUnderStorm_StrandsStale_KnownIssue`; the actor
+  engine's read-evidence guard is the proven fix shape (ADR 0006).
 
 ### Fixed
 

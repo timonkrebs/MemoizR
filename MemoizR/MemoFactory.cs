@@ -139,6 +139,31 @@ public sealed class MemoFactory
         };
     }
 
+    /// <summary>
+    /// EXPERIMENTAL (issue #36 layer 5, ADR 0006): creates a signal on the actor engine, where
+    /// all graph bookkeeping runs as turns of the context's <see cref="GraphActor"/> instead of
+    /// under locks. Actor-engine nodes only interoperate with other actor-engine nodes of the
+    /// same context; they cannot be wired into lock-engine memos or reactions (deliberately, at
+    /// the type level).
+    /// </summary>
+    public ActorSignal<T> CreateActorSignal<T>(T value)
+    {
+        EnsureSendableIfStrict<T>();
+        return new(value, Context.GraphActor);
+    }
+
+    /// <summary>
+    /// EXPERIMENTAL (issue #36 layer 5, ADR 0006): creates a memo on the actor engine. Same
+    /// observable semantics as <see cref="CreateMemoizR{T}(Func{Task{T}})"/> -- lazy, dynamic,
+    /// generation-guarded -- with every piece of bookkeeping serialized by the context's
+    /// <see cref="GraphActor"/>.
+    /// </summary>
+    public ActorMemo<T> CreateActorMemoizR<T>(Func<Task<T>> fn)
+    {
+        EnsureSendableIfStrict<T>();
+        return new(fn, Context.GraphActor);
+    }
+
     // Strict-mode boundary check (issue #36): every node type whose value crosses flows funnels
     // its creation through this. Internal so the structured-concurrency factory extensions (a
     // friend assembly) enforce the same contract for their nodes.

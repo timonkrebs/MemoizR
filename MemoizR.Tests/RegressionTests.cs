@@ -415,4 +415,58 @@ public class RegressionTests
         await v1.Set(7);
         Assert.Equal(14, await m.Get());
     }
+
+    // QUARANTINED known issue, discovered by the actor-engine work (ADR 0006): an observer that
+    // wires itself to an ALREADY-DIRTY source at commit time was never notified by the cascade
+    // that dirtied the source, and never will be -- later cascades terminate at the already-dirty
+    // source ("observers were already notified"), an assumption late-wired observers violate.
+    // Under an UN-PRIMED chain (links wire during the first evaluations, mid-storm) the memo
+    // commits Clean over a dirty parent and is permanently stale; every other stress test in the
+    // suite primes its graph before storming, which is why this stayed hidden. Reproduces in
+    // seconds when enabled. The actor engine closes the hole with read-evidence pairs
+    // (ActorEngineTests.UnprimedChainUnderStorm_NeverStrandsStale); porting that guard to the
+    // lock engine is the open follow-up.
+    [Fact(Timeout = 300000, Skip = "Known latent lock-engine issue: late-wired observers miss in-flight invalidations; see ADR 0006")]
+    public async Task LockEngine_UnprimedChainUnderStorm_StrandsStale_KnownIssue()
+    {
+        for (var round = 0; round < 20; round++)
+        {
+            await Task.WhenAll(Enumerable.Range(0, 6).Select(_ => Task.Run(RunUnprimedLockChainStormInstanceAsync)));
+        }
+    }
+
+    private static async Task RunUnprimedLockChainStormInstanceAsync()
+    {
+        var f = new MemoFactory();
+        var v = f.CreateSignal(0);
+        var m1 = f.CreateMemoizR(async () => await v.Get() * 2);
+        var m2 = f.CreateMemoizR(async () => await m1.Get() + 1);
+
+        const int writes = 200;
+        var writer = Task.Run(async () =>
+        {
+            for (var i = 1; i <= writes; i++)
+            {
+                await v.Set(i);
+            }
+        });
+        var readers = Enumerable.Range(0, 2).Select(_ => Task.Run(async () =>
+        {
+            while (!writer.IsCompleted)
+            {
+                var value = await m2.Get();
+                Assert.True(value % 2 == 1, $"inconsistent value {value}");
+            }
+        })).ToArray();
+
+        await writer;
+        await Task.WhenAll(readers);
+
+        for (var k = 0; k < 300 && await m2.Get() != writes * 2 + 1; k++)
+        {
+            await Task.Delay(2);
+        }
+
+        Assert.Equal(writes * 2 + 1, await m2.Get());
+    }
 }

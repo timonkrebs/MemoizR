@@ -55,7 +55,7 @@ public sealed class SetInsideComputationAnalyzer : DiagnosticAnalyzer
         }
 
         var type = method.ContainingType?.OriginalDefinition;
-        return type is { Arity: 1, Name: "Signal" or "EagerRelativeSignal" }
+        return type is { Arity: 1, Name: "Signal" or "EagerRelativeSignal" or "ActorSignal" }
             && type.ContainingNamespace?.ToDisplayString() == "MemoizR";
     }
 }

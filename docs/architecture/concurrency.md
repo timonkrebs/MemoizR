@@ -677,6 +677,15 @@ discipline is enforced at build time by the bundled `MemoizR.Analyzers` rules �
 (non-Sendable creation type), MZR002 (computation writes captured/shared state), MZR003 (`Set`
 inside a computation) — see [ADR 0004](../adr/0004-compile-time-data-race-diagnostics.md).
 
+An experimental **actor engine** (`CreateActorSignal`/`CreateActorMemoizR`,
+[ADR 0006](../adr/0006-actor-engine-prototype.md)) replaces layers 1–3 wholesale for its nodes:
+all bookkeeping runs as synchronous turns of a per-context `GraphActor`, leaving only the
+generation guard (§6, inherent to lazy memoization) and the two-volatile-field fast path (§7).
+Its read-evidence commit guard also closes a staleness window this document's engine leaves
+open — a `Stale` suppressed at an already-dirty node (§5's early termination) never reaches an
+observer whose down-link wired *after* the node went dirty; see the quarantined
+`LockEngine_UnprimedChainUnderStorm_StrandsStale_KnownIssue` regression test.
+
 ## 14. How this is verified
 
 Three complementary techniques, because no single one can prove a memory model:

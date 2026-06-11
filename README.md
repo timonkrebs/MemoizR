@@ -178,9 +178,27 @@ var r = f.BuildReaction().CreateReaction(m1, v =>
 });
 ```
 
+### Actor engine (experimental)
+
+The Swift-actor-style core suggested by issue #36: graph bookkeeping runs as serialized turns of
+a per-context `GraphActor` instead of under locks, while computations stay parallel. Same
+semantics, no monitors, no deadlock surface — plus a read-evidence commit guard that closes a
+staleness window the lock engine leaves open:
+
+```cs
+var f = new MemoFactory();
+var v = f.CreateActorSignal(1);
+var m = f.CreateActorMemoizR(async () => await v.Get() * 2);
+await m.Get(); // 2 — lazy, memoized, generation-guarded, actor-isolated bookkeeping
+```
+
+Actor nodes only interoperate with actor nodes of the same context (enforced at the type
+level); signals/memos only for now.
+
 See [ADR 0003](docs/adr/0003-sendable-checking-and-isolation-assertions.md) (runtime layer),
-[ADR 0004](docs/adr/0004-compile-time-data-race-diagnostics.md) (analyzers), and
-[ADR 0005](docs/adr/0005-custom-executors.md) (executors) for the design and its limits.
+[ADR 0004](docs/adr/0004-compile-time-data-race-diagnostics.md) (analyzers),
+[ADR 0005](docs/adr/0005-custom-executors.md) (executors), and
+[ADR 0006](docs/adr/0006-actor-engine-prototype.md) (actor engine) for the design and its limits.
 
 Try it out!https:
 Experiment with MemoizR online: https://dotnetfiddle.net/Widget/EWtptc

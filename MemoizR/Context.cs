@@ -57,6 +57,12 @@ public class Context
 
     public CancellationTokenSource? CancellationTokenSource { get; private set; }
 
+    // The experimental actor engine's serial seat (ADR 0006): one per context, like the
+    // ReactionScope machinery, so keyed factories share one actor. Lazy because most contexts
+    // never create actor-engine nodes.
+    private readonly Lazy<GraphActor> graphActor = new(() => new());
+    internal GraphActor GraphActor => graphActor.Value;
+
     private int evaluationDepth;
 
     // The context-wide CancellationTokenSource is shared by every evaluation in flight (so

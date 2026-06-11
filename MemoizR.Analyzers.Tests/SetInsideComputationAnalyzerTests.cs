@@ -76,6 +76,28 @@ public class SetInsideComputationAnalyzerTests
     }
 
     [Fact]
+    public async Task SetInsideActorMemoComputation_IsFlagged()
+    {
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var v = f.CreateActorSignal(1);
+                    f.CreateActorMemoizR(async () => { await v.Set(2); return 1; });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR003", diagnostic.Id);
+        Assert.Contains("ActorSignal<int>.Set", diagnostic.GetMessage());
+    }
+
+    [Fact]
     public async Task SetOutsideComputations_AndInsideConcurrentMapChildren_AreNotFlagged()
     {
         var diagnostics = await AnalyzeAsync("""

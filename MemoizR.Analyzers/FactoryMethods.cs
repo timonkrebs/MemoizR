@@ -14,7 +14,7 @@ internal static class FactoryMethods
     // value type -- their sources were checked where they were created.
     public static bool IsValueBearingCreation(IMethodSymbol method)
     {
-        return IsMemoFactoryMethod(method, "CreateSignal", "CreateEagerRelativeSignal", "CreateMemoizR")
+        return IsMemoFactoryMethod(method, "CreateSignal", "CreateEagerRelativeSignal", "CreateMemoizR", "CreateActorSignal", "CreateActorMemoizR")
             || IsStructuredFactoryMethod(method, "CreateConcurrentMap", "CreateConcurrentMapReduce", "CreateConcurrentRace");
     }
 
@@ -22,18 +22,20 @@ internal static class FactoryMethods
     // with everything else (MZR002, and the nested-walk pruning in ComputationLambdas).
     public static bool IsComputationHost(IMethodSymbol method)
     {
-        return IsMemoFactoryMethod(method, "CreateMemoizR")
+        return IsMemoFactoryMethod(method, "CreateMemoizR", "CreateActorMemoizR")
             || IsStructuredFactoryMethod(method, "CreateConcurrentMap", "CreateConcurrentMapReduce", "CreateConcurrentRace")
             || IsReactionBuilderMethod(method, "CreateReaction", "CreateAdvancedReaction");
     }
 
-    // Hosts whose computations run while their OWN flow holds the evaluation lock in upgradeable
-    // mode, so a Signal.Set inside them deterministically throws (MZR003). ConcurrentMap and
-    // ConcurrentRace children run on forced fresh scopes and are deliberately excluded;
-    // ConcurrentMapReduce children share their parent flow's scope, so they are included.
+    // Hosts whose computations deterministically throw on a Set of their own graph (MZR003): in
+    // the lock engine because the flow holds the evaluation lock in upgradeable mode, in the
+    // actor engine because ActorSignal.Set rejects flows with an active capture frame.
+    // ConcurrentMap and ConcurrentRace children run on forced fresh scopes and are deliberately
+    // excluded; ConcurrentMapReduce children share their parent flow's scope, so they are
+    // included.
     public static bool IsSameFlowEvaluationHost(IMethodSymbol method)
     {
-        return IsMemoFactoryMethod(method, "CreateMemoizR")
+        return IsMemoFactoryMethod(method, "CreateMemoizR", "CreateActorMemoizR")
             || IsStructuredFactoryMethod(method, "CreateConcurrentMapReduce")
             || IsReactionBuilderMethod(method, "CreateReaction", "CreateAdvancedReaction");
     }
