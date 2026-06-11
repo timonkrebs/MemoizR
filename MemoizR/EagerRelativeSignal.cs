@@ -11,18 +11,26 @@ public sealed class EagerRelativeSignal<T> : MemoHandlR<T>, IStateGetR<T>
 
     public async Task Set(Func<T, T> fn)
     {
-        // There can be multiple threads updating the CacheState at the same time but no reads should be possible while in the process.
-        // Must be Upgradeable because it could change to "Writeble-Lock" if something synchronously reactive is listening.
-        using (await mutex.LockAsync())
-        using (await Context.ReactionScope.ContextLock.ExclusiveLockAsync())
+        // Resolve once + strong root: see Signal.Set.
+        var scope = Context.ReactionScope;
+        try
         {
-            // only updating the value should be locked
-            lock (Lock)
+            // There can be multiple threads updating the CacheState at the same time but no reads should be possible while in the process.
+            using (await mutex.LockAsync())
+            using (await scope.ContextLock.ExclusiveLockAsync())
             {
-                Value = fn(Value);
-            }
+                // only updating the value should be locked
+                lock (Lock)
+                {
+                    Value = fn(Value);
+                }
 
-            await PropagateStaleToObserversAsync(CacheState.CacheDirty);
+                await PropagateStaleToObserversAsync(CacheState.CacheDirty);
+            }
+        }
+        finally
+        {
+            GC.KeepAlive(scope);
         }
     }
 
@@ -48,6 +56,7 @@ public sealed class EagerRelativeSignal<T> : MemoHandlR<T>, IStateGetR<T>
         {
             Context.CheckDependenciesTheSame(this);
         }
+        GC.KeepAlive(scope); // strong root: the lock identity must outlive the tracked read
 
         return Value;
     }

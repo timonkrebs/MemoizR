@@ -30,8 +30,11 @@ public sealed class StructuredResultsJob<T> : StructuredJobBase<ConcurrentDictio
     // Cognitive Complexity in budget.
     private async Task ExecuteFn(Func<IStructuredResourceGroup, Task<T>> x, int i, StructuredResourceGroup resourceGroup)
     {
-        context.ForceNewScope();
-        context.ReactionScope.CurrentReaction = @this;
+        // The local is the scope's ONLY strong root (the registry holds it weakly): without it a
+        // GC during the awaited fn collects the scope, the fn's reads resolve a resurrected scope
+        // whose CurrentReaction is null, and the child's dependencies are silently not captured.
+        var scope = context.ForceNewScope();
+        scope.CurrentReaction = @this;
         try
         {
             result!.TryAdd(i, await x(resourceGroup));
@@ -41,7 +44,8 @@ public sealed class StructuredResultsJob<T> : StructuredJobBase<ConcurrentDictio
             cancellationTokenSource.Cancel();
             throw;
         }
-        AccumulateSourcesAndObservers(context, @this);
+        AccumulateSourcesAndObservers(scope, @this);
+        GC.KeepAlive(scope);
     }
 
     protected override void HandleSubscriptions()

@@ -95,12 +95,22 @@ public class Context
     // under concurrency: root A creates it, root B enters while it exists, A finishes and nulls
     // the shared field while B is still mid-evaluation -- B's later reads then NRE'd and
     // Cancel() silently stopped working.
+    //
+    // A NEW ROOT evaluation (depth 0 -> 1) replaces a canceled source instead of reusing it:
+    // the canceled source used to linger until the next full-quiescence null-out, failing every
+    // later evaluation with TaskCanceledException. Nested enters (depth > 1) deliberately keep
+    // the canceled source -- they JOIN the in-flight tree, and Cancel() must reach everything in
+    // it, including debounced reaction updates whose nested parent scans re-enter here.
     internal void EnterEvaluationScope()
     {
         lock (Lock)
         {
             evaluationDepth++;
-            CancellationTokenSource ??= new();
+            if (CancellationTokenSource is null
+                || (evaluationDepth == 1 && CancellationTokenSource.IsCancellationRequested))
+            {
+                CancellationTokenSource = new();
+            }
         }
     }
 
@@ -125,9 +135,7 @@ public class Context
         {
             return false;
         }
-        var key = Random.Shared.NextDouble();
-        AsyncLocalScope.Value = key;
-        RegisterScope(key, new());
+        MintAndPinScope();
         return true;
     }
 
@@ -138,26 +146,36 @@ public class Context
         var key = AsyncLocalScope.Value;
         if (key == 0)
         {
-            key = Random.Shared.NextDouble();
-            AsyncLocalScope.Value = key;
-            ReactionScope created = new();
-            RegisterScope(key, created);
-            return created;
+            return MintAndPinScope();
         }
 
         return GetScopeForKey(key);
+    }
+
+    // The one mint-and-pin path: a fresh random key on the AsyncLocal plus a registry entry.
+    // Callers MUST keep the returned scope strongly referenced for as long as they rely on its
+    // identity (the registry holds it only weakly; see ReactionScope resurrection).
+    private ReactionScope MintAndPinScope()
+    {
+        var key = Random.Shared.NextDouble();
+        AsyncLocalScope.Value = key;
+        ReactionScope created = new();
+        RegisterScope(key, created);
+        return created;
     }
 
     private void RegisterScope(double key, ReactionScope scope)
     {
         AsyncReactionScopes.TryAdd(key, new(scope)); // fresh random key: cannot collide
 
-        // Amortized sweep: pruning on every registration is O(table) per mint, which goes
-        // quadratic under sustained traffic from unpinned flows (every top-level operation mints
-        // a scope). Sweep only when the registrations since the last sweep rival the table size,
-        // making each registration O(1) amortized. Concurrent double-sweeps are harmless.
+        // Sweep policy: while the table is small (<= 64 entries) sweep on every registration --
+        // an O(64)-bounded scan, so dead flows are pruned promptly. Past that, sweep only when
+        // the registrations since the last sweep rival the table size: pruning a LARGE table on
+        // every mint is O(table) per registration (quadratic under sustained traffic), while the
+        // rivalry condition keeps it O(1) amortized. Concurrent double-sweeps are harmless.
         var registrations = Interlocked.Increment(ref scopeRegistrationsSinceLastPrune);
-        if (registrations >= 64 && registrations >= AsyncReactionScopes.Count / 2)
+        var count = AsyncReactionScopes.Count;
+        if (count <= 64 || registrations >= count / 2)
         {
             Interlocked.Exchange(ref scopeRegistrationsSinceLastPrune, 0);
             PruneDeadScopes();
@@ -177,7 +195,9 @@ public class Context
         {
             if (!kvp.Value.TryGetTarget(out _))
             {
-                ((System.Collections.Generic.ICollection<KeyValuePair<double, WeakReference<ReactionScope>>>)AsyncReactionScopes).Remove(kvp);
+                // Conditional remove (key AND value must match), so it can never race away a
+                // concurrently resurrected scope.
+                AsyncReactionScopes.TryRemove(kvp);
             }
         }
     }
@@ -214,49 +234,64 @@ public class Context
                 // subscription window). With the link in place immediately, that Set reaches the
                 // node mid-evaluation, the commit is refused, and the normal machinery re-runs.
                 // (Prefix-matched re-reads above are already subscribed from the previous run.)
-                if (scope.CurrentReaction is IMemoizR reaction
-                    && scope.CurrentReaction is SignalHandlR node
-                    && !node.IsObserving(memoHandlR))
+                if (scope.CurrentReaction is IMemoizR reaction)
                 {
-                    memoHandlR.Observers = [.. memoHandlR.Observers, new(reaction)];
+                    memoHandlR.AddObserver(reaction);
                 }
             }
         }
     }
 
-    internal double ForceNewScope()
+    // Pins a FRESH scope onto the current flow, replacing any inherited pin. Returns the scope;
+    // the caller must keep it strongly referenced for the duration of its use (the registry holds
+    // it only weakly).
+    internal ReactionScope ForceNewScope()
     {
-        var key = Random.Shared.NextDouble();
-        AsyncLocalScope.Value = key;
-        RegisterScope(key, new());
-        return key;
+        return MintAndPinScope();
     }
 
     public T Untrack<T>(Func<T> fn)
     {
-        var listener = ReactionScope.CurrentReaction;
-        ReactionScope.CurrentReaction = null;
+        if (!HasFlowScope)
+        {
+            // An unpinned flow has no capturing reaction by construction; resolving the getter
+            // would only mint throwaway scopes whose CurrentReaction writes are dead stores.
+            return fn();
+        }
+
+        // Resolve ONCE: repeated getter access can observe different instances (the weakly-held
+        // scope can be collected and resurrected between accesses), in which case the restore
+        // below would land on a different scope than the one that was nulled.
+        var scope = ReactionScope;
+        var listener = scope.CurrentReaction;
+        scope.CurrentReaction = null;
         try
         {
             return fn();
         }
         finally
         {
-            ReactionScope.CurrentReaction = listener;
+            scope.CurrentReaction = listener;
         }
     }
 
     public async Task<T> Untrack<T>(Func<Task<T>> fn)
     {
-        var listener = ReactionScope.CurrentReaction;
-        ReactionScope.CurrentReaction = null;
+        if (!HasFlowScope)
+        {
+            return await fn();
+        }
+
+        var scope = ReactionScope;
+        var listener = scope.CurrentReaction;
+        scope.CurrentReaction = null;
         try
         {
             return await fn();
         }
         finally
         {
-            ReactionScope.CurrentReaction = listener;
+            scope.CurrentReaction = listener;
         }
     }
 }

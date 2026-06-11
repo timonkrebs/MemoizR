@@ -29,6 +29,9 @@ public sealed class StructuredReduceJob<T> : StructuredJobBase<T>
     // keep Cognitive Complexity in budget.
     private async Task ExecuteFn(Func<IStructuredResourceGroup, Task<T>> x, StructuredResourceGroup resourceGroup)
     {
+        // Children share the owning Get's flow scope (kept alive by that Get's strong local);
+        // resolve it once instead of re-probing the registry per access.
+        var scope = context.ReactionScope;
         try
         {
             var r = await x(resourceGroup);
@@ -42,7 +45,7 @@ public sealed class StructuredReduceJob<T> : StructuredJobBase<T>
             cancellationTokenSource.Cancel();
             throw;
         }
-        AccumulateSourcesAndObservers(context, @this);
+        AccumulateSourcesAndObservers(scope, @this);
     }
 
     protected override void HandleSubscriptions()

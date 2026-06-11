@@ -48,9 +48,47 @@ public abstract class SignalHandlR : IMemoHandlR
         this.Context = context;
     }
 
+    // Atomic add-if-absent on our observer down-links. The membership check and the array swap
+    // must happen under one monitor: observer mutations arrive from three different lock domains
+    // (capture under Context.Lock, rewiring under a flow's ContextLock + node mutex, job
+    // accumulation under the job Lock), and two unsynchronized read-modify-writes of the same
+    // array lose one of the entries -- a silently dropped subscription, i.e. a missed-trigger.
+    void IMemoHandlR.AddObserver(IMemoizR observer) => AddObserver(observer);
+
+    internal void AddObserver(IMemoizR observer)
+    {
+        lock (Lock)
+        {
+            foreach (var existing in Observers)
+            {
+                if (existing.TryGetTarget(out var o) && ReferenceEquals(o, observer))
+                {
+                    return;
+                }
+            }
+            Observers = [.. Observers, new(observer)];
+        }
+    }
+
+    void IMemoHandlR.RemoveObserver(IMemoizR observer) => RemoveObserver(observer);
+
+    internal void RemoveObserver(IMemoizR observer)
+    {
+        lock (Lock)
+        {
+            // Dead weak references are swept opportunistically while we are rebuilding anyway.
+            Observers = [.. Observers.Where(x => x.TryGetTarget(out var o) && !ReferenceEquals(o, observer))];
+        }
+    }
+
     // Rewire our source up-links and the parents' observer down-links to match the sources
     // captured during the current evaluation (Context.ReactionScope.CurrentGets). Must only be
     // called by IMemoizR nodes, inside their ContextLock-serialized evaluation.
+    //
+    // Diff-based on purpose: only sources DROPPED by this run lose their down-link to us.
+    // The previous strip-everything-then-re-add left a window in which a retained source had no
+    // observer entry for us -- a Set landing there notified nobody and never bumped our
+    // generation, so the value committed at the end of the evaluation cached stale forever.
     internal void UpdateSourceAndObserverLinks()
     {
         var self = (IMemoizR)this;
@@ -58,62 +96,44 @@ public abstract class SignalHandlR : IMemoHandlR
         // plus a dictionary probe, and this method reads it many times per recompute.
         var scope = Context.ReactionScope;
 
-        // if the sources have changed, update source & observer links
+        IMemoHandlR[] newSources;
         if (scope.CurrentGets.Length > 0)
         {
-            // remove all old Sources' .observers links to us
-            RemoveParentObservers(scope.CurrentGetsIndex);
-            // update source up links
-            if (Sources.Length > 0 && scope.CurrentGetsIndex > 0)
-            {
-                Sources = [.. Sources.Take(scope.CurrentGetsIndex), .. scope.CurrentGets];
-            }
-            else
-            {
-                Sources = scope.CurrentGets;
-            }
-
-            for (var i = scope.CurrentGetsIndex; i < Sources.Length; i++)
-            {
-                // Add ourselves to the parent .observers array. Usually already done eagerly at
-                // capture time (CheckDependenciesTheSame -- closing the subscription window), so
-                // only re-add if RemoveParentObservers above stripped it (a source that moved
-                // position between runs).
-                var source = Sources[i];
-                if (!IsObserving(source))
-                {
-                    source.Observers = [.. source.Observers, new(self)];
-                }
-            }
+            newSources = Sources.Length > 0 && scope.CurrentGetsIndex > 0
+                ? [.. Sources.Take(scope.CurrentGetsIndex), .. scope.CurrentGets]
+                : scope.CurrentGets;
         }
         else if (Sources.Length > 0 && scope.CurrentGetsIndex < Sources.Length)
         {
-            // remove all old Sources' .observers links to us
-            RemoveParentObservers(scope.CurrentGetsIndex);
-            Sources = [.. Sources.Take(scope.CurrentGetsIndex)];
+            newSources = [.. Sources.Take(scope.CurrentGetsIndex)];
+        }
+        else
+        {
+            return; // dependency set unchanged
+        }
+
+        foreach (var old in Sources)
+        {
+            if (!newSources.Contains(old))
+            {
+                old.RemoveObserver(self);
+            }
+        }
+        Sources = newSources;
+        foreach (var source in newSources)
+        {
+            // Usually a no-op: capture-time eager subscription already wired the link.
+            source.AddObserver(self);
         }
     }
 
     internal void RemoveParentObservers(int index)
     {
+        var self = (IMemoizR)this;
         for (var i = index; i < Sources.Length; i++)
         {
-            var source = Sources[i];
-            source.Observers = [.. source.Observers.Where(x => x.TryGetTarget(out var o) ? !ReferenceEquals(o, this) : false)];
+            Sources[i].RemoveObserver(self);
         }
-    }
-
-    // Whether this node is already in `source`'s observer down-links.
-    internal bool IsObserving(IMemoHandlR source)
-    {
-        foreach (var observer in source.Observers)
-        {
-            if (observer.TryGetTarget(out var o) && ReferenceEquals(o, this))
-            {
-                return true;
-            }
-        }
-        return false;
     }
 
     // The diamond down-link: after this node recomputed to a changed value, mark our observers
@@ -175,12 +195,6 @@ public abstract class SignalHandlR : IMemoHandlR
     {
         if (stateCell.State == CacheState.CacheClean || stateCell.TryCommitClean(token))
         {
-            return Task.CompletedTask;
-        }
-
-        if (stateCell.State == CacheState.CacheClean)
-        {
-            // A newer evaluation already committed; nothing is pending and observers are consistent.
             return Task.CompletedTask;
         }
 

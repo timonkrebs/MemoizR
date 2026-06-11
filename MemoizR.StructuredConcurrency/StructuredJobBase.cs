@@ -17,37 +17,29 @@ public abstract class StructuredJobBase<T>
 
     protected virtual void HandleSubscriptions() { }
 
-    // Folds the sources captured on the current scope into allSources and appends the owning
+    // Folds the sources captured on the given scope into allSources and appends the owning
     // node to each new source's observer down-links, under Lock (children run in parallel).
     // Shared by the reduce/results jobs, whose children each call it after running one mapped fn.
-    private protected void AccumulateSourcesAndObservers(Context context, IMemoizR owner)
+    //
+    // A child's reads split between prefix-matches against the owner's previous Sources
+    // (CurrentGetsIndex) and fresh captures (CurrentGets); BOTH must be unioned in. The previous
+    // replace-on-index-0 branch let each forced-scope child overwrite its siblings' captures, and
+    // prefix-matched re-runs contributed nothing at all -- either way HandleSubscriptions then
+    // wired the owner's Sources to a subset (or none) of its real dependencies, and the owner's
+    // CacheCheck parent scan missed invalidations: a deterministic stale read.
+    private protected void AccumulateSourcesAndObservers(ReactionScope scope, IMemoizR owner)
     {
         lock (Lock)
         {
-            // if the sources have changed, update source & observer links
-            if (context.ReactionScope.CurrentGets.Length > 0)
+            foreach (var source in owner.Sources.Take(scope.CurrentGetsIndex))
             {
-                // update source up links
-                if (allSources.Any() && context.ReactionScope.CurrentGetsIndex > 0)
-                {
-                    allSources = [.. allSources, .. context.ReactionScope.CurrentGets];
-                }
-                else
-                {
-                    allSources = context.ReactionScope.CurrentGets;
-                }
-
-                for (var i = context.ReactionScope.CurrentGetsIndex; i < allSources.Count; i++)
-                {
-                    // Add ourselves to the parent .observers array (add-if-absent: capture-time
-                    // eager subscription in CheckDependenciesTheSame usually did this already).
-                    var source = allSources[i];
-                    if (owner is SignalHandlR node && node.IsObserving(source))
-                    {
-                        continue;
-                    }
-                    source.Observers = [.. source.Observers, new(owner)];
-                }
+                allSources.Add(source);
+            }
+            foreach (var source in scope.CurrentGets)
+            {
+                allSources.Add(source);
+                // Usually a no-op: capture-time eager subscription already wired the link.
+                source.AddObserver(owner);
             }
         }
     }
