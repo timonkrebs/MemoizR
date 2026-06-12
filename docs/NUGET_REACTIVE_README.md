@@ -19,22 +19,3 @@ var r1 = f.CreateReaction(m1, m2, (val1, val2) => val1 + val2);
 
 A custom label or debounce time goes through the builder:
 `f.BuildReaction("MyReaction").AddDebounceTime(TimeSpan.FromMilliseconds(16)).CreateReaction(...)`.
-
-## UI threads
-
-Register the UI thread's SynchronizationContext (from the UI thread) and reactions deliver
-their action on it, while the dependencies — passed as separate parameters so they can be
-evaluated independently — are computed in parallel on the thread pool:
-
-```csharp
-// e.g. in a UI app: capture the UI SynchronizationContext on the UI thread
-var UISyncContext = SynchronizationContext.Current!;
-var f = new MemoFactory();
-f.AddSynchronizationContext(UISyncContext);
-
-// m1 and m2 are computed on worker threads; only the action runs on the UI thread.
-var r1 = f.CreateReaction(m1, m2, (val1, val2) => val1 + val2);
-```
-
-For WPF, the MemoizR.Wpf package wires this up directly from `Application.Current.Dispatcher`
-(callable from any thread): `var f = new MemoFactory().AddWpfDispatcher();`
