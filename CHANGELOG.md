@@ -3,6 +3,18 @@ All notable changes to this project will be documented in this file.
  
 The format is based on [Keep a Changelog](http://keepachangelog.com/)
 and this project adheres to [Semantic Versioning](http://semver.org/).
+## [Unreleased]
+ 
+### Added
+- `CreateReaction(...)` convenience overloads directly on the factory — sugar for `BuildReaction().CreateReaction(...)` with the default label and debounce
+- MemoizR.Wpf package: `AddWpfDispatcher` routes reaction actions to the WPF UI thread (via `Application.Current.Dispatcher` or an explicit `Dispatcher`) while the dependency graph keeps evaluating on the thread pool (#13)
+   
+### Changed
+- Reactions now evaluate their separate-parameter dependencies in parallel on the thread pool; with a SynchronizationContext registered, only the action (with the already-evaluated values) is marshalled to the context, and `CreateAdvancedReaction` keeps running its whole body on the context (#13)
+ 
+### Fixed
+- Debounced reaction updates no longer capture the scheduling thread's SynchronizationContext for their continuation, so creating a reaction (or setting a signal) on a UI thread no longer evaluates the dependency graph on that thread (#13)
+
 ## [0.1.0] - 2023-10-06
  
 ### Added

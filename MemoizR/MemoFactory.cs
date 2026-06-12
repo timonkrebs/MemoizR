@@ -8,10 +8,12 @@ public sealed class MemoFactory
     internal Context Context { get; }
     public Lock Lock { get; } = new();
 
-    // The SynchronizationContext reactions built from this factory marshal their Execute to
-    // (set via MemoizR.Reactive's AddSynchronizationContext). Lives on the factory itself so the
-    // association is discoverable and dies with the factory -- it previously sat in a static
-    // side-table in another assembly, which rooted every registered factory forever.
+    // The SynchronizationContext reactions built from this factory marshal to (set via
+    // MemoizR.Reactive's AddSynchronizationContext, or MemoizR.Wpf's AddWpfDispatcher): a
+    // Reaction posts only its action with the already-evaluated dependency values, an
+    // AdvancedReaction its whole Execute. Lives on the factory itself so the association is
+    // discoverable and dies with the factory -- it previously sat in a static side-table in
+    // another assembly, which rooted every registered factory forever.
     internal SynchronizationContext? SynchronizationContext { get; set; }
 
     public MemoFactory(string? contextKey = null)

@@ -17,13 +17,5 @@ var m2 = f.CreateMemoizR(async() => await v1.Get() * 2);
 var r1 = f.CreateReaction(m1, m2, (val1, val2) => val1 + val2);
 ```
 
-```csharp
-
-// The following example uses the TaskScheduler.FromCurrentSynchronizationContext method in a Windows Presentation Foundation (WPF) app to schedule
-// https://learn.microsoft.com/en-us/dotnet/api/system.threading.tasks.taskscheduler?view=net-7.0#specifying-a-synchronization-context
-var UISyncContext = SynchronizationContext.Current;
-var f = new MemoFactory();
-f.AddSynchronizationContext(UISyncContext);
-
-var r1 = f.CreateReaction(m1, m2, (val1, val2) => val1 + val2);
-```
+A custom label or debounce time goes through the builder:
+`f.BuildReaction("MyReaction").AddDebounceTime(TimeSpan.FromMilliseconds(16)).CreateReaction(...)`.

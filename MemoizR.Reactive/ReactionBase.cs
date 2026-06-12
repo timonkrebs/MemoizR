@@ -38,6 +38,19 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
     public async Task Resume()
     {
         isPaused = false;
+        if (ResumeOnDetachedScope)
+        {
+            await Task.Run(RunResumeUpdateOnDetachedScope);
+            return;
+        }
+
+        await RunResumeUpdateOnCurrentScope();
+    }
+
+    protected virtual bool ResumeOnDetachedScope => false;
+
+    private async Task RunResumeUpdateOnCurrentScope()
+    {
         // Serialize like the debounced update path: the node mutex ensures only one update of
         // this reaction runs at a time (Resume vs concurrent debounced updates -- without it, a
         // stale in-flight Execute could apply its side effects after a newer one finished), and
@@ -74,6 +87,35 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
             {
                 Context.CleanScope();
             }
+            GC.KeepAlive(scope);
+        }
+    }
+
+    private async Task RunResumeUpdateOnDetachedScope()
+    {
+        // Plain Reaction keeps dependency evaluation off the caller's thread even for Resume().
+        // This mirrors the debounced update path: the action may marshal through the builder's
+        // SynchronizationContext, but the graph is evaluated on a fresh worker-owned scope.
+        var scope = Context.ForceNewScope();
+        try
+        {
+            using (await mutex.LockAsync())
+            using (await scope.ContextLock.UpgradeableLockAsync())
+            {
+                Context.EnterEvaluationScope();
+                try
+                {
+                    await UpdateIfNecessary();
+                }
+                finally
+                {
+                    Context.ExitEvaluationScope();
+                }
+            }
+        }
+        finally
+        {
+            Context.CleanScope();
             GC.KeepAlive(scope);
         }
     }
@@ -221,7 +263,10 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
     }
 
     // Run Execute on the captured SynchronizationContext if one was supplied (marshalling the
-    // result/exception back through a TaskCompletionSource), otherwise run it inline.
+    // result/exception back through a TaskCompletionSource), otherwise run it inline. Only
+    // AdvancedReaction supplies a context here -- its opaque body cannot be split, so it runs on
+    // the context as a whole. Reaction marshals at action granularity inside its composed body
+    // instead (ReactionBuilder.InvokeActionAsync), keeping dependency evaluation off the context.
     private async Task InvokeExecute()
     {
         if (synchronizationContext != null)
@@ -331,13 +376,17 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
         try
         {
             // Hop off the caller's stack first: with a zero debounce, Task.Delay completes
-            // synchronously and this "fire-and-forget" would otherwise run the WHOLE update --
-            // including the user's Execute body -- inline inside Stale's monitor (and, for the
-            // constructor-triggered initial run, inside the builder's factory lock).
-            await Task.Yield();
+            // synchronously (plain ConfigureAwait(false) does not yield on a completed task)
+            // and this "fire-and-forget" would otherwise run the WHOLE update -- including the
+            // user's Execute body -- inline inside Stale's monitor (and, for the initial run,
+            // inside the builder's factory lock). ForceYielding instead of an extra Task.Yield:
+            // it always yields AND never captures the scheduling thread's SynchronizationContext
+            // (Task.Yield does), so a Stale raised on a UI thread -- Set callers and reaction
+            // builders under MemoizR.Wpf -- continues on the thread pool instead of queueing the
+            // whole dependency-graph evaluation back onto the UI thread (#13).
             try
             {
-                await Task.Delay(debounceTime, token).ConfigureAwait(false);
+                await Task.Delay(debounceTime, token).ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
             }
             catch (OperationCanceledException)
             {

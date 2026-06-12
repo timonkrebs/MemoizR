@@ -1,0 +1,39 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\MemoizR.Reactive\MemoizR.Reactive.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <!-- Lets the non-Windows legs of the CI matrix (and non-Windows contributors) restore and
+         build this Windows-only library; the WindowsDesktop reference packs come from NuGet. -->
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <PackageId>MemoizR.Wpf</PackageId>
+    <Version>0.0.5</Version>
+    <Authors>Timon Krebs</Authors>
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <PackageReadmeFile>NUGET_WPF_README.md</PackageReadmeFile>
+    <PackageIcon>MemoizR-Small.png</PackageIcon>
+    <!-- Optional: Publish the repository URL in the built .nupkg (in the NuSpec <Repository> element) -->
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+
+    <!-- Optional: Embed source files that are not tracked by the source control manager in the PDB -->
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+
+    <!-- Optional: Build symbol package (.snupkg) to distribute the PDB containing Source Link -->
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <PackageTags>WPF, Dispatcher, UI, UI Thread, Signal, Signals, Signaling, Reactive, Reactivity, Memoization, Graph, Dependency, Dependencies, Dynamic Dependencies, Concurrency, Thread Pool, Sync, Synchronization, State, State Synchronization</PackageTags>
+  </PropertyGroup>
+  <ItemGroup>
+        <None Include="..\docs\NUGET_WPF_README.md" Pack="true" PackagePath="\" />
+        <None Include="..\docs\MemoizR-Small.png" Pack="true" PackagePath="\" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.SourceLink.GitHub" Version="10.0.300" PrivateAssets="All" />
+  </ItemGroup>
+</Project>
