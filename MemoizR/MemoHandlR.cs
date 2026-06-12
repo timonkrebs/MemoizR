@@ -77,7 +77,23 @@ public abstract class SignalHandlR : IMemoHandlR
         lock (Lock)
         {
             // Dead weak references are swept opportunistically while we are rebuilding anyway.
-            Observers = [.. Observers.Where(x => x.TryGetTarget(out var o) && !ReferenceEquals(o, observer))];
+            var temp = new WeakReference<IMemoizR>[Observers.Length];
+            var j = 0;
+            for (int i = 0; i < Observers.Length; i++)
+            {
+                if (Observers[i].TryGetTarget(out var o) && !ReferenceEquals(o, observer))
+                {
+                    temp[j++] = Observers[i];
+                }
+            }
+
+            if (j == Observers.Length)
+            {
+                return;
+            }
+
+            Array.Resize(ref temp, j);
+            Observers = temp;
         }
     }
 
@@ -99,13 +115,21 @@ public abstract class SignalHandlR : IMemoHandlR
         IMemoHandlR[] newSources;
         if (scope.CurrentGets.Length > 0)
         {
-            newSources = Sources.Length > 0 && scope.CurrentGetsIndex > 0
-                ? [.. Sources.Take(scope.CurrentGetsIndex), .. scope.CurrentGets]
-                : scope.CurrentGets;
+            if (Sources.Length > 0 && scope.CurrentGetsIndex > 0)
+            {
+                newSources = new IMemoHandlR[scope.CurrentGetsIndex + scope.CurrentGets.Length];
+                Array.Copy(Sources, newSources, scope.CurrentGetsIndex);
+                Array.Copy(scope.CurrentGets, 0, newSources, scope.CurrentGetsIndex, scope.CurrentGets.Length);
+            }
+            else
+            {
+                newSources = scope.CurrentGets;
+            }
         }
         else if (Sources.Length > 0 && scope.CurrentGetsIndex < Sources.Length)
         {
-            newSources = [.. Sources.Take(scope.CurrentGetsIndex)];
+            newSources = new IMemoHandlR[scope.CurrentGetsIndex];
+            Array.Copy(Sources, newSources, scope.CurrentGetsIndex);
         }
         else
         {
