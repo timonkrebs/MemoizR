@@ -109,6 +109,44 @@ public class WpfDispatcherTests
         GC.KeepAlive(r);
     }
 
+    [Fact(Timeout = 30000)]
+    public async Task AddWpfDispatcher_ResumeFromUiThread_StillEvaluatesDependenciesOnWorkers()
+    {
+        var f = new MemoFactory().AddWpfDispatcher();
+        var v1 = f.CreateSignal(1);
+        var memoRanOnUiThread = false;
+        var m1 = f.CreateMemoizR(async () =>
+        {
+            memoRanOnUiThread |= Environment.CurrentManagedThreadId == fixture.UiThreadId;
+            return await v1.Get() * 2;
+        });
+
+        var last = 0;
+        var actionRanOffUiThread = false;
+        var r = f.BuildReaction().CreateReaction(m1, v =>
+        {
+            actionRanOffUiThread |= Environment.CurrentManagedThreadId != fixture.UiThreadId;
+            last = v;
+        });
+
+        await WpfTestHelpers.WaitForConvergenceAsync(() => last == 2);
+        Assert.Equal(2, last);
+
+        memoRanOnUiThread = false;
+        actionRanOffUiThread = false;
+        r.Pause();
+        await v1.Set(5);
+        await Task.Delay(100);
+        Assert.Equal(2, last);
+
+        await await fixture.Application.Dispatcher.InvokeAsync(async () => await r.Resume());
+
+        Assert.Equal(10, last);
+        Assert.False(memoRanOnUiThread, "dependency evaluation ran on the WPF UI thread during Resume; it must stay on the thread pool");
+        Assert.False(actionRanOffUiThread, "the action ran off the WPF UI thread");
+        GC.KeepAlive(r);
+    }
+
     // A throwing action must fault the awaited update exactly once (observable via Resume) and
     // must NOT escape onto the dispatcher as DispatcherUnhandledException -- in a real app that
     // is a process crash -- and the reaction must recover on the next Set.

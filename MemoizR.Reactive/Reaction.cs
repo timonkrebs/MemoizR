@@ -18,6 +18,8 @@ public sealed class Reaction : ReactionBase
         // after the object initializer has assigned Label/DebounceTime (see ReactionBase).
     }
 
+    protected override bool ResumeOnDetachedScope => true;
+
     protected override async Task Execute()
     {
         await action();

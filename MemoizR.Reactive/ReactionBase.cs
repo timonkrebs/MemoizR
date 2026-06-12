@@ -38,6 +38,19 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
     public async Task Resume()
     {
         isPaused = false;
+        if (ResumeOnDetachedScope)
+        {
+            await Task.Run(RunResumeUpdateOnDetachedScope);
+            return;
+        }
+
+        await RunResumeUpdateOnCurrentScope();
+    }
+
+    protected virtual bool ResumeOnDetachedScope => false;
+
+    private async Task RunResumeUpdateOnCurrentScope()
+    {
         // Serialize like the debounced update path: the node mutex ensures only one update of
         // this reaction runs at a time (Resume vs concurrent debounced updates -- without it, a
         // stale in-flight Execute could apply its side effects after a newer one finished), and
@@ -74,6 +87,35 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
             {
                 Context.CleanScope();
             }
+            GC.KeepAlive(scope);
+        }
+    }
+
+    private async Task RunResumeUpdateOnDetachedScope()
+    {
+        // Plain Reaction keeps dependency evaluation off the caller's thread even for Resume().
+        // This mirrors the debounced update path: the action may marshal through the builder's
+        // SynchronizationContext, but the graph is evaluated on a fresh worker-owned scope.
+        var scope = Context.ForceNewScope();
+        try
+        {
+            using (await mutex.LockAsync())
+            using (await scope.ContextLock.UpgradeableLockAsync())
+            {
+                Context.EnterEvaluationScope();
+                try
+                {
+                    await UpdateIfNecessary();
+                }
+                finally
+                {
+                    Context.ExitEvaluationScope();
+                }
+            }
+        }
+        finally
+        {
+            Context.CleanScope();
             GC.KeepAlive(scope);
         }
     }
