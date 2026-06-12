@@ -166,19 +166,28 @@ public sealed class ReactionBuilder
     // single scope corrupts dependency capture (see ReactionBase.RunDebouncedUpdateAsync), while
     // per-evaluation scopes make this exactly the supported concurrent-root-Gets pattern --
     // dirty dependencies recompute in isolation under the cross-flow rules (per-node mutex,
-    // generation guards). The local is the weakly-registered scope's only strong root.
-    private async Task<T> EvaluateOnOwnScopeAsync<T>(IStateGetR<T> memo)
+    // generation guards). The evaluation runs on a DETACHED task: ForceNewScope overwrites the
+    // ambient scope key of whichever flow runs it, and the reaction's update flow re-resolves
+    // its own scope by that key after Execute returns (UpdateSourceAndObserverLinks) -- pinning
+    // on a detached flow keeps the overwrite structurally local instead of leaning on the async
+    // method builder's ExecutionContext restore. It also starts the evaluations truly in
+    // parallel: inline, the synchronous prefix of every Get would run sequentially on the
+    // calling thread. The local is the weakly-registered scope's only strong root.
+    private Task<T> EvaluateOnOwnScopeAsync<T>(IStateGetR<T> memo)
     {
-        var scope = memoFactory.Context.ForceNewScope();
-        try
+        return Task.Run(async () =>
         {
-            return await memo.Get();
-        }
-        finally
-        {
-            memoFactory.Context.CleanScope();
-            GC.KeepAlive(scope);
-        }
+            var scope = memoFactory.Context.ForceNewScope();
+            try
+            {
+                return await memo.Get();
+            }
+            finally
+            {
+                memoFactory.Context.CleanScope();
+                GC.KeepAlive(scope);
+            }
+        });
     }
 
     // Dependencies are separate parameters (not reads inside one opaque body) so they can be
