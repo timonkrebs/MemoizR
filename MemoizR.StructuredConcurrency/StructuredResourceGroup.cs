@@ -39,6 +39,8 @@ public sealed class StructuredResourceGroup : IStructuredResourceGroup
 
         resourcesToDispose.Reverse();
 
+        List<Exception>? exceptions = null;
+
         foreach (var resource in resourcesToDispose)
         {
             try
@@ -52,12 +54,14 @@ public sealed class StructuredResourceGroup : IStructuredResourceGroup
                     disposable.Dispose();
                 }
             }
-            catch
+            catch (Exception ex)
             {
-                // Exceptions during disposal are typically ignored in structured concurrency
-                // or aggregated. For now, we'll follow the pattern of ignoring them to avoid
-                // masking the original exception.
+                (exceptions ??= new()).Add(ex);
             }
+        }
+        if (exceptions != null)
+        {
+            throw new AggregateException(exceptions);
         }
     }
 }
