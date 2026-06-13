@@ -188,11 +188,19 @@ public sealed class ReactionBuilder
     // calling thread. The local is the weakly-registered scope's only strong root.
     private Task<T> EvaluateOnOwnScopeAsync<T>(IStateGetR<T> memo)
     {
+        var evaluatingNode = memoFactory.Context.ReactionScope.CurrentReaction;
         return Task.Run(async () =>
         {
             var scope = memoFactory.Context.ForceNewScope();
             try
             {
+                if (memo is IStampedGetR<T> stamped && memo is SignalHandlR handler)
+                {
+                    var (value, stamp) = await stamped.GetWithStamp();
+                    memoFactory.Context.RecordSourceStamp(evaluatingNode, handler.Id, stamp);
+                    return value;
+                }
+
                 return await memo.Get();
             }
             finally

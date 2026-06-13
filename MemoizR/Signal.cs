@@ -1,11 +1,11 @@
 namespace MemoizR;
 
-public sealed class Signal<T> : MemoHandlR<T>, IStateGetR<T?>
+public sealed class Signal<T> : MemoHandlR<T>, IStampedGetR<T?>
 {
     private Lock Lock { get; } = new();
     internal Signal(T value, Context context) : base(context)
     {
-        Value = value;
+        SetValueAndStamp(value, CausalityStamp.ForSignal(Id, 0, context.Epoch));
     }
 
     public async Task Set(T value)
@@ -31,7 +31,12 @@ public sealed class Signal<T> : MemoHandlR<T>, IStateGetR<T?>
                 // only updating the value should be locked
                 lock (Lock)
                 {
-                    Value = value;
+                    // Read the current trigger and publish (value, trigger + 1) under the same
+                    // monitor: concurrent Sets run under different flows' ContextLocks, so this Lock
+                    // is what makes the trigger read-modify-write atomic. The bumped stamp rides in
+                    // the same box swap as the value, so readers can never pair them inconsistently.
+                    Stamp.TryGetTrigger(Id, out var trigger);
+                    SetValueAndStamp(value, CausalityStamp.ForSignal(Id, trigger + 1, Context.Epoch));
                 }
 
                 await PropagateStaleToObserversAsync(CacheState.CacheDirty);
@@ -45,27 +50,43 @@ public sealed class Signal<T> : MemoHandlR<T>, IStateGetR<T?>
 
     public async Task<T?> Get()
     {
+        return (await GetWithStamp()).Value;
+    }
+
+    public async Task<(T? Value, CausalityStamp Stamp)> GetWithStamp()
+    {
         // An unpinned flow can have no capturing reaction (its scope would be freshly minted),
         // so the read needs no scope at all.
         if (!Context.HasFlowScope)
         {
-            return Value;
+            return ValueAndStamp;
         }
 
         var scope = Context.GetOrCreateScope();
         if (scope.CurrentReaction == null)
         {
-            return Value;
+            return ValueAndStamp;
         }
 
         // Only one thread should evaluate the graph at a time. otherwise the context could get messed up.
         // This should lead to perf gains because memoization can be utilized more efficiently.
-        using (await scope.ContextLock.UpgradeableLockAsync())
+        try
         {
-            Context.CheckDependenciesTheSame(this);
-        }
-        GC.KeepAlive(scope); // strong root: the lock identity must outlive the tracked read
+            using (await scope.ContextLock.UpgradeableLockAsync())
+            {
+                Context.CheckDependenciesTheSame(this);
 
-        return Value;
+                // One box read: the stamp recorded for the capturing evaluation -- and the one
+                // returned to the caller -- must describe exactly the value returned (a concurrent
+                // Set must not split the pair).
+                var (value, stamp) = ValueAndStamp;
+                Context.RecordSourceStamp(scope.CurrentReaction, Id, stamp);
+                return (value, stamp);
+            }
+        }
+        finally
+        {
+            GC.KeepAlive(scope); // strong root: the lock identity must outlive the tracked read
+        }
     }
 }

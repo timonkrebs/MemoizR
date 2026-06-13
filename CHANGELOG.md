@@ -8,6 +8,24 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 ### Added
 - `CreateReaction(...)` convenience overloads directly on the factory — sugar for `BuildReaction().CreateReaction(...)` with the default label and debounce
 - MemoizR.Wpf package: `AddWpfDispatcher` routes reaction actions to the WPF UI thread (via `Application.Current.Dispatcher` or an explicit `Dispatcher`) while the dependency graph keeps evaluating on the thread pool (#13)
+- Causality Trigger Clock, phase 1 (#39, internal): stable per-context node ids, per-signal
+  trigger counters bumped on value-changing Sets, and per-node causality stamps (own stamp +
+  one stamp per source) captured at source-read time and published atomically with the value.
+  See docs/architecture/causality-trigger-clock.md.
+- Causality Trigger Clock, phase 2 (#39, internal): the ITC-inspired space-efficient encoding —
+  CausalityStamp is now a canonical, persistent event tree over the id space (uniform regions
+  collapse; joins share subtrees; equal maps have identical representations) — plus a compact,
+  deterministic binary wire format (Serialize/Deserialize) with defensive validation.
+- Causality Trigger Clock, phase 3 (#39): reset resilience via per-context incarnation epochs
+  (stamps from a restarted graph are never equal/consistent with, and refuse to join, their
+  pre-reset incarnation), the wire format frozen at version 2 (epoch in the header), and the
+  public read surface for a distributed sync layer: IStampedGetR<T>.GetWithStamp() on all
+  value nodes, public Stamp/SourceStamps/Id on every node, and the public CausalityStamp type
+  (creation stays internal).
+- Distributed-graph primitives (#39): CausalityStamp.IsDominatedBy (the lattice order under
+  Join -- lets a sync layer drop late/duplicate deliveries and identify the stale side of a
+  glitched pair) and per-context node-id slices (MemoFactory(contextKey, idRangeStart,
+  idRangeEnd)) so peers' merged stamps can never collide on an id; exhausting a slice throws.
    
 ### Changed
 - Reactions now evaluate their separate-parameter dependencies in parallel on the thread pool; with a SynchronizationContext registered, only the action (with the already-evaluated values) is marshalled to the context, and `CreateAdvancedReaction` keeps running its whole body on the context (#13)
