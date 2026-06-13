@@ -619,7 +619,7 @@ sequenceDiagram
     Note over R: lock(this): Invalidate (gen++),<br/>cancel previous debounce cts, new cts
     R--)D: fire-and-forget RunDebouncedUpdateAsync(debounce, ct)
     deactivate R
-    Note over D: Task.Delay(debounce, ct) — a NEWER Stale<br/>cancels superseded updates entirely
+    Note over D: Task.Delay(debounce, TimeProvider, ct) — a NEWER<br/>Stale cancels superseded updates entirely
     D->>D: CreateNewScopeIfNeeded (clean up only if created)
     D->>D: mutex.LockAsync  ⟵ serializes vs Resume() and<br/>other in-flight debounced updates of THIS reaction
     D->>D: ContextLock.Upgradeable (own flow)
@@ -638,6 +638,11 @@ Design points, each pinned by a test:
 
 - **Coalescing**: rapid `Set`s inside the debounce window cancel each other's pending updates;
   exactly one Execute runs with the final value (`DebounceCoalescesRapidUpdates`).
+- **Injectable clock**: the debounce delay runs on a `TimeProvider` — registered factory-wide
+  via `AddTimeProvider` or per builder, defaulting to `TimeProvider.System` — so tests drive
+  the window with a `FakeTimeProvider` instead of racing wall-clock time. The eager initial
+  run's zero delay completes without the clock advancing on any provider
+  (`Reaction_FactoryFakeTimeProvider_DebounceElapsesOnlyWhenAdvanced`).
 - **Per-node mutex**: two debounced updates inherit *different* flows' ContextLocks, which order
   nothing between them, and the generation guard protects only the `State` commit — not the
   ordering of `Execute`'s side effects. The node mutex is what prevents a stale in-flight

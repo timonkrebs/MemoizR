@@ -1,6 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <TargetFramework>net9.0</TargetFramework>
+    <TargetFramework>net10.0</TargetFramework>
     <PackageId>MemoizR.StructuredAsyncLock</PackageId>
     <Version>0.0.5</Version>
     <Authors>Timon Krebs</Authors>

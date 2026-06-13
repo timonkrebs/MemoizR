@@ -10,6 +10,16 @@ public static class ReactiveMemoFactory
         return memoFactory;
     }
 
+    // Like AddSynchronizationContext, the registration applies to reactions built afterwards:
+    // each ReactionBuilder captures the provider at build time. Inject a fake provider (e.g.
+    // Microsoft.Extensions.Time.Testing.FakeTimeProvider) to drive debounce windows from a test
+    // instead of waiting out wall-clock time.
+    public static MemoFactory AddTimeProvider(this MemoFactory memoFactory, TimeProvider timeProvider)
+    {
+        memoFactory.TimeProvider = timeProvider;
+        return memoFactory;
+    }
+
     public static ReactionBuilder BuildReaction(this MemoFactory memoFactory, string label = "Reaction")
     {
         return new(memoFactory, memoFactory.SynchronizationContext, label);

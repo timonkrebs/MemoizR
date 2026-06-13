@@ -16,6 +16,11 @@ public sealed class MemoFactory
     // another assembly, which rooted every registered factory forever.
     internal SynchronizationContext? SynchronizationContext { get; set; }
 
+    // The TimeProvider reactions built from this factory schedule their debounce delays on
+    // (set via MemoizR.Reactive's AddTimeProvider). Null means TimeProvider.System. Tests inject
+    // a FakeTimeProvider so debounce windows elapse under test control instead of wall-clock time.
+    internal TimeProvider? TimeProvider { get; set; }
+
     public MemoFactory(string? contextKey = null)
     {
         // Default context is mapped to empty string

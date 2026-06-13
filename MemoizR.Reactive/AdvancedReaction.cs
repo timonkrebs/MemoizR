@@ -6,8 +6,9 @@ public sealed class AdvancedReaction : ReactionBase
 
     internal AdvancedReaction(Func<Task> fn,
     Context context,
-    SynchronizationContext? synchronizationContext = null)
-    : base(context, synchronizationContext)
+    SynchronizationContext? synchronizationContext = null,
+    TimeProvider? timeProvider = null)
+    : base(context, synchronizationContext, timeProvider)
     {
         this.fn = fn;
         // The eager initial run is NOT started here: the builder calls ScheduleInitialRun()

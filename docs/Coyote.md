@@ -41,7 +41,7 @@ dotnet build
 ### 3. Rewrite the assemblies (in dependency order)
 
 ```bash
-cd MemoizR.Tests/bin/Debug/net9.0/
+cd MemoizR.Tests/bin/Debug/net10.0/
 coyote rewrite MemoizR.StructuredAsyncLock.dll
 coyote rewrite MemoizR.dll
 coyote rewrite MemoizR.Reactive.dll

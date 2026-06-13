@@ -7,17 +7,30 @@ public sealed class ReactionBuilder
 
     private string label;
     private TimeSpan debounceTime = TimeSpan.FromMilliseconds(1);
+    // Captured from the factory at build time (mirroring the SynchronizationContext contract):
+    // an AddTimeProvider on the factory after BuildReaction does not affect this builder. Null
+    // means TimeProvider.System.
+    private TimeProvider? timeProvider;
 
     public ReactionBuilder(MemoFactory memoFactory, SynchronizationContext? synchronizationContext, string label)
     {
         this.memoFactory = memoFactory;
         this.synchronizationContext = synchronizationContext;
         this.label = label;
+        this.timeProvider = memoFactory.TimeProvider;
     }
 
     public ReactionBuilder AddDebounceTime(TimeSpan debounceTime)
     {
         this.debounceTime = debounceTime;
+        return this;
+    }
+
+    // Per-reaction override of the factory-wide TimeProvider: the debounce delay of reactions
+    // created from this builder runs on the given clock (e.g. a FakeTimeProvider in tests).
+    public ReactionBuilder AddTimeProvider(TimeProvider timeProvider)
+    {
+        this.timeProvider = timeProvider;
         return this;
     }
 
@@ -35,7 +48,7 @@ public sealed class ReactionBuilder
     {
         lock (memoFactory.Lock)
         {
-            var reaction = new Reaction(body, memoFactory.Context)
+            var reaction = new Reaction(body, memoFactory.Context, timeProvider)
             {
                 Label = label,
                 DebounceTime = debounceTime
@@ -751,7 +764,7 @@ public sealed class ReactionBuilder
     {
         lock (memoFactory.Lock)
         {
-            var reaction = new AdvancedReaction(fn, memoFactory.Context, synchronizationContext)
+            var reaction = new AdvancedReaction(fn, memoFactory.Context, synchronizationContext, timeProvider)
             {
                 Label = label,
                 DebounceTime = debounceTime
