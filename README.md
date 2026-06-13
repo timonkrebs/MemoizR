@@ -200,8 +200,7 @@ See [ADR 0003](docs/adr/0003-sendable-checking-and-isolation-assertions.md) (run
 [ADR 0005](docs/adr/0005-custom-executors.md) (executors), and
 [ADR 0006](docs/adr/0006-actor-engine-prototype.md) (actor engine) for the design and its limits.
 
-Try it out!https:
-Experiment with MemoizR online: https://dotnetfiddle.net/Widget/EWtptc
+Try it out! Experiment with MemoizR online: https://dotnetfiddle.net/Widget/EWtptc
 
 Example From: [Khalid Abuhakmeh](https://khalidabuhakmeh.com/memoizr-declarative-structured-concurrency-for-csharp#conclusion)
 

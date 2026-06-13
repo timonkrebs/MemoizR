@@ -221,60 +221,81 @@ public sealed class ActorMemo<T> : ActorValueNode<T>
         return await Actor.Run(() => Commit(genSnapshot, frame, newValue, callerFrame)).ConfigureAwait(false);
     }
 
-    // Turn: the commit point of the evaluation transaction.
+    // Turn: the commit point of the evaluation transaction. The body runs user code (the value
+    // comparison's Equals(T)), which can throw; the try/finally is what guarantees the
+    // at-most-one-evaluation invariant survives that -- without it, a throwing Equals would
+    // leave the node wedged in Evaluating with its waiters never released, hanging every other
+    // flow's Get forever.
     private T Commit(int genSnapshot, EvaluationFrame frame, T newValue, EvaluationFrame? callerFrame)
     {
-        var oldValue = Value;
-        // Publish the box before the volatile state write below -- the release/acquire pair the
-        // lock-free fast path reads against.
-        Value = newValue;
-
-        // Rewire to the captured sources: whole-array swap for our up-links, in-place observer
-        // edits on the parents (actor-confined, so in-place is safe here).
-        foreach (var source in Sources)
+        try
         {
-            source.RemoveObserver(this);
+            var oldValue = Value;
+            // Publish the box before the volatile state write below -- the release/acquire pair
+            // the lock-free fast path reads against.
+            Value = newValue;
+
+            // Rewire to the captured sources: whole-array swap for our up-links, in-place
+            // observer edits on the parents (actor-confined, so in-place is safe here).
+            foreach (var source in Sources)
+            {
+                source.RemoveObserver(this);
+            }
+
+            Sources = frame.Captured.Select(captured => captured.Source).Distinct().ToArray();
+            foreach (var source in Sources)
+            {
+                source.AddObserver(this);
+            }
+
+            // The diamond down-link: only when the value actually changed, and without bumping
+            // the observers' generations (same-flow marks are absorbed by their own evaluations).
+            // Equals is user code: a throw here unwinds to the catch, which parks the node Dirty.
+            if (!Equals(oldValue, newValue))
+            {
+                MarkObserversDirtyFromParent();
+            }
+
+            // Recorded before any park-bump below: a caller consuming a value this commit cannot
+            // confirm must see a generation mismatch at its own commit.
+            callerFrame?.Captured.Add((this, Generation));
+
+            // Clean requires BOTH that no invalidation reached this node mid-compute (the
+            // generation snapshot) AND that every consumed source is still at the generation it
+            // was read at (the late-wiring guard: an invalidation of a source this node was not
+            // yet wired to bumps the source's generation but can never cascade here -- the
+            // cascade's early termination at already-dirty nodes makes that silence PERMANENT, so
+            // it must be detected from the read evidence, not awaited from the push path).
+            if (Generation == genSnapshot && SourcesUnchangedSinceRead(frame))
+            {
+                State = CacheState.CacheClean;
+            }
+            else
+            {
+                // Park Dirty (not Check: a stale pair may be a signal's, and signals cannot be
+                // re-verified by a scan), bump so OUR consumers' pairs mismatch in turn, and
+                // re-notify wired observers that may have raced us to Clean.
+                Generation++;
+                State = CacheState.CacheDirty;
+                PropagateToObservers(CacheState.CacheCheck);
+            }
+
+            return newValue;
         }
-
-        Sources = frame.Captured.Select(captured => captured.Source).Distinct().ToArray();
-        foreach (var source in Sources)
+        catch
         {
-            source.AddObserver(this);
-        }
-
-        // The diamond down-link: only when the value actually changed, and without bumping the
-        // observers' generations (same-flow marks are absorbed by their own evaluations).
-        if (!Equals(oldValue, newValue))
-        {
-            MarkObserversDirtyFromParent();
-        }
-
-        // Recorded before any park-bump below: a caller consuming a value this commit cannot
-        // confirm must see a generation mismatch at its own commit.
-        callerFrame?.Captured.Add((this, Generation));
-
-        // Clean requires BOTH that no invalidation reached this node mid-compute (the
-        // generation snapshot) AND that every consumed source is still at the generation it was
-        // read at (the late-wiring guard: an invalidation of a source this node was not yet
-        // wired to bumps the source's generation but can never cascade here -- the cascade's
-        // early termination at already-dirty nodes makes that silence PERMANENT, so it must be
-        // detected from the read evidence, not awaited from the push path).
-        if (Generation == genSnapshot && SourcesUnchangedSinceRead(frame))
-        {
-            State = CacheState.CacheClean;
-        }
-        else
-        {
-            // Park Dirty (not Check: a stale pair may be a signal's, and signals cannot be
-            // re-verified by a scan), bump so OUR consumers' pairs mismatch in turn, and
-            // re-notify wired observers that may have raced us to Clean.
+            // Any fault in the turn (e.g. a user Equals that throws) must not strand the node:
+            // park it Dirty so the next Get retries, re-notify observers that may have committed
+            // against the now-published value, and let the fault propagate to this Get's caller.
             Generation++;
             State = CacheState.CacheDirty;
             PropagateToObservers(CacheState.CacheCheck);
+            throw;
         }
-
-        EndEvaluation();
-        return newValue;
+        finally
+        {
+            EndEvaluation();
+        }
     }
 
     private static bool SourcesUnchangedSinceRead(EvaluationFrame frame)

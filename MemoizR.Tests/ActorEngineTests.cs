@@ -396,6 +396,54 @@ public class ActorEngineTests
         Assert.Throws<InvalidOperationException>(() => f.CreateActorMemoizR(async () => new List<int>()));
         Assert.NotNull(f.CreateActorSignal(1));
     }
+
+    // The commit turn runs user code (the value comparison's Equals). A throw there must NOT
+    // strand the node in Evaluating with its waiters never released -- the failure mode the
+    // try/finally in Commit closes. A second Get parked as a waiter on the throwing evaluation
+    // must be released (and itself fault on retry), not hang forever.
+    [Fact(Timeout = 10000)]
+    public async Task ThrowingEqualsInCommit_ReleasesWaiters_AndDoesNotWedge()
+    {
+        var f = new MemoFactory();
+        var v = f.CreateActorSignal(0);
+        var armed = false;
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var m = f.CreateActorMemoizR(async () =>
+        {
+            if (Volatile.Read(ref armed))
+            {
+                entered.TrySetResult();
+                await gate.Task;
+            }
+
+            return new ThrowsOnEquals(await v.Get());
+        });
+
+        await m.Get(); // prime: oldValue is null, so Equals is not yet called
+        await v.Set(1); // dirty
+        Volatile.Write(ref armed, true);
+
+        var evaluating = m.Get(); // claims the evaluation, parks mid-fn
+        await entered.Task;
+        var waiter = m.Get(); // parks as a waiter on the in-flight evaluation
+        gate.SetResult(); // the evaluating Get resumes; its Commit calls Equals(old, new) -> throws
+
+        // The evaluating Get faults (with the fix, EndEvaluation still runs in the finally)...
+        await Assert.ThrowsAsync<InvalidOperationException>(() => evaluating);
+        // ...and the waiter was released rather than hung; on retry it recomputes and faults too.
+        await Assert.ThrowsAsync<InvalidOperationException>(() => waiter);
+
+        // The node is not wedged: a fresh Get still reaches the computation (and faults again).
+        await Assert.ThrowsAsync<InvalidOperationException>(() => m.Get());
+    }
+
+    private sealed class ThrowsOnEquals(int seed)
+    {
+        public override bool Equals(object? obj) => throw new InvalidOperationException("equals boom");
+
+        public override int GetHashCode() => seed;
+    }
 }
 
 // The GraphActor's own contracts: turns are serialized (plain shared state inside turns needs

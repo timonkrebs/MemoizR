@@ -217,7 +217,18 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
                 }
             }
 
-            executor.Enqueue(ExecuteOnExecutor);
+            try
+            {
+                executor.Enqueue(ExecuteOnExecutor);
+            }
+            catch (Exception e)
+            {
+                // A custom IExecutor may reject scheduling (e.g. disposed): fault the awaited
+                // task so the failure flows through the same path as an Execute fault instead of
+                // throwing synchronously past the TCS.
+                tcs.TrySetException(e);
+            }
+
             await tcs.Task;
         }
         else

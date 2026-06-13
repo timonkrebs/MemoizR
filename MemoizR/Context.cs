@@ -217,12 +217,13 @@ public class Context
 
     /// <summary>
     /// Whether the current async flow is inside a MemoizR-serialized graph evaluation, i.e. it
-    /// holds its flow's evaluation lock (in either mode). A flow with no pinned scope resolves a
-    /// throwaway scope whose lock was never acquired, so it correctly reads as not isolated.
-    /// Point-in-time: only meaningful as "I am inside the locked region", never as a reason to
-    /// skip acquiring the lock.
+    /// holds its flow's evaluation lock (in either mode). A flow with no pinned scope cannot hold
+    /// a stable ContextLock, so it reads as not isolated -- short-circuited here so the common
+    /// "outside evaluation" case does not allocate the throwaway scope the ReactionScope getter
+    /// would otherwise mint. Point-in-time: only meaningful as "I am inside the locked region",
+    /// never as a reason to skip acquiring the lock.
     /// </summary>
-    public bool IsEvaluationIsolated => ReactionScope.ContextLock.IsHeldByCurrentFlow;
+    public bool IsEvaluationIsolated => AsyncLocalScope.Value != 0 && ReactionScope.ContextLock.IsHeldByCurrentFlow;
 
     /// <summary>
     /// Dynamic isolation check (issue #36), the runtime analog of Swift's
