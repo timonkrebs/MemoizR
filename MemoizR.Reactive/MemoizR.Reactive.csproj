@@ -2,6 +2,13 @@
 
   <ItemGroup>
     <ProjectReference Include="..\MemoizR\MemoizR.csproj" />
+    <!-- Build-time only: emits the CreateReaction<T1..Tn> arity overloads into the partial
+         ReactionBuilder / ReactiveMemoFactory classes. ReferenceOutputAssembly + PrivateAssets
+         keep the generator out of both the compile references and the published package. -->
+    <ProjectReference Include="..\MemoizR.Reactive.SourceGenerator\MemoizR.Reactive.SourceGenerator.csproj"
+                      OutputItemType="Analyzer"
+                      ReferenceOutputAssembly="false"
+                      PrivateAssets="all" />
   </ItemGroup>
 
   <PropertyGroup>

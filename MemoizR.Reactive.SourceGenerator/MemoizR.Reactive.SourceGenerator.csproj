@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- Roslyn loads analyzers/source generators from netstandard2.0 assemblies. -->
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <IsRoslynComponent>true</IsRoslynComponent>
+    <EnforceExtendedAnalyzerRules>true</EnforceExtendedAnalyzerRules>
+    <!-- This project is a build-time tool, not a shipped library: it is consumed only as an
+         analyzer by MemoizR.Reactive, so it neither produces compile output for referencers nor
+         a NuGet package of its own. -->
+    <IncludeBuildOutput>false</IncludeBuildOutput>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Pinned below the host Roslyn (the .NET 10 SDK ships 5.0.x): a generator must be built
+         against a version less than or equal to the compiler that loads it. PrivateAssets="all"
+         keeps Roslyn out of the consuming project. -->
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.8.0" PrivateAssets="all" />
+  </ItemGroup>
+
+</Project>

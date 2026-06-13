@@ -17,6 +17,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MemoizR.Wpf", "MemoizR.Wpf\
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MemoizR.Wpf.Tests", "MemoizR.Wpf.Tests\MemoizR.Wpf.Tests.csproj", "{B0F71417-2E5E-4D87-9D3C-2C5BFE4A7C9E}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MemoizR.Reactive.SourceGenerator", "MemoizR.Reactive.SourceGenerator\MemoizR.Reactive.SourceGenerator.csproj", "{0FD767E0-CFB5-4769-8149-02A28BE32848}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -54,5 +56,9 @@ Global
 		{B0F71417-2E5E-4D87-9D3C-2C5BFE4A7C9E}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{B0F71417-2E5E-4D87-9D3C-2C5BFE4A7C9E}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{B0F71417-2E5E-4D87-9D3C-2C5BFE4A7C9E}.Release|Any CPU.Build.0 = Release|Any CPU
+		{0FD767E0-CFB5-4769-8149-02A28BE32848}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{0FD767E0-CFB5-4769-8149-02A28BE32848}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{0FD767E0-CFB5-4769-8149-02A28BE32848}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{0FD767E0-CFB5-4769-8149-02A28BE32848}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 EndGlobal
