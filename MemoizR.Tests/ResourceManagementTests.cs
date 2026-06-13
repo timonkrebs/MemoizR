@@ -117,6 +117,29 @@ public class ResourceManagementTests
         Assert.True(resource2.IsDisposed);
     }
 
+
+    [Fact]
+    public async Task TestResourceDisposalExceptionsAreAggregated()
+    {
+        var f = new MemoFactory();
+
+        var resource1 = new ActionDisposable(() => throw new InvalidOperationException("dispose 1"));
+        var resource2 = new ActionDisposable(() => throw new InvalidOperationException("dispose 2"));
+
+        var c1 = f.CreateConcurrentMapReduce(
+            r =>
+            {
+                r.AddResource(resource1);
+                r.AddResource(resource2);
+                return Task.FromResult(1);
+            });
+
+        var ex = await Assert.ThrowsAsync<AggregateException>(async () => await c1.Get());
+        Assert.Equal(2, ex.InnerExceptions.Count);
+        Assert.Equal("dispose 2", ex.InnerExceptions[0].Message);
+        Assert.Equal("dispose 1", ex.InnerExceptions[1].Message);
+    }
+
     private class ActionDisposable : IDisposable
     {
         private readonly Action action;
