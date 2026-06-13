@@ -26,13 +26,14 @@ The debounce delay of reactions runs on a `TimeProvider` (default: `TimeProvider
 ```csharp
 var timeProvider = new FakeTimeProvider();
 var f = new MemoFactory().AddTimeProvider(timeProvider); // applies to reactions built afterwards
+var v1 = f.CreateSignal(1);
 
 var r1 = f.BuildReaction()
     .AddDebounceTime(TimeSpan.FromSeconds(1))
-    .CreateReaction(m1, val => { /* side effect */ });
+    .CreateReaction(v1, val => { /* side effect */ });
 
-await v1.Set(2);                                // schedules the debounced update
-timeProvider.Advance(TimeSpan.FromSeconds(1));  // releases it deterministically
+await v1.Set(2);                               // schedules the debounced update
+timeProvider.Advance(TimeSpan.FromSeconds(1)); // releases it deterministically
 ```
 
 The provider can also be set per reaction on the builder: `f.BuildReaction().AddTimeProvider(timeProvider)`.
