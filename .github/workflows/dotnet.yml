@@ -29,7 +29,7 @@ jobs:
     - name: Setup .NET
       uses: actions/setup-dotnet@v5
       with:
-        dotnet-version: 9.0.x
+        dotnet-version: 10.0.x
     - name: Restore dependencies
       run: dotnet restore
     - name: Build
@@ -46,8 +46,8 @@ jobs:
         echo "$HOME/.dotnet/tools" >> $GITHUB_PATH
     - name: Coyote Rewrite
       run: |
-        # Use net9.0 as targeted in the project file. Rewrite in dependency order.
-        cd MemoizR.Tests/bin/Debug/net9.0/
+        # Use net10.0 as targeted in the project file. Rewrite in dependency order.
+        cd MemoizR.Tests/bin/Debug/net10.0/
         coyote rewrite MemoizR.StructuredAsyncLock.dll
         coyote rewrite MemoizR.dll
         coyote rewrite MemoizR.Reactive.dll
@@ -72,7 +72,7 @@ jobs:
     - name: Setup .NET
       uses: actions/setup-dotnet@v5
       with:
-        dotnet-version: 9.0.x
+        dotnet-version: 10.0.x
     - name: Cognitive Complexity gate (S3776 <= 15)
       run: dotnet build -p:MeasureCognitiveComplexity=true -p:WarningsAsErrors=S3776
 

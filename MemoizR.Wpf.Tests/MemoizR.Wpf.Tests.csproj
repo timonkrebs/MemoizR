@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net9.0-windows</TargetFramework>
+    <TargetFramework>net10.0-windows</TargetFramework>
     <UseWPF>true</UseWPF>
     <!-- Lets the non-Windows legs of the CI matrix (and non-Windows contributors) restore and
          build this project for compile coverage; the WindowsDesktop reference packs come from
