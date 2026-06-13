@@ -66,7 +66,10 @@ public abstract class SignalHandlR : IMemoHandlR
                     return;
                 }
             }
-            Observers = [.. Observers, new(observer)];
+            var newObservers = new WeakReference<IMemoizR>[Observers.Length + 1];
+            Array.Copy(Observers, newObservers, Observers.Length);
+            newObservers[^1] = new(observer);
+            Observers = newObservers;
         }
     }
 
@@ -77,7 +80,20 @@ public abstract class SignalHandlR : IMemoHandlR
         lock (Lock)
         {
             // Dead weak references are swept opportunistically while we are rebuilding anyway.
-            Observers = [.. Observers.Where(x => x.TryGetTarget(out var o) && !ReferenceEquals(o, observer))];
+            // Using a temporary array and Array.Copy prevents index errors if GC sweeps a reference during the loop.
+            var temp = new WeakReference<IMemoizR>[Observers.Length];
+            var count = 0;
+            for (int i = 0; i < Observers.Length; i++)
+            {
+                var x = Observers[i];
+                if (x.TryGetTarget(out var o) && !ReferenceEquals(o, observer))
+                {
+                    temp[count++] = x;
+                }
+            }
+            var newObservers = new WeakReference<IMemoizR>[count];
+            Array.Copy(temp, newObservers, count);
+            Observers = newObservers;
         }
     }
 
@@ -99,13 +115,21 @@ public abstract class SignalHandlR : IMemoHandlR
         IMemoHandlR[] newSources;
         if (scope.CurrentGets.Length > 0)
         {
-            newSources = Sources.Length > 0 && scope.CurrentGetsIndex > 0
-                ? [.. Sources.Take(scope.CurrentGetsIndex), .. scope.CurrentGets]
-                : scope.CurrentGets;
+            if (Sources.Length > 0 && scope.CurrentGetsIndex > 0)
+            {
+                newSources = new IMemoHandlR[scope.CurrentGetsIndex + scope.CurrentGets.Length];
+                Array.Copy(Sources, newSources, scope.CurrentGetsIndex);
+                Array.Copy(scope.CurrentGets, 0, newSources, scope.CurrentGetsIndex, scope.CurrentGets.Length);
+            }
+            else
+            {
+                newSources = scope.CurrentGets;
+            }
         }
         else if (Sources.Length > 0 && scope.CurrentGetsIndex < Sources.Length)
         {
-            newSources = [.. Sources.Take(scope.CurrentGetsIndex)];
+            newSources = new IMemoHandlR[scope.CurrentGetsIndex];
+            Array.Copy(Sources, newSources, scope.CurrentGetsIndex);
         }
         else
         {
@@ -114,7 +138,7 @@ public abstract class SignalHandlR : IMemoHandlR
 
         foreach (var old in Sources)
         {
-            if (!newSources.Contains(old))
+            if (Array.IndexOf(newSources, old) == -1)
             {
                 old.RemoveObserver(self);
             }

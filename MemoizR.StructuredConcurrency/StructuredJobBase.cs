@@ -31,9 +31,10 @@ public abstract class StructuredJobBase<T>
     {
         lock (Lock)
         {
-            foreach (var source in owner.Sources.Take(scope.CurrentGetsIndex))
+            var sources = owner.Sources;
+            for (int i = 0; i < scope.CurrentGetsIndex; i++)
             {
-                allSources.Add(source);
+                allSources.Add(sources[i]);
             }
             foreach (var source in scope.CurrentGets)
             {
