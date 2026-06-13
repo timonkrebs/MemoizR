@@ -5,7 +5,7 @@
   </ItemGroup>
 
   <PropertyGroup>
-    <TargetFramework>net9.0-windows</TargetFramework>
+    <TargetFramework>net10.0-windows</TargetFramework>
     <UseWPF>true</UseWPF>
     <!-- Lets the non-Windows legs of the CI matrix (and non-Windows contributors) restore and
          build this Windows-only library; the WindowsDesktop reference packs come from NuGet. -->

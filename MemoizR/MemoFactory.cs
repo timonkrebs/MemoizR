@@ -19,6 +19,12 @@ public sealed class MemoFactory
     public MemoFactory(string? contextKey = null) : this(contextKey, 1, int.MaxValue)
     {
     }
+  
+    // The TimeProvider reactions built from this factory schedule their debounce delays on
+    // (set via MemoizR.Reactive's AddTimeProvider). Null means TimeProvider.System. Tests inject
+    // a FakeTimeProvider so debounce windows elapse under test control instead of wall-clock time.
+    internal TimeProvider? TimeProvider { get; set; }
+
 
     // Pins this factory's context to the node-id slice [idRangeStart, idRangeEnd): distributed
     // peers use disjoint slices so causality stamps merged across peers can never collide on an

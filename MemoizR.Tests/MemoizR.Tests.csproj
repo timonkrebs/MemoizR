@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net9.0</TargetFramework>
+    <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
 
@@ -12,6 +12,7 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.Coyote" Version="1.7.11" />
     <PackageReference Include="Microsoft.Coyote.Test" Version="1.7.11" />
+    <PackageReference Include="Microsoft.Extensions.TimeProvider.Testing" Version="9.10.0" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.6.0" />
     <PackageReference Include="xRetry" Version="1.9.0" />
     <PackageReference Include="xunit" Version="2.9.3" />

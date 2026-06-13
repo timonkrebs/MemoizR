@@ -19,3 +19,21 @@ var r1 = f.CreateReaction(m1, m2, (val1, val2) => val1 + val2);
 
 A custom label or debounce time goes through the builder:
 `f.BuildReaction("MyReaction").AddDebounceTime(TimeSpan.FromMilliseconds(16)).CreateReaction(...)`.
+
+## Testing time-dependent reactions
+The debounce delay of reactions runs on a `TimeProvider` (default: `TimeProvider.System`). Inject a fake provider, e.g. `Microsoft.Extensions.Time.Testing.FakeTimeProvider`, to control when debounce windows elapse instead of waiting out wall-clock time:
+
+```csharp
+var timeProvider = new FakeTimeProvider();
+var f = new MemoFactory().AddTimeProvider(timeProvider); // applies to reactions built afterwards
+var v1 = f.CreateSignal(1);
+
+var r1 = f.BuildReaction()
+    .AddDebounceTime(TimeSpan.FromSeconds(1))
+    .CreateReaction(v1, val => { /* side effect */ });
+
+await v1.Set(2);                               // schedules the debounced update
+timeProvider.Advance(TimeSpan.FromSeconds(1)); // releases it deterministically
+```
+
+The provider can also be set per reaction on the builder: `f.BuildReaction().AddTimeProvider(timeProvider)`.
