@@ -135,9 +135,12 @@ public class ResourceManagementTests
             });
 
         var ex = await Assert.ThrowsAsync<AggregateException>(async () => await c1.Get());
+        // Both disposal failures must be surfaced. The LIFO disposal ORDER is a separate contract
+        // verified by TestResourceDisposalOrder, so this aggregation test stays order-independent
+        // (and would survive disposal ever being parallelized).
         Assert.Equal(2, ex.InnerExceptions.Count);
-        Assert.Equal("dispose 2", ex.InnerExceptions[0].Message);
-        Assert.Equal("dispose 1", ex.InnerExceptions[1].Message);
+        Assert.Contains(ex.InnerExceptions, e => e.Message == "dispose 1");
+        Assert.Contains(ex.InnerExceptions, e => e.Message == "dispose 2");
     }
 
     [Fact]
