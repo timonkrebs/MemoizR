@@ -8,6 +8,8 @@ interleavings with diagrams.
 
 - [ADR 0001 — Use of `volatile` fields](../adr/0001-volatile-field-usage.md)
 - [ADR 0002 — Choosing a lock](../adr/0002-choosing-a-lock.md)
+- [Performance Notes](performance.md) — the measured cost of these mechanisms and the
+  optimizations applied on top of them.
 
 All diagrams are [Mermaid](https://mermaid.js.org/) and render on GitHub.
 
@@ -118,8 +120,13 @@ Flow identity is carried by `AsyncLocal<double>` keys:
   a memo's fn).
 - `Context.ForceNewScope()` unconditionally mints a fresh scope — used by structured-concurrency
   children that must *not* share their parent's dependency capture (§8).
-- The `Context.ReactionScope` getter resolves the current flow's scope from a dictionary of weak
-  references (under `Context.Lock`); a flow with no pinned key gets a throwaway scope per access.
+- The `Context.ReactionScope` getter is **lock-free**: it resolves the current flow's scope from
+  a `ConcurrentDictionary` of weak references (resurrecting a collected scope atomically via a
+  `GetOrAdd`/`TryUpdate` loop); a flow with no pinned key gets a throwaway scope per access.
+  `Context.Lock` is *not* involved — nothing may assume scope resolution is serialized with
+  `CheckDependenciesTheSame`. Because entries are only weakly held, every evaluation keeps its
+  scope in a strong local (with `GC.KeepAlive`) for as long as it relies on the scope's — and
+  thus its `ContextLock`'s — identity.
 
 Each `ReactionScope` carries the flow's **dependency-capture state** (`CurrentReaction`,
 `CurrentGets`, `CurrentGetsIndex`) and the flow's **`ContextLock`**. The lock being *per-flow* is
@@ -380,7 +387,21 @@ This only runs on actual commit failures (a race already happened), so it adds n
 uncontended path, and it terminates: re-propagation recurses only through *escalations*, which
 are monotone on a finite DAG.
 
-### 6.4 The diamond rule: absorption without a bump
+### 6.4 Subscription happens at capture time
+
+Everything above presumes the invalidation cascade can *reach* a node — which requires the node
+to be in its sources' observer lists. That wiring therefore happens **eagerly, at capture time**
+(`CheckDependenciesTheSame`, the moment a new source is first read), not after the evaluation
+completes. With deferred wiring there was a **first-evaluation subscription window**: a `Set`
+landing between the read and the wiring saw no observer, notified nobody, and the node committed
+a value computed from the pre-`Set` read with its generation never bumped — cached stale until
+some later unrelated write. With capture-time subscription, that `Set` reaches the half-built
+node mid-evaluation, escalates it past `Evaluating` (bumping the generation), and the commit is
+refused — the standard recovery. The deferred `UpdateSourceAndObserverLinks` keeps its
+merge/removal job, re-adding only links that its own pruning removed (add-if-absent).
+Pinned by `Memo_FirstEvaluation_SetDuringSubscriptionWindow_IsNotLost`.
+
+### 6.5 The diamond rule: absorption without a bump
 
 One invalidation source deliberately does **not** bump the generation: the **diamond down-link**.
 When a parent recomputes to a changed value, it marks its observers `CacheDirty` through the
@@ -412,10 +433,13 @@ any evaluation that started after it reads the fresh values.
 
 ```mermaid
 flowchart TD
-    G["Get()"] --> P["CreateNewScopeIfNeeded()"]
+    G["Get()"] --> U{"State == CacheClean<br/>(volatile acquire)<br/>AND flow has NO pinned scope?"}
+    U -->|yes| V0["return valueBox.Value —<br/>an unpinned flow's scope would be<br/>freshly minted with CurrentReaction == null,<br/>so: two volatile reads, no scope,<br/>no lock, zero allocation"]
+    U -->|no| P["GetOrCreateScope()<br/>(lock-free dictionary resolve,<br/>mint + register only if unpinned)"]
     P --> F{"State == CacheClean<br/>(volatile acquire)<br/>AND CurrentReaction == null<br/>(volatile acquire)?"}
     F -->|yes| V["return valueBox.Value<br/>(volatile read of the box ref;<br/>readonly field — never torn)"]
     F -->|no| L["mutex.LockAsync()<br/>ContextLock.UpgradeableLockAsync()"]
+    style V0 fill:#e1f5e1,stroke:#2e7d32
     L --> T["CheckDependenciesTheSame (dependency capture)"]
     T --> R{"State == CacheClean now?<br/>(someone else evaluated while we waited)"}
     R -->|yes| V2["return Value"]
@@ -595,7 +619,7 @@ sequenceDiagram
     Note over R: lock(this): Invalidate (gen++),<br/>cancel previous debounce cts, new cts
     R--)D: fire-and-forget RunDebouncedUpdateAsync(debounce, ct)
     deactivate R
-    Note over D: Task.Delay(debounce, ct) — a NEWER Stale<br/>cancels superseded updates entirely
+    Note over D: Task.Delay(debounce, TimeProvider, ct) — a NEWER<br/>Stale cancels superseded updates entirely
     D->>D: CreateNewScopeIfNeeded (clean up only if created)
     D->>D: mutex.LockAsync  ⟵ serializes vs Resume() and<br/>other in-flight debounced updates of THIS reaction
     D->>D: ContextLock.Upgradeable (own flow)
@@ -614,6 +638,11 @@ Design points, each pinned by a test:
 
 - **Coalescing**: rapid `Set`s inside the debounce window cancel each other's pending updates;
   exactly one Execute runs with the final value (`DebounceCoalescesRapidUpdates`).
+- **Injectable clock**: the debounce delay runs on a `TimeProvider` — registered factory-wide
+  via `AddTimeProvider` or per builder, defaulting to `TimeProvider.System` — so tests drive
+  the window with a `FakeTimeProvider` instead of racing wall-clock time. The eager initial
+  run's zero delay completes without the clock advancing on any provider
+  (`Reaction_FactoryFakeTimeProvider_DebounceElapsesOnlyWhenAdvanced`).
 - **Per-node mutex**: two debounced updates inherit *different* flows' ContextLocks, which order
   nothing between them, and the generation guard protects only the `State` commit — not the
   ordering of `Execute`'s side effects. The node mutex is what prevents a stale in-flight

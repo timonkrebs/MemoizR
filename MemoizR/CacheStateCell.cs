@@ -13,17 +13,18 @@ internal sealed class CacheStateCell(CacheState initial)
 {
     private readonly Lock gate = new();
     private volatile CacheState state = initial;
-    private int generation;
+    private volatile int generation;
 
     // Lock-free read for the Get fast path and the state-machine branches.
     public CacheState State => state;
 
     // Snapshot the generation without changing state, for a caller that may commit Clean later
     // without going through BeginEvaluation (the CacheCheck path that resolves without recompute).
-    public int Generation
-    {
-        get { lock (gate) { return generation; } }
-    }
+    // Lock-free: a volatile read can only be STALE-LOW (it never sees an unwritten bump), and a
+    // stale-low token makes the later TryCommitClean -- which compares under the gate -- REFUSE,
+    // which is the same conservative outcome as a racing invalidation. It can never let a commit
+    // through that the locked read would have refused.
+    public int Generation => generation;
 
     // Begin an evaluation: mark Evaluating and return the generation to commit against.
     public int BeginEvaluation()

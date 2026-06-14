@@ -8,11 +8,20 @@ public sealed class MemoFactory
     internal Context Context { get; }
     public Lock Lock { get; } = new();
 
-    // The executor reactions built from this factory enqueue their Execute to (set via
-    // MemoizR.Reactive's AddExecutor / AddSynchronizationContext). Lives on the factory itself
-    // so the association is discoverable and dies with the factory -- it previously sat in a
-    // static side-table in another assembly, which rooted every registered factory forever.
+    // The executor reaction side effects built from this factory are marshalled to (set via
+    // MemoizR.Reactive's AddExecutor / AddSynchronizationContext, or MemoizR.Wpf's
+    // AddWpfDispatcher -- a UI SynchronizationContext arrives wrapped in a
+    // SynchronizationContextExecutor): a Reaction enqueues only its action with the
+    // already-evaluated dependency values, an AdvancedReaction its whole Execute. Lives on the
+    // factory itself so the association is discoverable and dies with the factory -- it
+    // previously sat in a static side-table in another assembly, which rooted every registered
+    // factory forever.
     internal IExecutor? Executor { get; set; }
+
+    // The TimeProvider reactions built from this factory schedule their debounce delays on
+    // (set via MemoizR.Reactive's AddTimeProvider). Null means TimeProvider.System. Tests inject
+    // a FakeTimeProvider so debounce windows elapse under test control instead of wall-clock time.
+    internal TimeProvider? TimeProvider { get; set; }
 
     /// <summary>
     /// Options are per-factory, not per-context: strictness governs how THIS factory creates

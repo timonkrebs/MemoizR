@@ -545,13 +545,13 @@ public class ReactiveTests
         }
     }
 
-    // Happy path for the SynchronizationContext marshalling: Execute must actually be posted to
-    // the supplied context and the reaction must converge through it. Generous poll budgets:
-    // every await inside Execute round-trips through the context's Post (a thread-pool hop), so
-    // under full-suite parallel load on a small runner propagation can take a while -- the polls
-    // exit early on healthy runs.
+    // Happy path for the SynchronizationContext marshalling: the reaction's action must actually
+    // be posted to the supplied context and the reaction must converge through it. Generous poll
+    // budgets: the action round-trips through the context's Post (a thread-pool hop), so under
+    // full-suite parallel load on a small runner propagation can take a while -- the polls exit
+    // early on healthy runs.
     [Fact(Timeout = 30000)]
-    public async Task Reaction_WithSynchronizationContext_ExecutesViaContextAndConverges()
+    public async Task Reaction_WithSynchronizationContext_RunsActionViaContextAndConverges()
     {
         var syncCtx = new CapturingSynchronizationContext();
         var f = new MemoFactory().AddSynchronizationContext(syncCtx);
@@ -561,7 +561,7 @@ public class ReactiveTests
 
         await TestHelpers.WaitForConvergenceAsync(() => last == 1, timeoutMs: 15000);
         Assert.Equal(1, last);
-        Assert.True(syncCtx.Posted > 0, "Execute was never posted to the supplied SynchronizationContext");
+        Assert.True(syncCtx.Posted > 0, "the action was never posted to the supplied SynchronizationContext");
 
         await v1.Set(7);
         await TestHelpers.WaitForConvergenceAsync(() => last == 7, timeoutMs: 15000);
@@ -571,14 +571,95 @@ public class ReactiveTests
         GC.KeepAlive(r);
     }
 
-    // Regression for the async-void double completion in InvokeExecute's posted callback: when
-    // Execute throws, the TCS was completed with SetException and then SetResult, and the
-    // resulting InvalidOperationException escaped the async void onto the SynchronizationContext
-    // -- a process crash on a real UI context. The fault must instead surface exactly once,
-    // through the awaited update (observable via Resume), with nothing escaping onto the context,
-    // and the reaction must recover on the next Set.
+    // The thread-pool/UI-thread split (#13): with a SynchronizationContext registered, dependency
+    // evaluation (the memo computations) must stay OFF the context -- on the worker flow that
+    // runs the update -- and only the action, with the already-evaluated values, may be
+    // marshalled to it. The capturing context makes itself Current for posted callbacks, so
+    // SynchronizationContext.Current distinguishes the two sides.
     [Fact(Timeout = 30000)]
-    public async Task Reaction_ExecuteThrowsUnderSynchronizationContext_FaultsResumeWithoutCrashingContext()
+    public async Task Reaction_WithSynchronizationContext_EvaluatesDependenciesOffContext_RunsActionOnContext()
+    {
+        var syncCtx = new CapturingSynchronizationContext();
+        var f = new MemoFactory().AddSynchronizationContext(syncCtx);
+        var v1 = f.CreateSignal(1);
+        var v2 = f.CreateSignal(10);
+        var memoRanOnContext = false;
+        var m1 = f.CreateMemoizR(async () =>
+        {
+            memoRanOnContext |= SynchronizationContext.Current == syncCtx;
+            return await v1.Get() * 2;
+        });
+
+        var last = 0;
+        var actionRanOffContext = false;
+        var r = f.BuildReaction().CreateReaction(m1, v2, (a, b) =>
+        {
+            actionRanOffContext |= SynchronizationContext.Current != syncCtx;
+            last = a + b;
+        });
+
+        await TestHelpers.WaitForConvergenceAsync(() => last == 12, timeoutMs: 15000);
+
+        await v1.Set(5);
+        await TestHelpers.WaitForConvergenceAsync(() => last == 20, timeoutMs: 15000);
+
+        Assert.False(memoRanOnContext, "dependency evaluation ran via the SynchronizationContext; it must stay on the thread pool");
+        Assert.False(actionRanOffContext, "the action ran outside the SynchronizationContext");
+        Assert.True(syncCtx.Exceptions.IsEmpty,
+            $"unhandled exception escaped onto the SynchronizationContext: {string.Join(", ", syncCtx.Exceptions)}");
+        GC.KeepAlive(r);
+    }
+
+    // CreateAdvancedReaction is the escape hatch from the dependency/action split: its opaque
+    // Func<Task> body cannot be split, so the WHOLE body still starts on the context
+    // (ReactionBase.InvokeExecute). A fault must surface exactly once through the awaited update
+    // (observable via Resume) with nothing escaping onto the context -- this keeps the
+    // async-void double-completion regression covered now that plain reactions no longer go
+    // through InvokeExecute's posted callback.
+    [Fact(Timeout = 30000)]
+    public async Task AdvancedReaction_WithSynchronizationContext_RunsWholeBodyViaContext_AndFaultsCleanly()
+    {
+        var syncCtx = new CapturingSynchronizationContext();
+        var f = new MemoFactory().AddSynchronizationContext(syncCtx);
+        var v1 = f.CreateSignal(1);
+        var last = 0;
+        var bodyStartedOffContext = false;
+        var r = f.BuildReaction().CreateAdvancedReaction(async () =>
+        {
+            bodyStartedOffContext |= SynchronizationContext.Current != syncCtx;
+            var v = await v1.Get();
+            if (v == 13) throw new InvalidOperationException("boom13");
+            last = v;
+        });
+
+        await TestHelpers.WaitForConvergenceAsync(() => last == 1, timeoutMs: 15000);
+        Assert.False(bodyStartedOffContext, "the advanced reaction body must start on the SynchronizationContext");
+        Assert.True(syncCtx.Posted > 0, "the body was never posted to the supplied SynchronizationContext");
+
+        r.Pause();
+        await v1.Set(13);
+        // Resume runs the pending update inline, so the Execute fault propagates to the caller.
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => r.Resume());
+        Assert.Contains("boom13", ex.Message);
+
+        // The failed run must not have poisoned the reaction: the next write still triggers it.
+        await v1.Set(2);
+        await TestHelpers.WaitForConvergenceAsync(() => last == 2, timeoutMs: 15000);
+        Assert.Equal(2, last);
+
+        Assert.True(syncCtx.Exceptions.IsEmpty,
+            $"unhandled exception escaped onto the SynchronizationContext: {string.Join(", ", syncCtx.Exceptions)}");
+        GC.KeepAlive(r);
+    }
+
+    // A throwing action under a SynchronizationContext (the posted callback is
+    // ReactionBuilder.InvokeActionAsync's): the fault must surface exactly once, through the
+    // awaited update (observable via Resume), with nothing escaping onto the context -- on a
+    // real UI context an escaped exception is a process crash -- and the reaction must recover
+    // on the next Set. (The async-void double-completion regression that motivated this shape
+    // lives on InvokeExecute's posted callback, covered by the AdvancedReaction test above.)
+    [Fact(Timeout = 30000)]
+    public async Task Reaction_ActionThrowsUnderSynchronizationContext_FaultsResumeWithoutCrashingContext()
     {
         var syncCtx = new CapturingSynchronizationContext();
         var f = new MemoFactory().AddSynchronizationContext(syncCtx);
@@ -607,6 +688,130 @@ public class ReactiveTests
         // InvalidOperationException("...already completed...") through the context.
         Assert.True(syncCtx.Exceptions.IsEmpty,
             $"unhandled exception escaped onto the SynchronizationContext: {string.Join(", ", syncCtx.Exceptions)}");
+        GC.KeepAlive(r);
+    }
+
+    // Creating a reaction must not run its eager initial evaluation inline on the creating
+    // thread: reactions are typically created on UI threads (see MemoizR.Wpf), where the
+    // dependency evaluation belongs on the thread pool even for the initial run. The
+    // zero-debounce initial Stale used to continue inline off the already-completed
+    // Task.Delay(0) (ConfigureAwait(false) does not yield on completed tasks), evaluating the
+    // whole graph on the creating thread before CreateReaction returned -- pinned here by the
+    // ForceYielding in RunDebouncedUpdateAsync. (Its companion guarantee -- the yield must not
+    // re-queue to the creating thread's SynchronizationContext like Task.Yield would -- needs a
+    // real UI context to observe and is covered by MemoizR.Wpf.Tests.)
+    [Fact(Timeout = 10000)]
+    public async Task Reaction_InitialRun_DoesNotEvaluateDependenciesInlineOnCreatingThread()
+    {
+        var f = new MemoFactory();
+        var v1 = f.CreateSignal(1);
+        var creatingThreadId = Environment.CurrentManagedThreadId;
+        var creating = true;
+        var ranInlineOnCreatingThread = false;
+        var m1 = f.CreateMemoizR(async () =>
+        {
+            // Same thread AND still inside the creation call: only the inline path can observe
+            // both (the creating thread cannot serve queued pool work while it is still inside
+            // CreateReaction), so a pool-scheduled run can never trip this flag.
+            ranInlineOnCreatingThread |= Environment.CurrentManagedThreadId == creatingThreadId && Volatile.Read(ref creating);
+            return await v1.Get();
+        });
+
+        var last = 0;
+        var r = f.BuildReaction().CreateReaction(m1, v => last = v);
+        Volatile.Write(ref creating, false);
+
+        await TestHelpers.WaitForConvergenceAsync(() => last == 1);
+        Assert.Equal(1, last);
+        Assert.False(ranInlineOnCreatingThread, "the initial run evaluated dependencies inline on the creating thread");
+        GC.KeepAlive(r);
+    }
+
+    // Factory-level convenience: f.CreateReaction(..) must behave exactly like
+    // f.BuildReaction().CreateReaction(..) with the default label and debounce.
+    [Fact(Timeout = 10000)]
+    public async Task Factory_CreateReaction_Convenience_TriggersLikeBuilderForm()
+    {
+        var f = new MemoFactory();
+        var v1 = f.CreateSignal(1);
+        var m1 = f.CreateMemoizR(async () => await v1.Get() * 2);
+        var last = 0;
+        var r = f.CreateReaction(m1, v1, (a, b) => last = a + b);
+
+        await TestHelpers.WaitForConvergenceAsync(() => last == 3);
+        Assert.Equal(3, last);
+
+        await v1.Set(5);
+        await TestHelpers.WaitForConvergenceAsync(() => last == 15);
+        Assert.Equal(15, last);
+        GC.KeepAlive(r);
+    }
+
+    // Separate-parameter dependencies must be evaluated IN PARALLEL (issue #13: "so that they
+    // can be evaluated independently"): each runs on its own pinned scope, so a dirty update
+    // costs the slowest dependency instead of the sum. The two memos here deadlock unless both
+    // computations are in flight at once -- each releases the other's gate before reading its
+    // signal -- so a sequential composition times out the gates and never converges.
+    [Fact(Timeout = 30000)]
+    public async Task Reaction_MultiDependency_EvaluatesDependenciesInParallel()
+    {
+        var f = new MemoFactory();
+        var v1 = f.CreateSignal(1);
+        var v2 = f.CreateSignal(2);
+        var entered1 = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var entered2 = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var m1 = f.CreateMemoizR(async () =>
+        {
+            entered1.TrySetResult();
+            await entered2.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            return await v1.Get();
+        });
+        var m2 = f.CreateMemoizR(async () =>
+        {
+            entered2.TrySetResult();
+            await entered1.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            return await v2.Get();
+        });
+
+        var last = 0;
+        var r = f.BuildReaction().CreateReaction(m1, m2, (a, b) => last = a + b);
+
+        await TestHelpers.WaitForConvergenceAsync(() => last == 3, timeoutMs: 15000);
+        Assert.Equal(3, last);
+        GC.KeepAlive(r);
+    }
+
+    // Every parameter is registered (and eagerly subscribed) BEFORE evaluation starts, so a
+    // dependency faulting on the reaction's first run leaves ALL parameters wired: a Set on any
+    // of them revives the reaction. The sequential composition only wired the prefix read before
+    // the fault -- here m1 faults first, so v2 was never wired and its Set was lost forever.
+    [Fact(Timeout = 30000)]
+    public async Task Reaction_DependencyFaultsOnFirstRun_AllParametersStillWired_AndRecovers()
+    {
+        var f = new MemoFactory();
+        var v1 = f.CreateSignal(1);
+        var v2 = f.CreateSignal(10);
+        var attempts = 0;
+        var shouldThrow = true;
+        var m1 = f.CreateMemoizR(async () =>
+        {
+            Interlocked.Increment(ref attempts);
+            if (Volatile.Read(ref shouldThrow)) throw new InvalidOperationException("dep boom");
+            return await v1.Get();
+        });
+
+        var last = 0;
+        var r = f.BuildReaction().CreateReaction(m1, v2, (a, b) => last = a + b);
+
+        // Wait until the initial run has actually attempted (and faulted) before disarming.
+        await TestHelpers.WaitForConvergenceAsync(() => Volatile.Read(ref attempts) >= 1);
+        Assert.True(Volatile.Read(ref attempts) >= 1, "the initial run never executed");
+        Assert.Equal(0, last); // the faulted run must not have produced the side effect
+
+        Volatile.Write(ref shouldThrow, false);
+        await v2.Set(20); // revive via the dependency AFTER the faulting one
+        await TestHelpers.WaitForConvergenceAsync(() => last == 21, timeoutMs: 15000);
+        Assert.Equal(21, last);
         GC.KeepAlive(r);
     }
 
@@ -712,17 +917,21 @@ public class ReactiveTests
         var f = new MemoFactory();
         var v1 = f.CreateSignal(1);
         var last = -1;
+        var attempts = 0;
         var shouldThrow = true;
         var r = f.BuildReaction().CreateReaction(v1, v =>
         {
+            Interlocked.Increment(ref attempts);
             if (Volatile.Read(ref shouldThrow)) throw new InvalidOperationException("initial boom");
             last = v;
         });
 
-        // Let the initial (throwing) run complete and fail; the exception is swallowed by the
-        // fire-and-forget debounce, so observe via the side effect staying unset.
-        await Task.Delay(150);
-        Assert.Equal(-1, last);
+        // Wait until the initial run has ACTUALLY attempted (and thrown) before disarming: a
+        // fixed delay raced the fire-and-forget initial run -- when the flip won, the initial run
+        // succeeded and the catch-path wiring this test exists to pin never executed at all.
+        await TestHelpers.WaitForConvergenceAsync(() => Volatile.Read(ref attempts) >= 1);
+        Assert.True(Volatile.Read(ref attempts) >= 1, "the initial run never executed");
+        Assert.Equal(-1, last); // the throwing run must not have produced the side effect
 
         Volatile.Write(ref shouldThrow, false);
         await v1.Set(5);

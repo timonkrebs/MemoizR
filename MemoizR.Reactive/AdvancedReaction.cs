@@ -6,12 +6,13 @@ public sealed class AdvancedReaction : ReactionBase
 
     internal AdvancedReaction(Func<Task> fn,
     Context context,
-    IExecutor? executor = null)
-    : base(context, executor)
+    IExecutor? executor = null,
+    TimeProvider? timeProvider = null)
+    : base(context, executor, timeProvider)
     {
         this.fn = fn;
-
-        Stale(CacheState.CacheDirty, TimeSpan.Zero);
+        // The eager initial run is NOT started here: the builder calls ScheduleInitialRun()
+        // after the object initializer has assigned Label/DebounceTime (see ReactionBase).
     }
 
     protected override Task Execute()

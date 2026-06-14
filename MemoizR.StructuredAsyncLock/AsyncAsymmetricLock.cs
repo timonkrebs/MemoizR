@@ -233,7 +233,11 @@ public sealed class AsyncAsymmetricLock
         lock (Lock)
         {
             locksHeld--;
-            if (locksHeld == 0)
+            // The scope is only surrendered when NOTHING in it holds the lock anymore: a
+            // same-scope upgradeable granted recursively under this exclusive may still be held,
+            // and zeroing the scope under it would make that holder's next same-flow acquisition
+            // enqueue behind itself -- a deadlock. (Mirrors ReleaseUpgradeableLock.)
+            if (locksHeld == 0 && upgradedLocksHeld == 0)
             {
                 lockScope = 0;
             }

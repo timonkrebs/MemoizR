@@ -4,22 +4,22 @@ public sealed class Reaction : ReactionBase
 {
     private readonly Func<Task> action;
 
+    // Deliberately no SynchronizationContext: a Reaction's marshalling is owned by its composed
+    // body (ReactionBuilder evaluates the dependencies on the calling flow and posts only the
+    // user action). Base-level whole-Execute posting would put graph evaluation back on the
+    // context AND nest a second post around the action's own. AdvancedReaction is the type for
+    // bodies that must run on the context as a whole.
     internal Reaction(Func<Task> action,
                       Context context,
-                      IExecutor? executor = null)
-        : base(context, executor)
+                      TimeProvider? timeProvider = null)
+        : base(context, timeProvider: timeProvider)
     {
         this.action = action;
-
-        // Eager-run contract: a reaction executes once on creation (SolidJS-style effect
-        // semantics), scheduled through the same invalidation/debounce machinery as every other
-        // trigger. TimeSpan.Zero deliberately bypasses the configured DebounceTime -- the initial
-        // run should not wait out a debounce window meant for write coalescing. Note this is a
-        // fire-and-forget background start from a constructor: ReactionBuilder's object
-        // initializer (Label, DebounceTime) races it, which is benign only because the initial
-        // run does not read either.
-        Stale(CacheState.CacheDirty, TimeSpan.Zero);
+        // The eager initial run is NOT started here: the builder calls ScheduleInitialRun()
+        // after the object initializer has assigned Label/DebounceTime (see ReactionBase).
     }
+
+    protected override bool ResumeOnDetachedScope => true;
 
     protected override async Task Execute()
     {

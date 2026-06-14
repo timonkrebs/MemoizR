@@ -17,3 +17,6 @@ New ADRs are numbered sequentially (`NNNN-title.md`).
 See also: [Concurrency Architecture](../architecture/concurrency.md) — the mechanism-level deep
 dive (synchronization layers, the cache-state protocol, the lock-free read path, the generation
 guard, structured concurrency) with diagrams; the ADRs record the decisions it builds on.
+And [Performance Notes](../architecture/performance.md) — the measured hot-path numbers, the
+root causes behind them, each optimization's safety argument, and what was deliberately left
+unoptimized.

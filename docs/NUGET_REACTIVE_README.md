@@ -17,16 +17,28 @@ var m2 = f.CreateMemoizR(async() => await v1.Get() * 2);
 var r1 = f.CreateReaction(m1, m2, (val1, val2) => val1 + val2);
 ```
 
+A custom label or debounce time goes through the builder:
+`f.BuildReaction("MyReaction").AddDebounceTime(TimeSpan.FromMilliseconds(16)).CreateReaction(...)`.
+
+## Testing time-dependent reactions
+The debounce delay of reactions runs on a `TimeProvider` (default: `TimeProvider.System`). Inject a fake provider, e.g. `Microsoft.Extensions.Time.Testing.FakeTimeProvider`, to control when debounce windows elapse instead of waiting out wall-clock time:
+
 ```csharp
+var timeProvider = new FakeTimeProvider();
+var f = new MemoFactory().AddTimeProvider(timeProvider); // applies to reactions built afterwards
+var v1 = f.CreateSignal(1);
 
-// The following example uses the TaskScheduler.FromCurrentSynchronizationContext method in a Windows Presentation Foundation (WPF) app to schedule
-// https://learn.microsoft.com/en-us/dotnet/api/system.threading.tasks.taskscheduler?view=net-7.0#specifying-a-synchronization-context
-var UISyncContext = SynchronizationContext.Current;
-var f = new MemoFactory();
-f.AddSynchronizationContext(UISyncContext);
+var r1 = f.BuildReaction()
+    .AddDebounceTime(TimeSpan.FromSeconds(1))
+    .CreateReaction(v1, val => { /* side effect */ });
 
-var r1 = f.CreateReaction(m1, m2, (val1, val2) => val1 + val2);
+await v1.Set(2);                               // schedules the debounced update
+timeProvider.Advance(TimeSpan.FromSeconds(1)); // releases it deterministically
 ```
+
+The provider can also be set per reaction on the builder: `f.BuildReaction().AddTimeProvider(timeProvider)`.
+
+## Pinning reaction side effects to an executor
 
 Reactions can be pinned to any `IExecutor` (the analog of Swift's custom actor executors), per
 factory or per builder — e.g. a `DedicatedThreadExecutor`, whose installed
@@ -41,3 +53,6 @@ var r1 = f.BuildReaction().CreateReaction(m1, val =>
     executor.AssertIsolated(); // throws when not running on the executor
 });
 ```
+
+`AddSynchronizationContext` (and `MemoizR.Wpf`'s `AddWpfDispatcher`) wrap the context in a
+`SynchronizationContextExecutor`, so UI marshalling and custom executors share one mechanism.

@@ -32,20 +32,29 @@ public sealed class ConcurrentRace<T, I> : MemoHandlR<T>, IMemoizR, IStateGetR<T
     public async Task<T> Get()
     {
         var scope = Context.GetOrCreateScope();
-        // Only one thread should evaluate the graph at a time. otherwise the context could get messed up.
-        // This should lead to perf gains because memoization can be utilized more efficiently.
-        using (await mutex.LockAsync())
-        using (await scope.ContextLock.UpgradeableLockAsync())
+        try
         {
-            Context.EnterEvaluationScope();
-            try
+            // Only one thread should evaluate the graph at a time. otherwise the context could get messed up.
+            // This should lead to perf gains because memoization can be utilized more efficiently.
+            using (await mutex.LockAsync())
+            using (await scope.ContextLock.UpgradeableLockAsync())
             {
-                return await Update();
+                Context.EnterEvaluationScope();
+                try
+                {
+                    return await Update();
+                }
+                finally
+                {
+                    Context.ExitEvaluationScope();
+                }
             }
-            finally
-            {
-                Context.ExitEvaluationScope();
-            }
+        }
+        finally
+        {
+            // Strong root for the weakly-registered scope: keeps the held lock's identity stable
+            // across the evaluation (a collected scope would resurrect with a fresh, free lock).
+            GC.KeepAlive(scope);
         }
     }
 
@@ -94,18 +103,26 @@ public sealed class ConcurrentRace<T, I> : MemoHandlR<T>, IMemoizR, IStateGetR<T
 
     async Task IMemoizR.UpdateIfNecessary()
     {
-        using (await mutex.LockAsync())
-        using (await Context.ReactionScope.ContextLock.UpgradeableLockAsync())
+        var scope = Context.GetOrCreateScope();
+        try
         {
-            Context.EnterEvaluationScope();
-            try
+            using (await mutex.LockAsync())
+            using (await scope.ContextLock.UpgradeableLockAsync())
             {
-                await Update();
+                Context.EnterEvaluationScope();
+                try
+                {
+                    await Update();
+                }
+                finally
+                {
+                    Context.ExitEvaluationScope();
+                }
             }
-            finally
-            {
-                Context.ExitEvaluationScope();
-            }
+        }
+        finally
+        {
+            GC.KeepAlive(scope);
         }
     }
 
@@ -126,8 +143,7 @@ public sealed class ConcurrentRace<T, I> : MemoHandlR<T>, IMemoizR, IStateGetR<T
         return Stale(state);
     }
 
-    ~ConcurrentRace()
-    {
-        Cancel();
-    }
+    // Deliberately NO finalizer: the CancellationTokenSource is CONTEXT-wide and shared by every
+    // evaluation in flight, so a finalizer calling Cancel() would abort unrelated work at an
+    // arbitrary GC-determined moment on the finalizer thread.
 }
