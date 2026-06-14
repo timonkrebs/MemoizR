@@ -128,6 +128,78 @@ var m2 = f.CreateMemoizR(async() => await v1.Get() * 2);
 var r1 = f.CreateReaction(m1, m2, (val1, val2) => val1 + val2);
 ```
 
+### Data-race safety (strict mode)
+
+MemoizR publishes value *references* tear-free across concurrent flows, but only an immutable
+(or thread-safe) type makes the object behind the reference safe to share. Strict mode — the
+runtime analog of Swift's `Sendable` checking — validates this at node creation:
+
+```cs
+var f = new MemoFactory("strict", MemoFactoryOptions.StrictSendableChecks);
+
+record Person(string Name, int Age);          // init-only members => Sendable
+var p = f.CreateSignal(new Person("Ada", 36)); // ok
+var xs = f.CreateSignal(ImmutableArray.Create(1, 2, 3)); // ok
+
+f.CreateSignal(new List<int>()); // throws: List<int> is not Sendable
+                                 // (writable instance field '_items')
+```
+
+Types the structural check cannot prove (internally synchronized ones) can opt in with
+`[Sendable]`, the analog of Swift's `@unchecked Sendable`. Code that must only run inside a
+serialized graph evaluation can assert it dynamically — the `preconditionIsolated()` analog:
+
+```cs
+f.AssertEvaluationIsolated(); // throws outside a Get/Set/recompute/reaction update
+```
+
+The same discipline is checked at **build time** by analyzers bundled in the NuGet package
+(severity configurable per rule via `.editorconfig`):
+
+| Rule | Flags |
+|------|-------|
+| `MZR001` | A non-Sendable value type at a `Create*` call — the compile-time mirror of strict mode |
+| `MZR002` | A computation writing captured locals, fields, or statics — lift that state into a `Signal` |
+| `MZR003` | `Signal.Set` inside a computation, which throws `InvalidOperationException` at runtime |
+
+Reaction side effects can be pinned to an **executor** — the analog of Swift's custom actor
+executors (SE-0392). `AddSynchronizationContext(uiContext)` covers UI threads;
+`AddExecutor(new DedicatedThreadExecutor())` gives a single-threaded isolation seat whose
+installed `SynchronizationContext` keeps async continuations on its thread; any custom
+`IExecutor` works, per factory or per `BuildReaction()`:
+
+```cs
+using var executor = new DedicatedThreadExecutor();
+var f = new MemoFactory().AddExecutor(executor);
+var r = f.BuildReaction().CreateReaction(m1, v =>
+{
+    executor.AssertIsolated(); // the executor-flavored preconditionIsolated()
+    // touch executor-isolated state safely
+});
+```
+
+### Actor engine (experimental)
+
+The Swift-actor-style core suggested by issue #36: graph bookkeeping runs as serialized turns of
+a per-context `GraphActor` instead of under locks, while computations stay parallel. Same
+semantics, no monitors, no deadlock surface — plus a read-evidence commit guard that closes a
+staleness window the lock engine leaves open:
+
+```cs
+var f = new MemoFactory();
+var v = f.CreateActorSignal(1);
+var m = f.CreateActorMemoizR(async () => await v.Get() * 2);
+await m.Get(); // 2 — lazy, memoized, generation-guarded, actor-isolated bookkeeping
+```
+
+Actor nodes only interoperate with actor nodes of the same context (enforced at the type
+level); signals/memos only for now.
+
+See [ADR 0003](docs/adr/0003-sendable-checking-and-isolation-assertions.md) (runtime layer),
+[ADR 0004](docs/adr/0004-compile-time-data-race-diagnostics.md) (analyzers),
+[ADR 0005](docs/adr/0005-custom-executors.md) (executors), and
+[ADR 0006](docs/adr/0006-actor-engine-prototype.md) (actor engine) for the design and its limits.
+
 ### WPF / UI threads
 
 With the `MemoizR.Wpf` package the whole dependency graph keeps evaluating on the thread pool;
@@ -150,10 +222,10 @@ A specific `Dispatcher` can be supplied with `f.AddWpfDispatcher(dispatcher)`. O
 stacks, register the UI `SynchronizationContext` directly from the UI thread with
 `f.AddSynchronizationContext(SynchronizationContext.Current!)` (`MemoizR.Reactive`); reactions
 built from the factory then follow the same contract: dependencies on the thread pool, action
-on the registered context.
+on the registered context. Both routes wrap the context in a `SynchronizationContextExecutor`,
+the `IExecutor` seat described above.
 
-Try it out!https:
-Experiment with MemoizR online: https://dotnetfiddle.net/Widget/EWtptc
+Try it out! Experiment with MemoizR online: https://dotnetfiddle.net/Widget/EWtptc
 
 Example From: [Khalid Abuhakmeh](https://khalidabuhakmeh.com/memoizr-declarative-structured-concurrency-for-csharp#conclusion)
 

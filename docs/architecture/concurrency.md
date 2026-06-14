@@ -612,7 +612,7 @@ sequenceDiagram
     participant W as Set (writer flow)
     participant R as ReactionBase
     participant D as debounced task (inherits writer's flow)
-    participant SC as SynchronizationContext (optional)
+    participant SC as Executor (optional — e.g. a UI SynchronizationContext)
 
     W->>R: Stale(CacheDirty)
     activate R
@@ -624,10 +624,10 @@ sequenceDiagram
     D->>D: mutex.LockAsync  ⟵ serializes vs Resume() and<br/>other in-flight debounced updates of THIS reaction
     D->>D: ContextLock.Upgradeable (own flow)
     D->>D: UpdateIfNecessary: Clean? → no-op (coalesced)
-    alt SynchronizationContext supplied
-        D->>SC: Post(Execute)
-        SC->>SC: Execute (user code on the context)
-        SC-->>D: TCS completed (RunContinuationsAsynchronously —<br/>bookkeeping does NOT run inline in the post)
+    alt executor supplied (AddExecutor / AddSynchronizationContext)
+        D->>SC: Enqueue(Execute)
+        SC->>SC: Execute (user code on the executor)
+        SC-->>D: TCS completed (RunContinuationsAsynchronously —<br/>bookkeeping does NOT run inline in the executor's slot)
     else none
         D->>D: Execute inline
     end
@@ -653,10 +653,12 @@ Design points, each pinned by a test:
   `Dirty`. `Resume` runs the pending update inline under mutex + ContextLock and cleans up only
   a scope it created — calling it from inside an active evaluation must not destroy the
   enclosing flow's scope (`Reaction_ResumeInsideActiveEvaluation_DoesNotDestroyEnclosingScope`).
-- **SynchronizationContext marshalling**: `Execute` is posted to the supplied context (UI
-  thread); its completion TCS uses `RunContinuationsAsynchronously` so commit/cleanup never runs
-  inside the context's callback, and the callback completes the TCS **exactly once** — a
-  `SetResult` after `SetException` would escape the `async void` and crash the process
+- **Executor marshalling**: `Execute` is enqueued to the supplied `IExecutor` (a UI
+  `SynchronizationContext` wrapped by `AddSynchronizationContext`, a `DedicatedThreadExecutor`,
+  or a custom seat — the SE-0392 analog, [ADR 0005](../adr/0005-custom-executors.md)); its
+  completion TCS uses `RunContinuationsAsynchronously` so commit/cleanup never runs inside the
+  executor's slot, and the callback completes the TCS **exactly once** — a `SetResult` after
+  `SetException` would escape the `async void` and crash the process
   (`Reaction_ExecuteThrowsUnderSynchronizationContext_FaultsResumeWithoutCrashingContext`).
 - **Error semantics**: a throwing `Execute` re-marks the reaction `Dirty` (`Force`) and the
   exception propagates to `Resume` callers / is swallowed by the fire-and-forget debounce; the
@@ -681,7 +683,39 @@ Design points, each pinned by a test:
 | I11 | Scopes are cleaned up only by their creator | `CreateNewScopeIfNeeded` → `bool` (§2) | `Reaction_ResumeInsideActiveEvaluation…` |
 | I12 | Reaction side effects are ordered per node | reaction mutex (§11) | `Reaction_ExecutionsNeverOverlap…` |
 
-## 13. How this is verified
+## 13. The user boundary: Sendable values and dynamic isolation checks
+
+Everything above makes MemoizR's *own* state race-free — but the graph also shares **user
+values** across flows: `Value` hands the same `T` reference to every consumer, including
+lock-free fast-path readers, while any flow may be mutating the object behind it. That gap (and
+the runtime checks that close it, modeled on Swift's `Sendable` + `preconditionIsolated`) is
+recorded in [ADR 0003](../adr/0003-sendable-checking-and-isolation-assertions.md):
+
+- `SendableChecker` structurally verifies that a type is deeply immutable or internally
+  synchronized; `[Sendable]` is the trusted opt-in for types it cannot prove.
+- `MemoFactoryOptions.StrictSendableChecks` enforces the check when value-bearing nodes are
+  created (signals, memos, the concurrent nodes — including `ConcurrentRace`'s resolver result,
+  which is handed to every racing child in parallel).
+- `AsyncAsymmetricLock.IsHeldByCurrentFlow` + `Context.AssertEvaluationIsolated()` let code
+  assert "I am inside a serialized graph evaluation"; a DEBUG-only assert in
+  `UpdateSourceAndObserverLinks` mechanically pins its documented "only inside a
+  ContextLock-serialized evaluation" contract on every recompute of every Debug test run.
+
+These are boundary checks, not new synchronization: they change nothing in layers 1–5. The same
+discipline is enforced at build time by the bundled `MemoizR.Analyzers` rules — MZR001
+(non-Sendable creation type), MZR002 (computation writes captured/shared state), MZR003 (`Set`
+inside a computation) — see [ADR 0004](../adr/0004-compile-time-data-race-diagnostics.md).
+
+An experimental **actor engine** (`CreateActorSignal`/`CreateActorMemoizR`,
+[ADR 0006](../adr/0006-actor-engine-prototype.md)) replaces layers 1–3 wholesale for its nodes:
+all bookkeeping runs as synchronous turns of a per-context `GraphActor`, leaving only the
+generation guard (§6, inherent to lazy memoization) and the two-volatile-field fast path (§7).
+Its read-evidence commit guard also closes a staleness window this document's engine leaves
+open — a `Stale` suppressed at an already-dirty node (§5's early termination) never reaches an
+observer whose down-link wired *after* the node went dirty; see the quarantined
+`LockEngine_UnprimedChainUnderStorm_StrandsStale_KnownIssue` regression test.
+
+## 14. How this is verified
 
 Three complementary techniques, because no single one can prove a memory model:
 

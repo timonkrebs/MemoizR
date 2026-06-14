@@ -86,6 +86,12 @@ public class Context
 
     public CancellationTokenSource? CancellationTokenSource { get; private set; }
 
+    // The experimental actor engine's serial seat (ADR 0006): one per context, like the
+    // ReactionScope machinery, so keyed factories share one actor. Lazy because most contexts
+    // never create actor-engine nodes.
+    private readonly Lazy<GraphActor> graphActor = new(() => new());
+    internal GraphActor GraphActor => graphActor.Value;
+
     private int evaluationDepth;
 
     // The context-wide CancellationTokenSource is shared by every evaluation in flight (so
@@ -247,6 +253,32 @@ public class Context
     internal ReactionScope ForceNewScope()
     {
         return MintAndPinScope();
+    }
+
+    /// <summary>
+    /// Whether the current async flow is inside a MemoizR-serialized graph evaluation, i.e. it
+    /// holds its flow's evaluation lock (in either mode). A flow with no pinned scope cannot hold
+    /// a stable ContextLock, so it reads as not isolated -- short-circuited here so the common
+    /// "outside evaluation" case does not allocate the throwaway scope the ReactionScope getter
+    /// would otherwise mint. Point-in-time: only meaningful as "I am inside the locked region",
+    /// never as a reason to skip acquiring the lock.
+    /// </summary>
+    public bool IsEvaluationIsolated => AsyncLocalScope.Value != 0 && ReactionScope.ContextLock.IsHeldByCurrentFlow;
+
+    /// <summary>
+    /// Dynamic isolation check (issue #36), the runtime analog of Swift's
+    /// <c>preconditionIsolated()</c>: throws when the current async flow is not inside a
+    /// MemoizR-serialized graph evaluation.
+    /// </summary>
+    public void AssertEvaluationIsolated()
+    {
+        if (!IsEvaluationIsolated)
+        {
+            throw new InvalidOperationException(
+                "This code expected to run inside a MemoizR graph evaluation (a Get/Set/recompute or " +
+                "reaction update holding the current flow's evaluation lock), but no evaluation is active " +
+                "on this async flow.");
+        }
     }
 
     public T Untrack<T>(Func<T> fn)

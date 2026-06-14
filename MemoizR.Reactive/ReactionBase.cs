@@ -15,10 +15,14 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
     // trigger (see CacheStateCell). isPaused is written by Pause/Resume from arbitrary threads
     // and read in Update, so it stays volatile.
     private CacheState State => stateCell.State;
-    private SynchronizationContext? synchronizationContext;
+    // The executor a whole-body Execute is marshalled to (the SE-0392 custom-executor analog).
+    // Only AdvancedReaction supplies one; a plain Reaction marshals at action granularity in its
+    // composed body (ReactionBuilder) instead. A UI SynchronizationContext arrives wrapped in a
+    // SynchronizationContextExecutor (e.g. via AddSynchronizationContext / MemoizR.Wpf).
+    private readonly IExecutor? executor;
     // The clock the debounce delay runs on (issue #38). Threaded through the constructor like
-    // synchronizationContext so tests can drive the debounce window with a fake provider instead
-    // of racing wall-clock time. Null defaults to TimeProvider.System.
+    // executor so tests can drive the debounce window with a fake provider instead of racing
+    // wall-clock time. Null defaults to TimeProvider.System.
     private readonly TimeProvider timeProvider;
     private volatile bool isPaused;
 
@@ -27,10 +31,10 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
     // Written by a parent's diamond down-link; absorbed (not generation-bumped) during our own eval.
     CacheState IMemoizR.State { get => stateCell.State; set => stateCell.InvalidateFromParent(value); }
 
-    internal ReactionBase(Context context, SynchronizationContext? synchronizationContext = null, TimeProvider? timeProvider = null)
+    internal ReactionBase(Context context, IExecutor? executor = null, TimeProvider? timeProvider = null)
     : base(context)
     {
-        this.synchronizationContext = synchronizationContext;
+        this.executor = executor;
         this.timeProvider = timeProvider ?? TimeProvider.System;
         stateCell.Force(CacheState.CacheDirty);
     }
@@ -267,28 +271,30 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
         stateCell.TryCommitClean(token);
     }
 
-    // Run Execute on the captured SynchronizationContext if one was supplied (marshalling the
+    // Run Execute on the configured executor if one was supplied (marshalling the
     // result/exception back through a TaskCompletionSource), otherwise run it inline. Only
-    // AdvancedReaction supplies a context here -- its opaque body cannot be split, so it runs on
-    // the context as a whole. Reaction marshals at action granularity inside its composed body
-    // instead (ReactionBuilder.InvokeActionAsync), keeping dependency evaluation off the context.
+    // AdvancedReaction supplies an executor here -- its opaque body cannot be split, so it runs
+    // on the executor as a whole. Reaction marshals at action granularity inside its composed
+    // body instead (ReactionBuilder.InvokeActionAsync), keeping dependency evaluation off the
+    // executor. The executor only decides WHERE Execute runs (SE-0392 analog); completion and
+    // exception semantics live here, once, so an IExecutor implementation cannot get them wrong.
     private async Task InvokeExecute()
     {
-        if (synchronizationContext != null)
+        if (executor != null)
         {
             // RunContinuationsAsynchronously: completing the TCS must not run the rest of the
             // update pipeline (link rewiring, state commit, lock releases) inline inside the
-            // SynchronizationContext's posted callback -- that work belongs to the update's own
-            // flow, and running it on e.g. a UI thread inside the post both blocks that thread
-            // and exposes the pipeline to whatever exception handling wraps the context's
-            // callbacks.
+            // executor's slot -- that work belongs to the update's own flow, and running it on
+            // e.g. a UI thread inside the enqueued callback both blocks that thread and exposes
+            // the pipeline to whatever exception handling wraps the executor's callbacks.
             var tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
-            async void SendOrPostCallback(object? _)
+            async void ExecuteOnExecutor()
             {
                 // Complete the TCS exactly once: SetResult after SetException would throw
                 // InvalidOperationException out of this async void and crash the process via the
-                // SynchronizationContext instead of faulting the awaited task.
+                // executor instead of faulting the awaited task. This wrapper is also what makes
+                // the IExecutor contract hold ("the enqueued delegate never throws").
                 try
                 {
                     await Execute();
@@ -300,7 +306,18 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
                 }
             }
 
-            synchronizationContext.Post(SendOrPostCallback, null);
+            try
+            {
+                executor.Enqueue(ExecuteOnExecutor);
+            }
+            catch (Exception e)
+            {
+                // A custom IExecutor may reject scheduling (e.g. disposed): fault the awaited
+                // task so the failure flows through the update pipeline rather than throwing
+                // synchronously past the TCS.
+                tcs.TrySetException(e);
+            }
+
             await tcs.Task;
         }
         else

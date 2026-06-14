@@ -91,6 +91,7 @@ public abstract class SignalHandlR : IMemoHandlR
     // generation, so the value committed at the end of the evaluation cached stale forever.
     internal void UpdateSourceAndObserverLinks()
     {
+        AssertRewiringIsolated();
         var self = (IMemoizR)this;
         // Resolve the scope once: every Context.ReactionScope access takes the context-wide lock
         // plus a dictionary probe, and this method reads it many times per recompute.
@@ -125,6 +126,17 @@ public abstract class SignalHandlR : IMemoHandlR
             // Usually a no-op: capture-time eager subscription already wired the link.
             source.AddObserver(self);
         }
+    }
+
+    // Dynamic isolation check (DEBUG only, issue #36): mechanically pins the "must only be
+    // called inside a ContextLock-serialized evaluation" contract above, so a future caller that
+    // reaches the rewiring without the lock fails loudly in every Debug test run instead of
+    // corrupting the links silently. Not asserted in RemoveParentObservers: ReactionBase.Dispose
+    // legitimately prunes links outside any evaluation.
+    [System.Diagnostics.Conditional("DEBUG")]
+    private void AssertRewiringIsolated()
+    {
+        Context.AssertEvaluationIsolated();
     }
 
     internal void RemoveParentObservers(int index)
