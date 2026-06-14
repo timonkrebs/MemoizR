@@ -35,6 +35,7 @@ public sealed class StructuredRaceJob<T, R> : StructuredJobBase<T>
 
     protected override async Task AddConcurrentWork(StructuredResourceGroup resourceGroup)
     {
+        resourceGroup.AddResource(innerCancellationTokenSource);
         var inputs = await action();
         var raceResourceGroup = new RaceResourceGroup(resourceGroup, innerCancellationTokenSource.Token);
         tasks.AddRange(fns.Select(x => new Task<Task>(async () =>
