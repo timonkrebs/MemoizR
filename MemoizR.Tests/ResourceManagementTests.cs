@@ -117,6 +117,57 @@ public class ResourceManagementTests
         Assert.True(resource2.IsDisposed);
     }
 
+
+    [Fact]
+    public async Task TestResourceDisposalExceptionsAreAggregated()
+    {
+        var f = new MemoFactory();
+
+        var resource1 = new ActionDisposable(() => throw new InvalidOperationException("dispose 1"));
+        var resource2 = new ActionDisposable(() => throw new InvalidOperationException("dispose 2"));
+
+        var c1 = f.CreateConcurrentMapReduce(
+            r =>
+            {
+                r.AddResource(resource1);
+                r.AddResource(resource2);
+                return Task.FromResult(1);
+            });
+
+        var ex = await Assert.ThrowsAsync<AggregateException>(async () => await c1.Get());
+        // Both disposal failures must be surfaced. The LIFO disposal ORDER is a separate contract
+        // verified by TestResourceDisposalOrder, so this aggregation test stays order-independent
+        // (and would survive disposal ever being parallelized).
+        Assert.Equal(2, ex.InnerExceptions.Count);
+        Assert.Contains(ex.InnerExceptions, e => e.Message == "dispose 1");
+        Assert.Contains(ex.InnerExceptions, e => e.Message == "dispose 2");
+    }
+
+    [Fact]
+    public async Task TestJobAndDisposalExceptionsAreCombined()
+    {
+        // When the job body AND resource disposal both fail, the disposal fault must be combined
+        // with the original job fault -- not allowed to replace it (which a throwing `finally`
+        // would do, masking the root cause).
+        var f = new MemoFactory();
+
+        var resource = new ActionDisposable(() => throw new InvalidOperationException("dispose failure"));
+
+        var c1 = f.CreateConcurrentMapReduce(
+            (IStructuredResourceGroup r) =>
+            {
+                r.AddResource(resource);
+                return Task.FromException<int>(new InvalidOperationException("job failure"));
+            },
+            async c => { await Task.Delay(50, c.Token); return 1; });
+
+        var ex = await Assert.ThrowsAsync<AggregateException>(async () => await c1.Get());
+
+        var inner = ex.Flatten().InnerExceptions;
+        Assert.Contains(inner, e => e.Message == "job failure");
+        Assert.Contains(inner, e => e.Message == "dispose failure");
+    }
+
     private class ActionDisposable : IDisposable
     {
         private readonly Action action;
