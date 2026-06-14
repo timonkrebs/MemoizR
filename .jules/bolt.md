@@ -1,0 +1,3 @@
+## 2024-05-18 - Replacing Enumerable LINQ methods with Spans and Range indexing
+**Learning:** In C#12+ with Collection Expressions (`[.. a, .. b]`), replacing `[.. arr.Take(n)]` with `[.. arr.AsSpan(0, n)]` yields significant performance gains by avoiding the allocation of the enumerator and the LINQ interface dispatch overhead, while still staying within the guidelines of using declarative structures and avoiding manual loops/`Array.Copy`. However, per AGENTS.md, I MUST avoid replacing standard LINQ methods like `.Where()` with imperative manual loops or `Array.FindAll` or similar manual tracking.
+**Action:** Use `.AsSpan(...)` instead of `.Take(...)` in hot paths within collection expressions for array manipulation to optimize without breaking AGENTS.md directives.

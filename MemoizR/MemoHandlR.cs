@@ -100,12 +100,12 @@ public abstract class SignalHandlR : IMemoHandlR
         if (scope.CurrentGets.Length > 0)
         {
             newSources = Sources.Length > 0 && scope.CurrentGetsIndex > 0
-                ? [.. Sources.Take(scope.CurrentGetsIndex), .. scope.CurrentGets]
+                ? [.. Sources.AsSpan(0, scope.CurrentGetsIndex), .. scope.CurrentGets]
                 : scope.CurrentGets;
         }
         else if (Sources.Length > 0 && scope.CurrentGetsIndex < Sources.Length)
         {
-            newSources = [.. Sources.Take(scope.CurrentGetsIndex)];
+            newSources = [.. Sources.AsSpan(0, scope.CurrentGetsIndex)];
         }
         else
         {
