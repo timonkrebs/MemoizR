@@ -207,8 +207,6 @@ public abstract class MemoBase<T> : MemoHandlR<T>, IMemoizR, IStateGetR<T>
             var self = (IMemoizR)this;
             foreach (var got in scope.CurrentGets)
             {
-                // Performance: Replaced LINQ .Contains() with Array.IndexOf()
-                // to avoid enumerator allocations and interface dispatch overhead on hot path.
                 if (Array.IndexOf(Sources, got) == -1)
                 {
                     got.RemoveObserver(self);

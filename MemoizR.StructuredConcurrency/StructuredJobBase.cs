@@ -32,7 +32,9 @@ public abstract class StructuredJobBase<T>
     {
         lock (Lock)
         {
-            foreach (var source in owner.Sources.Take(scope.CurrentGetsIndex))
+            // Performance: Replaced LINQ .Take() with .AsSpan()
+            // to avoid enumerator allocations and interface dispatch overhead on hot path.
+            foreach (var source in owner.Sources.AsSpan(0, scope.CurrentGetsIndex))
             {
                 allSources.Add(source);
             }

@@ -1,0 +1,14 @@
+--- MemoizR/MemoHandlR.cs
++++ MemoizR/MemoHandlR.cs
+@@ -113,8 +113,10 @@
+         }
+
+         foreach (var old in Sources)
+         {
+-            if (!newSources.Contains(old))
++            // Performance: Replaced LINQ .Contains() with Array.IndexOf()
++            // to avoid enumerator allocations and interface dispatch overhead on hot path.
++            if (Array.IndexOf(newSources, old) == -1)
+             {
+                 old.RemoveObserver(self);
+             }

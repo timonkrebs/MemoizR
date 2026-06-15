@@ -114,8 +114,6 @@ public abstract class SignalHandlR : IMemoHandlR
 
         foreach (var old in Sources)
         {
-            // Performance: Replaced LINQ .Contains() with Array.IndexOf()
-            // to avoid enumerator allocations and interface dispatch overhead on hot path.
             if (Array.IndexOf(newSources, old) == -1)
             {
                 old.RemoveObserver(self);

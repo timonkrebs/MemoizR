@@ -1,0 +1,26 @@
+--- MemoizR/MemoBase.cs
++++ MemoizR/MemoBase.cs
+@@ -206,8 +206,10 @@
+             var self = (IMemoizR)this;
+             foreach (var got in scope.CurrentGets)
+             {
+-                if (!Sources.Contains(got))
++                // Performance: Replaced LINQ .Contains() with Array.IndexOf()
++                // to avoid enumerator allocations and interface dispatch overhead on hot path.
++                if (Array.IndexOf(Sources, got) == -1)
+                 {
+                     got.RemoveObserver(self);
+                 }
+--- MemoizR.StructuredConcurrency/StructuredJobBase.cs
++++ MemoizR.StructuredConcurrency/StructuredJobBase.cs
+@@ -31,8 +31,10 @@
+     {
+         lock (Lock)
+         {
+-            foreach (var source in owner.Sources.Take(scope.CurrentGetsIndex))
++            // Performance: Replaced LINQ .Take() with .AsSpan()
++            // to avoid enumerator allocations and interface dispatch overhead on hot path.
++            foreach (var source in owner.Sources.AsSpan(0, scope.CurrentGetsIndex))
+             {
+                 allSources.Add(source);
+             }
