@@ -218,6 +218,11 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
         scope.CurrentGets = [];
         scope.CurrentGetsIndex = 0;
 
+        // Open the stamp-capture bucket: tracked reads inside Execute record the source stamps
+        // they observed, keyed by this node. A reaction has no value box, so on success the
+        // joined stamp is published to the inherited ownStamp field instead.
+        Context.BeginStampCapture(this);
+
         // Mark Evaluating and snapshot the generation so a Stale during Execute escalates past
         // Evaluating (bumping the generation) and blocks the commit below.
         var token = stateCell.BeginEvaluation();
@@ -252,10 +257,17 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
                 throw;
             }
 
+            var captured = Context.TakeStampCapture(this);
+            ownStamp = CausalityStamp.JoinAll(captured.Values);
+            sourceStamps = captured;
+
             UpdateSourceAndObserverLinks();
         }
         finally
         {
+            // Drop a capture left open by the paused/throwing paths (the reaction keeps its
+            // previous stamp); no-op after a successful publish.
+            Context.DiscardStampCapture(this);
             scope.CurrentGets = prevGets;
             scope.CurrentReaction = prevReaction;
             scope.CurrentGetsIndex = prevIndex;

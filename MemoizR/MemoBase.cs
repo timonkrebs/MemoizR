@@ -10,7 +10,7 @@ namespace MemoizR;
 //
 // Deliberately NOT on this base: ReactionBase (push-driven, no Get, debounce-scheduled commits)
 // and ConcurrentRace (uncached -- it recomputes on every Get, so the guard buys it nothing).
-public abstract class MemoBase<T> : MemoHandlR<T>, IMemoizR, IStateGetR<T>
+public abstract class MemoBase<T> : MemoHandlR<T>, IMemoizR, IStampedGetR<T>
 {
     // State is read on the lock-free Get fast path (alongside the volatile CurrentReaction); the
     // inherited cell exposes a lock-free volatile read and guards transitions so a concurrent
@@ -40,19 +40,26 @@ public abstract class MemoBase<T> : MemoHandlR<T>, IMemoizR, IStateGetR<T>
 
     public async Task<T> Get()
     {
+        return (await GetWithStamp()).Value;
+    }
+
+    public async Task<(T Value, CausalityStamp Stamp)> GetWithStamp()
+    {
         // An UNPINNED flow's scope would be freshly minted with CurrentReaction == null by
         // construction, so a clean read from one needs no scope at all: two volatile reads and
         // out -- no lock, no allocation. (Without this, every top-level Get minted and
         // registered a scope just to look at a field that is always null.)
         if (State == CacheState.CacheClean && !Context.HasFlowScope)
         {
-            return Value;
+            return ValueAndStamp;
         }
 
         var scope = Context.GetOrCreateScope();
         if (State == CacheState.CacheClean && scope.CurrentReaction == null)
         {
-            return Value;
+            // The lock-free fast path: one volatile box read -- a linearizable (value, stamp)
+            // snapshot (see MemoHandlR).
+            return ValueAndStamp;
         }
 
         // Only one thread should evaluate the graph at a time. otherwise the context could get messed up.
@@ -71,12 +78,17 @@ public abstract class MemoBase<T> : MemoHandlR<T>, IMemoizR, IStateGetR<T>
                     }
 
                     // if someone else did read the graph while this thread was blocked it could be that this is already Clean
-                    if (State == CacheState.CacheClean)
+                    if (State != CacheState.CacheClean)
                     {
-                        return Value;
+                        await UpdateIfNecessary();
                     }
 
-                    await UpdateIfNecessary();
+                    // One box read: the stamp recorded for the capturing evaluation (if this read is
+                    // tracked) -- and the one returned to the caller -- must describe exactly the
+                    // value returned; a concurrent recompute or Set must not split the pair.
+                    var (value, stamp) = ValueAndStamp;
+                    Context.RecordSourceStamp(scope.CurrentReaction, Id, stamp);
+                    return (value, stamp);
                 }
                 finally
                 {
@@ -91,8 +103,6 @@ public abstract class MemoBase<T> : MemoHandlR<T>, IMemoizR, IStateGetR<T>
             // instance whose fresh ContextLock is not the one this evaluation holds.
             GC.KeepAlive(scope);
         }
-
-        return Value;
     }
 
     /** update() if dirty, or a parent turns out to be dirty. */
@@ -173,16 +183,22 @@ public abstract class MemoBase<T> : MemoHandlR<T>, IMemoizR, IStateGetR<T>
         scope.CurrentGets = [];
         scope.CurrentGetsIndex = 0;
 
+        // Open the stamp-capture bucket for this evaluation: tracked source reads -- including
+        // those performed by structured-concurrency children on other flows, which evaluate on
+        // this node's behalf -- record the source stamps they observed, keyed by this node.
+        Context.BeginStampCapture(this);
+
         // Mark Evaluating and snapshot the generation; commit Clean below only if no Stale
         // invalidates us while the computation runs.
         var token = stateCell.BeginEvaluation();
         try
         {
-            Value = await ComputeAsync();
+            var newValue = await ComputeAsync();
+            // Publish the value with the joined captured stamps in one box swap, then Clean
+            // early so lock-free fast-path readers can serve the new value while the links are
+            // rewired; the trailing commit below re-confirms after the diamond propagation.
+            PublishValueWithCapturedStamps(newValue);
             hasComputedOnce = true;
-            // Publish Clean early so lock-free fast-path readers can serve the new value while
-            // the links are rewired; the trailing commit below re-confirms after the diamond
-            // propagation.
             stateCell.TryCommitClean(token);
 
             if (RewireOwnLinks)
@@ -216,6 +232,9 @@ public abstract class MemoBase<T> : MemoHandlR<T>, IMemoizR, IStateGetR<T>
         }
         finally
         {
+            // On the failure paths the capture is still open -- drop it (the previous value
+            // keeps its previous stamp). A no-op after a successful publish.
+            Context.DiscardStampCapture(this);
             scope.CurrentGets = prevGets;
             scope.CurrentReaction = prevReaction;
             scope.CurrentGetsIndex = prevIndex;

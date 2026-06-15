@@ -41,11 +41,35 @@ public abstract class SignalHandlR : IMemoHandlR
     // recompute state), they just carry the tiny unused cell so the protocol lives in one place.
     internal readonly CacheStateCell stateCell = new(CacheState.CacheClean);
 
+    private static readonly IReadOnlyDictionary<int, CausalityStamp> NoSourceStamps = new Dictionary<int, CausalityStamp>();
+
+    // Stable per-context identity for causality stamps (issue #39): signals appear in stamps
+    // under this id, and derived nodes key their per-source stamp map by it.
+    public int Id { get; }
+
+    // Backs SourceStamps: swap-published as a whole map that is never mutated after publish;
+    // volatile so readers get a coherent reference without a lock. Written by the evaluation
+    // paths of MemoHandlR (value nodes) and ReactionBase (hence internal, not private).
+    internal volatile IReadOnlyDictionary<int, CausalityStamp> sourceStamps = NoSourceStamps;
+
+    // "Every Node keeps a Stamp for each of its Sources" (issue #39): the stamp observed on
+    // each tracked source read of the last completed evaluation, keyed by source id -- the data
+    // a distributed sync layer exchanges. Signals keep the empty map.
+    public IReadOnlyDictionary<int, CausalityStamp> SourceStamps => sourceStamps;
+
+    // The node's own published stamp: which signal versions its current state reflects. Value
+    // nodes override Stamp to read it from the same volatile box as the value (an untorn
+    // pair); this base field carries it for reactions, which have no value box.
+    internal volatile CausalityStamp ownStamp = CausalityStamp.Empty;
+
+    public virtual CausalityStamp Stamp => ownStamp;
+
     public string Label { get; init; } = "Label";
 
     internal SignalHandlR(Context context)
     {
         this.Context = context;
+        this.Id = context.NextNodeId();
     }
 
     // Atomic add-if-absent on our observer down-links. The membership check and the array swap
@@ -209,25 +233,54 @@ public abstract class MemoHandlR<T> : SignalHandlR
     // generic overload is class-constrained), and a large struct T can tear under a concurrent
     // write. So the value is published through an immutable box held in a single volatile
     // reference: a write swaps in a fully-constructed box (an atomic reference store with release
-    // semantics), and a read takes the reference once and returns its readonly field -- always a
-    // complete, untorn value. Every Update writes Value before setting State = CacheClean (a
+    // semantics), and a read takes the reference once and returns its readonly fields -- always a
+    // complete, untorn value. Every Update writes the box before setting State = CacheClean (a
     // volatile release) and the fast path reads State (a volatile acquire) before Value, so a
     // reader that observes CacheClean is guaranteed to see the box of that-or-a-newer clean
     // generation. The read is therefore a linearizable snapshot, not an eventually-consistent one.
-    private volatile ValueBox valueBox = new(default!);
+    // The causality stamp rides in the same box (issue #39): the stamp describing which signal
+    // versions the value was computed from is published in the same atomic swap, so a
+    // (value, stamp) pair can never be split by a concurrent write.
+    private volatile ValueBox valueBox = new(default!, CausalityStamp.Empty);
 
-    internal T Value
+    internal T Value => valueBox.Value;
+
+    public override CausalityStamp Stamp => valueBox.Stamp;
+
+    // The (value, stamp) pair of one publication -- a single volatile box read, never torn.
+    internal (T Value, CausalityStamp Stamp) ValueAndStamp
     {
-        get => valueBox.Value;
-        set => valueBox = new ValueBox(value);
+        get
+        {
+            var box = valueBox;
+            return (box.Value, box.Stamp);
+        }
+    }
+
+    // The only value writer: every publication carries the stamp describing exactly which
+    // signal versions the value reflects, in one atomic box swap.
+    internal void SetValueAndStamp(T value, CausalityStamp stamp)
+    {
+        valueBox = new ValueBox(value, stamp);
+    }
+
+    // Publish a computed value together with the source stamps captured during the evaluation
+    // that produced it: the node's own stamp is their join, and the per-source map is kept for
+    // the future distributed sync layer. Shared by MemoBase and ConcurrentRace.
+    internal void PublishValueWithCapturedStamps(T value)
+    {
+        var captured = Context.TakeStampCapture(this);
+        SetValueAndStamp(value, CausalityStamp.JoinAll(captured.Values));
+        sourceStamps = captured;
     }
 
     internal MemoHandlR(Context context) : base(context)
     {
     }
 
-    private sealed class ValueBox(T value)
+    private sealed class ValueBox(T value, CausalityStamp stamp)
     {
         public readonly T Value = value;
+        public readonly CausalityStamp Stamp = stamp;
     }
 }

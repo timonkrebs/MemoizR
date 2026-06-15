@@ -152,6 +152,24 @@ stacks, register the UI `SynchronizationContext` directly from the UI thread wit
 built from the factory then follow the same contract: dependencies on the thread pool, action
 on the registered context.
 
+### Causality Stamps (preparation for distributed graphs)
+
+Every node carries a causality stamp recording exactly which signal versions its current value
+reflects, captured atomically with the value — the groundwork for glitch-free synchronization
+of distributed graphs ([#39](https://github.com/timonkrebs/MemoizR/issues/39), inspired by
+Interval Tree Clocks):
+
+```cs
+var (value, stamp) = await m1.GetWithStamp(); // the (value, stamp) pair of one publication
+stamp.TryGetTrigger(v1.Id, out var trigger);  // which version of v1 the value reflects
+var glitchFree = stamp.IsConsistentWith(otherStamp); // agreement on all shared signals
+var payload = stamp.Serialize();              // compact, deterministic wire format
+```
+
+Stamps are space-efficient (uniform regions collapse, ITC-style), reset-resilient (a restarted
+graph's stamps are never confused with their pre-restart incarnation), and documented in
+[docs/architecture/causality-trigger-clock.md](docs/architecture/causality-trigger-clock.md).
+
 Try it out!https:
 Experiment with MemoizR online: https://dotnetfiddle.net/Widget/EWtptc
 
