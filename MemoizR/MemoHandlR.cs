@@ -114,7 +114,7 @@ public abstract class SignalHandlR : IMemoHandlR
 
         foreach (var old in Sources)
         {
-            if (!newSources.Contains(old))
+            if (Array.IndexOf(newSources, old) == -1)
             {
                 old.RemoveObserver(self);
             }

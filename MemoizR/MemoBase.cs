@@ -207,7 +207,7 @@ public abstract class MemoBase<T> : MemoHandlR<T>, IMemoizR, IStateGetR<T>
             var self = (IMemoizR)this;
             foreach (var got in scope.CurrentGets)
             {
-                if (!Sources.Contains(got))
+                if (Array.IndexOf(Sources, got) == -1)
                 {
                     got.RemoveObserver(self);
                 }
