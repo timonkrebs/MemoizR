@@ -85,6 +85,35 @@ public class StructuredConcurrencyTests
         Assert.Equal(1, await c1.Get());
     }
 
+    [Fact(Timeout = 1000)]
+    public async Task Race_LateLoserFaultAfterWinner_DoesNotFailCompletedRace()
+    {
+        var f = new MemoFactory();
+
+        var race = f.CreateConcurrentRace(
+            () => Task.FromResult(1),
+            async (c, r) =>
+            {
+                await Task.Delay(10, c.Token);
+                return r;
+            },
+            async (c, _) =>
+            {
+                try
+                {
+                    await Task.Delay(3000, c.Token);
+                }
+                catch (OperationCanceledException)
+                {
+                    throw new InvalidOperationException("late loser teardown fault");
+                }
+
+                return 0;
+            });
+
+        Assert.Equal(1, await race.Get());
+    }
+
     // Timing-sensitive: asserts on debounced async reactions after fixed delays. Retry like
     // the other flaky reactive tests (xRetry) instead of relying on a knife-edge timeout.
     [RetryFact(3, 200)]
