@@ -77,7 +77,8 @@ public sealed class ConcurrentRace<T, I> : MemoHandlR<T>, IMemoizR, IStateGetR<T
         try
         {
             State = CacheState.Evaluating;
-            Value = await new StructuredRaceJob<T, I>(action, fns, Context.CancellationTokenSource!).Run(Context.CancellationTokenSource!.Token);
+            using var job = new StructuredRaceJob<T, I>(action, fns, Context.CancellationTokenSource!);
+            Value = await job.Run(Context.CancellationTokenSource!.Token);
             State = CacheState.CacheClean;
         }
         catch
