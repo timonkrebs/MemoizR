@@ -1,0 +1,53 @@
+name: Claude Code
+
+# Makes every "@claude" mention a real, logged, retryable Actions run instead of a
+# best-effort cloud dispatch. When a run fails it is visible in the Actions tab (and can
+# be re-run), so an "@claude" request can no longer be silently acknowledged-but-dropped.
+#
+# Requires the repository secret ANTHROPIC_API_KEY (Settings -> Secrets and variables ->
+# Actions). Claude subscription users who ran `/install-github-app` can instead pass
+# `claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}` below.
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+  pull_request_review:
+    types: [submitted]
+  issues:
+    types: [opened, assigned]
+
+# Serialize runs per issue/PR so overlapping mentions don't produce duplicate responses.
+concurrency:
+  group: claude-${{ github.event.issue.number || github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  claude:
+    # Only spend a run when "@claude" is actually present in the triggering text.
+    if: |
+      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
+      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
+      (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude')) ||
+      (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')))
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      id-token: write
+      actions: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - name: Run Claude Code
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Optional CLI passthrough, e.g. pin a model or raise the turn budget:
+          # claude_args: "--max-turns 15"
