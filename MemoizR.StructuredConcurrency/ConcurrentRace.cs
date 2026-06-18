@@ -127,7 +127,7 @@ public sealed class ConcurrentRace<T, I> : MemoHandlR<T>, IMemoizR, IStateGetR<T
         }
     }
 
-    internal async Task Stale(CacheState state)
+    async Task IMemoizR.Stale(CacheState state)
     {
         if (state <= State)
         {
@@ -137,11 +137,6 @@ public sealed class ConcurrentRace<T, I> : MemoHandlR<T>, IMemoizR, IStateGetR<T
         State = state;
 
         await PropagateStaleToObserversAsync(CacheState.CacheDirty);
-    }
-
-    Task IMemoizR.Stale(CacheState state)
-    {
-        return Stale(state);
     }
 
     // Deliberately NO finalizer: the CancellationTokenSource is CONTEXT-wide and shared by every

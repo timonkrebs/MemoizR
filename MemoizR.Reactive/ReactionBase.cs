@@ -138,7 +138,7 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
         // continuation inline on this stack. Dropping it means the dead reaction's update never
         // re-acquires locks or re-runs the parent scan.
         pending.Cancel();
-        RemoveParentObservers(0);
+        RemoveParentObservers();
     }
 
     protected abstract Task Execute();

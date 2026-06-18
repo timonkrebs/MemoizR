@@ -127,12 +127,12 @@ public abstract class SignalHandlR : IMemoHandlR
         }
     }
 
-    internal void RemoveParentObservers(int index)
+    internal void RemoveParentObservers()
     {
         var self = (IMemoizR)this;
-        for (var i = index; i < Sources.Length; i++)
+        foreach (var source in Sources)
         {
-            Sources[i].RemoveObserver(self);
+            source.RemoveObserver(self);
         }
     }
 
