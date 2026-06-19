@@ -472,11 +472,66 @@ public class ActorEngineTests
         await Assert.ThrowsAsync<InvalidOperationException>(() => m.Get());
     }
 
+    // A transient throw from the commit-turn value comparison must not leave the uncommitted new
+    // value in the box: the retry would then compare new-vs-new, see no change, skip the diamond
+    // mark, and strand an observer that only received CacheCheck. The commit compares against the
+    // last committed value BEFORE publishing, so the change is still detected on the retry.
+    [Fact(Timeout = 10000)]
+    public async Task TransientEqualsThrowInCommit_StillNotifiesObserversOfTheChange()
+    {
+        var f = new MemoFactory();
+        var v = f.CreateActorSignal(1);
+        var p = f.CreateActorMemoizR(async () => new FlakyEquals(await v.Get()));
+        var c = f.CreateActorMemoizR(async () => (await p.Get()).V * 10);
+
+        Assert.Equal(10, await c.Get()); // prime: oldValue is null on the first commit, so Equals is not called
+
+        FlakyEquals.ArmThrowOnce();
+        await v.Set(2); // p recomputes to FlakyEquals(2); the first commit's Equals throws once
+
+        // p faults then retries; c must end up reflecting p's changed value (20), not stay at 10.
+        var converged = false;
+        for (var i = 0; i < 100 && !converged; i++)
+        {
+            if (await c.Get() == 20)
+            {
+                converged = true;
+            }
+            else
+            {
+                await Task.Delay(10);
+            }
+        }
+
+        Assert.Equal(20, await c.Get());
+    }
+
     private sealed class ThrowsOnEquals(int seed)
     {
         public override bool Equals(object? obj) => throw new InvalidOperationException("equals boom");
 
         public override int GetHashCode() => seed;
+    }
+
+    private sealed class FlakyEquals(int v)
+    {
+        private static int throwArmed;
+
+        public int V { get; } = v;
+
+        public static void ArmThrowOnce() => Interlocked.Exchange(ref throwArmed, 1);
+
+        public override bool Equals(object? obj)
+        {
+            if (Interlocked.Exchange(ref throwArmed, 0) == 1)
+            {
+                throw new InvalidOperationException("flaky equals");
+            }
+
+            return obj is FlakyEquals o && o.V == V;
+        }
+
+        public override int GetHashCode() => V;
     }
 }
 

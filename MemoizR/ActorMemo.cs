@@ -249,6 +249,14 @@ public sealed class ActorMemo<T> : ActorValueNode<T>
         try
         {
             var oldValue = Value;
+
+            // Compare against the last COMMITTED value BEFORE publishing the new box. Equals is
+            // user code: if it throws, the box must still hold the old value so a retry's own
+            // comparison stays correct. Publishing first would leave newValue in the box while the
+            // catch parks the node Dirty, and the retry would then see new == old, skip the
+            // diamond mark, and strand observers that only received CacheCheck.
+            var changed = !Equals(oldValue, newValue);
+
             // Publish the box before the volatile state write below -- the release/acquire pair
             // the lock-free fast path reads against.
             Value = newValue;
@@ -268,8 +276,7 @@ public sealed class ActorMemo<T> : ActorValueNode<T>
 
             // The diamond down-link: only when the value actually changed, and without bumping
             // the observers' generations (same-flow marks are absorbed by their own evaluations).
-            // Equals is user code: a throw here unwinds to the catch, which parks the node Dirty.
-            if (!Equals(oldValue, newValue))
+            if (changed)
             {
                 MarkObserversDirtyFromParent();
             }
