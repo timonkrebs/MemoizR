@@ -37,3 +37,22 @@ timeProvider.Advance(TimeSpan.FromSeconds(1)); // releases it deterministically
 ```
 
 The provider can also be set per reaction on the builder: `f.BuildReaction().AddTimeProvider(timeProvider)`.
+
+## Pinning reaction side effects to an executor
+
+Reactions can be pinned to any `IExecutor` (the analog of Swift's custom actor executors), per
+factory or per builder — e.g. a `DedicatedThreadExecutor`, whose installed
+`SynchronizationContext` keeps async continuations on its single thread:
+
+```csharp
+using var executor = new DedicatedThreadExecutor();
+var f = new MemoFactory().AddExecutor(executor);
+
+var r1 = f.BuildReaction().CreateReaction(m1, val =>
+{
+    executor.AssertIsolated(); // throws when not running on the executor
+});
+```
+
+`AddSynchronizationContext` (and `MemoizR.Wpf`'s `AddWpfDispatcher`) wrap the context in a
+`SynchronizationContextExecutor`, so UI marshalling and custom executors share one mechanism.

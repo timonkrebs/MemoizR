@@ -4,21 +4,31 @@ namespace MemoizR.Reactive;
 public sealed class ReactionBuilder
 {
     private readonly MemoFactory memoFactory;
-    private readonly SynchronizationContext? synchronizationContext;
+    private IExecutor? executor;
 
     private string label;
     private TimeSpan debounceTime = TimeSpan.FromMilliseconds(10);
 
-    public ReactionBuilder(MemoFactory memoFactory, SynchronizationContext? synchronizationContext, string label)
+    public ReactionBuilder(MemoFactory memoFactory, IExecutor? executor, string label)
     {
         this.memoFactory = memoFactory;
-        this.synchronizationContext = synchronizationContext;
+        this.executor = executor;
         this.label = label;
     }
 
     public ReactionBuilder AddDebounceTime(TimeSpan debounceTime)
     {
         this.debounceTime = debounceTime;
+        return this;
+    }
+
+    /// <summary>
+    /// Overrides the factory-level executor for the reactions built by THIS builder -- per-node
+    /// executor selection, like a Swift actor declaring its own unownedExecutor (SE-0392).
+    /// </summary>
+    public ReactionBuilder AddExecutor(IExecutor executor)
+    {
+        this.executor = executor;
         return this;
     }
 
