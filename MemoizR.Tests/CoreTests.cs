@@ -487,4 +487,58 @@ public class CoreTests
         Assert.Equal(2, m2.Sources.Length);
         Assert.Empty(m2.Observers);
     }
+
+    // EagerRelativeSignal coverage for the mutex-asymmetry question (its Get/Set take the node
+    // mutex where Signal does not): pins the observable contract any change to that locking must
+    // preserve. (a) a tracked read wires the reader as an observer and a relative Set invalidates
+    // it -- the Get path the mutex wraps; (b) a storm of concurrent relative Sets interleaved
+    // with concurrent tracked Gets converges on the exact accumulated total, with no torn read,
+    // deadlock, or exception. RMW atomicity comes from lock(Lock), so the accumulation alone is
+    // already covered by TestRelativeThreadSafety; the contribution here is the Get/Set interleave.
+    [Fact(Timeout = 20000)]
+    public async Task RelativeSignal_TracksReaders_AndConvergesUnderConcurrentSetsAndGets()
+    {
+        var f = new MemoFactory();
+        var v1 = f.CreateEagerRelativeSignal(0);
+        var m1 = f.CreateMemoizR(async () => await v1.Get() * 2);
+
+        // (a) deterministic tracking + invalidation through the relative-signal read path.
+        Assert.Equal(0, await m1.Get());
+        Assert.True(TestHelpers.Observes(v1.Observers, m1), "the memo should observe the relative signal it read");
+        await v1.Set(x => x + 5);
+        Assert.Equal(10, await m1.Get());
+
+        // (b) concurrent relative Sets (+1 each) interleaved with concurrent tracked Gets.
+        const int writers = 8;
+        const int perWriter = 500;
+        var tasks = new List<Task>();
+        for (var w = 0; w < writers; w++)
+        {
+            tasks.Add(Task.Run(async () =>
+            {
+                for (var i = 0; i < perWriter; i++)
+                {
+                    await v1.Set(x => x + 1);
+                }
+            }));
+        }
+        // Readers race the writers, exercising the Get-path lock against the Set-path. m1 = v1 * 2
+        // is even for every integer v1, so any odd snapshot would mean a torn read.
+        for (var rdr = 0; rdr < 4; rdr++)
+        {
+            tasks.Add(Task.Run(async () =>
+            {
+                for (var i = 0; i < perWriter; i++)
+                {
+                    var snapshot = await m1.Get();
+                    Assert.True(snapshot % 2 == 0, $"torn read: {snapshot} is not 2 * an integer");
+                }
+            }));
+        }
+        await Task.WhenAll(tasks);
+
+        var expected = (5 + writers * perWriter) * 2;
+        Assert.Equal(expected, await m1.Get());
+        GC.KeepAlive(m1);
+    }
 }

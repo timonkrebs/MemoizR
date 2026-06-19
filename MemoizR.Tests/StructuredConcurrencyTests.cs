@@ -558,4 +558,27 @@ public class StructuredConcurrencyTests
 
         var x = await c1.Get(); // must wait for the slowest child (~300ms), not deadlock or cancel
     }
+
+    // ConcurrentRace.Stale was folded into its IMemoizR.Stale explicit implementation (one method
+    // instead of an internal Stale plus a delegating stub). A race whose resolver reads a signal
+    // becomes an observer of that signal via the capture-time subscription, so a later Set drives
+    // the race's Stale: it must reach the race without throwing, and the race must recompute the
+    // new resolver value on the next Get. Pins the inlined path.
+    [Fact(Timeout = 10000)]
+    public async Task Race_ResolverSignalSet_ReachesRaceStale_AndRecomputes()
+    {
+        var f = new MemoFactory();
+        var v1 = f.CreateSignal(2);
+        var race = f.CreateConcurrentRace(
+            v1.Get,
+            async (_, r) => { await Task.Yield(); return r; });
+
+        Assert.Equal(2, await race.Get());
+        // The resolver read v1 under the race's capture, so v1 now observes the race -- the live
+        // target the next Set's Stale propagation must reach.
+        Assert.True(Observes(v1.Observers, race), "the race should observe the signal its resolver read");
+
+        await v1.Set(9); // v1 -> race.Stale (the inlined IMemoizR.Stale); must not throw
+        Assert.Equal(9, await race.Get()); // race recomputes with the new resolver value
+    }
 }

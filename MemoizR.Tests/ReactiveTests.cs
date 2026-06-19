@@ -984,4 +984,39 @@ public class ReactiveTests
         Assert.Equal(22, sum);
         GC.KeepAlive(r);
     }
+
+    // RemoveParentObservers() (run from Dispose) must unsubscribe the reaction from EVERY one of
+    // its sources, not only the first. The single-source Reaction_Dispose test above passes even
+    // if the sweep stopped early, so it cannot guard the parameterless whole-Sources iteration;
+    // this multi-source dispose pins it: after Dispose no source still observes the reaction, and
+    // none can retrigger it.
+    [Fact(Timeout = 10000)]
+    public async Task Reaction_Dispose_MultiSource_UnsubscribesFromEverySource()
+    {
+        var f = new MemoFactory();
+        var v1 = f.CreateSignal(1);
+        var v2 = f.CreateSignal(10);
+        var v3 = f.CreateSignal(100);
+        var last = -1;
+        var r = f.BuildReaction().CreateReaction(v1, v2, v3, (a, b, c) => last = a + b + c);
+
+        await TestHelpers.WaitForConvergenceAsync(() => last == 111); // initial run wired all three
+        Assert.True(TestHelpers.Observes(v1.Observers, r), "r should observe v1 before dispose");
+        Assert.True(TestHelpers.Observes(v2.Observers, r), "r should observe v2 before dispose");
+        Assert.True(TestHelpers.Observes(v3.Observers, r), "r should observe v3 before dispose");
+
+        r.Dispose();
+
+        Assert.False(TestHelpers.Observes(v1.Observers, r), "disposed r still observes v1");
+        Assert.False(TestHelpers.Observes(v2.Observers, r), "disposed r still observes v2");
+        Assert.False(TestHelpers.Observes(v3.Observers, r), "disposed r still observes v3");
+
+        // No source may trigger it again -- a negative assertion, so it needs a real quiescence window.
+        await v1.Set(2);
+        await v2.Set(20);
+        await v3.Set(200);
+        await Task.Delay(100);
+        Assert.Equal(111, last);
+        GC.KeepAlive(r);
+    }
 }

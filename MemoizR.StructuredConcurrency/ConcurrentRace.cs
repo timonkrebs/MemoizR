@@ -29,33 +29,11 @@ public sealed class ConcurrentRace<T, I> : MemoHandlR<T>, IMemoizR, IStateGetR<T
         Context.CancellationTokenSource?.Cancel();
     }
 
-    public async Task<T> Get()
+    // A race recomputes on every Get (no clean fast path); the locked evaluation scaffold is the
+    // shared one. Update returns the value, so the generic overload threads it straight through.
+    public Task<T> Get()
     {
-        var scope = Context.GetOrCreateScope();
-        try
-        {
-            // Only one thread should evaluate the graph at a time. otherwise the context could get messed up.
-            // This should lead to perf gains because memoization can be utilized more efficiently.
-            using (await mutex.LockAsync())
-            using (await scope.ContextLock.UpgradeableLockAsync())
-            {
-                Context.EnterEvaluationScope();
-                try
-                {
-                    return await Update();
-                }
-                finally
-                {
-                    Context.ExitEvaluationScope();
-                }
-            }
-        }
-        finally
-        {
-            // Strong root for the weakly-registered scope: keeps the held lock's identity stable
-            // across the evaluation (a collected scope would resurrect with a fresh, free lock).
-            GC.KeepAlive(scope);
-        }
+        return Context.EvaluateUnderLockAsync(mutex, Update);
     }
 
     /** run the computation fn, updating the cached value */
@@ -102,32 +80,13 @@ public sealed class ConcurrentRace<T, I> : MemoHandlR<T>, IMemoizR, IStateGetR<T
         return Value;
     }
 
-    async Task IMemoizR.UpdateIfNecessary()
+    // Same scaffold as Get; the recomputed value is awaited for effect and discarded.
+    Task IMemoizR.UpdateIfNecessary()
     {
-        var scope = Context.GetOrCreateScope();
-        try
-        {
-            using (await mutex.LockAsync())
-            using (await scope.ContextLock.UpgradeableLockAsync())
-            {
-                Context.EnterEvaluationScope();
-                try
-                {
-                    await Update();
-                }
-                finally
-                {
-                    Context.ExitEvaluationScope();
-                }
-            }
-        }
-        finally
-        {
-            GC.KeepAlive(scope);
-        }
+        return Context.EvaluateUnderLockAsync(mutex, Update);
     }
 
-    internal async Task Stale(CacheState state)
+    async Task IMemoizR.Stale(CacheState state)
     {
         if (state <= State)
         {
@@ -137,11 +96,6 @@ public sealed class ConcurrentRace<T, I> : MemoHandlR<T>, IMemoizR, IStateGetR<T
         State = state;
 
         await PropagateStaleToObserversAsync(CacheState.CacheDirty);
-    }
-
-    Task IMemoizR.Stale(CacheState state)
-    {
-        return Stale(state);
     }
 
     // Deliberately NO finalizer: the CancellationTokenSource is CONTEXT-wide and shared by every

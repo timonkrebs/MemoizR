@@ -236,33 +236,11 @@ public abstract class MemoBase<T> : MemoHandlR<T>, IMemoizR, IStateGetR<T>
         await CommitCleanOrRenotifyAsync(token);
     }
 
-    async Task IMemoizR.UpdateIfNecessary()
+    // The IMemoizR fan-in (a parent scanning this node, or a reaction flow where no root Get holds
+    // the evaluation scope) reaches the same locked recompute as Get, via the shared scaffold.
+    Task IMemoizR.UpdateIfNecessary()
     {
-        // The local is a strong root for the weakly-registered scope: it keeps the lock identity
-        // stable for the whole update (see the matching pin in Get).
-        var scope = Context.GetOrCreateScope();
-        try
-        {
-            using (await mutex.LockAsync())
-            using (await scope.ContextLock.UpgradeableLockAsync())
-            {
-                // Refcount the shared CancellationTokenSource: this entry point can recompute and is
-                // reached from reaction flows where no root Get holds the evaluation scope.
-                Context.EnterEvaluationScope();
-                try
-                {
-                    await UpdateIfNecessary();
-                }
-                finally
-                {
-                    Context.ExitEvaluationScope();
-                }
-            }
-        }
-        finally
-        {
-            GC.KeepAlive(scope);
-        }
+        return Context.UpdateUnderLockAsync(mutex, UpdateIfNecessary);
     }
 
     Task IMemoizR.Stale(CacheState state)

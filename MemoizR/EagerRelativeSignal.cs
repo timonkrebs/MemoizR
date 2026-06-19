@@ -16,10 +16,11 @@ public sealed class EagerRelativeSignal<T> : MemoHandlR<T>, IStateGetR<T>
         try
         {
             // There can be multiple threads updating the CacheState at the same time but no reads should be possible while in the process.
-            using (await mutex.LockAsync())
             using (await scope.ContextLock.ExclusiveLockAsync())
             {
-                // only updating the value should be locked
+                // The relative read-modify-write is serialized by lock (Lock); the per-node mutex
+                // adds nothing for a signal (it has no recompute to serialize -- ADR 0002 scopes
+                // the mutex to recomputing nodes), so, like Signal.Set, it is not taken.
                 lock (Lock)
                 {
                     Value = fn(Value);
@@ -49,9 +50,9 @@ public sealed class EagerRelativeSignal<T> : MemoHandlR<T>, IStateGetR<T>
             return Value;
         }
 
-        // Only one thread should evaluate the graph at a time. otherwise the context could get messed up.
-        // This should lead to perf gains because memoization can be utilized more efficiently.
-        using (await mutex.LockAsync())
+        // Tracked read: register the dependency under this flow's ContextLock. Like Signal.Get,
+        // the per-node mutex is not taken -- CheckDependenciesTheSame is already serialized by
+        // Context.Lock, and a signal has no recompute for the mutex to guard (ADR 0002).
         using (await scope.ContextLock.UpgradeableLockAsync())
         {
             Context.CheckDependenciesTheSame(this);
