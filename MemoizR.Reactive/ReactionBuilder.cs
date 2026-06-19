@@ -157,20 +157,32 @@ public sealed class ReactionBuilder
         // whatever exception handling wraps the executor's callbacks.
         var tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
+        void Run()
+        {
+            try
+            {
+                uiAction();
+                tcs.SetResult();
+            }
+            catch (Exception e)
+            {
+                tcs.SetException(e);
+            }
+        }
+
+        // Carry the reaction's Context scope across the executor hop (see
+        // ReactionBase.InvokeExecute): an executor that runs the callback on its own thread
+        // without flowing ExecutionContext (e.g. DedicatedThreadExecutor) would otherwise drop
+        // the AsyncLocal scope, so a signal the action reads would be captured untracked and a
+        // later Set on it would never re-trigger the reaction.
+        var executionContext = ExecutionContext.Capture();
+        Action callback = executionContext is null
+            ? Run
+            : () => ExecutionContext.Run(executionContext, static state => ((Action)state!)(), (Action)Run);
+
         try
         {
-            executor.Enqueue(() =>
-            {
-                try
-                {
-                    uiAction();
-                    tcs.SetResult();
-                }
-                catch (Exception e)
-                {
-                    tcs.SetException(e);
-                }
-            });
+            executor.Enqueue(callback);
         }
         catch (Exception e)
         {
