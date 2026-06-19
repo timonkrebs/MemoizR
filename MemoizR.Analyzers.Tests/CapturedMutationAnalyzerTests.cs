@@ -172,6 +172,54 @@ public class CapturedMutationAnalyzerTests
     }
 
     [Fact]
+    public async Task WriteToFieldOfCapturedStructLocal_IsFlagged()
+    {
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public struct Counter { public int Value; }
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var counter = new Counter();
+                    f.CreateMemoizR(async () => { counter.Value++; return counter.Value; });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Contains("captured local 'counter'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task EventSubscriptionInComputation_IsFlagged()
+    {
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                private event Action Changed;
+                private static event Action StaticChanged;
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    f.CreateMemoizR(async () => { Changed += () => {}; StaticChanged += () => {}; return 1; });
+                }
+            }
+            """);
+
+        Assert.Equal(2, diagnostics.Length);
+        Assert.Contains(diagnostics, d => d.GetMessage().Contains("event 'Changed'"));
+        Assert.Contains(diagnostics, d => d.GetMessage().Contains("static event 'StaticChanged'"));
+    }
+
+    [Fact]
     public async Task LocalOfNestedNonComputationLambda_IsNotFlagged()
     {
         var diagnostics = await AnalyzeAsync("""

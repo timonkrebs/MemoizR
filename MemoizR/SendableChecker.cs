@@ -133,6 +133,16 @@ public static class SendableChecker
             return null;
         }
 
+        // Reject unverifiable categories (interface, abstract class, array, delegate, object,
+        // pointer) BEFORE the namespace trust below: an interface or abstract base that merely
+        // lives in System.Collections.Immutable/Concurrent (e.g. IProducerConsumerCollection<T>)
+        // says nothing about the concrete runtime type, so the namespace must not bless it.
+        var categoryReason = UnverifiableCategoryReason(type);
+        if (categoryReason != null)
+        {
+            return categoryReason;
+        }
+
         // Trust the immutable/concurrent collections by namespace -- but only the top-level
         // collection types, NOT their nested mutable helpers. ImmutableList<T>.Builder and
         // ImmutableArray<T>.Builder live in the same namespace yet are freely mutable; a nested
@@ -143,7 +153,7 @@ public static class SendableChecker
             return CheckTypeArguments(type, inProgress);
         }
 
-        return UnverifiableCategoryReason(type) ?? CheckFields(type, inProgress);
+        return CheckFields(type, inProgress);
     }
 
     // Categories that can never be verified structurally, whatever their fields say.

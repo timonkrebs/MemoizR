@@ -122,6 +122,30 @@ public class SetInsideComputationAnalyzerTests
     }
 
     [Fact]
+    public async Task CrossEngineSet_IsNotFlagged()
+    {
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var lockSig = f.CreateSignal(1);
+                    var actorSig = f.CreateActorSignal(1);
+                    // lock-engine Signal.Set inside an actor computation: no same-flow lock, does not throw
+                    f.CreateActorMemoizR(async () => { await lockSig.Set(2); return 1; });
+                    // ActorSignal.Set inside a lock-engine computation: does not throw either
+                    f.CreateMemoizR(async () => { await actorSig.Set(2); return 1; });
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
     public async Task SetOutsideComputations_AndInsideConcurrentMapChildren_AreNotFlagged()
     {
         var diagnostics = await AnalyzeAsync("""

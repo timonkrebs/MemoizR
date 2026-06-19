@@ -46,6 +46,17 @@ internal static class FactoryMethods
             || IsReactiveMemoFactoryMethod(method, "CreateReaction");
     }
 
+    // Whether the host runs an ACTOR-engine computation (CreateActorMemoizR). MZR003 uses this to
+    // match the Set to the host's engine: only ActorSignal.Set throws inside an actor computation
+    // (it rejects flows with an active ActorFlow.Frame), while only lock-engine Signal/
+    // EagerRelativeSignal.Set throws inside a lock-engine computation (exclusive-inside-upgradeable).
+    // A cross-engine Set (e.g. Signal.Set inside CreateActorMemoizR) does NOT throw, so flagging it
+    // would be a false positive.
+    public static bool IsActorEngineHost(IMethodSymbol method)
+    {
+        return IsMemoFactoryMethod(method, "CreateActorMemoizR");
+    }
+
     private static bool IsMemoFactoryMethod(IMethodSymbol method, params string[] names)
     {
         return IsOn(method, "MemoizR", "MemoFactory", names);

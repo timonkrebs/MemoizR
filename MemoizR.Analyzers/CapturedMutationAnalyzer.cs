@@ -63,6 +63,10 @@ public sealed class CapturedMutationAnalyzer : DiagnosticAnalyzer
                 return tuple.Elements;
             case IArgumentOperation { Parameter.RefKind: RefKind.Ref or RefKind.Out } argument:
                 return ImmutableArray.Create(argument.Value);
+            case IEventAssignmentOperation eventAssignment:
+                // `this.Changed += h` / `StaticEvent += h` mutates the event's backing delegate
+                // on the enclosing/static object -- shared mutable state, like a field write.
+                return ImmutableArray.Create(eventAssignment.EventReference);
             default:
                 return ImmutableArray<IOperation>.Empty;
         }
@@ -88,6 +92,19 @@ public sealed class CapturedMutationAnalyzer : DiagnosticAnalyzer
                 => ("static property", staticProperty.Property),
             IPropertyReferenceOperation { Instance: IInstanceReferenceOperation { ReferenceKind: InstanceReferenceKind.ContainingTypeInstance } } instanceProperty
                 => ("property", instanceProperty.Property),
+            // A field write on a captured VALUE-type local/parameter (counter.Value++) mutates the
+            // hoisted struct itself -- the same shared storage as writing the captured variable.
+            // (A field write on a captured REFERENCE-type variable mutates the pointed-to object,
+            // which is MZR001's territory -- the value type should be Sendable -- so it is left.)
+            IFieldReferenceOperation { Instance: ILocalReferenceOperation { Local: { Type.IsValueType: true } structLocal } } when IsDeclaredOutside(structLocal, lambda)
+                => ("captured local", structLocal),
+            IFieldReferenceOperation { Instance: IParameterReferenceOperation { Parameter: { Type.IsValueType: true } structParam } } when IsDeclaredOutside(structParam, lambda)
+                => ("captured parameter", structParam),
+            // Event subscriptions on the enclosing/static object mutate shared delegate state.
+            IEventReferenceOperation { Event.IsStatic: true } staticEvent
+                => ("static event", staticEvent.Event),
+            IEventReferenceOperation { Instance: IInstanceReferenceOperation { ReferenceKind: InstanceReferenceKind.ContainingTypeInstance } } instanceEvent
+                => ("event", instanceEvent.Event),
             _ => (null, null!),
         };
 

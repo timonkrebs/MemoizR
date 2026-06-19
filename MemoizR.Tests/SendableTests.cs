@@ -37,6 +37,7 @@ public class SendableCheckerTests
     [InlineData(typeof(Task<List<int>>))] // safe carrier, unsafe payload
     [InlineData(typeof(ImmutableList<int>.Builder))] // nested mutable helper in an "immutable" namespace
     [InlineData(typeof(ImmutableArray<int>.Builder))]
+    [InlineData(typeof(IProducerConsumerCollection<int>))] // interface in a trusted namespace: impl unverifiable
     public void MutableOrUnverifiableTypes_AreNotSendable(Type type)
     {
         Assert.False(SendableChecker.IsSendable(type, out var reason));

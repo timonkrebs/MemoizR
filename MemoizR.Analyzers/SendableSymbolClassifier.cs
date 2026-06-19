@@ -53,17 +53,28 @@ internal sealed class SendableSymbolClassifier
             return CheckCached(named.TypeArguments[0], inProgress);
         }
 
-        if (IsTaskOfT(named) || IsInImmutableOrSynchronizedNamespace(named))
-        {
-            return CheckTypeArguments(named, inProgress);
-        }
-
         if (HasSendableAttribute(named))
         {
             return null;
         }
 
-        return UnverifiableCategoryReason(named) ?? CheckFields(named, inProgress);
+        // Reject unverifiable categories (interface, abstract class, delegate, object) BEFORE the
+        // namespace/Task trust below, kept in lockstep with the runtime checker: an interface or
+        // abstract base in System.Collections.Immutable/Concurrent (e.g.
+        // IProducerConsumerCollection<T>) reveals nothing about the concrete runtime type, so the
+        // namespace must not bless it.
+        var categoryReason = UnverifiableCategoryReason(named);
+        if (categoryReason != null)
+        {
+            return categoryReason;
+        }
+
+        if (IsTaskOfT(named) || IsInImmutableOrSynchronizedNamespace(named))
+        {
+            return CheckTypeArguments(named, inProgress);
+        }
+
+        return CheckFields(named, inProgress);
     }
 
     private static bool IsAlwaysSendable(ITypeSymbol type)

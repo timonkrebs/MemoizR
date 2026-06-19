@@ -32,11 +32,13 @@ public sealed class SetInsideComputationAnalyzer : DiagnosticAnalyzer
             return;
         }
 
+        var actorHost = FactoryMethods.IsActorEngineHost(invocation.TargetMethod);
+
         foreach (var lambda in ComputationLambdas.OfInvocation(invocation))
         {
             foreach (var operation in ComputationLambdas.Descend(lambda.Body))
             {
-                if (operation is IInvocationOperation inner && IsSignalSet(inner.TargetMethod))
+                if (operation is IInvocationOperation inner && IsSameEngineSet(inner.TargetMethod, actorHost))
                 {
                     context.ReportDiagnostic(Diagnostic.Create(
                         DiagnosticDescriptors.SetInsideComputation,
@@ -47,7 +49,10 @@ public sealed class SetInsideComputationAnalyzer : DiagnosticAnalyzer
         }
     }
 
-    private static bool IsSignalSet(IMethodSymbol method)
+    // A Set that throws in THIS host's engine: ActorSignal.Set inside an actor computation, or
+    // lock-engine Signal/EagerRelativeSignal.Set inside a lock-engine computation. A cross-engine
+    // Set takes no same-flow lock and does not throw, so it must not be flagged.
+    private static bool IsSameEngineSet(IMethodSymbol method, bool actorHost)
     {
         if (method.Name != "Set")
         {
@@ -55,7 +60,13 @@ public sealed class SetInsideComputationAnalyzer : DiagnosticAnalyzer
         }
 
         var type = method.ContainingType?.OriginalDefinition;
-        return type is { Arity: 1, Name: "Signal" or "EagerRelativeSignal" or "ActorSignal" }
-            && type.ContainingNamespace?.ToDisplayString() == "MemoizR";
+        if (type is not { Arity: 1 } || type.ContainingNamespace?.ToDisplayString() != "MemoizR")
+        {
+            return false;
+        }
+
+        return actorHost
+            ? type.Name == "ActorSignal"
+            : type.Name is "Signal" or "EagerRelativeSignal";
     }
 }
