@@ -1,4 +1,5 @@
 using MemoizR.StructuredAsyncLock;
+using Nito.AsyncEx;
 
 namespace MemoizR;
 
@@ -123,6 +124,50 @@ public class Context
             }
         }
     }
+
+    // The pull-driven evaluation-lock scaffold, factored out of the per-entry-point copies in
+    // MemoizR<T>, the concurrent nodes, ConcurrentRace, and ReactionBase. It resolves-or-pins the
+    // ambient scope and keeps it strongly rooted for the whole evaluation (a collected scope would
+    // resurrect under the same key with a FRESH ContextLock -- not the one this evaluation holds),
+    // takes the per-node mutex (one evaluation of a node at a time, across awaits) and then this
+    // flow's upgradeable ContextLock, and refcounts the evaluation so the shared
+    // CancellationTokenSource lives exactly as long as the evaluation tree (created at depth 0,
+    // torn down when the last overlapping evaluation exits). Used only by the entry points that
+    // resolve-or-pin the ambient scope via GetOrCreateScope; the reaction's debounced/Resume paths
+    // own or conditionally tear down a scope of their own, so they keep their bespoke wrappers.
+    internal async Task<TResult> EvaluateUnderLockAsync<TResult>(AsyncLock mutex, Func<Task<TResult>> evaluate)
+    {
+        var scope = GetOrCreateScope();
+        try
+        {
+            using (await mutex.LockAsync())
+            using (await scope.ContextLock.UpgradeableLockAsync())
+            {
+                EnterEvaluationScope();
+                try
+                {
+                    return await evaluate();
+                }
+                finally
+                {
+                    ExitEvaluationScope();
+                }
+            }
+        }
+        finally
+        {
+            GC.KeepAlive(scope);
+        }
+    }
+
+    // Void-body convenience over EvaluateUnderLockAsync for the IMemoizR.UpdateIfNecessary fan-in,
+    // which recomputes for its effect and has no value to return.
+    internal Task UpdateUnderLockAsync(AsyncLock mutex, Func<Task> update)
+        => EvaluateUnderLockAsync(mutex, async () =>
+        {
+            await update();
+            return true;
+        });
 
     // Pins a scope to the current async flow if it has none yet. Returns whether a scope was
     // created: a caller that pairs this with CleanScope must only clean up when it created the

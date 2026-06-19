@@ -309,30 +309,12 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
         }
     }
 
-    async Task IMemoizR.UpdateIfNecessary()
+    // The IMemoizR fan-in (a parent scanning this reaction) reaches the locked update through the
+    // shared scaffold. The reaction's OWN debounced/Resume paths do not: they own or conditionally
+    // tear down a scope of their own, which this GetOrCreateScope-based helper does not model.
+    Task IMemoizR.UpdateIfNecessary()
     {
-        // Strong root for the weakly-registered scope (see Resume).
-        var scope = Context.GetOrCreateScope();
-        try
-        {
-            using (await mutex.LockAsync())
-            using (await scope.ContextLock.UpgradeableLockAsync())
-            {
-                Context.EnterEvaluationScope();
-                try
-                {
-                    await UpdateIfNecessary();
-                }
-                finally
-                {
-                    Context.ExitEvaluationScope();
-                }
-            }
-        }
-        finally
-        {
-            GC.KeepAlive(scope);
-        }
+        return Context.UpdateUnderLockAsync(mutex, UpdateIfNecessary);
     }
 
     internal Task Stale(CacheState state, TimeSpan debounceTime)
