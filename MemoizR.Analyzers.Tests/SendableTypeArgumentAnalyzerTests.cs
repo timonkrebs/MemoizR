@@ -129,6 +129,33 @@ public class SendableTypeArgumentAnalyzerTests
     }
 
     [Fact]
+    public async Task GetOnlyPropertyOfNonSendableType_IsFlagged()
+    {
+        // No backing field for the field walk to see (computed get-only property), so the property
+        // TYPE must be checked -- this is what catches a metadata `public List<int> Items { get; }`
+        // whose private backing field the compiler does not import.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public sealed class Exposes { public List<int> Items => new(); }
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    f.CreateSignal(new Exposes());
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR001", diagnostic.Id);
+        Assert.Contains("Items", diagnostic.GetMessage());
+    }
+
+    [Fact]
     public async Task SendableAttribute_IsTrusted()
     {
         var diagnostics = await AnalyzeAsync("""

@@ -97,6 +97,15 @@ public class SendableCheckerTests
     }
 
     [Fact]
+    public void TypeWithVisibleCustomEvent_IsNotSendable()
+    {
+        // A custom event (explicit add/remove) has no instance backing field for the field walk,
+        // so it must be rejected via the event check; subscribing mutates shared delegate state.
+        Assert.False(SendableChecker.IsSendable(typeof(HasCustomEvent), out var reason));
+        Assert.Contains("event", reason);
+    }
+
+    [Fact]
     public void EnsureSendable_Throws_WithReasonAndFixGuidance()
     {
         var ex = Assert.Throws<InvalidOperationException>(() => SendableChecker.EnsureSendable(typeof(List<int>)));
@@ -191,4 +200,15 @@ internal sealed class HolderOfMutable
 internal sealed class TrustedMutable
 {
     public int Count { get; set; }
+}
+
+internal sealed class HasCustomEvent
+{
+    private static Action? handlers;
+
+    public event Action Changed
+    {
+        add => handlers += value;
+        remove => handlers -= value;
+    }
 }

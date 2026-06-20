@@ -234,23 +234,38 @@ internal sealed class SendableSymbolClassifier
         }
     }
 
+    // A settable (non-init) property that is not private is a mutation surface, on any consumer's
+    // thread. This rule carries the weight for METADATA types: under the compiler's default
+    // MetadataImportOptions.Public their private fields are not even imported, so List<int> is
+    // caught by its settable Capacity/indexer rather than by its invisible '_items'. Value types
+    // are exempt for the same reason as fields: a setter mutates the reader's private copy. The
+    // property TYPE is also checked (not just the setter), so a get-only `public List<int> Items
+    // { get; }` on a metadata class -- whose private backing field the field walk cannot see -- is
+    // rejected the way the runtime checker rejects it through that field.
+    private string? CheckPropertyMember(INamedTypeSymbol named, IPropertySymbol property, HashSet<ITypeSymbol> inProgress)
+    {
+        if (!named.IsValueType && !property.IsStatic && HasVisibleNonInitSetter(property))
+        {
+            return $"{Display(named)} has {SettableDisplay(property)}";
+        }
+
+        if (property.IsStatic || property.IsIndexer || property.GetMethod is null
+            || property.DeclaredAccessibility == Accessibility.Private)
+        {
+            return null;
+        }
+
+        var propertyReason = CheckCached(property.Type, inProgress);
+        return propertyReason is null
+            ? null
+            : $"{Display(named)}'s property '{property.Name}' is of non-Sendable type {Display(property.Type)} ({propertyReason})";
+    }
+
     private string? CheckMember(INamedTypeSymbol named, ISymbol member, HashSet<ITypeSymbol> inProgress)
     {
-        // A settable (non-init) property that is not private is a mutation surface, on any
-        // consumer's thread. This rule carries the weight for METADATA types: under the
-        // compiler's default MetadataImportOptions.Public their private fields are not even
-        // imported, so List<int> is caught by its settable Capacity/indexer rather than by its
-        // invisible '_items' (the runtime checker, which reflects over everything, remains the
-        // backstop for metadata types with purely private mutable state). Value types are
-        // exempt for the same reason as fields: a setter mutates the reader's private copy.
         if (member is IPropertySymbol property)
         {
-            if (!named.IsValueType && !property.IsStatic && HasVisibleNonInitSetter(property))
-            {
-                return $"{Display(named)} has {SettableDisplay(property)}";
-            }
-
-            return null;
+            return CheckPropertyMember(named, property, inProgress);
         }
 
         // A visible (non-private) instance event is a mutation surface like a settable property:

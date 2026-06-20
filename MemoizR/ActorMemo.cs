@@ -319,6 +319,11 @@ public sealed class ActorMemo<T> : ActorValueNode<T>
             // against the now-published value, and let the fault propagate to this Get's caller.
             Generation++;
             State = CacheState.CacheDirty;
+            // Record this read in the caller's frame even though the commit faulted (it can throw
+            // before the success-path record below): a caller that catches our failure and returns
+            // a fallback must still wire to us, so our later recovery cascades to it. Same reason
+            // as the fn-failure path in ComputeAndCommit.
+            callerFrame?.Captured.Add((this, Generation));
             PropagateToObservers(CacheState.CacheCheck);
             throw;
         }

@@ -227,6 +227,12 @@ public static class SendableChecker
             {
                 return settable;
             }
+
+            var subscribable = CheckEvents(type, declaringLevel);
+            if (subscribable != null)
+            {
+                return subscribable;
+            }
         }
 
         foreach (var field in declaringLevel.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.DeclaredOnly))
@@ -269,6 +275,27 @@ public static class SendableChecker
             return property.GetIndexParameters().Length > 0
                 ? $"{Pretty(type)} has a settable indexer"
                 : $"{Pretty(type)} has settable property '{property.Name}' (use init or get-only)";
+        }
+
+        return null;
+    }
+
+    // A visible (non-private) instance event is a mutation surface like a settable property:
+    // subscribing/unsubscribing mutates the shared instance's delegate. An auto-event would also
+    // be caught by its writable delegate-typed backing field in the field walk, but a CUSTOM event
+    // (explicit add/remove, no instance field -- e.g. one that mutates a static delegate) has no
+    // such field, so it must be rejected here. Kept in lockstep with the MZR001 analyzer.
+    private static string? CheckEvents(Type type, Type declaringLevel)
+    {
+        foreach (var @event in declaringLevel.GetEvents(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.DeclaredOnly))
+        {
+            var add = @event.GetAddMethod(nonPublic: true);
+            if (add is null || add.IsPrivate)
+            {
+                continue;
+            }
+
+            return $"{Pretty(type)} has event '{@event.Name}' (subscribing mutates the shared instance)";
         }
 
         return null;
