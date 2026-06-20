@@ -226,6 +226,36 @@ public abstract class MemoHandlR<T> : SignalHandlR
     {
     }
 
+    // The tracked-read path shared verbatim by Signal.Get and EagerRelativeSignal.Get: a plain
+    // signal read that, when a reaction is capturing, registers itself as that reaction's
+    // dependency. MemoBase overrides Get with its own cached fast path, so this stays a leaf-signal
+    // helper rather than the base Get. The per-node mutex is deliberately NOT taken --
+    // CheckDependenciesTheSame is already serialized by Context.Lock, and a signal has no recompute
+    // for the mutex to guard (ADR 0002).
+    private protected async Task<T> ReadTracked()
+    {
+        // An unpinned flow can have no capturing reaction (its scope would be freshly minted),
+        // so the read needs no scope at all.
+        if (!Context.HasFlowScope)
+        {
+            return Value;
+        }
+
+        var scope = Context.GetOrCreateScope();
+        if (scope.CurrentReaction == null)
+        {
+            return Value;
+        }
+
+        using (await scope.ContextLock.UpgradeableLockAsync())
+        {
+            Context.CheckDependenciesTheSame(this);
+        }
+        GC.KeepAlive(scope); // strong root: the lock identity must outlive the tracked read
+
+        return Value;
+    }
+
     private sealed class ValueBox(T value)
     {
         public readonly T Value = value;

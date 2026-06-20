@@ -43,29 +43,6 @@ public sealed class Signal<T> : MemoHandlR<T>, IStateGetR<T?>
         }
     }
 
-    public async Task<T?> Get()
-    {
-        // An unpinned flow can have no capturing reaction (its scope would be freshly minted),
-        // so the read needs no scope at all.
-        if (!Context.HasFlowScope)
-        {
-            return Value;
-        }
-
-        var scope = Context.GetOrCreateScope();
-        if (scope.CurrentReaction == null)
-        {
-            return Value;
-        }
-
-        // Only one thread should evaluate the graph at a time. otherwise the context could get messed up.
-        // This should lead to perf gains because memoization can be utilized more efficiently.
-        using (await scope.ContextLock.UpgradeableLockAsync())
-        {
-            Context.CheckDependenciesTheSame(this);
-        }
-        GC.KeepAlive(scope); // strong root: the lock identity must outlive the tracked read
-
-        return Value;
-    }
+    // Identical tracked read to EagerRelativeSignal.Get -- shared on the MemoHandlR base.
+    public Task<T?> Get() => ReadTracked();
 }
