@@ -227,6 +227,11 @@ public sealed class ActorMemo<T> : ActorValueNode<T>
             {
                 Generation++;
                 State = CacheState.CacheDirty;
+                // Record this read in the caller's frame even though it faulted: a caller that
+                // catches our failure and returns a fallback must still wire to us, so that when
+                // we later recover and change, the cascade reaches it. Without the link it would
+                // commit clean over us and serve the fallback forever.
+                callerFrame?.Captured.Add((this, Generation));
                 EndEvaluation();
             }).ConfigureAwait(false);
             throw;

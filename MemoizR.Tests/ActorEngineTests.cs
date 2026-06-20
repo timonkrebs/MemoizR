@@ -506,6 +506,54 @@ public class ActorEngineTests
         Assert.Equal(20, await c.Get());
     }
 
+    // An actor computation that catches a dependency's failure and returns a fallback must still
+    // record the failed dependency, so that when the dependency later recovers and changes, the
+    // cascade reaches this node. Without the recorded link, the node commits clean with no source
+    // and serves the fallback forever.
+    [Fact(Timeout = 10000)]
+    public async Task ActorMemo_CatchingAFailedDependency_StaysWiredToIt_AndRecovers()
+    {
+        var f = new MemoFactory();
+        var v = f.CreateActorSignal(1);
+        var fail = true;
+        var p = f.CreateActorMemoizR(async () =>
+        {
+            var x = await v.Get();
+            return Volatile.Read(ref fail) ? throw new InvalidOperationException("p boom") : x;
+        });
+        var c = f.CreateActorMemoizR(async () =>
+        {
+            try
+            {
+                return await p.Get();
+            }
+            catch
+            {
+                return -1;
+            }
+        });
+
+        Assert.Equal(-1, await c.Get()); // p fails on first eval; c catches -> -1, but must stay wired to p
+
+        Volatile.Write(ref fail, false);
+        await p.Get(); // p recovers via a pull; its change must cascade to c through the recorded link
+
+        var converged = false;
+        for (var i = 0; i < 100 && !converged; i++)
+        {
+            if (await c.Get() == 1)
+            {
+                converged = true;
+            }
+            else
+            {
+                await Task.Delay(10);
+            }
+        }
+
+        Assert.Equal(1, await c.Get());
+    }
+
     private sealed class ThrowsOnEquals(int seed)
     {
         public override bool Equals(object? obj) => throw new InvalidOperationException("equals boom");

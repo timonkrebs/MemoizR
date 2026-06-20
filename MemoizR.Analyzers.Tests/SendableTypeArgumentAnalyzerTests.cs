@@ -106,6 +106,29 @@ public class SendableTypeArgumentAnalyzerTests
     }
 
     [Fact]
+    public async Task TypeWithVisibleEvent_IsFlagged()
+    {
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public sealed class HasEvent { public event Action? Changed; }
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    f.CreateSignal(new HasEvent()); // subscribing mutates the shared instance
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR001", diagnostic.Id);
+    }
+
+    [Fact]
     public async Task SendableAttribute_IsTrusted()
     {
         var diagnostics = await AnalyzeAsync("""

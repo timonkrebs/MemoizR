@@ -195,6 +195,32 @@ public class CapturedMutationAnalyzerTests
     }
 
     [Fact]
+    public async Task WriteToMemberOfEnclosingStructField_IsFlagged()
+    {
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public struct Counter { public int Value; }
+
+            public class C
+            {
+                private Counter counter;
+                private static Counter StaticCounter;
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    f.CreateMemoizR(async () => { this.counter.Value++; StaticCounter.Value++; return 1; });
+                }
+            }
+            """);
+
+        Assert.Equal(2, diagnostics.Length);
+        Assert.Contains(diagnostics, d => d.GetMessage().Contains("field 'counter'"));
+        Assert.Contains(diagnostics, d => d.GetMessage().Contains("static field 'StaticCounter'"));
+    }
+
+    [Fact]
     public async Task EventSubscriptionInComputation_IsFlagged()
     {
         var diagnostics = await AnalyzeAsync("""

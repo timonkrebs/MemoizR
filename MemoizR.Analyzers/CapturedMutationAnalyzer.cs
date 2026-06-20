@@ -74,40 +74,7 @@ public sealed class CapturedMutationAnalyzer : DiagnosticAnalyzer
 
     private static void ReportIfShared(OperationAnalysisContext context, IOperation target, IAnonymousFunctionOperation lambda)
     {
-        var (kind, symbol) = target switch
-        {
-            ILocalReferenceOperation local when IsDeclaredOutside(local.Local, lambda)
-                => ("captured local", (ISymbol)local.Local),
-            IParameterReferenceOperation parameter when IsDeclaredOutside(parameter.Parameter, lambda)
-                => ("captured parameter", parameter.Parameter),
-            IFieldReferenceOperation { Field.IsStatic: true } staticField
-                => ("static field", staticField.Field),
-            IFieldReferenceOperation { Instance: IInstanceReferenceOperation { ReferenceKind: InstanceReferenceKind.ContainingTypeInstance } } instanceField
-                => ("field", instanceField.Field),
-            // Property writes have the same shared-state surface as field writes -- a settable
-            // auto-property or a setter touching backing state. Flag static properties and
-            // properties of the enclosing object (this.X); a property written on some captured
-            // OTHER object is MZR001's territory (the value type should be Sendable), like fields.
-            IPropertyReferenceOperation { Property.IsStatic: true } staticProperty
-                => ("static property", staticProperty.Property),
-            IPropertyReferenceOperation { Instance: IInstanceReferenceOperation { ReferenceKind: InstanceReferenceKind.ContainingTypeInstance } } instanceProperty
-                => ("property", instanceProperty.Property),
-            // A field write on a captured VALUE-type local/parameter (counter.Value++) mutates the
-            // hoisted struct itself -- the same shared storage as writing the captured variable.
-            // (A field write on a captured REFERENCE-type variable mutates the pointed-to object,
-            // which is MZR001's territory -- the value type should be Sendable -- so it is left.)
-            IFieldReferenceOperation { Instance: ILocalReferenceOperation { Local: { Type.IsValueType: true } structLocal } } when IsDeclaredOutside(structLocal, lambda)
-                => ("captured local", structLocal),
-            IFieldReferenceOperation { Instance: IParameterReferenceOperation { Parameter: { Type.IsValueType: true } structParam } } when IsDeclaredOutside(structParam, lambda)
-                => ("captured parameter", structParam),
-            // Event subscriptions on the enclosing/static object mutate shared delegate state.
-            IEventReferenceOperation { Event.IsStatic: true } staticEvent
-                => ("static event", staticEvent.Event),
-            IEventReferenceOperation { Instance: IInstanceReferenceOperation { ReferenceKind: InstanceReferenceKind.ContainingTypeInstance } } instanceEvent
-                => ("event", instanceEvent.Event),
-            _ => (null, null!),
-        };
-
+        var (kind, symbol) = ResolveSharedRoot(target, lambda);
         if (kind is null)
         {
             return;
@@ -117,7 +84,60 @@ public sealed class CapturedMutationAnalyzer : DiagnosticAnalyzer
             DiagnosticDescriptors.CapturedMutation,
             target.Syntax.GetLocation(),
             kind,
-            symbol.Name));
+            symbol!.Name));
+    }
+
+    // Resolves a mutation target to the shared storage it ultimately writes, walking up value-type
+    // member receivers so that `this.s.Value++`, `StaticStruct.Value++`, and `capturedStruct.Value++`
+    // all resolve to the shared field/local being mutated. Returns (null, null) when the target is a
+    // member of some OTHER reference object (mutation through a captured reference -- MZR001's
+    // territory, the value type there should be Sendable).
+    private static (string? kind, ISymbol? symbol) ResolveSharedRoot(IOperation target, IAnonymousFunctionOperation lambda)
+    {
+        switch (target)
+        {
+            case ILocalReferenceOperation local when IsDeclaredOutside(local.Local, lambda):
+                return ("captured local", local.Local);
+            case IParameterReferenceOperation parameter when IsDeclaredOutside(parameter.Parameter, lambda):
+                return ("captured parameter", parameter.Parameter);
+            case IFieldReferenceOperation { Field.IsStatic: true } staticField:
+                return ("static field", staticField.Field);
+            case IFieldReferenceOperation field:
+                return ResolveThroughReceiver(field.Instance, "field", field.Field, lambda);
+            case IPropertyReferenceOperation { Property.IsStatic: true } staticProperty:
+                return ("static property", staticProperty.Property);
+            case IPropertyReferenceOperation property:
+                return ResolveThroughReceiver(property.Instance, "property", property.Property, lambda);
+            case IEventReferenceOperation { Event.IsStatic: true } staticEvent:
+                return ("static event", staticEvent.Event);
+            case IEventReferenceOperation @event:
+                return ResolveThroughReceiver(@event.Instance, "event", @event.Event, lambda);
+            default:
+                return (null, null);
+        }
+    }
+
+    // A member on `this` is reported as the member. A member on a value-type receiver that is
+    // itself shared storage (a captured struct local/parameter, or a nested value-type
+    // field/property/this) reports that RECEIVER -- mutating the member mutates the receiver's
+    // storage. A member on any other (reference) receiver is left to MZR001.
+    private static (string? kind, ISymbol? symbol) ResolveThroughReceiver(IOperation? receiver, string memberKind, ISymbol member, IAnonymousFunctionOperation lambda)
+    {
+        switch (receiver)
+        {
+            case IInstanceReferenceOperation { ReferenceKind: InstanceReferenceKind.ContainingTypeInstance }:
+                return (memberKind, member);
+            case ILocalReferenceOperation { Local.Type.IsValueType: true } local when IsDeclaredOutside(local.Local, lambda):
+                return ("captured local", local.Local);
+            case IParameterReferenceOperation { Parameter.Type.IsValueType: true } parameter when IsDeclaredOutside(parameter.Parameter, lambda):
+                return ("captured parameter", parameter.Parameter);
+            case IFieldReferenceOperation { Type.IsValueType: true } outerField:
+                return ResolveSharedRoot(outerField, lambda);
+            case IPropertyReferenceOperation { Type.IsValueType: true } outerProperty:
+                return ResolveSharedRoot(outerProperty, lambda);
+            default:
+                return (null, null);
+        }
     }
 
     // "Captured" = declared outside this computation lambda's syntax. The span test (rather than

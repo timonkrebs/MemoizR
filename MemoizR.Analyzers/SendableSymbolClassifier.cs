@@ -253,6 +253,19 @@ internal sealed class SendableSymbolClassifier
             return null;
         }
 
+        // A visible (non-private) instance event is a mutation surface like a settable property:
+        // subscribing/unsubscribing mutates the shared instance's delegate. The runtime checker
+        // catches an auto-event via its (writable, delegate-typed) backing field, but under the
+        // compiler's default MetadataImportOptions.Public that field is not imported, so the
+        // analyzer must reject the event itself to stay in lockstep. (Value types: exempt, like
+        // fields/properties -- the event lives on the reader's private copy.)
+        if (member is IEventSymbol { IsStatic: false } @event
+            && !named.IsValueType
+            && @event.DeclaredAccessibility != Accessibility.Private)
+        {
+            return $"{Display(named)} has event '{@event.Name}' (subscribing mutates the shared instance)";
+        }
+
         if (member is not IFieldSymbol field || field.IsStatic)
         {
             return null;
