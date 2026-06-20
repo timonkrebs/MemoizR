@@ -35,6 +35,10 @@ public sealed class EagerRelativeSignal<T> : MemoHandlR<T>, IStateGetR<T>
         }
     }
 
-    // Identical tracked read to Signal.Get -- shared on the MemoHandlR base.
-    public Task<T> Get() => ReadTracked();
+    // Tracked read shared with Signal.Get via MemoHandlR.TrackDependency.
+    public async Task<T> Get()
+    {
+        await TrackDependency();
+        return Value;
+    }
 }
