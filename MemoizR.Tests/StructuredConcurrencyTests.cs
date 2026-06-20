@@ -581,4 +581,43 @@ public class StructuredConcurrencyTests
         await v1.Set(9); // v1 -> race.Stale (the inlined IMemoizR.Stale); must not throw
         Assert.Equal(9, await race.Get()); // race recomputes with the new resolver value
     }
+
+    // Prep for hoisting the (identical) HandleSubscriptions into StructuredJobBase: it wires the
+    // node's Sources from the parallel children's captures via allSources.Distinct(), so a source
+    // read by MORE THAN ONE child must end up wired exactly once. Pins the dedup the hoist must
+    // preserve -- and that a single observer entry still invalidates correctly.
+    [Fact(Timeout = 10000)]
+    public async Task ConcurrentMap_TwoChildrenReadSameSignal_WiresItOnce_AndInvalidates()
+    {
+        var f = new MemoFactory();
+        var s = f.CreateSignal(1);
+        var map = f.CreateConcurrentMap(
+            async _ => await s.Get(),
+            async _ => await s.Get() + 100);
+
+        Assert.Equal([1, 101], await map.Get());
+        Assert.Equal(1, map.Sources.Count(src => ReferenceEquals(src, s))); // deduped, not [s, s]
+
+        await s.Set(2);
+        Assert.Equal([2, 102], await map.Get());
+    }
+
+    // ConcurrentMapReduce sibling of the dedup pin above (its reduce job has the same
+    // HandleSubscriptions). Its children share the parent flow scope rather than forced per-child
+    // scopes -- the other half of the structured wiring design.
+    [Fact(Timeout = 10000)]
+    public async Task ConcurrentMapReduce_TwoChildrenReadSameSignal_WiresItOnce_AndInvalidates()
+    {
+        var f = new MemoFactory();
+        var s = f.CreateSignal(1);
+        var sum = f.CreateConcurrentMapReduce(
+            async _ => await s.Get(),
+            async _ => await s.Get());
+
+        Assert.Equal(2, await sum.Get()); // 1 + 1
+        Assert.Equal(1, sum.Sources.Count(src => ReferenceEquals(src, s))); // deduped, not [s, s]
+
+        await s.Set(5);
+        Assert.Equal(10, await sum.Get()); // 5 + 5
+    }
 }

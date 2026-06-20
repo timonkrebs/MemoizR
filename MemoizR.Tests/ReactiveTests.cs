@@ -1019,4 +1019,32 @@ public class ReactiveTests
         Assert.Equal(111, last);
         GC.KeepAlive(r);
     }
+
+    // Prep for the ScanParentsForDirty extraction: the CacheCheck parent scan in
+    // ReactionBase.UpdateIfNecessary must resolve a reaction back to Clean WITHOUT running its
+    // action when a re-checked upstream memo turns out unchanged. Here s changes (0 -> 2) but
+    // m = s % 2 stays 0, so the scheduled debounced update scans m, finds it unchanged, and must
+    // not fire. Pins the reaction-side copy of the scan that the extraction would unify (the
+    // memo-side copy is pinned by GraphRewiringTests.Memo_EqualButNotSameRecomputedValue_*).
+    [Fact(Timeout = 10000)]
+    public async Task Reaction_UpstreamMemoRecomputesEqualValue_DoesNotRerun()
+    {
+        var f = new MemoFactory();
+        var s = f.CreateSignal(0);
+        var m = f.CreateMemoizR(async () => await s.Get() % 2); // distinct s collapse to one parity
+        var invocations = 0;
+        var r = f.BuildReaction().CreateReaction(m, _ => invocations++);
+
+        await TestHelpers.WaitForConvergenceAsync(() => invocations == 1); // eager initial run
+        Assert.Equal(1, invocations);
+
+        await s.Set(2);        // m re-checks to 2 % 2 == 0 (unchanged) -> the scan must resolve Clean
+        await Task.Delay(150); // negative assertion: a real quiescence window, not a poll
+        Assert.Equal(1, invocations);
+
+        await s.Set(3);        // m = 3 % 2 == 1 (changed) -> the reaction must run again
+        await TestHelpers.WaitForConvergenceAsync(() => invocations == 2);
+        Assert.Equal(2, invocations);
+        GC.KeepAlive(r);
+    }
 }
