@@ -2,18 +2,16 @@
 
 namespace MemoizR.StructuredConcurrency;
 
-public sealed class StructuredResultsJob<T> : StructuredJobBase<ConcurrentDictionary<int, T>>
+public sealed class StructuredResultsJob<T> : OwnedStructuredJob<ConcurrentDictionary<int, T>>
 {
     private readonly IReadOnlyCollection<Func<IStructuredResourceGroup, Task<T>>> fns;
     private readonly Context context;
-    private readonly ConcurrentMap<T> @this;
     private readonly CancellationTokenSource cancellationTokenSource;
 
-    public StructuredResultsJob(IReadOnlyCollection<Func<IStructuredResourceGroup, Task<T>>> fns, Context context, ConcurrentMap<T> @this)
+    public StructuredResultsJob(IReadOnlyCollection<Func<IStructuredResourceGroup, Task<T>>> fns, Context context, ConcurrentMap<T> @this) : base(@this)
     {
         this.fns = fns;
         this.context = context;
-        this.@this = @this;
         this.result = new();
         this.cancellationTokenSource = context.CancellationTokenSource!;
     }
@@ -34,7 +32,7 @@ public sealed class StructuredResultsJob<T> : StructuredJobBase<ConcurrentDictio
         // GC during the awaited fn collects the scope, the fn's reads resolve a resurrected scope
         // whose CurrentReaction is null, and the child's dependencies are silently not captured.
         var scope = context.ForceNewScope();
-        scope.CurrentReaction = @this;
+        scope.CurrentReaction = owner;
         try
         {
             result!.TryAdd(i, await x(resourceGroup));
@@ -44,12 +42,7 @@ public sealed class StructuredResultsJob<T> : StructuredJobBase<ConcurrentDictio
             cancellationTokenSource.Cancel();
             throw;
         }
-        AccumulateSourcesAndObservers(scope, @this);
+        AccumulateSourcesAndObservers(scope);
         GC.KeepAlive(scope);
-    }
-
-    protected override void HandleSubscriptions()
-    {
-        @this.Sources = allSources.Distinct().ToArray();
     }
 }

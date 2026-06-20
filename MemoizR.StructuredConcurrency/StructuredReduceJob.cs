@@ -1,19 +1,17 @@
 ﻿namespace MemoizR.StructuredConcurrency;
 
-public sealed class StructuredReduceJob<T> : StructuredJobBase<T>
+public sealed class StructuredReduceJob<T> : OwnedStructuredJob<T>
 {
     private readonly IReadOnlyCollection<Func<IStructuredResourceGroup, Task<T>>> fns;
     private readonly CancellationTokenSource cancellationTokenSource;
     private readonly Func<T, T, T?> reduce;
     private readonly Context context;
-    private readonly ConcurrentMapReduce<T> @this;
 
-    public StructuredReduceJob(IReadOnlyCollection<Func<IStructuredResourceGroup, Task<T>>> fns, Func<T, T, T?> reduce, Context context, ConcurrentMapReduce<T> @this)
+    public StructuredReduceJob(IReadOnlyCollection<Func<IStructuredResourceGroup, Task<T>>> fns, Func<T, T, T?> reduce, Context context, ConcurrentMapReduce<T> @this) : base(@this)
     {
         this.fns = fns;
         this.reduce = reduce;
         this.context = context;
-        this.@this = @this;
         this.cancellationTokenSource = context.CancellationTokenSource!;
     }
 
@@ -45,11 +43,6 @@ public sealed class StructuredReduceJob<T> : StructuredJobBase<T>
             cancellationTokenSource.Cancel();
             throw;
         }
-        AccumulateSourcesAndObservers(scope, @this);
-    }
-
-    protected override void HandleSubscriptions()
-    {
-        @this.Sources = allSources.Distinct().ToArray();
+        AccumulateSourcesAndObservers(scope);
     }
 }
