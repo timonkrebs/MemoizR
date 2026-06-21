@@ -2,6 +2,7 @@ namespace MemoizR;
 
 public sealed class Signal<T> : MemoHandlR<T>, IStateGetR<T?>
 {
+    private Lock Lock { get; } = new();
     internal Signal(T value, Context context) : base(context)
     {
         Value = value;
@@ -27,7 +28,11 @@ public sealed class Signal<T> : MemoHandlR<T>, IStateGetR<T?>
                     return;
                 }
 
-                Value = value;
+                // only updating the value should be locked
+                lock (Lock)
+                {
+                    Value = value;
+                }
 
                 await PropagateStaleToObserversAsync(CacheState.CacheDirty);
             }
