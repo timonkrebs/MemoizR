@@ -1,4 +1,4 @@
-﻿namespace MemoizR.StructuredConcurrency;
+namespace MemoizR.StructuredConcurrency;
 
 public sealed class StructuredRaceJob<T, R> : StructuredJobBase<T>, IDisposable
 {

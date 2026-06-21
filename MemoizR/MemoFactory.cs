@@ -2,11 +2,10 @@ namespace MemoizR;
 
 public sealed class MemoFactory
 {
-
-    private static Lock contextsLock = new();
+    private static readonly Lock contextsLock = new();
     internal static Dictionary<string, WeakReference<Context>> CONTEXTS = new Dictionary<string, WeakReference<Context>>();
     internal Context Context { get; }
-    public Lock Lock { get; } = new();
+    internal Lock Lock { get; } = new();
 
     // The SynchronizationContext reactions built from this factory marshal to (set via
     // MemoizR.Reactive's AddSynchronizationContext, or MemoizR.Wpf's AddWpfDispatcher): a
