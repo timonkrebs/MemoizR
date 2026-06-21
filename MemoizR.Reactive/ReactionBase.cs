@@ -155,28 +155,8 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
         // recompute, the final commit below must not mark us Clean over it.
         var token = stateCell.Generation;
 
-        // If we are potentially dirty, check if we have a parent who has actually changed value.
-        var parentFaulted = false;
-        if (State == CacheState.CacheCheck)
-        {
-            foreach (var source in Sources)
-            {
-                if (source is IMemoizR memoizR)
-                {
-                    var update = memoizR.UpdateIfNecessary(); // updateIfNecessary() can change state.
-                    await update.ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
-                    parentFaulted |= update.IsFaulted;
-                }
-
-                if (State == CacheState.CacheDirty)
-                {
-                    // Stop the loop here so we won't trigger updates on other parents unnecessarily.
-                    // If our computation changes to no longer use some Sources, we don't
-                    // want to update() a source we used last time but now don't use.
-                    break;
-                }
-            }
-        }
+        // If we are potentially dirty, check if a parent has actually changed value.
+        var parentFaulted = State == CacheState.CacheCheck && await ScanParentsForDirty();
 
         // If we were already dirty or marked dirty by the step above, update.
         if (State == CacheState.CacheDirty)
