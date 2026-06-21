@@ -1,4 +1,4 @@
-﻿namespace MemoizR.Reactive;
+namespace MemoizR.Reactive;
 
 public sealed class AdvancedReaction : ReactionBase
 {
