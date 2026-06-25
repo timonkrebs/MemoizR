@@ -168,6 +168,25 @@ public class ResourceManagementTests
         Assert.Contains(inner, e => e.Message == "dispose failure");
     }
 
+    [Fact]
+    public void TestAddResourceAfterDisposeThrows()
+    {
+        var group = new StructuredResourceGroup(CancellationToken.None);
+        var _ = group.DisposeResources();
+
+        Assert.Throws<ObjectDisposedException>(() => group.AddResource(new TestResource()));
+        Assert.Throws<ObjectDisposedException>(() => group.AddResource(new AsyncTestResource()));
+    }
+
+    [Fact]
+    public void TestAddNullResourceThrows()
+    {
+        var group = new StructuredResourceGroup(CancellationToken.None);
+
+        Assert.Throws<ArgumentNullException>(() => group.AddResource((IDisposable)null!));
+        Assert.Throws<ArgumentNullException>(() => group.AddResource((IAsyncDisposable)null!));
+    }
+
     private class ActionDisposable : IDisposable
     {
         private readonly Action action;
