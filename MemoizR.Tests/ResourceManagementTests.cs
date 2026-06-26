@@ -174,4 +174,31 @@ public class ResourceManagementTests
         public ActionDisposable(Action action) => this.action = action;
         public void Dispose() => action();
     }
+
+    [Fact]
+    public async Task TestResourceAddNullThrowsArgumentNullException()
+    {
+        var f = new MemoFactory();
+        var c1 = f.CreateConcurrentMapReduce(
+            r =>
+            {
+                Assert.Throws<ArgumentNullException>(() => r.AddResource((IDisposable)null!));
+                Assert.Throws<ArgumentNullException>(() => r.AddResource((IAsyncDisposable)null!));
+                return Task.FromResult(1);
+            });
+
+        await c1.Get();
+    }
+
+    [Fact]
+    public async Task TestResourceDisposalTOCTOUThrowsObjectDisposedException()
+    {
+        var resourceGroup = new StructuredResourceGroup(CancellationToken.None);
+        var resource = new TestResource();
+
+        await resourceGroup.DisposeResources();
+
+        Assert.Throws<ObjectDisposedException>(() => resourceGroup.AddResource(resource));
+        Assert.Throws<ObjectDisposedException>(() => resourceGroup.AddResource(new AsyncTestResource()));
+    }
 }

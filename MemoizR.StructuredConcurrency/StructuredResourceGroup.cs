@@ -4,6 +4,7 @@ public sealed class StructuredResourceGroup : IStructuredResourceGroup
 {
     private readonly List<object> resources = new();
     private readonly Lock mutex = new();
+    private bool isDisposed;
 
     public CancellationToken Token { get; }
 
@@ -14,16 +15,20 @@ public sealed class StructuredResourceGroup : IStructuredResourceGroup
 
     public void AddResource(IDisposable resource)
     {
+        ArgumentNullException.ThrowIfNull(resource);
         lock (mutex)
         {
+            ObjectDisposedException.ThrowIf(isDisposed, this);
             resources.Add(resource);
         }
     }
 
     public void AddResource(IAsyncDisposable resource)
     {
+        ArgumentNullException.ThrowIfNull(resource);
         lock (mutex)
         {
+            ObjectDisposedException.ThrowIf(isDisposed, this);
             resources.Add(resource);
         }
     }
@@ -33,6 +38,11 @@ public sealed class StructuredResourceGroup : IStructuredResourceGroup
         List<object> resourcesToDispose;
         lock (mutex)
         {
+            if (isDisposed)
+            {
+                return;
+            }
+            isDisposed = true;
             resourcesToDispose = new List<object>(resources);
             resources.Clear();
         }
