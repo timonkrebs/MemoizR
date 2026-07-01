@@ -21,7 +21,11 @@ public sealed class ActorSignal<T> : ActorValueNode<T>
         // rejection: a Set from inside a computation is a feedback loop -- it would invalidate
         // the very evaluation in progress, dooming its commit by design. Detected on the flow,
         // before paying for a turn (MZR003 reports the same mistake at build time).
-        if (ActorFlow.Frame.Value != null)
+        // CurrentFrame, not the raw AsyncLocal: deferred work started inside the computation
+        // (Task.Run and friends capture ExecutionContext) runs AFTER the evaluation with a
+        // stale frame -- that is the documented escape for this very rejection, so an expired
+        // frame must not throw.
+        if (ActorFlow.CurrentFrame != null)
         {
             throw new InvalidOperationException(
                 "Set was called from inside a reactive computation. A computation must not write signals " +
@@ -54,10 +58,10 @@ public sealed class ActorSignal<T> : ActorValueNode<T>
 
     public Task<T> Get()
     {
-        var frame = ActorFlow.Frame.Value;
+        var frame = ActorFlow.CurrentFrame;
         if (frame == null)
         {
-            ActorFlowGuards.RejectUntrackedReadInsideLockComputation(this);
+            ActorFlowGuards.RejectUntrackedReadInsideLockComputation();
 
             // Untracked read: signals are always current; the box read is a complete value.
             return Task.FromResult(Value);

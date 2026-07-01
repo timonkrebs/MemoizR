@@ -78,12 +78,12 @@ public sealed class CapturedMutationAnalyzer : DiagnosticAnalyzer
     // in place: `counter.Increment()` mutates the captured local exactly like `counter.Value++`.
     // Exempt: readonly members and readonly structs (most BCL value types -- int, DateTime,
     // Guid...), the object/ValueType virtuals (ToString/Equals/GetHashCode overrides are
-    // overwhelmingly pure), and property receivers (the getter hands out a copy, so the call
-    // mutates a temporary -- a lost write, not shared mutation; direct writes through a
-    // value-type property are already compiler errors).
+    // overwhelmingly pure), and receivers the call cannot reach in place -- property receivers
+    // and DEFENSIVE-COPY receivers (a readonly field, an `in` parameter, a ref-readonly local:
+    // C# invokes non-readonly members on a copy there, so shared storage is never written).
     private static bool IsMutatingValueReceiverCall(IInvocationOperation call)
     {
-        if (call.Instance is not { Type.IsValueType: true } || call.Instance is IPropertyReferenceOperation)
+        if (call.Instance is not { Type.IsValueType: true } receiver || IsCopyReceiver(receiver))
         {
             return false;
         }
@@ -95,6 +95,18 @@ public sealed class CapturedMutationAnalyzer : DiagnosticAnalyzer
         }
 
         return true;
+    }
+
+    private static bool IsCopyReceiver(IOperation receiver)
+    {
+        return receiver switch
+        {
+            IPropertyReferenceOperation => true, // the getter hands out a copy (direct writes there are already compiler errors)
+            IFieldReferenceOperation field => field.Field.IsReadOnly,
+            IParameterReferenceOperation parameter => parameter.Parameter.RefKind == RefKind.In,
+            ILocalReferenceOperation local => local.Local.RefKind == RefKind.RefReadOnly,
+            _ => false,
+        };
     }
 
     private static bool IsObjectVirtual(ITypeSymbol? declaringType)

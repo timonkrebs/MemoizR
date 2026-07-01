@@ -166,6 +166,39 @@ public class SendableTypeArgumentAnalyzerTests
     }
 
     [Fact]
+    public async Task SourceDeclaredCollectionLookalike_IsFlagged()
+    {
+        // An exact-name lookalike declared in source (source wins over metadata on a name
+        // clash, so this IS the type the creation binds to) must not be blessed by the
+        // green-list: the runtime's typeof-identity check rejects it, and the analyzer must
+        // stay in lockstep and let the structural walk flag it.
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            namespace System.Collections.Concurrent
+            {
+                public class ConcurrentQueue<T>
+                {
+                    public T? Head;
+                }
+            }
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    f.CreateSignal(new System.Collections.Concurrent.ConcurrentQueue<int>());
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR001", diagnostic.Id);
+        Assert.Contains("Head", diagnostic.GetMessage());
+    }
+
+    [Fact]
     public async Task ImmutableCollectionBuilder_IsFlagged_NotBlessedByNamespace()
     {
         var diagnostics = await AnalyzeAsync("""

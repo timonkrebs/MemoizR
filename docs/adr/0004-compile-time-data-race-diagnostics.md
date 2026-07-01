@@ -57,8 +57,11 @@ what a compiler can and cannot see:
    because every non-sealed record synthesizes `protected virtual Type EqualityContract { get; }`
    and `Type` is abstract — without the green-list the rule would falsely reject every non-sealed
    record. A metadata type with *purely private* mutable state still passes the analyzer
-   silently; the runtime strict mode remains the backstop there. (Value types stay exempt from
-   the field and settable-property rules: every read hands out a copy.)
+   silently — that includes a `{ get; private set; }` auto-property on a referenced assembly,
+   whose private setter and writable backing field are both invisible under public-only import,
+   making it indistinguishable from a get-only property; the runtime strict mode remains the
+   backstop there. (Value types stay exempt from the field and settable-property rules: every
+   read hands out a copy.)
 
 ### MZR002 — reactive computation mutates state shared with code outside it
 

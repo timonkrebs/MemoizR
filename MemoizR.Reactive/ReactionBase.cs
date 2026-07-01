@@ -221,6 +221,8 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
         scope.CurrentReaction = this;
         scope.CurrentGets = [];
         scope.CurrentGetsIndex = 0;
+        var prevAmbientContext = LockEngineFlow.EvaluatingContext.Value;
+        LockEngineFlow.EvaluatingContext.Value = Context;
 
         // Mark Evaluating and snapshot the generation so a Stale during Execute escalates past
         // Evaluating (bumping the generation) and blocks the commit below.
@@ -263,6 +265,7 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
             scope.CurrentGets = prevGets;
             scope.CurrentReaction = prevReaction;
             scope.CurrentGetsIndex = prevIndex;
+            LockEngineFlow.EvaluatingContext.Value = prevAmbientContext;
         }
 
         // We've rerun with the latest values from all of our Sources, so we no longer need to

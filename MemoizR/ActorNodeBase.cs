@@ -6,6 +6,13 @@ internal static class ActorFlow
 {
     // The dependency-capture frame of the innermost actor-memo evaluation on this flow.
     internal static readonly AsyncLocal<EvaluationFrame?> Frame = new();
+
+    // The frame, treating an EXPIRED one as absent. ExecutionContext capture (Task.Run, timer
+    // callbacks, thread-pool work items started inside a computation) carries the AsyncLocal
+    // into work that may run long after the evaluation committed -- the documented "schedule
+    // the write outside the evaluation" escape does exactly that. Such work is no longer
+    // inside any evaluation, so its stale frame must not track reads or reject writes.
+    internal static EvaluationFrame? CurrentFrame => Frame.Value is { IsExpired: false } frame ? frame : null;
 }
 
 // Flow-side rejections shared by the read entry points.
@@ -16,14 +23,15 @@ internal static class ActorFlowGuards
     // engine tracks through ActorFlow frames, which lock computations do not carry, and the lock
     // engine tracks through IMemoHandlR, which actor nodes deliberately do not implement. The
     // computation would cache a value that no later actor-side Set can ever invalidate:
-    // permanent staleness, so the read is rejected on the flow. Context.Untrack remains the
-    // escape hatch -- an untracked snapshot read is exactly what it asks for (it clears
-    // CurrentReaction, so the capture predicate goes quiet). Detection is per-context (the
-    // node's own); a computation of a DIFFERENT context evaluating on this flow is not
-    // detectable from here.
-    public static void RejectUntrackedReadInsideLockComputation(ActorNodeBase node)
+    // permanent staleness, so the read is rejected on the flow. The evaluating computation is
+    // found through the context-agnostic LockEngineFlow ambient (a computation of ANY context
+    // on this flow is the same staleness, so the node's own context must not be the only one
+    // checked), and its capture state re-checked through that context -- which keeps
+    // Context.Untrack working as the escape hatch: an untracked snapshot read is exactly what
+    // it asks for (it clears CurrentReaction, so the capture predicate goes quiet).
+    public static void RejectUntrackedReadInsideLockComputation()
     {
-        if (node.Context.IsComputationCapturing)
+        if (LockEngineFlow.EvaluatingContext.Value is { IsComputationCapturing: true })
         {
             throw new InvalidOperationException(
                 "An actor-engine node was read from inside a lock-engine computation. The two engines " +
@@ -76,11 +84,21 @@ internal sealed class EvaluationFrame
     public readonly ActorNodeBase Owner;
     public readonly EvaluationFrame? Parent;
 
+    // Set once when the owning evaluation ends (commit or fault). The frame object is shared by
+    // every ExecutionContext snapshot that captured it, so this one write is visible to deferred
+    // work carrying a stale copy of the flow's context -- volatile because those reads happen on
+    // arbitrary threads (see ActorFlow.CurrentFrame).
+    private volatile bool expired;
+
     public EvaluationFrame(ActorNodeBase owner, EvaluationFrame? parent)
     {
         Owner = owner;
         Parent = parent;
     }
+
+    public bool IsExpired => expired;
+
+    public void Expire() => expired = true;
 
     public bool Contains(ActorNodeBase node)
     {

@@ -51,6 +51,8 @@ public sealed class ConcurrentRace<T, I> : MemoHandlR<T>, IMemoizR, IStateGetR<T
         scope.CurrentReaction = this;
         scope.CurrentGets = [];
         scope.CurrentGetsIndex = 0;
+        var prevAmbientContext = LockEngineFlow.EvaluatingContext.Value;
+        LockEngineFlow.EvaluatingContext.Value = Context;
 
         try
         {
@@ -69,6 +71,7 @@ public sealed class ConcurrentRace<T, I> : MemoHandlR<T>, IMemoizR, IStateGetR<T
             scope.CurrentGets = prevGets;
             scope.CurrentReaction = prevReaction;
             scope.CurrentGetsIndex = prevIndex;
+            LockEngineFlow.EvaluatingContext.Value = prevAmbientContext;
         }
 
         // handles diamond dependencies if we're the parent of a diamond.

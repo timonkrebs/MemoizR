@@ -285,6 +285,37 @@ public class ActorEngineTests
         Assert.Equal(6, await outer.Get());
     }
 
+    // The documented escape for the rejection below: BUILD the write inside the computation,
+    // run it after the evaluation. Task.Run captures ExecutionContext -- including the
+    // evaluation's frame -- so the deferred write executes with a STALE frame; frame expiry at
+    // commit is what lets it through (without it, the escape itself threw).
+    [Fact(Timeout = 10000)]
+    public async Task DeferredWrite_ScheduledInsideAComputation_RunsAfterCommit_IsNotRejected()
+    {
+        var f = new MemoFactory();
+        var v = f.CreateActorSignal(1);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        Task? deferred = null;
+        var m = f.CreateActorMemoizR(async () =>
+        {
+            var value = await v.Get();
+            deferred ??= Task.Run(async () =>
+            {
+                await release.Task; // held until the evaluation has committed
+                await v.Set(41);
+            });
+
+            return value;
+        });
+
+        Assert.Equal(1, await m.Get()); // commits; the evaluation's frame expires
+        release.SetResult();
+        await deferred!; // with a live (unexpired) frame this threw "inside a reactive computation"
+
+        Assert.Equal(41, await v.Get());
+        Assert.Equal(41, await m.Get()); // the deferred write dirtied m like any ordinary Set
+    }
+
     [Fact(Timeout = 10000)]
     public async Task SetInsideComputation_Throws_AndTheMemoRetries()
     {
@@ -472,6 +503,22 @@ public class ActorEngineTests
         // Outside any computation the same reads are fine -- and the actor graph still works.
         Assert.Equal(1, await actorValue.Get());
         Assert.Equal(2, await actorMemo.Get());
+    }
+
+    // The same staleness with the computation and the actor node in DIFFERENT contexts: the
+    // guard must detect a capturing computation of ANY context on the flow (the flow-ambient
+    // LockEngineFlow marker), not just the actor node's own.
+    [Fact(Timeout = 10000)]
+    public async Task ActorRead_InsideALockComputationOfAnotherContext_IsRejected()
+    {
+        var lockFactory = new MemoFactory();
+        var actorFactory = new MemoFactory();
+        var actorValue = actorFactory.CreateActorSignal(1);
+
+        var mixed = lockFactory.CreateMemoizR(async () => await actorValue.Get());
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => mixed.Get());
+        Assert.Contains("lock-engine computation", ex.Message);
     }
 
     // A tracked read of a node from another context would capture a foreign source, and the

@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Linq;
 using Microsoft.CodeAnalysis;
 
 namespace MemoizR.Analyzers;
@@ -155,17 +156,18 @@ internal sealed class SendableSymbolClassifier
     }
 
     // The known framework collections that are immutable or internally synchronized BY
-    // CONTRACT, matched by definition (namespace + name + arity, top-level only) -- NOT by
-    // namespace alone: any project can declare its own types inside a System.Collections.*
-    // namespace, and those must fall through to the structural checks. Kept in lockstep with
-    // the runtime checker, where the same list is matched by type identity (typeof). Nested
-    // helpers like ImmutableList<T>.Builder are distinct definitions and fall through too
-    // (their settable indexers reject them). FrozenDictionary/FrozenSet are abstract by
-    // design, so this trust is granted before the abstract-category rejection.
+    // CONTRACT, matched by definition (namespace + name + arity, top-level only, declared in a
+    // framework assembly) -- NOT by namespace or name alone: any project can declare its own
+    // types (even exact-name lookalikes) inside a System.Collections.* namespace, and those
+    // must fall through to the structural checks, as the runtime checker's typeof-identity
+    // match would reject them. Kept in lockstep with that runtime list. Nested helpers like
+    // ImmutableList<T>.Builder are distinct definitions and fall through too (their settable
+    // indexers reject them). FrozenDictionary/FrozenSet are abstract by design, so this trust
+    // is granted before the abstract-category rejection.
     private static bool IsKnownSendableCollection(INamedTypeSymbol named)
     {
         var definition = named.OriginalDefinition;
-        if (definition.ContainingType is not null)
+        if (definition.ContainingType is not null || !IsDeclaredInFrameworkAssembly(definition))
         {
             return false;
         }
@@ -197,6 +199,25 @@ internal sealed class SendableSymbolClassifier
             default:
                 return false;
         }
+    }
+
+    // A symbol only counts as THE framework collection when it comes from a framework assembly:
+    // a source declaration is by definition the user's (source wins over metadata on a name
+    // clash, so the candidate here IS what the code binds to), and a metadata lookalike from an
+    // ordinary library must not be blessed either. The assembly-name set covers where these
+    // types (or their facades) live across TFMs -- .NET (split System.Collections.* assemblies,
+    // System.Private.CoreLib in runtime-assembly compilations), .NET Framework
+    // (mscorlib/System), and the netstandard/System.Runtime facades.
+    private static bool IsDeclaredInFrameworkAssembly(INamedTypeSymbol definition)
+    {
+        if (definition.Locations.Any(location => location.IsInSource))
+        {
+            return false;
+        }
+
+        return definition.ContainingAssembly?.Identity.Name is
+            "System.Collections.Immutable" or "System.Collections.Concurrent" or "System.Collections"
+            or "System.Runtime" or "System.Private.CoreLib" or "mscorlib" or "netstandard" or "System";
     }
 
     private static bool HasSendableAttribute(INamedTypeSymbol named)

@@ -65,8 +65,14 @@ sibling reads of one memo issued by the same computation, which share a flow but
 commit rewire another actor's observer list. Reads of actor nodes from inside a **lock-engine
 computation** are rejected the same way — the read would register in *neither* graph (lock
 computations carry no ActorFlow frame; actor nodes implement no lock-engine interface), so the
-computation would cache a value no actor-side Set can ever invalidate; `Untrack` remains the
-escape hatch for a deliberate snapshot read. The mirror direction — an actor computation
+computation would cache a value no actor-side Set can ever invalidate. The evaluating
+computation is found through a context-agnostic flow-ambient marker set by the lock engine's
+evaluation paths (a computation of ANY context is the same staleness, so the node's own context
+must not be the only one checked); `Untrack` remains the escape hatch for a deliberate snapshot
+read. Frames **expire** when their evaluation commits or faults, so deferred work that captured
+the flow's `ExecutionContext` inside a computation (`Task.Run` — the documented way to schedule
+a write for after the evaluation) reads as outside any evaluation instead of being falsely
+rejected by its stale frame. The mirror direction — an actor computation
 reading a lock-engine node — has the same silent-staleness shape but is only detectable from
 the lock engine's getters, whose fast paths are the repo's most optimized; guarding it costs an
 AsyncLocal probe on the shipping hot path and is deliberately left open pending that trade-off.

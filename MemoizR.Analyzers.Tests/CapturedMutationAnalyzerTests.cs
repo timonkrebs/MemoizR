@@ -212,6 +212,8 @@ public class CapturedMutationAnalyzerTests
 
             public class C
             {
+                private readonly Counter frozen;
+
                 public void M()
                 {
                     var f = new MemoFactory();
@@ -221,6 +223,7 @@ public class CapturedMutationAnalyzerTests
                         counter.Increment(); // mutates shared storage: flagged
                         _ = counter.Peek(); // readonly member: cannot mutate
                         _ = counter.ToString(); // object virtual: not flagged
+                        frozen.Increment(); // readonly field: runs on a defensive copy, no shared write
                         var mine = new Counter();
                         mine.Increment(); // the computation's own local
                         return counter.Value;

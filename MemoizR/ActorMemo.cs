@@ -36,10 +36,10 @@ public sealed class ActorMemo<T> : ActorValueNode<T>
 
     public Task<T> Get()
     {
-        var frame = ActorFlow.Frame.Value;
+        var frame = ActorFlow.CurrentFrame;
         if (frame == null)
         {
-            ActorFlowGuards.RejectUntrackedReadInsideLockComputation(this);
+            ActorFlowGuards.RejectUntrackedReadInsideLockComputation();
             if (State == CacheState.CacheClean)
             {
                 // Lock-free fast path: volatile state (acquire) read before the value box,
@@ -237,39 +237,51 @@ public sealed class ActorMemo<T> : ActorValueNode<T>
         var previousFrame = ActorFlow.Frame.Value;
         ActorFlow.Frame.Value = frame;
 
-        T newValue;
         try
         {
-            newValue = await fn().ConfigureAwait(false);
-        }
-        catch
-        {
-            // Deliberate divergence from the lock-based engine (which parks a failed memo at
-            // CacheCheck): Dirty guarantees the next Get retries the computation even when the
-            // failure happened on the very first run, before any source links existed.
-            await Actor.Run(() =>
+            T newValue;
+            try
             {
-                // Record this read in the caller's frame even though it faulted: a caller that
-                // catches our failure and returns a fallback must still wire to us, so that when
-                // we later recover and change, the cascade reaches it. Recorded BEFORE the bump
-                // (like every non-Clean outcome): the fallback consumed a value this node cannot
-                // confirm, so the caller's own commit must see the generation mismatch and park
-                // Dirty -- were the pair recorded post-bump it would match, the caller would
-                // commit Clean over our Dirty, and a later write to the still-dirty parent would
-                // be suppressed, caching the fallback forever.
-                callerFrame?.Captured.Add((this, Generation));
-                Generation++;
-                State = CacheState.CacheDirty;
-                EndEvaluation();
-            }).ConfigureAwait(false);
-            throw;
+                newValue = await fn().ConfigureAwait(false);
+            }
+            catch
+            {
+                // Deliberate divergence from the lock-based engine (which parks a failed memo at
+                // CacheCheck): Dirty guarantees the next Get retries the computation even when
+                // the failure happened on the very first run, before any source links existed.
+                await Actor.Run(() =>
+                {
+                    // Record this read in the caller's frame even though it faulted: a caller
+                    // that catches our failure and returns a fallback must still wire to us, so
+                    // that when we later recover and change, the cascade reaches it. Recorded
+                    // BEFORE the bump (like every non-Clean outcome): the fallback consumed a
+                    // value this node cannot confirm, so the caller's own commit must see the
+                    // generation mismatch and park Dirty -- were the pair recorded post-bump it
+                    // would match, the caller would commit Clean over our Dirty, and a later
+                    // write to the still-dirty parent would be suppressed, caching the fallback
+                    // forever.
+                    callerFrame?.Captured.Add((this, Generation));
+                    Generation++;
+                    State = CacheState.CacheDirty;
+                    EndEvaluation();
+                }).ConfigureAwait(false);
+                throw;
+            }
+            finally
+            {
+                ActorFlow.Frame.Value = previousFrame;
+            }
+
+            return await Actor.Run(() => Commit(genSnapshot, frame, newValue, callerFrame)).ConfigureAwait(false);
         }
         finally
         {
-            ActorFlow.Frame.Value = previousFrame;
+            // The evaluation is over (committed or faulted): deferred work that captured this
+            // frame through ExecutionContext (Task.Run inside fn -- the documented way to
+            // schedule a write for after the evaluation) must from now on read as OUTSIDE any
+            // evaluation (see ActorFlow.CurrentFrame).
+            frame.Expire();
         }
-
-        return await Actor.Run(() => Commit(genSnapshot, frame, newValue, callerFrame)).ConfigureAwait(false);
     }
 
     // Turn: the commit point of the evaluation transaction. The body runs user code (the value

@@ -48,7 +48,9 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
   bumping the generation, so a computation that catches a dependency's failure cannot cache its
   fallback Clean over the still-dirty dependency; cycles are detected via the evaluation chain
   (unawaited sibling reads of one memo from a single computation wait instead of throwing);
-  cross-context actor reads are rejected at the read; equal-value `ActorSignal.Set` is a
+  cross-context actor reads and actor reads from inside lock-engine computations (of any
+  context) are rejected at the read; evaluation frames expire at commit so deferred writes
+  scheduled inside a computation are not falsely rejected; equal-value `ActorSignal.Set` is a
   complete no-op, matching the lock engine.
 - `CreateReaction(...)` convenience overloads directly on the factory — sugar for `BuildReaction().CreateReaction(...)` with the default label and debounce
 - MemoizR.Wpf package: `AddWpfDispatcher` routes reaction actions to the WPF UI thread (via `Application.Current.Dispatcher` or an explicit `Dispatcher`) while the dependency graph keeps evaluating on the thread pool (#13)
