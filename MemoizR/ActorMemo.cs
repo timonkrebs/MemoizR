@@ -11,10 +11,12 @@ namespace MemoizR;
 /// here), then Commit (publish, rewire, diamond-mark, generation-checked Clean).
 ///
 /// At most one evaluation per node runs at a time (the lock engine's per-node mutex) via an
-/// actor-confined waiter queue; a second flow arriving mid-evaluation parks on a waiter task
-/// and re-decides when woken, while the SAME flow re-entering mid-evaluation is, by definition,
-/// a cycle and throws. Waiting holds no lock and no actor, so the lock-ordering analysis of
-/// concurrency.md §9 has nothing to analyze here.
+/// actor-confined waiter queue; a reader arriving mid-evaluation parks on a waiter task and
+/// re-decides when woken -- UNLESS the read is nested inside this node's own in-flight
+/// evaluation (the node appears in the reader's evaluation chain), which is, by definition, a
+/// cycle and throws. Unawaited sibling reads of one memo from a single flow are not cycles and
+/// wait like any other reader. Waiting holds no lock and no actor, so the lock-ordering
+/// analysis of concurrency.md §9 has nothing to analyze here.
 /// </summary>
 public sealed class ActorMemo<T> : ActorValueNode<T>
 {
@@ -24,7 +26,6 @@ public sealed class ActorMemo<T> : ActorValueNode<T>
     // at-most-one-evaluation invariant, because a cascade legitimately overwrites the
     // Evaluating STATE mid-compute (Evaluating is the enum's minimum; any Stale escalates it).
     private bool evaluating;
-    private long evaluatingFlowId;
     private readonly List<TaskCompletionSource> waiters = [];
 
     internal ActorMemo(Func<Task<T>> fn, GraphActor actor)
@@ -44,19 +45,24 @@ public sealed class ActorMemo<T> : ActorValueNode<T>
             return Task.FromResult(Value);
         }
 
-        return Drive(frame);
+        ActorFlowGuards.RejectCrossActorRead(frame, this);
+
+        // A tracked read's frame is also its evaluation chain: the frame of the computation the
+        // read is nested inside, linked through its ancestors.
+        return Drive(frame, frame);
     }
 
     // The parent-scan entry point (the analog of IMemoizR.UpdateIfNecessary): bring this node
-    // up to date without capturing it as a dependency of the caller.
-    internal override async Task EnsureCleanAsync()
+    // up to date without capturing it as a dependency of the caller. The chain still travels,
+    // so a cycle closed through a parent scan is detected.
+    internal override async Task EnsureCleanAsync(EvaluationFrame? chain)
     {
         if (State == CacheState.CacheClean)
         {
             return;
         }
 
-        await Drive(null).ConfigureAwait(false);
+        await Drive(null, chain).ConfigureAwait(false);
     }
 
     // The evaluation driver. Runs on the calling flow; every graph-state access happens inside
@@ -64,14 +70,13 @@ public sealed class ActorMemo<T> : ActorValueNode<T>
     // changed arbitrarily while parked. The caller's capture frame travels into every
     // value-determining turn, because the (source, generation) pair must be recorded in the
     // same turn the value is served -- recording it any earlier or later would let a
-    // concurrent invalidation slip between the value and its evidence.
-    private async Task<T> Drive(EvaluationFrame? frame)
+    // concurrent invalidation slip between the value and its evidence. The chain (== frame for
+    // tracked reads; capture-free ancestry for scans) travels for cycle detection.
+    private async Task<T> Drive(EvaluationFrame? frame, EvaluationFrame? chain)
     {
-        var flowId = ActorFlow.GetOrMintId();
-
         while (true)
         {
-            var decision = await Actor.Run(() => Decide(frame, flowId)).ConfigureAwait(false);
+            var decision = await Actor.Run(() => Decide(frame, chain)).ConfigureAwait(false);
             switch (decision.Kind)
             {
                 case DecisionKind.Done:
@@ -82,7 +87,7 @@ public sealed class ActorMemo<T> : ActorValueNode<T>
                     continue;
 
                 case DecisionKind.Scan:
-                    decision = await ScanAndResolveAsync(decision, frame).ConfigureAwait(false);
+                    decision = await ScanAndResolveAsync(decision, frame, chain).ConfigureAwait(false);
                     if (decision.Kind == DecisionKind.Done)
                     {
                         return decision.Value;
@@ -91,19 +96,23 @@ public sealed class ActorMemo<T> : ActorValueNode<T>
                     goto case DecisionKind.Compute;
 
                 case DecisionKind.Compute:
-                    return await ComputeAndCommit(decision.GenSnapshot, frame).ConfigureAwait(false);
+                    return await ComputeAndCommit(decision.GenSnapshot, frame, chain).ConfigureAwait(false);
             }
         }
     }
 
     // Turn: classify this Get against the node's current state, atomically with claiming the
     // evaluation when one is needed.
-    private Decision Decide(EvaluationFrame? frame, long flowId)
+    private Decision Decide(EvaluationFrame? frame, EvaluationFrame? chain)
     {
         if (evaluating)
         {
-            if (evaluatingFlowId == flowId)
+            if (chain != null && chain.Contains(this))
             {
+                // The read is nested inside this node's own in-flight evaluation -- reachable
+                // only through fn (or a scan fn triggered): a true dependency cycle. A reader
+                // whose chain does NOT include us -- another flow, or an unawaited sibling read
+                // of the same computation -- legitimately waits below.
                 throw new InvalidOperationException("Cyclic behavior detected");
             }
 
@@ -123,32 +132,35 @@ public sealed class ActorMemo<T> : ActorValueNode<T>
                 // (parents recompute in parallel with everything else); Sources is safe to hand
                 // out because commits swap it wholesale.
                 evaluating = true;
-                evaluatingFlowId = flowId;
                 return Decision.OfScan(Generation, Sources);
 
             default: // CacheDirty -- Evaluating is unreachable here (it implies `evaluating`)
-                return BeginCompute(flowId);
+                return BeginCompute();
         }
     }
 
-    private Decision BeginCompute(long flowId)
+    private Decision BeginCompute()
     {
         evaluating = true;
-        evaluatingFlowId = flowId;
         State = CacheState.Evaluating;
         return Decision.OfCompute(Generation);
     }
 
     // Off-actor: bring every snapshotted source up to date, then resolve the scan in a turn
     // (Done, or Compute when a parent's changed value diamond-marked us Dirty meanwhile).
-    private async Task<Decision> ScanAndResolveAsync(Decision scan, EvaluationFrame? frame)
+    private async Task<Decision> ScanAndResolveAsync(Decision scan, EvaluationFrame? frame, EvaluationFrame? chain)
     {
+        // Extend the chain with this node (a link-only frame; nothing captures into it): a
+        // parent whose recompute reads back into us -- a dependency cycle closed through this
+        // scan -- must be detected, not parked on a waiter that this scan itself is blocking.
+        var scanChain = new EvaluationFrame(this, chain);
+
         var parentFaulted = false;
         foreach (var source in scan.Sources!)
         {
             try
             {
-                await source.EnsureCleanAsync().ConfigureAwait(false);
+                await source.EnsureCleanAsync(scanChain).ConfigureAwait(false);
             }
             catch
             {
@@ -174,15 +186,18 @@ public sealed class ActorMemo<T> : ActorValueNode<T>
     {
         if (State == CacheState.CacheDirty)
         {
-            return BeginCompute(evaluatingFlowId);
+            return BeginCompute();
         }
 
         if (parentFaulted)
         {
             // Could not verify against a faulted parent: leave the node CacheCheck (do not commit
-            // Clean) so the next Get re-scans and retries. Still record the caller's dependency
-            // pair -- the caller must stay wired to us to be re-notified once we do resolve.
+            // Clean) so the next Get re-scans and retries. The caller's dependency pair keeps it
+            // wired to us for the eventual resolution, and is recorded BEFORE a bump -- the value
+            // served here is unconfirmed, so a caller memo must not be able to commit Clean
+            // against it (same rule as the fault paths in ComputeAndCommit/Commit).
             frame?.Captured.Add((this, Generation));
+            Generation++;
             EndEvaluation();
             return Decision.OfDone(Value);
         }
@@ -207,9 +222,12 @@ public sealed class ActorMemo<T> : ActorValueNode<T>
         return Decision.OfDone(Value);
     }
 
-    private async Task<T> ComputeAndCommit(int genSnapshot, EvaluationFrame? callerFrame)
+    private async Task<T> ComputeAndCommit(int genSnapshot, EvaluationFrame? callerFrame, EvaluationFrame? chain)
     {
-        var frame = new EvaluationFrame();
+        // The new frame chains onto the arriving read's ancestry (not the ambient frame: a
+        // scan-driven recompute must chain through the scanning node's link, which is never
+        // installed as ambient), so fn's nested reads see the full path for cycle detection.
+        var frame = new EvaluationFrame(this, chain);
         var previousFrame = ActorFlow.Frame.Value;
         ActorFlow.Frame.Value = frame;
 
@@ -225,13 +243,17 @@ public sealed class ActorMemo<T> : ActorValueNode<T>
             // failure happened on the very first run, before any source links existed.
             await Actor.Run(() =>
             {
-                Generation++;
-                State = CacheState.CacheDirty;
                 // Record this read in the caller's frame even though it faulted: a caller that
                 // catches our failure and returns a fallback must still wire to us, so that when
-                // we later recover and change, the cascade reaches it. Without the link it would
-                // commit clean over us and serve the fallback forever.
+                // we later recover and change, the cascade reaches it. Recorded BEFORE the bump
+                // (like every non-Clean outcome): the fallback consumed a value this node cannot
+                // confirm, so the caller's own commit must see the generation mismatch and park
+                // Dirty -- were the pair recorded post-bump it would match, the caller would
+                // commit Clean over our Dirty, and a later write to the still-dirty parent would
+                // be suppressed, caching the fallback forever.
                 callerFrame?.Captured.Add((this, Generation));
+                Generation++;
+                State = CacheState.CacheDirty;
                 EndEvaluation();
             }).ConfigureAwait(false);
             throw;
@@ -317,13 +339,13 @@ public sealed class ActorMemo<T> : ActorValueNode<T>
             // Any fault in the turn (e.g. a user Equals that throws) must not strand the node:
             // park it Dirty so the next Get retries, re-notify observers that may have committed
             // against the now-published value, and let the fault propagate to this Get's caller.
+            // The caller's pair is recorded even though the commit faulted (it can throw before
+            // the success-path record above) -- a fallback-returning caller must stay wired to us
+            // -- and recorded BEFORE the bump, so that caller cannot commit Clean over a value
+            // this node just refused to confirm (see the fn-failure path in ComputeAndCommit).
+            callerFrame?.Captured.Add((this, Generation));
             Generation++;
             State = CacheState.CacheDirty;
-            // Record this read in the caller's frame even though the commit faulted (it can throw
-            // before the success-path record below): a caller that catches our failure and returns
-            // a fallback must still wire to us, so our later recovery cascades to it. Same reason
-            // as the fn-failure path in ComputeAndCommit.
-            callerFrame?.Captured.Add((this, Generation));
             PropagateToObservers(CacheState.CacheCheck);
             throw;
         }
@@ -349,7 +371,6 @@ public sealed class ActorMemo<T> : ActorValueNode<T>
     private void EndEvaluation()
     {
         evaluating = false;
-        evaluatingFlowId = 0;
         if (waiters.Count == 0)
         {
             return;

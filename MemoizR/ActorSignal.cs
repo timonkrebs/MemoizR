@@ -33,11 +33,13 @@ public sealed class ActorSignal<T> : ActorValueNode<T>
         {
             if (Equals(Value, value))
             {
-                // The value did not change, but observers may be mid-check against it: tell
-                // them to re-verify (and bump their generations) rather than marking them dirty.
-                // The signal's OWN generation is deliberately untouched: reads of the old value
-                // are still valid, so captured (signal, generation) pairs must keep matching.
-                PropagateToObservers(CacheState.CacheCheck);
+                // The value did not change: nothing derived from this signal can have become
+                // stale, so do not notify -- the lock engine's Signal.Set rule. (Propagating
+                // CacheCheck here bumped observer generations and refused their in-flight
+                // commits: under an equal-value write storm, memos could retry indefinitely
+                // against reads that were in fact still valid.) The signal's own generation is
+                // untouched for the same reason: captured (signal, generation) pairs must keep
+                // matching.
                 return;
             }
 
@@ -58,6 +60,8 @@ public sealed class ActorSignal<T> : ActorValueNode<T>
             // Untracked read: signals are always current; the box read is a complete value.
             return Task.FromResult(Value);
         }
+
+        ActorFlowGuards.RejectCrossActorRead(frame, this);
 
         // Tracked read: recording the dependency is bookkeeping, so it is a turn -- which also
         // linearizes the returned value against any concurrent Set's cascade, and pins the

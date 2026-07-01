@@ -4,36 +4,74 @@ namespace MemoizR;
 // turns: AsyncLocal mutations made on the actor loop could never reach the flows anyway).
 internal static class ActorFlow
 {
-    private static long nextId;
-
-    // Flow identity for cycle detection: the flow that began an evaluation re-entering the same
-    // node is a cycle; a different flow is a legitimate concurrent reader that waits.
-    private static readonly AsyncLocal<long> FlowId = new();
-
     // The dependency-capture frame of the innermost actor-memo evaluation on this flow.
     internal static readonly AsyncLocal<EvaluationFrame?> Frame = new();
+}
 
-    public static long GetOrMintId()
+// Flow-side rejections shared by the tracked-read entry points.
+internal static class ActorFlowGuards
+{
+    // A tracked read of a node that lives on a DIFFERENT GraphActor would capture a foreign
+    // source: the reader's commit turn would then rewire that source's observer list while
+    // running on the reader's actor -- mutating actor-confined state from the wrong actor (the
+    // Debug isolation assertion trips deep inside the commit; a Release build would race the
+    // foreign actor's own turns). Each Context has one actor, so this rejects the cross-context
+    // dependency at the read, on the flow, with an error that names the actual mistake.
+    public static void RejectCrossActorRead(EvaluationFrame? frame, ActorNodeBase node)
     {
-        if (FlowId.Value == 0)
+        if (frame != null && !ReferenceEquals(frame.Owner.Actor, node.Actor))
         {
-            FlowId.Value = Interlocked.Increment(ref nextId);
+            throw new InvalidOperationException(
+                "An actor computation read an actor node that belongs to a different context. " +
+                "Actor-engine nodes can only depend on nodes of the same context: a cross-context " +
+                "link would mutate another actor's graph. Create nodes that must depend on each " +
+                "other from one factory, or share a context by key (new MemoFactory(\"sharedKey\")).");
         }
-
-        return FlowId.Value;
     }
 }
 
-// One evaluation's dependency capture. Created in the Begin turn, installed on the evaluating
-// flow, discarded after the Commit turn. Every tracked read records the source TOGETHER WITH the
-// source's generation, in the same turn that serves the value: at commit, a pair whose source
-// generation moved proves the computation consumed a value that is no longer (or never was)
-// confirmed -- the late-wiring guard, see ActorMemo.Commit. The list is mutated only inside
-// turns, so concurrent tracked reads inside one computation (e.g. Task.WhenAll over two Gets)
-// are serialized by the actor, not by a lock.
+// One evaluation's dependency capture, doubling as a link in the EVALUATION CHAIN used for cycle
+// detection. Created in ComputeAndCommit (owner = the evaluating memo, parent = the chain the
+// read arrived on), installed on the evaluating flow, discarded after the Commit turn.
+//
+// Capture: every tracked read records the source TOGETHER WITH the source's generation, in the
+// same turn that serves the value: at commit, a pair whose source generation moved proves the
+// computation consumed a value that is no longer (or never was) confirmed -- the late-wiring
+// guard, see ActorMemo.Commit. The list is mutated only inside turns, so concurrent tracked
+// reads inside one computation (e.g. Task.WhenAll over two Gets) are serialized by the actor.
+//
+// Cycles: a read is a cycle exactly when it re-enters a node whose own in-flight evaluation the
+// read is nested inside -- i.e. the node appears in the reader's chain. Bare flow identity
+// cannot make that distinction: two unawaited sibling Gets of one memo issued by the same
+// computation share the flow but are NOT a cycle (the first evaluation completes fine; the
+// second must wait), while a genuine self-reach through any number of nested reads or parent
+// scans is. Scans extend the chain with a link-only frame (owner = the scanning node) so a
+// dependency cycle closed through a CacheCheck parent scan is caught too.
 internal sealed class EvaluationFrame
 {
     public readonly List<(ActorNodeBase Source, int GenerationAtRead)> Captured = [];
+
+    public readonly ActorNodeBase Owner;
+    public readonly EvaluationFrame? Parent;
+
+    public EvaluationFrame(ActorNodeBase owner, EvaluationFrame? parent)
+    {
+        Owner = owner;
+        Parent = parent;
+    }
+
+    public bool Contains(ActorNodeBase node)
+    {
+        for (var frame = this; frame != null; frame = frame.Parent)
+        {
+            if (ReferenceEquals(frame.Owner, node))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
 }
 
 /// <summary>
@@ -135,8 +173,9 @@ public abstract class ActorNodeBase
     }
 
     // Bring this node up to date without dependency capture (the parent-scan path; the analog
-    // of IMemoizR.UpdateIfNecessary). Signals are always up to date.
-    internal virtual Task EnsureCleanAsync()
+    // of IMemoizR.UpdateIfNecessary). The chain carries the scanning evaluation's ancestry for
+    // cycle detection only -- nothing is captured. Signals are always up to date.
+    internal virtual Task EnsureCleanAsync(EvaluationFrame? chain)
     {
         return Task.CompletedTask;
     }

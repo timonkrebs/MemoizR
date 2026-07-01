@@ -56,9 +56,14 @@ actor-confined **waiter queue** provides at-most-one-evaluation: concurrent arri
 TCS and re-decide when the evaluation ends), no `AsyncLocal` lock-scope reentrancy machinery
 (nested reads hold nothing, so there is nothing to re-enter), and no lock-ordering analysis —
 concurrency.md §9 has no counterpart here because waiting never holds anything. Cycle detection
-falls out of flow identity: the evaluating flow re-entering its own node is a cycle and throws;
-any other flow waits. Independent computations still run fully in parallel — the actor
-serializes *turns*, never user code (pinned by test).
+falls out of the **evaluation chain** (each frame links to the frame its read arrived under, and
+parent scans extend the chain with a link-only frame): a read nested inside the target node's
+own in-flight evaluation is a cycle and throws; every other reader waits — including unawaited
+sibling reads of one memo issued by the same computation, which share a flow but are not a cycle
+(bare flow identity, the first cut, wrongly rejected those). A tracked read of a node from a
+*different* context is rejected at the read: capturing a foreign source would make the reader's
+commit rewire another actor's observer list. Independent computations still run fully in
+parallel — the actor serializes *turns*, never user code (pinned by test).
 
 Kept, deliberately:
 
@@ -105,11 +110,17 @@ a concurrent invalidation slips between value and evidence). A commit may go Cle
 own generation snapshot is intact AND every captured pair is still current. Every non-Clean
 outcome bumps the node's generation *after* recording, so in-flight consumers of an unconfirmed
 value are guaranteed a mismatch and park themselves Dirty in turn — staleness can no longer hide
-behind a missing link, it is detected from the consumer's side. (A pleasant corollary: a
-computation that reads the same source twice across an intervening change is also caught — the
-two pairs cannot both match.) Signals bump their generation only on value-*changing* Sets, so
-equal-value writes keep read evidence valid and still trigger only re-verification. The
-regression test is `ActorEngineTests.UnprimedChainUnderStorm_NeverStrandsStale`.
+behind a missing link, it is detected from the consumer's side. The *after recording* order is
+load-bearing on the failure paths too: a faulted computation, a faulted commit, and a scan that
+could not verify a faulted parent all record the caller's pair first and then bump, so a caller
+that catches the failure and returns a fallback parks Dirty instead of committing the fallback
+Clean over a Dirty parent whose later recovery write would be suppressed. (A pleasant corollary:
+a computation that reads the same source twice across an intervening change is also caught — the
+two pairs cannot both match.) Signals bump their generation only on value-*changing* Sets;
+equal-value writes are complete no-ops — nothing derived can have become stale, and notifying
+anyway bumped observer generations and refused their still-valid in-flight commits (the lock
+engine's `Signal.Set` follows the same rule). The regression test is
+`ActorEngineTests.UnprimedChainUnderStorm_NeverStrandsStale`.
 
 ### Deliberate divergences from the lock engine
 

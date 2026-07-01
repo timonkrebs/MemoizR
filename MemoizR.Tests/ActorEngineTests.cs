@@ -35,7 +35,7 @@ public class ActorEngineTests
     }
 
     [Fact(Timeout = 10000)]
-    public async Task EqualValueSet_TriggersReVerification_NotRecomputation()
+    public async Task EqualValueSet_IsANoOp_NothingRecomputes()
     {
         var f = new MemoFactory();
         var v = f.CreateActorSignal(2);
@@ -47,7 +47,7 @@ public class ActorEngineTests
         });
 
         Assert.Equal(6, await m.Get());
-        await v.Set(2); // same value: observers re-verify (CacheCheck), they do not recompute
+        await v.Set(2); // same value: no notification at all (the lock engine's Signal.Set rule)
         Assert.Equal(6, await m.Get());
         Assert.Equal(1, computeCount);
     }
@@ -246,7 +246,7 @@ public class ActorEngineTests
     }
 
     [Fact(Timeout = 10000)]
-    public async Task Cycle_IsDetected_ByFlowIdentity()
+    public async Task Cycle_IsDetected_ByTheEvaluationChain()
     {
         var f = new MemoFactory();
         ActorMemo<int> a = null!;
@@ -254,6 +254,35 @@ public class ActorEngineTests
         a = f.CreateActorMemoizR(async () => await b.Get());
 
         await Assert.ThrowsAsync<InvalidOperationException>(() => a.Get());
+    }
+
+    // Two unawaited Gets of one dirty memo issued by the same computation are NOT a cycle: the
+    // first claims the evaluation, and the second -- whose chain does not pass through m -- must
+    // park as a waiter like any other reader. (Bare flow-identity detection called this a cycle:
+    // both reads inherit the computation's flow.)
+    [Fact(Timeout = 10000)]
+    public async Task SiblingReadsOfOneMemo_InsideAComputation_AreNotACycle()
+    {
+        var f = new MemoFactory();
+        var v = f.CreateActorSignal(3);
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var m = f.CreateActorMemoizR(async () =>
+        {
+            entered.TrySetResult();
+            await gate.Task; // holds the evaluation open so the sibling read overlaps it
+            return await v.Get();
+        });
+        var outer = f.CreateActorMemoizR(async () =>
+        {
+            var first = m.Get();
+            await entered.Task; // m is now mid-evaluation, claimed by the first read
+            var second = m.Get(); // same flow, same computation -- must wait, not throw
+            gate.TrySetResult();
+            return await first + await second;
+        });
+
+        Assert.Equal(6, await outer.Get());
     }
 
     [Fact(Timeout = 10000)]
@@ -422,6 +451,28 @@ public class ActorEngineTests
         Assert.Equal(writes * 2 + 1, await m2.Get());
     }
 
+    // A tracked read of a node from another context would capture a foreign source, and the
+    // commit turn would then mutate that source's observer list on the WRONG actor. Rejected at
+    // the read, on the flow, with an error naming the mistake.
+    [Fact(Timeout = 10000)]
+    public async Task CrossContextActorRead_IsRejected()
+    {
+        var fa = new MemoFactory();
+        var fb = new MemoFactory();
+        var foreignSignal = fb.CreateActorSignal(1);
+        var foreignMemo = fb.CreateActorMemoizR(async () => await foreignSignal.Get() + 1);
+
+        var readsForeignSignal = fa.CreateActorMemoizR(async () => await foreignSignal.Get());
+        var readsForeignMemo = fa.CreateActorMemoizR(async () => await foreignMemo.Get());
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => readsForeignSignal.Get());
+        Assert.Contains("different context", ex.Message);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => readsForeignMemo.Get());
+
+        // Untracked top-level reads across factories stay legal -- only DEPENDING is confined.
+        Assert.Equal(1, await foreignSignal.Get());
+    }
+
     [Fact]
     public void StrictFactory_AppliesSendableChecks_ToActorNodes()
     {
@@ -552,6 +603,41 @@ public class ActorEngineTests
         }
 
         Assert.Equal(1, await c.Get());
+    }
+
+    // The sharper twin of the recorded-link test above: the link alone is not enough. The pair
+    // must be recorded BEFORE the failure bumps the generation -- recorded after, it matches, the
+    // fallback commits Clean over the Dirty parent, and the healing write below is SUPPRESSED at
+    // the already-dirty parent (no direct pull on p here to mask it), caching -1 forever.
+    [Fact(Timeout = 10000)]
+    public async Task FallbackOverFaultedDependency_IsNotCachedClean_HealsViaTheSuppressedCascade()
+    {
+        var f = new MemoFactory();
+        var s = f.CreateActorSignal(1);
+        var p = f.CreateActorMemoizR(async () =>
+        {
+            var x = await s.Get();
+            return x < 10 ? throw new InvalidOperationException("p boom") : x;
+        });
+        var c = f.CreateActorMemoizR(async () =>
+        {
+            try
+            {
+                return await p.Get();
+            }
+            catch
+            {
+                return -1;
+            }
+        });
+
+        Assert.Equal(-1, await c.Get()); // p faults (never commits, so s -> p never wires); c falls back
+
+        // p is already Dirty, so this write's cascade stops at p -- only c's read evidence can
+        // force the retry. No p.Get() in between: the pull below must do all the healing.
+        await s.Set(10);
+
+        Assert.Equal(10, await c.Get());
     }
 
     private sealed class ThrowsOnEquals(int seed)
