@@ -129,6 +129,10 @@ internal sealed class SendableSymbolClassifier
             case "TimeOnly":
             case "Uri":
             case "Version":
+            // Type is runtime-managed and effectively immutable; it is also what every non-sealed
+            // record's synthesized `protected virtual Type EqualityContract` property returns, so
+            // rejecting it (System.Type is abstract) would falsely reject every non-sealed record.
+            case "Type":
                 return ns == "System";
             case "BigInteger":
                 return ns == "System.Numerics";

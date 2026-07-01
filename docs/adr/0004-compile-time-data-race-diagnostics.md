@@ -44,20 +44,29 @@ what a compiler can and cannot see:
 2. **Private metadata fields are invisible.** Compilations default to
    `MetadataImportOptions.Public`, so the analyzer cannot see `List<int>`'s private `_items` —
    and it cannot opt out: import options belong to the user's compilation, not the analyzer.
-   This forced a rule *both* checkers now share: **a non-private settable (non-init) property is
-   mutability evidence** on a reference type. `List<T>` is caught at compile time by its settable
-   `Capacity`/indexer instead of its invisible fields. The rule is principled rather than a
-   BCL hand-list — a visible mutation surface makes a shared instance mutable regardless of the
-   backing storage — and adding it to the runtime checker keeps the verdicts aligned. A metadata
-   type with *purely private* mutable state still passes the analyzer silently; the runtime
-   strict mode remains the backstop there. (Value types stay exempt from both the field and the
-   property rule: every read hands out a copy.)
+   This forced two rules *both* checkers now share: **a non-private settable (non-init) property
+   is mutability evidence** on a reference type, and **a visible get-only property's TYPE must
+   itself be Sendable**. `List<T>` is caught at compile time by its settable `Capacity`/indexer
+   instead of its invisible fields; a get-only `List<int> Items { get; }` on a metadata class is
+   caught through the property's type instead of the invisible backing field (and, at runtime, a
+   *computed* get-only property handing out shared static state — the one shape the field walk
+   can never see). The rules are principled rather than a BCL hand-list — a visible mutation
+   surface makes a shared instance mutable regardless of the backing storage — and mirroring them
+   in the runtime checker keeps the verdicts aligned. The property-type rule required one
+   green-list addition on both sides: `System.Type` (runtime-managed, effectively immutable),
+   because every non-sealed record synthesizes `protected virtual Type EqualityContract { get; }`
+   and `Type` is abstract — without the green-list the rule would falsely reject every non-sealed
+   record. A metadata type with *purely private* mutable state still passes the analyzer
+   silently; the runtime strict mode remains the backstop there. (Value types stay exempt from
+   the field and settable-property rules: every read hands out a copy.)
 
 ### MZR002 — reactive computation mutates state shared with code outside it
 
-The SE-0412 analog, scoped to stay high-signal. Inside any computation lambda passed to
+The SE-0412 analog, scoped to stay high-signal. Inside any computation passed to
 `CreateMemoizR`, the structured-concurrency creations, or `ReactionBuilder.CreateReaction` /
-`CreateAdvancedReaction`, a **write** to:
+`CreateAdvancedReaction` — a lambda, or a method group / local function whose declaration lives
+in the same file (other trees have no operation model in the analysis; the runtime checks cover
+them) — a **write** to:
 
 - a local or parameter captured from the enclosing method,
 - a field of the enclosing object (through `this`), or
@@ -65,7 +74,8 @@ The SE-0412 analog, scoped to stay high-signal. Inside any computation lambda pa
 
 is flagged, with the fix suggestion being the library's own model: lift the state into a
 `Signal`/`EagerRelativeSignal`. Writes are simple/compound/coalesce assignments, `++`/`--`,
-deconstructions, and `ref`/`out` arguments.
+deconstructions (flattened through nested tuples: `(a, (b, c)) = ...` writes every leaf), and
+`ref`/`out` arguments.
 
 Deliberately **not** flagged:
 
@@ -76,11 +86,12 @@ Deliberately **not** flagged:
   the *type* crossing the boundary should be Sendable.
 - **Property writes on other objects** — same reasoning.
 
-"Captured" is decided by declaration position (declared outside the computation lambda's span),
-which keeps nested non-computation lambdas correct: a LINQ lambda's own local belongs to the
-computation; the enclosing method's local does not. A creation nested inside another computation
-is pruned from the outer walk — the operation action fires for the nested invocation too, so the
-inner lambda is analyzed exactly once.
+"Captured" is decided by declaration position (declared outside the computation's declaring
+syntax — the lambda expression, or the method/local-function declaration), which keeps nested
+non-computation lambdas correct: a LINQ lambda's own local belongs to the computation; the
+enclosing method's local does not. A creation nested inside another computation is pruned from
+the outer walk — the operation action fires for the nested invocation too, so the inner lambda
+is analyzed exactly once.
 
 ### MZR003 — `Set` inside a reactive computation
 
@@ -94,6 +105,14 @@ Host scoping follows the lock semantics exactly: `CreateMemoizR`, `CreateConcurr
 (its children share the parent flow's scope), and the reaction builders are flagged;
 `CreateConcurrentMap` and `CreateConcurrentRace` are **not**, because their children run on
 forced fresh scopes where the same-flow conflict does not exist.
+
+The walk is likewise scoped to the lock semantics: only the computation's **direct execution
+path** is inspected. Nested anonymous functions and local-function declarations are pruned,
+because a callback the computation merely *builds* — the diagnostic's own fix guidance,
+"schedule the write outside the evaluation" — runs later on a flow that holds no evaluation
+lock. (The cost is a false negative for a nested function invoked synchronously inside the
+computation; the runtime exception still guards that path. MZR002 keeps the full walk: a
+captured-state write is a data race whenever the callback runs, deferred or not.)
 
 ### Testing strategy
 

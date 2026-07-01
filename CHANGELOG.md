@@ -21,7 +21,13 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
   reactive computation writes captured/shared state; lift it into a Signal), MZR003
   (`Signal.Set` inside a computation, which throws at runtime, reported at build time).
   Reference types with a non-private settable (non-init) property now count as non-Sendable
-  in both the analyzer and `SendableChecker`.
+  in both the analyzer and `SendableChecker`, and a visible get-only property's type must
+  itself be Sendable (with `System.Type` green-listed on both sides so non-sealed records'
+  synthesized `EqualityContract` is not falsely rejected). MZR002/MZR003 also analyze
+  computations passed as method groups or local functions declared in the same file, MZR002
+  flattens nested deconstruction targets (`(a, (b, c)) = ...`), and MZR003 inspects only the
+  computation's direct execution path, so a deferred callback the computation merely builds
+  (its own documented escape) is not flagged.
 - Custom executors for reactive side effects (issue #36, the Swift SE-0392 analog, see ADR
   0005): `IExecutor` (`Enqueue`/`IsCurrent`) with `executor.AssertIsolated()`,
   `SynchronizationContextExecutor`, a `DedicatedThreadExecutor` whose installed

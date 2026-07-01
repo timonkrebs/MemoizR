@@ -221,6 +221,34 @@ public class CapturedMutationAnalyzerTests
     }
 
     [Fact]
+    public async Task NestedDeconstructionOfCapturedLocal_IsFlagged()
+    {
+        // The captured local sits in the NESTED tuple: `(a, (shared, c))` writes it just as
+        // surely as a top-level element, so the flattening must recurse.
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    int shared = 0;
+                    f.CreateMemoizR(async () =>
+                    {
+                        int a;
+                        (a, (shared, var c)) = (1, (2, 3));
+                        return a + shared + c;
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Contains("captured local 'shared'", diagnostic.GetMessage());
+    }
+
+    [Fact]
     public async Task EventSubscriptionInComputation_IsFlagged()
     {
         var diagnostics = await AnalyzeAsync("""
@@ -243,6 +271,63 @@ public class CapturedMutationAnalyzerTests
         Assert.Equal(2, diagnostics.Length);
         Assert.Contains(diagnostics, d => d.GetMessage().Contains("event 'Changed'"));
         Assert.Contains(diagnostics, d => d.GetMessage().Contains("static event 'StaticChanged'"));
+    }
+
+    [Fact]
+    public async Task MethodGroupComputation_WritingEnclosingField_IsFlagged()
+    {
+        // `CreateMemoizR(Compute)` makes Compute's body a computation just like a lambda; the
+        // method's own locals stay unflagged (declared inside the resolved scope).
+        var diagnostics = await AnalyzeAsync("""
+            using System.Threading.Tasks;
+            using MemoizR;
+
+            public class C
+            {
+                private int hits;
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    f.CreateMemoizR(Compute);
+                }
+
+                private async Task<int> Compute()
+                {
+                    int local = 0;
+                    local++;
+                    hits++;
+                    return hits + local;
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Contains("field 'hits'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task LocalFunctionComputation_WritingCapturedLocal_IsFlagged()
+    {
+        var diagnostics = await AnalyzeAsync("""
+            using System.Threading.Tasks;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    int counter = 0;
+                    f.CreateMemoizR(Compute);
+
+                    async Task<int> Compute() { counter++; return counter; }
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Contains("captured local 'counter'", diagnostic.GetMessage());
     }
 
     [Fact]

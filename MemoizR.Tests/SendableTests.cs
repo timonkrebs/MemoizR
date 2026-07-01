@@ -22,6 +22,7 @@ public class SendableCheckerTests
     [InlineData(typeof(KeyValuePair<string, int>))]
     [InlineData(typeof(Task))]
     [InlineData(typeof(Task<int>))] // multi-await safe carrier of a Sendable result
+    [InlineData(typeof(Type))] // runtime-managed, effectively immutable (and every record's EqualityContract)
     public void PrimitivesImmutablesAndValueCompositions_AreSendable(Type type)
     {
         Assert.True(SendableChecker.IsSendable(type, out var reason), reason);
@@ -71,6 +72,25 @@ public class SendableCheckerTests
         // verdict must come from the fields, which are all readonly here.
         Assert.True(SendableChecker.IsSendable(typeof(SendableLinkedNode), out var nodeReason), nodeReason);
         Assert.True(SendableChecker.IsSendable(typeof(SendablePoint), out var pointReason), pointReason);
+    }
+
+    [Fact]
+    public void NonSealedRecord_WithInitOnlyMembers_IsSendable()
+    {
+        // A non-sealed record synthesizes `protected virtual Type EqualityContract { get; }`; the
+        // get-only property-type check must not trip over it -- System.Type is abstract but
+        // green-listed as known-immutable. Guards the pairing of the two rules.
+        Assert.True(SendableChecker.IsSendable(typeof(SendableOpenRecord), out var reason), reason);
+    }
+
+    [Fact]
+    public void ComputedGetOnlyProperty_OfMutableType_IsNotSendable()
+    {
+        // No instance backing field for the field walk to see: the computed property hands out
+        // shared mutable state, so the property-TYPE check (in lockstep with MZR001) rejects it.
+        Assert.False(SendableChecker.IsSendable(typeof(LeakyComputedView), out var reason));
+        Assert.Contains("'Snapshot'", reason);
+        Assert.Contains("List", reason);
     }
 
     [Fact]
@@ -179,6 +199,17 @@ public class StrictSendableModeTests
 }
 
 internal sealed record SendablePerson(string Name, int Age);
+
+// Deliberately NOT sealed: exercises the synthesized `protected virtual Type EqualityContract`.
+internal record SendableOpenRecord(string Name, int Age);
+
+// The mutable state leaks through a computed get-only property; there is no instance field.
+internal sealed class LeakyComputedView
+{
+    private static readonly List<int> shared = [];
+
+    public List<int> Snapshot => shared;
+}
 
 internal sealed record SendableLinkedNode(string Value, SendableLinkedNode? Next);
 

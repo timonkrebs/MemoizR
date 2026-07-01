@@ -19,9 +19,10 @@ namespace MemoizR;
 ///    writable: every read of a struct value yields a private copy, so only references reachable
 ///    from the copy can alias shared state);
 ///  - reference types whose instance fields are all readonly (init-only counts) AND of Sendable
-///    type, with no non-private settable (non-init) properties, checked across the whole
-///    inheritance chain -- the property rule is shared with the MZR001 analyzer, where it is
-///    what catches metadata types whose private fields the compiler does not import;
+///    type, with no non-private settable (non-init) properties and no visible get-only property
+///    of non-Sendable type, checked across the whole inheritance chain -- the property rules are
+///    shared with the MZR001 analyzer, where they are what catches metadata types whose private
+///    fields the compiler does not import;
 ///  - anything marked <see cref="SendableAttribute"/> (trusted, like Swift's @unchecked Sendable).
 ///
 /// Interfaces, abstract classes, object, delegates, and arrays are not Sendable: the first three
@@ -55,6 +56,10 @@ public static class SendableChecker
         typeof(System.Numerics.BigInteger),
         typeof(CancellationToken),
         typeof(Task),
+        // Runtime-managed and effectively immutable; also what every non-sealed record's
+        // synthesized `protected virtual Type EqualityContract` property returns, so rejecting
+        // it (System.Type is abstract) would falsely reject every non-sealed record.
+        typeof(Type),
     ];
 
     // Generic definitions that are safe to share when their type arguments are: Task<T> is
@@ -220,14 +225,14 @@ public static class SendableChecker
 
     private static string? CheckDeclaredMembers(Type type, Type declaringLevel, HashSet<Type> inProgress)
     {
+        var propertyReason = CheckProperties(type, declaringLevel, inProgress);
+        if (propertyReason != null)
+        {
+            return propertyReason;
+        }
+
         if (!type.IsValueType)
         {
-            var settable = CheckProperties(type, declaringLevel);
-            if (settable != null)
-            {
-                return settable;
-            }
-
             var subscribable = CheckEvents(type, declaringLevel);
             if (subscribable != null)
             {
@@ -262,22 +267,45 @@ public static class SendableChecker
     // metadata fields, so List<int> is caught there by its settable Capacity/indexer rather
     // than by its invisible '_items'. Value types are exempt for the same reason as writable
     // fields: a setter mutates the reader's private copy.
-    private static string? CheckProperties(Type type, Type declaringLevel)
+    private static string? CheckProperties(Type type, Type declaringLevel, HashSet<Type> inProgress)
     {
         foreach (var property in declaringLevel.GetProperties(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.DeclaredOnly))
         {
             var setter = property.SetMethod;
-            if (setter is null || setter.IsPrivate || IsInitOnly(setter))
+            if (!type.IsValueType && setter is not null && !setter.IsPrivate && !IsInitOnly(setter))
             {
-                continue;
+                return property.GetIndexParameters().Length > 0
+                    ? $"{Pretty(type)} has a settable indexer"
+                    : $"{Pretty(type)} has settable property '{property.Name}' (use init or get-only)";
             }
 
-            return property.GetIndexParameters().Length > 0
-                ? $"{Pretty(type)} has a settable indexer"
-                : $"{Pretty(type)} has settable property '{property.Name}' (use init or get-only)";
+            var typeReason = CheckPropertyType(type, property, inProgress);
+            if (typeReason != null)
+            {
+                return typeReason;
+            }
         }
 
         return null;
+    }
+
+    // The property's TYPE is checked too (not just its setter), in lockstep with the MZR001
+    // analyzer, where that rule catches a get-only `List<int> Items { get; }` on a metadata type
+    // whose private backing field the compiler does not import. Here it catches what the field
+    // walk cannot see: a COMPUTED get-only property handing out shared mutable state (e.g.
+    // `public List<int> Items => sharedStatic;` -- static fields are not instance fields).
+    private static string? CheckPropertyType(Type type, PropertyInfo property, HashSet<Type> inProgress)
+    {
+        var getter = property.GetGetMethod(nonPublic: true);
+        if (getter is null || getter.IsPrivate || property.GetIndexParameters().Length > 0)
+        {
+            return null;
+        }
+
+        var inner = CheckCached(property.PropertyType, inProgress);
+        return inner is null
+            ? null
+            : $"{Pretty(type)}'s property '{property.Name}' is of non-Sendable type {Pretty(property.PropertyType)} ({inner})";
     }
 
     // A visible (non-private) instance event is a mutation surface like a settable property:

@@ -6,6 +6,10 @@
   non-init setter rejects the type), kept in lockstep with the MZR001 analyzer where that rule is
   what catches metadata types whose private fields the compiler does not import; the planned
   compile-time layer shipped as [ADR 0004](0004-compile-time-data-race-diagnostics.md).
+- Updated: 2026-07-01 — a second lockstep property rule: a visible get-only property's TYPE must
+  itself be Sendable (catches a computed property handing out shared static state, which no field
+  walk can see), with `System.Type` green-listed on both sides so the synthesized
+  `EqualityContract` does not falsely reject non-sealed records (ADR 0004 has the details).
 - Deciders: MemoizR maintainers
 - Issue: [#36 — Strengthen data-race safety guarantees](https://github.com/timonkrebs/MemoizR/issues/36)
 

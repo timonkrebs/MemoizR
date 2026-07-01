@@ -35,13 +35,13 @@ public sealed class CapturedMutationAnalyzer : DiagnosticAnalyzer
             return;
         }
 
-        foreach (var lambda in ComputationLambdas.OfInvocation(invocation))
+        foreach (var computation in ComputationLambdas.OfInvocation(invocation))
         {
-            foreach (var operation in ComputationLambdas.Descend(lambda.Body))
+            foreach (var operation in ComputationLambdas.Descend(computation.Body))
             {
                 foreach (var target in MutationTargets(operation))
                 {
-                    ReportIfShared(context, target, lambda);
+                    ReportIfShared(context, target, computation.Scope);
                 }
             }
         }
@@ -60,7 +60,7 @@ public sealed class CapturedMutationAnalyzer : DiagnosticAnalyzer
             case IIncrementOrDecrementOperation increment:
                 return ImmutableArray.Create(increment.Target);
             case IDeconstructionAssignmentOperation deconstruction when deconstruction.Target is ITupleOperation tuple:
-                return tuple.Elements;
+                return FlattenTupleElements(tuple);
             case IArgumentOperation { Parameter.RefKind: RefKind.Ref or RefKind.Out } argument:
                 return ImmutableArray.Create(argument.Value);
             case IEventAssignmentOperation eventAssignment:
@@ -72,9 +72,29 @@ public sealed class CapturedMutationAnalyzer : DiagnosticAnalyzer
         }
     }
 
-    private static void ReportIfShared(OperationAnalysisContext context, IOperation target, IAnonymousFunctionOperation lambda)
+    // A deconstruction target can nest tuples arbitrarily -- `(a, (b, c)) = value` -- and every
+    // leaf is written, so each nested ITupleOperation is flattened to its element targets.
+    private static ImmutableArray<IOperation> FlattenTupleElements(ITupleOperation tuple)
     {
-        var (kind, symbol) = ResolveSharedRoot(target, lambda);
+        var targets = ImmutableArray.CreateBuilder<IOperation>(tuple.Elements.Length);
+        foreach (var element in tuple.Elements)
+        {
+            if (element is ITupleOperation nested)
+            {
+                targets.AddRange(FlattenTupleElements(nested));
+            }
+            else
+            {
+                targets.Add(element);
+            }
+        }
+
+        return targets.ToImmutable();
+    }
+
+    private static void ReportIfShared(OperationAnalysisContext context, IOperation target, SyntaxNode scope)
+    {
+        var (kind, symbol) = ResolveSharedRoot(target, scope);
         if (kind is null)
         {
             return;
@@ -92,26 +112,26 @@ public sealed class CapturedMutationAnalyzer : DiagnosticAnalyzer
     // all resolve to the shared field/local being mutated. Returns (null, null) when the target is a
     // member of some OTHER reference object (mutation through a captured reference -- MZR001's
     // territory, the value type there should be Sendable).
-    private static (string? kind, ISymbol? symbol) ResolveSharedRoot(IOperation target, IAnonymousFunctionOperation lambda)
+    private static (string? kind, ISymbol? symbol) ResolveSharedRoot(IOperation target, SyntaxNode scope)
     {
         switch (target)
         {
-            case ILocalReferenceOperation local when IsDeclaredOutside(local.Local, lambda):
+            case ILocalReferenceOperation local when IsDeclaredOutside(local.Local, scope):
                 return ("captured local", local.Local);
-            case IParameterReferenceOperation parameter when IsDeclaredOutside(parameter.Parameter, lambda):
+            case IParameterReferenceOperation parameter when IsDeclaredOutside(parameter.Parameter, scope):
                 return ("captured parameter", parameter.Parameter);
             case IFieldReferenceOperation { Field.IsStatic: true } staticField:
                 return ("static field", staticField.Field);
             case IFieldReferenceOperation field:
-                return ResolveThroughReceiver(field.Instance, "field", field.Field, lambda);
+                return ResolveThroughReceiver(field.Instance, "field", field.Field, scope);
             case IPropertyReferenceOperation { Property.IsStatic: true } staticProperty:
                 return ("static property", staticProperty.Property);
             case IPropertyReferenceOperation property:
-                return ResolveThroughReceiver(property.Instance, "property", property.Property, lambda);
+                return ResolveThroughReceiver(property.Instance, "property", property.Property, scope);
             case IEventReferenceOperation { Event.IsStatic: true } staticEvent:
                 return ("static event", staticEvent.Event);
             case IEventReferenceOperation @event:
-                return ResolveThroughReceiver(@event.Instance, "event", @event.Event, lambda);
+                return ResolveThroughReceiver(@event.Instance, "event", @event.Event, scope);
             default:
                 return (null, null);
         }
@@ -121,30 +141,31 @@ public sealed class CapturedMutationAnalyzer : DiagnosticAnalyzer
     // itself shared storage (a captured struct local/parameter, or a nested value-type
     // field/property/this) reports that RECEIVER -- mutating the member mutates the receiver's
     // storage. A member on any other (reference) receiver is left to MZR001.
-    private static (string? kind, ISymbol? symbol) ResolveThroughReceiver(IOperation? receiver, string memberKind, ISymbol member, IAnonymousFunctionOperation lambda)
+    private static (string? kind, ISymbol? symbol) ResolveThroughReceiver(IOperation? receiver, string memberKind, ISymbol member, SyntaxNode scope)
     {
         switch (receiver)
         {
             case IInstanceReferenceOperation { ReferenceKind: InstanceReferenceKind.ContainingTypeInstance }:
                 return (memberKind, member);
-            case ILocalReferenceOperation { Local.Type.IsValueType: true } local when IsDeclaredOutside(local.Local, lambda):
+            case ILocalReferenceOperation { Local.Type.IsValueType: true } local when IsDeclaredOutside(local.Local, scope):
                 return ("captured local", local.Local);
-            case IParameterReferenceOperation { Parameter.Type.IsValueType: true } parameter when IsDeclaredOutside(parameter.Parameter, lambda):
+            case IParameterReferenceOperation { Parameter.Type.IsValueType: true } parameter when IsDeclaredOutside(parameter.Parameter, scope):
                 return ("captured parameter", parameter.Parameter);
             case IFieldReferenceOperation { Type.IsValueType: true } outerField:
-                return ResolveSharedRoot(outerField, lambda);
+                return ResolveSharedRoot(outerField, scope);
             case IPropertyReferenceOperation { Type.IsValueType: true } outerProperty:
-                return ResolveSharedRoot(outerProperty, lambda);
+                return ResolveSharedRoot(outerProperty, scope);
             default:
                 return (null, null);
         }
     }
 
-    // "Captured" = declared outside this computation lambda's syntax. The span test (rather than
-    // comparing containing symbols) is what keeps nested non-computation lambdas correct: a local
-    // declared in a nested LINQ lambda belongs to the computation and must not be flagged, while
-    // a local of the enclosing method is shared and must be.
-    private static bool IsDeclaredOutside(ISymbol symbol, IAnonymousFunctionOperation lambda)
+    // "Captured" = declared outside the computation's declaring syntax (the lambda expression,
+    // or the method/local-function declaration for a method-group computation). The span test
+    // (rather than comparing containing symbols) is what keeps nested non-computation lambdas
+    // correct: a local declared in a nested LINQ lambda belongs to the computation and must not
+    // be flagged, while a local of the enclosing method is shared and must be.
+    private static bool IsDeclaredOutside(ISymbol symbol, SyntaxNode scope)
     {
         var declaration = symbol.DeclaringSyntaxReferences.FirstOrDefault();
         if (declaration is null)
@@ -153,7 +174,7 @@ public sealed class CapturedMutationAnalyzer : DiagnosticAnalyzer
             return false;
         }
 
-        return declaration.SyntaxTree != lambda.Syntax.SyntaxTree
-            || !lambda.Syntax.Span.Contains(declaration.Span);
+        return declaration.SyntaxTree != scope.SyntaxTree
+            || !scope.Span.Contains(declaration.Span);
     }
 }

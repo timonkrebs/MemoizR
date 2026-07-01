@@ -34,9 +34,11 @@ public sealed class SetInsideComputationAnalyzer : DiagnosticAnalyzer
 
         var actorHost = FactoryMethods.IsActorEngineHost(invocation.TargetMethod);
 
-        foreach (var lambda in ComputationLambdas.OfInvocation(invocation))
+        foreach (var computation in ComputationLambdas.OfInvocation(invocation))
         {
-            foreach (var operation in ComputationLambdas.Descend(lambda.Body))
+            // Direct execution path only: a Set inside a callback the computation merely BUILDS
+            // (the diagnostic's suggested escape) runs later, off the evaluation's flow.
+            foreach (var operation in ComputationLambdas.DescendDirectExecution(computation.Body))
             {
                 if (operation is IInvocationOperation inner && IsSameEngineSet(inner.TargetMethod, actorHost))
                 {

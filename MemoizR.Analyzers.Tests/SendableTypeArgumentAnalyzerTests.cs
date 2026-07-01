@@ -60,6 +60,30 @@ public class SendableTypeArgumentAnalyzerTests
     }
 
     [Fact]
+    public async Task NonSealedRecord_IsNotFlagged()
+    {
+        // A non-sealed record synthesizes `protected virtual Type EqualityContract { get; }`; the
+        // get-only property-type check must not trip over it -- System.Type is abstract but
+        // green-listed as known-immutable, in lockstep with the runtime checker.
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public record OpenPerson(string Name, int Age);
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    f.CreateSignal(new OpenPerson("a", 1));
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
     public async Task RecordWithSettableProperty_IsFlagged_NamingTheProperty()
     {
         var diagnostics = await AnalyzeAsync("""

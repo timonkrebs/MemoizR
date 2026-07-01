@@ -146,6 +146,68 @@ public class SetInsideComputationAnalyzerTests
     }
 
     [Fact]
+    public async Task SetInsideLocalFunctionComputation_IsFlagged()
+    {
+        // The computation is a local function passed as a method group: its body must be
+        // resolved and analyzed exactly like a lambda's.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Threading.Tasks;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var v = f.CreateSignal(1);
+                    f.CreateMemoizR(Compute);
+
+                    async Task<int> Compute() { await v.Set(2); return 1; }
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR003", diagnostic.Id);
+        Assert.Contains("Signal<int>.Set", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task SetInsideDeferredCallback_BuiltByTheComputation_IsNotFlagged()
+    {
+        // The diagnostic's own fix guidance: "schedule the write outside the evaluation". A
+        // callback the computation BUILDS runs later on a flow that holds no evaluation lock,
+        // so neither a stored lambda nor a local-function declaration may be flagged; the
+        // direct Set in the second memo must still be.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using System.Threading.Tasks;
+            using MemoizR;
+
+            public class C
+            {
+                private Func<Task>? deferred;
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var v = f.CreateSignal(1);
+                    f.CreateMemoizR<int>(async () =>
+                    {
+                        deferred = async () => await v.Set(2); // deferred: runs outside the evaluation
+                        Task Later() => v.Set(3); // declared, not executed here
+                        return 1;
+                    });
+                    f.CreateMemoizR(async () => { await v.Set(4); return 1; }); // direct: still flagged
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR003", diagnostic.Id);
+    }
+
+    [Fact]
     public async Task SetOutsideComputations_AndInsideConcurrentMapChildren_AreNotFlagged()
     {
         var diagnostics = await AnalyzeAsync("""
