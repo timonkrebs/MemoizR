@@ -393,6 +393,34 @@ public class CapturedMutationAnalyzerTests
     }
 
     [Fact]
+    public async Task SideEffectInANestedCreationsOrdinaryArgument_IsFlagged()
+    {
+        // The nested creation's LABEL argument is evaluated during the OUTER computation, so a
+        // write there is the outer computation's shared mutation; only the nested delegate
+        // bodies belong to the nested invocation's own analysis.
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    int counter = 0;
+                    f.CreateMemoizR(async () =>
+                    {
+                        var inner = f.CreateMemoizR("m" + ++counter, async () => 1);
+                        return await inner.Get();
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Contains("captured local 'counter'", diagnostic.GetMessage());
+    }
+
+    [Fact]
     public async Task NestedComputation_IsReportedOnce_ByItsOwnAnalysis()
     {
         // A creation nested inside another computation: the write belongs to the INNER lambda's

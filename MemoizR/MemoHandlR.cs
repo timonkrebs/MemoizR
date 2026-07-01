@@ -249,6 +249,8 @@ public abstract class MemoHandlR<T> : SignalHandlR
     // this stays a leaf-signal helper.
     private protected async Task TrackDependency()
     {
+        ActorFlowGuards.RejectLockNodeReadInsideActorComputation();
+
         // An unpinned flow can have no capturing reaction (its scope would be freshly minted),
         // so the read needs no scope at all.
         if (!Context.HasFlowScope)

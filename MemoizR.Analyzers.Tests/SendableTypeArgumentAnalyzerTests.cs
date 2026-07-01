@@ -166,6 +166,38 @@ public class SendableTypeArgumentAnalyzerTests
     }
 
     [Fact]
+    public async Task SourceDeclaredKnownImmutableLookalike_IsFlagged()
+    {
+        // Same rule as the collection lookalike below, applied to the known-immutable
+        // green-list: a source-declared System.Uri binds over the BCL one and must go through
+        // the structural walk (the runtime's typeof identity rejects it too).
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            namespace System
+            {
+                public sealed class Uri
+                {
+                    public int State;
+                }
+            }
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    f.CreateSignal(new System.Uri());
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR001", diagnostic.Id);
+        Assert.Contains("State", diagnostic.GetMessage());
+    }
+
+    [Fact]
     public async Task SourceDeclaredCollectionLookalike_IsFlagged()
     {
         // An exact-name lookalike declared in source (source wins over metadata on a name

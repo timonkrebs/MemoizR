@@ -56,7 +56,11 @@ what a compiler can and cannot see:
    green-list addition on both sides: `System.Type` (runtime-managed, effectively immutable),
    because every non-sealed record synthesizes `protected virtual Type EqualityContract { get; }`
    and `Type` is abstract — without the green-list the rule would falsely reject every non-sealed
-   record. A metadata type with *purely private* mutable state still passes the analyzer
+   record. The green-lists (known collections, known immutables, `Task<T>`) additionally
+   require the symbol to come from a framework assembly and not from source: a source-declared
+   lookalike (`namespace System { class Uri { public int State; } }`) binds over the BCL type
+   and must go through the structural walk, exactly as the runtime's `typeof` identity match
+   treats it. A metadata type with *purely private* mutable state still passes the analyzer
    silently — that includes a `{ get; private set; }` auto-property on a referenced assembly,
    whose private setter and writable backing field are both invisible under public-only import,
    making it indistinguishable from a get-only property; the runtime strict mode remains the
@@ -67,9 +71,10 @@ what a compiler can and cannot see:
 
 The SE-0412 analog, scoped to stay high-signal. Inside any computation passed to
 `CreateMemoizR`, the structured-concurrency creations, or `ReactionBuilder.CreateReaction` /
-`CreateAdvancedReaction` — a lambda, or a method group / local function whose declaration lives
-in the same file (other trees have no operation model in the analysis; the runtime checks cover
-them) — a **write** to:
+`CreateAdvancedReaction` — a lambda, a method group / local function whose declaration lives in
+the same file, or a delegate variable whose same-tree initializer holds the computation (later
+reassignments are dataflow the analyzer does not chase; other trees have no operation model in
+the analysis — the runtime checks cover both) — a **write** to:
 
 - a local or parameter captured from the enclosing method,
 - a field of the enclosing object (through `this`), or
@@ -97,7 +102,8 @@ syntax — the lambda expression, or the method/local-function declaration), whi
 non-computation lambdas correct: a LINQ lambda's own local belongs to the computation; the
 enclosing method's local does not. A creation nested inside another computation is pruned from
 the outer walk — the operation action fires for the nested invocation too, so the inner lambda
-is analyzed exactly once.
+is analyzed exactly once — while the nested creation's ORDINARY arguments (a label expression,
+say) still belong to the outer walk: they are evaluated during the outer evaluation.
 
 ### MZR003 — `Set` inside a reactive computation
 

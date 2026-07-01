@@ -72,12 +72,16 @@ must not be the only one checked); `Untrack` remains the escape hatch for a deli
 read. Frames **expire** when their evaluation commits or faults, so deferred work that captured
 the flow's `ExecutionContext` inside a computation (`Task.Run` — the documented way to schedule
 a write for after the evaluation) reads as outside any evaluation instead of being falsely
-rejected by its stale frame. The mirror direction — an actor computation
-reading a lock-engine node — has the same silent-staleness shape but is only detectable from
-the lock engine's getters, whose fast paths are the repo's most optimized; guarding it costs an
-AsyncLocal probe on the shipping hot path and is deliberately left open pending that trade-off.
-Independent computations still run fully in parallel — the actor serializes *turns*, never user
-code (pinned by test).
+rejected by its stale frame. The mirror direction — an actor computation reading a lock-engine
+node, the same silent staleness seen from the other side — is guarded at the lock engine's read
+entry points, gated on the actor engine being **engaged** at all (a static flag set by the first
+actor node): a process that never creates actor nodes pays one predictable branch per read, not
+an AsyncLocal probe, which is what kept this direction open until now. A dependency cycle that
+only forms at recompute time (detected via the evaluation chain) surfaces as
+`CyclicDependencyException` even when it closes through a parent *scan* — a scan converts
+ordinary parent faults into "stay CacheCheck and retry", but a cycle is a structural error that
+must not hide behind a stale serve. Independent computations still run fully in parallel — the
+actor serializes *turns*, never user code (pinned by test).
 
 Kept, deliberately:
 

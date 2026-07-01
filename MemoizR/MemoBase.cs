@@ -40,6 +40,8 @@ public abstract class MemoBase<T> : MemoHandlR<T>, IMemoizR, IStateGetR<T>
 
     public async Task<T> Get()
     {
+        ActorFlowGuards.RejectLockNodeReadInsideActorComputation();
+
         // An UNPINNED flow's scope would be freshly minted with CurrentReaction == null by
         // construction, so a clean read from one needs no scope at all: two volatile reads and
         // out -- no lock, no allocation. (Without this, every top-level Get minted and

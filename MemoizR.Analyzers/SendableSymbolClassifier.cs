@@ -112,10 +112,13 @@ internal sealed class SendableSymbolClassifier
 
     // The green-list of the runtime checker: immutable (or, for CancellationToken/Task,
     // internally synchronized) BCL types whose structure hides caches/arrays behind an
-    // immutable API.
+    // immutable API. Framework-assembly gated like the collection list: a source-declared
+    // lookalike (`namespace System { class Uri { public int State; } }`) binds over the BCL
+    // type and must go through the structural walk, as the runtime's typeof identity would
+    // reject it.
     private static bool IsKnownImmutable(ITypeSymbol type)
     {
-        if (type is not INamedTypeSymbol named || named.Arity != 0)
+        if (type is not INamedTypeSymbol named || named.Arity != 0 || !IsDeclaredInFrameworkAssembly(named))
         {
             return false;
         }
@@ -152,7 +155,8 @@ internal sealed class SendableSymbolClassifier
         var definition = named.OriginalDefinition;
         return definition.Name == "Task"
             && definition.Arity == 1
-            && definition.ContainingNamespace?.ToDisplayString() == "System.Threading.Tasks";
+            && definition.ContainingNamespace?.ToDisplayString() == "System.Threading.Tasks"
+            && IsDeclaredInFrameworkAssembly(definition);
     }
 
     // The known framework collections that are immutable or internally synchronized BY
@@ -201,13 +205,13 @@ internal sealed class SendableSymbolClassifier
         }
     }
 
-    // A symbol only counts as THE framework collection when it comes from a framework assembly:
-    // a source declaration is by definition the user's (source wins over metadata on a name
+    // A symbol only counts as THE framework type when it comes from a framework assembly: a
+    // source declaration is by definition the user's (source wins over metadata on a name
     // clash, so the candidate here IS what the code binds to), and a metadata lookalike from an
-    // ordinary library must not be blessed either. The assembly-name set covers where these
-    // types (or their facades) live across TFMs -- .NET (split System.Collections.* assemblies,
-    // System.Private.CoreLib in runtime-assembly compilations), .NET Framework
-    // (mscorlib/System), and the netstandard/System.Runtime facades.
+    // ordinary library must not be blessed either. The assembly-name set covers where the
+    // green-listed types (or their facades) live across TFMs -- .NET (split System.* runtime
+    // assemblies, System.Private.CoreLib in runtime-assembly compilations), .NET Framework
+    // (mscorlib/System/System.Numerics), and the netstandard/System.Runtime facades.
     private static bool IsDeclaredInFrameworkAssembly(INamedTypeSymbol definition)
     {
         if (definition.Locations.Any(location => location.IsInSource))
@@ -217,7 +221,8 @@ internal sealed class SendableSymbolClassifier
 
         return definition.ContainingAssembly?.Identity.Name is
             "System.Collections.Immutable" or "System.Collections.Concurrent" or "System.Collections"
-            or "System.Runtime" or "System.Private.CoreLib" or "mscorlib" or "netstandard" or "System";
+            or "System.Runtime" or "System.Private.CoreLib" or "mscorlib" or "netstandard" or "System"
+            or "System.Private.Uri" or "System.Runtime.Numerics" or "System.Numerics";
     }
 
     private static bool HasSendableAttribute(INamedTypeSymbol named)

@@ -118,8 +118,10 @@ public sealed class ActorMemo<T> : ActorValueNode<T>
                 // The read is nested inside this node's own in-flight evaluation -- reachable
                 // only through fn (or a scan fn triggered): a true dependency cycle. A reader
                 // whose chain does NOT include us -- another flow, or an unawaited sibling read
-                // of the same computation -- legitimately waits below.
-                throw new InvalidOperationException("Cyclic behavior detected");
+                // of the same computation -- legitimately waits below. The dedicated type is
+                // what lets ScanAndResolveAsync tell this structural error apart from an
+                // ordinary parent fault.
+                throw new CyclicDependencyException();
             }
 
             var waiter = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -162,11 +164,21 @@ public sealed class ActorMemo<T> : ActorValueNode<T>
         var scanChain = new EvaluationFrame(this, chain);
 
         var parentFaulted = false;
+        System.Runtime.ExceptionServices.ExceptionDispatchInfo? cycle = null;
         foreach (var source in scan.Sources!)
         {
             try
             {
                 await source.EnsureCleanAsync(scanChain).ConfigureAwait(false);
+            }
+            catch (CyclicDependencyException e)
+            {
+                // A parent's recompute cycled back through THIS scanning node: a structural
+                // error, not a transient parent fault -- converting it to a stale serve would
+                // HIDE a dynamic cycle introduced after an initial clean run. Surface it below,
+                // after resolving the claimed evaluation (waiters must not strand).
+                cycle = System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(e);
+                break;
             }
             catch
             {
@@ -179,6 +191,19 @@ public sealed class ActorMemo<T> : ActorValueNode<T>
                 // anyway, our own read of the parent re-surfaces the exception with our context.
                 parentFaulted = true;
             }
+        }
+
+        if (cycle is not null)
+        {
+            // Same record-then-bump as the fault paths: the caller consumed nothing confirmable
+            // here, and an in-flight caller must not be able to commit Clean over this node.
+            await Actor.Run(() =>
+            {
+                frame?.Captured.Add((this, Generation));
+                Generation++;
+                EndEvaluation();
+            }).ConfigureAwait(false);
+            cycle.Throw();
         }
 
         return await Actor.Run(() => ResolveScan(scan.GenSnapshot, frame, parentFaulted)).ConfigureAwait(false);

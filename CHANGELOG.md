@@ -51,7 +51,12 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
   cross-context actor reads and actor reads from inside lock-engine computations (of any
   context) are rejected at the read; evaluation frames expire at commit so deferred writes
   scheduled inside a computation are not falsely rejected; equal-value `ActorSignal.Set` is a
-  complete no-op, matching the lock engine.
+  complete no-op, matching the lock engine. Lock-engine reads inside actor computations are
+  rejected symmetrically (gated on the actor engine being in use, so lock-only processes pay a
+  single static-bool branch per read), scan-crossed dependency cycles surface as the new
+  `CyclicDependencyException` instead of hiding behind a stale serve, and
+  `EagerRelativeSignal.Set` pins the scope it locks so `AssertEvaluationIsolated` recognizes
+  its callbacks.
 - `CreateReaction(...)` convenience overloads directly on the factory — sugar for `BuildReaction().CreateReaction(...)` with the default label and debounce
 - MemoizR.Wpf package: `AddWpfDispatcher` routes reaction actions to the WPF UI thread (via `Application.Current.Dispatcher` or an explicit `Dispatcher`) while the dependency graph keeps evaluating on the thread pool (#13)
 

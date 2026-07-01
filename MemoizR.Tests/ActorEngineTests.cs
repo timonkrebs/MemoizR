@@ -253,7 +253,32 @@ public class ActorEngineTests
         var b = f.CreateActorMemoizR(async () => await a.Get());
         a = f.CreateActorMemoizR(async () => await b.Get());
 
-        await Assert.ThrowsAsync<InvalidOperationException>(() => a.Get());
+        await Assert.ThrowsAsync<CyclicDependencyException>(() => a.Get());
+    }
+
+    // A cycle that only forms AFTER a clean run, closed through a parent SCAN: b (CacheCheck)
+    // scans a, whose recompute now reads back into b. The cycle exception must surface to the
+    // getter -- swallowing it as an ordinary parent fault would serve b's stale value and hide
+    // the structural error entirely.
+    [Fact(Timeout = 10000)]
+    public async Task DynamicCycle_ClosedThroughAParentScan_SurfacesToTheGetter()
+    {
+        var f = new MemoFactory();
+        var toggle = f.CreateActorSignal(false);
+        ActorMemo<int> a = null!;
+        ActorMemo<int> b = null!;
+        a = f.CreateActorMemoizR(async () => await toggle.Get() ? await b.Get() : 1);
+        b = f.CreateActorMemoizR(async () => await a.Get() + 1);
+
+        Assert.Equal(2, await b.Get()); // acyclic prime: a=1, b=2
+
+        await toggle.Set(true); // a -> Dirty, b -> CacheCheck; a's recompute now reads b
+
+        await Assert.ThrowsAsync<CyclicDependencyException>(() => b.Get());
+
+        // Breaking the cycle heals the graph: b re-scans, a recomputes acyclically.
+        await toggle.Set(false);
+        Assert.Equal(2, await b.Get());
     }
 
     // Two unawaited Gets of one dirty memo issued by the same computation are NOT a cycle: the
@@ -503,6 +528,29 @@ public class ActorEngineTests
         // Outside any computation the same reads are fine -- and the actor graph still works.
         Assert.Equal(1, await actorValue.Get());
         Assert.Equal(2, await actorMemo.Get());
+    }
+
+    // The final mixing direction: a LOCK-ENGINE node read from inside an actor computation
+    // registers in neither graph (the lock getter sees no capturing CurrentReaction on the
+    // actor fn's flow; actor frames cannot capture lock sources), so the actor memo would cache
+    // a value no lock-side Set can ever invalidate. Rejected at the lock engine's read entry
+    // points, gated on the actor engine being in use at all.
+    [Fact(Timeout = 10000)]
+    public async Task LockRead_InsideAnActorComputation_IsRejected()
+    {
+        var f = new MemoFactory();
+        var lockSignal = f.CreateSignal(1);
+        var lockMemo = f.CreateMemoizR(async () => await lockSignal.Get());
+
+        var readsLockSignal = f.CreateActorMemoizR(async () => await lockSignal.Get());
+        var readsLockMemo = f.CreateActorMemoizR(async () => await lockMemo.Get());
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => readsLockSignal.Get());
+        Assert.Contains("actor computation", ex.Message);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => readsLockMemo.Get());
+
+        // Outside actor computations the same lock nodes work as ever.
+        Assert.Equal(1, await lockMemo.Get());
     }
 
     // The same staleness with the computation and the actor node in DIFFERENT contexts: the

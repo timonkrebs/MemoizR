@@ -173,6 +173,32 @@ public class SetInsideComputationAnalyzerTests
     }
 
     [Fact]
+    public async Task SetInsideComputation_PassedThroughADelegateVariable_IsFlagged()
+    {
+        // The computation reaches the factory through a local: the variable's initializer is
+        // resolved to the same lambda body the inline form diagnoses.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using System.Threading.Tasks;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var v = f.CreateSignal(1);
+                    Func<Task<int>> compute = async () => { await v.Set(2); return 0; };
+                    f.CreateMemoizR(compute);
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR003", diagnostic.Id);
+    }
+
+    [Fact]
     public async Task SetInsideDeferredCallback_BuiltByTheComputation_IsNotFlagged()
     {
         // The diagnostic's own fix guidance: "schedule the write outside the evaluation". A

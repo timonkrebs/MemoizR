@@ -7,6 +7,15 @@ internal static class ActorFlow
     // The dependency-capture frame of the innermost actor-memo evaluation on this flow.
     internal static readonly AsyncLocal<EvaluationFrame?> Frame = new();
 
+    // Whether ANY actor-engine node was ever created in this process. The lock engine's read
+    // paths gate their cross-engine guard on this, so a process that never touches the actor
+    // engine pays one predictable static-bool branch instead of an AsyncLocal probe per read.
+    private static volatile bool engaged;
+
+    internal static bool Engaged => engaged;
+
+    internal static void MarkEngaged() => engaged = true;
+
     // The frame, treating an EXPIRED one as absent. ExecutionContext capture (Task.Run, timer
     // callbacks, thread-pool work items started inside a computation) carries the AsyncLocal
     // into work that may run long after the evaluation committed -- the documented "schedule
@@ -18,6 +27,24 @@ internal static class ActorFlow
 // Flow-side rejections shared by the read entry points.
 internal static class ActorFlowGuards
 {
+    // The mirror of RejectUntrackedReadInsideLockComputation below: a LOCK-ENGINE node read
+    // from inside an actor computation registers in neither graph (the lock getter sees no
+    // capturing CurrentReaction on the actor fn's flow; the actor frame cannot capture
+    // IMemoHandlR sources), so the actor memo would commit with no link and cache a value no
+    // lock-side Set can ever invalidate. Called from the lock engine's read entry points --
+    // gated on Engaged so lock-only processes pay a static-bool branch, not an AsyncLocal
+    // probe; CurrentFrame (not the raw AsyncLocal) so deferred post-commit work is exempt.
+    public static void RejectLockNodeReadInsideActorComputation()
+    {
+        if (ActorFlow.Engaged && ActorFlow.CurrentFrame != null)
+        {
+            throw new InvalidOperationException(
+                "A lock-engine node was read from inside an actor computation. The two engines cannot " +
+                "track dependencies across each other, so this read would never re-trigger the computation " +
+                "-- it would cache a permanently stale value. Keep a graph on one engine end to end.");
+        }
+    }
+
     // The reverse direction of the engine-separation rule: a lock-engine computation that reads
     // an actor node gets the value with NO dependency registered in either graph -- the actor
     // engine tracks through ActorFlow frames, which lock computations do not carry, and the lock
@@ -158,6 +185,7 @@ public abstract class ActorNodeBase
         Context = context;
         Actor = context.GraphActor;
         state = initialState;
+        ActorFlow.MarkEngaged();
     }
 
     // Escalate dirtiness (a Stale). ALWAYS bumps the generation -- even when the state was

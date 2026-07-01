@@ -9,6 +9,28 @@ namespace MemoizR.Tests;
 // rewiring assert in SignalHandlR is exercised implicitly by every recompute in the suite.
 public class IsolationAssertionTests
 {
+    // The error message lists Set among the isolated graph evaluations, and
+    // EagerRelativeSignal.Set runs USER code under the exclusive lock -- so that callback must
+    // read as isolated. It only can if Set pins the scope whose lock it holds (a throwaway
+    // scope would make the callback resolve a different instance and read as not isolated).
+    [Fact(Timeout = 10000)]
+    public async Task AssertEvaluationIsolated_Passes_InsideATopLevelSetCallback()
+    {
+        var f = new MemoFactory();
+        var relative = f.CreateEagerRelativeSignal(1);
+
+        var observedIsolated = false;
+        await relative.Set(v =>
+        {
+            f.AssertEvaluationIsolated(); // throws if the held exclusive lock is not recognized
+            observedIsolated = true;
+            return v + 1;
+        });
+
+        Assert.True(observedIsolated);
+        Assert.Equal(2, await relative.Get());
+    }
+
     [Fact(Timeout = 10000)]
     public async Task IsHeldByCurrentFlow_TracksAcquireAndRelease_InBothModes()
     {

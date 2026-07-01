@@ -33,6 +33,7 @@ public sealed class ConcurrentRace<T, I> : MemoHandlR<T>, IMemoizR, IStateGetR<T
     // shared one. Update returns the value, so the generic overload threads it straight through.
     public Task<T> Get()
     {
+        ActorFlowGuards.RejectLockNodeReadInsideActorComputation();
         return Context.EvaluateUnderLockAsync(mutex, Update);
     }
 

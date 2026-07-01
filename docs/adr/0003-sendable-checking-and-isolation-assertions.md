@@ -117,7 +117,10 @@ The `AsyncAsymmetricLock` already converts impossible same-flow waits into excep
   **`MemoFactory.AssertEvaluationIsolated()`** passthrough — the public
   `preconditionIsolated()` analog: throws when the current flow is not inside a
   MemoizR-serialized graph evaluation. A flow with no pinned scope resolves a throwaway scope
-  whose lock was never acquired, so it correctly reads as not isolated.
+  whose lock was never acquired, so it correctly reads as not isolated. Because
+  `EagerRelativeSignal.Set` runs *user code* under its exclusive lock, that Set pins the scope
+  it locks — so its callback resolves the very scope whose lock is held and correctly reads as
+  isolated (plain `Signal.Set` runs no user code and keeps the cheaper unpinned path).
 - **A DEBUG-only assert in `SignalHandlR.UpdateSourceAndObserverLinks`** mechanically pins its
   documented contract ("must only be called inside a ContextLock-serialized evaluation"). Every
   Debug test run now exercises it on every recompute; a future caller that reaches the rewiring
