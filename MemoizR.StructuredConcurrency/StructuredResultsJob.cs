@@ -35,6 +35,8 @@ public sealed class StructuredResultsJob<T> : StructuredJobBase<ConcurrentDictio
         // whose CurrentReaction is null, and the child's dependencies are silently not captured.
         var scope = context.ForceNewScope();
         scope.CurrentReaction = @this;
+        var prevAmbientContext = LockEngineFlow.EvaluatingContext.Value;
+        LockEngineFlow.EvaluatingContext.Value = context;
         try
         {
             result!.TryAdd(i, await x(resourceGroup));
@@ -43,6 +45,10 @@ public sealed class StructuredResultsJob<T> : StructuredJobBase<ConcurrentDictio
         {
             cancellationTokenSource.Cancel();
             throw;
+        }
+        finally
+        {
+            LockEngineFlow.EvaluatingContext.Value = prevAmbientContext;
         }
         AccumulateSourcesAndObservers(scope, @this);
         GC.KeepAlive(scope);
