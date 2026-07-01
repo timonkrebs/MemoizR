@@ -74,8 +74,11 @@ them) — a **write** to:
 
 is flagged, with the fix suggestion being the library's own model: lift the state into a
 `Signal`/`EagerRelativeSignal`. Writes are simple/compound/coalesce assignments, `++`/`--`,
-deconstructions (flattened through nested tuples: `(a, (b, c)) = ...` writes every leaf), and
-`ref`/`out` arguments.
+deconstructions (flattened through nested tuples: `(a, (b, c)) = ...` writes every leaf),
+`ref`/`out` arguments, and non-`readonly` instance-method calls on value-type receivers that
+resolve to shared storage (`counter.Increment()` mutates the captured local exactly like
+`counter.Value++`; `readonly` members — which includes most BCL structs — and the
+object-virtual overrides stay exempt).
 
 Deliberately **not** flagged:
 

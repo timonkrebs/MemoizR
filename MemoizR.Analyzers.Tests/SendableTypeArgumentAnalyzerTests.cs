@@ -109,6 +109,63 @@ public class SendableTypeArgumentAnalyzerTests
     }
 
     [Fact]
+    public async Task FrozenCollections_AreNotFlagged()
+    {
+        // FrozenDictionary/FrozenSet are abstract by design (the runtime hands out internal
+        // implementations): the known-definitions green-list must trust them BEFORE the
+        // abstract-category rejection, in lockstep with the runtime checker.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Frozen;
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    f.CreateSignal(new Dictionary<string, int> { ["a"] = 1 }.ToFrozenDictionary());
+                    f.CreateSignal(new HashSet<int> { 1 }.ToFrozenSet());
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task UserTypeDeclaredInAFrameworkCollectionNamespace_IsFlagged()
+    {
+        // The collection green-list matches known framework definitions, not namespaces as
+        // strings: a project's own type inside System.Collections.Concurrent goes through the
+        // structural walk like any other type.
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            namespace System.Collections.Concurrent
+            {
+                public class HomegrownCache
+                {
+                    public int Hits;
+                }
+            }
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    f.CreateSignal(new System.Collections.Concurrent.HomegrownCache());
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR001", diagnostic.Id);
+        Assert.Contains("Hits", diagnostic.GetMessage());
+    }
+
+    [Fact]
     public async Task ImmutableCollectionBuilder_IsFlagged_NotBlessedByNamespace()
     {
         var diagnostics = await AnalyzeAsync("""

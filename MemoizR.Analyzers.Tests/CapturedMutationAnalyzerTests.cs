@@ -195,6 +195,45 @@ public class CapturedMutationAnalyzerTests
     }
 
     [Fact]
+    public async Task MutatingMethodCall_OnCapturedStructReceiver_IsFlagged()
+    {
+        // `counter.Increment()` writes the captured local's storage exactly like
+        // `counter.Value++`; readonly members, the object virtuals, and the computation's own
+        // locals stay unflagged.
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public struct Counter
+            {
+                public int Value;
+                public void Increment() => Value++;
+                public readonly int Peek() => Value;
+            }
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var counter = new Counter();
+                    f.CreateMemoizR(async () =>
+                    {
+                        counter.Increment(); // mutates shared storage: flagged
+                        _ = counter.Peek(); // readonly member: cannot mutate
+                        _ = counter.ToString(); // object virtual: not flagged
+                        var mine = new Counter();
+                        mine.Increment(); // the computation's own local
+                        return counter.Value;
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Contains("captured local 'counter'", diagnostic.GetMessage());
+    }
+
+    [Fact]
     public async Task WriteToMemberOfEnclosingStructField_IsFlagged()
     {
         var diagnostics = await AnalyzeAsync("""

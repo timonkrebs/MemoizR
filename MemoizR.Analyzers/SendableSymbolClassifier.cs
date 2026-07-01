@@ -53,25 +53,25 @@ internal sealed class SendableSymbolClassifier
             return CheckCached(named.TypeArguments[0], inProgress);
         }
 
+        if (IsTaskOfT(named) || IsKnownSendableCollection(named))
+        {
+            return CheckTypeArguments(named, inProgress);
+        }
+
         if (HasSendableAttribute(named))
         {
             return null;
         }
 
-        // Reject unverifiable categories (interface, abstract class, delegate, object) BEFORE the
-        // namespace/Task trust below, kept in lockstep with the runtime checker: an interface or
-        // abstract base in System.Collections.Immutable/Concurrent (e.g.
-        // IProducerConsumerCollection<T>) reveals nothing about the concrete runtime type, so the
-        // namespace must not bless it.
+        // Reject unverifiable categories (interface, abstract class, delegate, object). Runs
+        // after the known-definitions green-list above (FrozenDictionary/FrozenSet are
+        // deliberately abstract) but before the structural walk, kept in lockstep with the
+        // runtime checker: an interface or abstract base (e.g. IProducerConsumerCollection<T>)
+        // reveals nothing about the concrete runtime type, whatever namespace it lives in.
         var categoryReason = UnverifiableCategoryReason(named);
         if (categoryReason != null)
         {
             return categoryReason;
-        }
-
-        if (IsTaskOfT(named) || IsInImmutableOrSynchronizedNamespace(named))
-        {
-            return CheckTypeArguments(named, inProgress);
         }
 
         return CheckFields(named, inProgress);
@@ -154,20 +154,49 @@ internal sealed class SendableSymbolClassifier
             && definition.ContainingNamespace?.ToDisplayString() == "System.Threading.Tasks";
     }
 
-    private static bool IsInImmutableOrSynchronizedNamespace(INamedTypeSymbol named)
+    // The known framework collections that are immutable or internally synchronized BY
+    // CONTRACT, matched by definition (namespace + name + arity, top-level only) -- NOT by
+    // namespace alone: any project can declare its own types inside a System.Collections.*
+    // namespace, and those must fall through to the structural checks. Kept in lockstep with
+    // the runtime checker, where the same list is matched by type identity (typeof). Nested
+    // helpers like ImmutableList<T>.Builder are distinct definitions and fall through too
+    // (their settable indexers reject them). FrozenDictionary/FrozenSet are abstract by
+    // design, so this trust is granted before the abstract-category rejection.
+    private static bool IsKnownSendableCollection(INamedTypeSymbol named)
     {
-        // Top-level collection types only: nested mutable helpers like ImmutableList<T>.Builder
-        // share the namespace but are freely mutable, so they must fall through to the structural
-        // checks (kept in lockstep with the runtime SendableChecker's !type.IsNested guard).
-        if (named.ContainingType is not null)
+        var definition = named.OriginalDefinition;
+        if (definition.ContainingType is not null)
         {
             return false;
         }
 
-        var ns = named.ContainingNamespace?.ToDisplayString();
-        return ns == "System.Collections.Immutable"
-            || ns == "System.Collections.Frozen"
-            || ns == "System.Collections.Concurrent";
+        switch (definition.ContainingNamespace?.ToDisplayString())
+        {
+            case "System.Collections.Immutable":
+                return definition.Name switch
+                {
+                    "ImmutableArray" or "ImmutableHashSet" or "ImmutableList"
+                        or "ImmutableQueue" or "ImmutableSortedSet" or "ImmutableStack" => definition.Arity == 1,
+                    "ImmutableDictionary" or "ImmutableSortedDictionary" => definition.Arity == 2,
+                    _ => false,
+                };
+            case "System.Collections.Frozen":
+                return definition.Name switch
+                {
+                    "FrozenSet" => definition.Arity == 1,
+                    "FrozenDictionary" => definition.Arity == 2,
+                    _ => false,
+                };
+            case "System.Collections.Concurrent":
+                return definition.Name switch
+                {
+                    "ConcurrentQueue" or "ConcurrentStack" or "ConcurrentBag" or "BlockingCollection" => definition.Arity == 1,
+                    "ConcurrentDictionary" => definition.Arity == 2,
+                    _ => false,
+                };
+            default:
+                return false;
+        }
     }
 
     private static bool HasSendableAttribute(INamedTypeSymbol named)

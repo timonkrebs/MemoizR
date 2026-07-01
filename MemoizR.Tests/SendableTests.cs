@@ -50,9 +50,22 @@ public class SendableCheckerTests
     [InlineData(typeof(ImmutableList<string>))]
     [InlineData(typeof(ImmutableDictionary<string, decimal>))]
     [InlineData(typeof(ConcurrentDictionary<string, int>))] // internally synchronized
+    [InlineData(typeof(ConcurrentQueue<int>))]
+    [InlineData(typeof(System.Collections.Frozen.FrozenDictionary<string, int>))] // abstract by design: trusted by definition, before the category rejection
+    [InlineData(typeof(System.Collections.Frozen.FrozenSet<int>))]
     public void ImmutableAndConcurrentCollections_AreSendable_WhenTheirElementsAre(Type type)
     {
         Assert.True(SendableChecker.IsSendable(type, out var reason), reason);
+    }
+
+    [Fact]
+    public void UserTypeDeclaredInAFrameworkCollectionNamespace_IsNotBlessedByTheNamespace()
+    {
+        // The collection green-list matches known framework DEFINITIONS by type identity; a
+        // project's own type inside System.Collections.Concurrent goes through the structural
+        // walk like any other type -- and this one fails it.
+        Assert.False(SendableChecker.IsSendable(typeof(HomegrownConcurrentCache), out var reason));
+        Assert.Contains("Hits", reason);
     }
 
     [Fact]

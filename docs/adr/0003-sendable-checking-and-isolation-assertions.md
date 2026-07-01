@@ -10,6 +10,11 @@
   itself be Sendable (catches a computed property handing out shared static state, which no field
   walk can see), with `System.Type` green-listed on both sides so the synthesized
   `EqualityContract` does not falsely reject non-sealed records (ADR 0004 has the details).
+- Updated: 2026-07-01 — the collection trust is matched by known framework *definitions* (type
+  identity at runtime, namespace+name+arity in the analyzer) instead of by namespace, closing a
+  hole where user types declared inside `System.Collections.*` bypassed the structural walk;
+  this also correctly trusts the deliberately-abstract `FrozenDictionary`/`FrozenSet`, which the
+  category rejection had been refusing.
 - Deciders: MemoizR maintainers
 - Issue: [#36 — Strengthen data-race safety guarantees](https://github.com/timonkrebs/MemoizR/issues/36)
 
@@ -51,8 +56,12 @@ synchronized:
 - primitives, enums, and a small green-list of known-immutable/known-synchronized BCL types
   (`string`, `decimal`, date/time types, `Guid`, `Uri`, `Version`, `BigInteger`,
   `CancellationToken`, `Task`, `Task<T>` with a Sendable `T`);
-- collections in `System.Collections.Immutable` / `.Frozen` / `.Concurrent`, when their type
-  arguments are Sendable (the elements are what consumers share);
+- the known framework collections of `System.Collections.Immutable` / `.Frozen` / `.Concurrent`,
+  when their type arguments are Sendable (the elements are what consumers share) — matched by
+  type identity, not by namespace: a project can declare its own types inside those namespaces,
+  and a namespace string must not bless arbitrary user code past the structural walk. (The
+  Frozen types are abstract by design, so this trust is granted before the abstract-category
+  rejection.)
 - **value types** whose instance fields are all of Sendable type. The fields may be writable:
   every read of a struct value yields a private copy, so only *references* reachable from the
   copy can alias shared state. (This is why tuples pass.)

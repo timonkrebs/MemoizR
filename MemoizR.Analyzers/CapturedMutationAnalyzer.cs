@@ -67,9 +67,39 @@ public sealed class CapturedMutationAnalyzer : DiagnosticAnalyzer
                 // `this.Changed += h` / `StaticEvent += h` mutates the event's backing delegate
                 // on the enclosing/static object -- shared mutable state, like a field write.
                 return ImmutableArray.Create(eventAssignment.EventReference);
+            case IInvocationOperation call when IsMutatingValueReceiverCall(call):
+                return ImmutableArray.Create(call.Instance!);
             default:
                 return ImmutableArray<IOperation>.Empty;
         }
+    }
+
+    // A non-readonly instance method on a value-type receiver can write the receiver's storage
+    // in place: `counter.Increment()` mutates the captured local exactly like `counter.Value++`.
+    // Exempt: readonly members and readonly structs (most BCL value types -- int, DateTime,
+    // Guid...), the object/ValueType virtuals (ToString/Equals/GetHashCode overrides are
+    // overwhelmingly pure), and property receivers (the getter hands out a copy, so the call
+    // mutates a temporary -- a lost write, not shared mutation; direct writes through a
+    // value-type property are already compiler errors).
+    private static bool IsMutatingValueReceiverCall(IInvocationOperation call)
+    {
+        if (call.Instance is not { Type.IsValueType: true } || call.Instance is IPropertyReferenceOperation)
+        {
+            return false;
+        }
+
+        var method = call.TargetMethod;
+        if (method.IsReadOnly || IsObjectVirtual(method.ContainingType) || IsObjectVirtual(method.OverriddenMethod?.ContainingType))
+        {
+            return false;
+        }
+
+        return true;
+    }
+
+    private static bool IsObjectVirtual(ITypeSymbol? declaringType)
+    {
+        return declaringType?.SpecialType is SpecialType.System_Object or SpecialType.System_ValueType;
     }
 
     // A deconstruction target can nest tuples arbitrarily -- `(a, (b, c)) = value` -- and every

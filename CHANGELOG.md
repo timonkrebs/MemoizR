@@ -27,7 +27,10 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
   computations passed as method groups or local functions declared in the same file, MZR002
   flattens nested deconstruction targets (`(a, (b, c)) = ...`), and MZR003 inspects only the
   computation's direct execution path, so a deferred callback the computation merely builds
-  (its own documented escape) is not flagged.
+  (its own documented escape) is not flagged. The collection green-list matches known framework
+  definitions rather than namespaces (user types declared inside `System.Collections.*` are not
+  blessed), which also makes the deliberately-abstract `FrozenDictionary`/`FrozenSet` verify
+  correctly on both sides.
 - Custom executors for reactive side effects (issue #36, the Swift SE-0392 analog, see ADR
   0005): `IExecutor` (`Enqueue`/`IsCurrent`) with `executor.AssertIsolated()`,
   `SynchronizationContextExecutor`, a `DedicatedThreadExecutor` whose installed

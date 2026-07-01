@@ -14,7 +14,9 @@ namespace MemoizR;
 /// A type is Sendable when every value of it is either deeply immutable or internally
 /// synchronized:
 ///  - primitives, enums, and a small list of known-immutable BCL types (string, decimal, Uri, ...);
-///  - immutable/frozen and concurrent collections, when their type arguments are Sendable;
+///  - the known framework immutable/frozen/concurrent collections -- matched by type identity,
+///    not by namespace, so user types declared inside System.Collections.* are not blessed --
+///    when their type arguments are Sendable;
 ///  - value types whose instance fields are all of Sendable type (the fields themselves may be
 ///    writable: every read of a struct value yields a private copy, so only references reachable
 ///    from the copy can alias shared state);
@@ -63,19 +65,33 @@ public static class SendableChecker
     ];
 
     // Generic definitions that are safe to share when their type arguments are: Task<T> is
-    // multi-await safe (unlike ValueTask<T>, which is single-consumption and deliberately absent).
+    // multi-await safe (unlike ValueTask<T>, which is single-consumption and deliberately
+    // absent), plus the known framework collections that are immutable or internally
+    // synchronized BY CONTRACT. Matched by type identity, NOT by namespace: any project can
+    // declare its own types inside a System.Collections.* namespace, and a namespace string
+    // must not bless arbitrary user code past the structural walk. (Their nested Builder
+    // helpers are distinct definitions and fall through to the structural checks, which reject
+    // them by their settable indexers.) FrozenDictionary/FrozenSet are abstract by design (the
+    // runtime hands out internal implementations), so this trust is granted BEFORE the
+    // abstract-category rejection.
     private static readonly HashSet<Type> KnownSendableGenericDefinitions =
     [
         typeof(Task<>),
-    ];
-
-    // Collections in these namespaces are immutable or internally synchronized by contract; only
-    // their type arguments need verification (the elements are what the consumers share).
-    private static readonly HashSet<string> ImmutableOrSynchronizedNamespaces =
-    [
-        "System.Collections.Immutable",
-        "System.Collections.Frozen",
-        "System.Collections.Concurrent",
+        typeof(System.Collections.Immutable.ImmutableArray<>),
+        typeof(System.Collections.Immutable.ImmutableDictionary<,>),
+        typeof(System.Collections.Immutable.ImmutableHashSet<>),
+        typeof(System.Collections.Immutable.ImmutableList<>),
+        typeof(System.Collections.Immutable.ImmutableQueue<>),
+        typeof(System.Collections.Immutable.ImmutableSortedDictionary<,>),
+        typeof(System.Collections.Immutable.ImmutableSortedSet<>),
+        typeof(System.Collections.Immutable.ImmutableStack<>),
+        typeof(System.Collections.Frozen.FrozenDictionary<,>),
+        typeof(System.Collections.Frozen.FrozenSet<>),
+        typeof(System.Collections.Concurrent.ConcurrentDictionary<,>),
+        typeof(System.Collections.Concurrent.ConcurrentQueue<>),
+        typeof(System.Collections.Concurrent.ConcurrentStack<>),
+        typeof(System.Collections.Concurrent.ConcurrentBag<>),
+        typeof(System.Collections.Concurrent.BlockingCollection<>),
     ];
 
     public static bool IsSendable(Type type)
@@ -139,23 +155,14 @@ public static class SendableChecker
         }
 
         // Reject unverifiable categories (interface, abstract class, array, delegate, object,
-        // pointer) BEFORE the namespace trust below: an interface or abstract base that merely
-        // lives in System.Collections.Immutable/Concurrent (e.g. IProducerConsumerCollection<T>)
-        // says nothing about the concrete runtime type, so the namespace must not bless it.
+        // pointer). Runs after the known-definitions green-list above -- FrozenDictionary/
+        // FrozenSet are deliberately abstract -- but before the structural walk: an interface
+        // or abstract base (e.g. IProducerConsumerCollection<T>) says nothing about the
+        // concrete runtime type, whatever namespace it lives in.
         var categoryReason = UnverifiableCategoryReason(type);
         if (categoryReason != null)
         {
             return categoryReason;
-        }
-
-        // Trust the immutable/concurrent collections by namespace -- but only the top-level
-        // collection types, NOT their nested mutable helpers. ImmutableList<T>.Builder and
-        // ImmutableArray<T>.Builder live in the same namespace yet are freely mutable; a nested
-        // type falls through to the structural checks (the Builders' settable indexer rejects
-        // them) instead of being blessed by the namespace.
-        if (type.Namespace is { } ns && !type.IsNested && ImmutableOrSynchronizedNamespaces.Contains(ns))
-        {
-            return CheckTypeArguments(type, inProgress);
         }
 
         return CheckFields(type, inProgress);

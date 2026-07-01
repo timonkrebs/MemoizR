@@ -8,9 +8,31 @@ internal static class ActorFlow
     internal static readonly AsyncLocal<EvaluationFrame?> Frame = new();
 }
 
-// Flow-side rejections shared by the tracked-read entry points.
+// Flow-side rejections shared by the read entry points.
 internal static class ActorFlowGuards
 {
+    // The reverse direction of the engine-separation rule: a lock-engine computation that reads
+    // an actor node gets the value with NO dependency registered in either graph -- the actor
+    // engine tracks through ActorFlow frames, which lock computations do not carry, and the lock
+    // engine tracks through IMemoHandlR, which actor nodes deliberately do not implement. The
+    // computation would cache a value that no later actor-side Set can ever invalidate:
+    // permanent staleness, so the read is rejected on the flow. Context.Untrack remains the
+    // escape hatch -- an untracked snapshot read is exactly what it asks for (it clears
+    // CurrentReaction, so the capture predicate goes quiet). Detection is per-context (the
+    // node's own); a computation of a DIFFERENT context evaluating on this flow is not
+    // detectable from here.
+    public static void RejectUntrackedReadInsideLockComputation(ActorNodeBase node)
+    {
+        if (node.Context.IsComputationCapturing)
+        {
+            throw new InvalidOperationException(
+                "An actor-engine node was read from inside a lock-engine computation. The two engines " +
+                "cannot track dependencies across each other, so this read would never re-trigger the " +
+                "computation -- it would cache a permanently stale value. Keep a graph on one engine end " +
+                "to end, or wrap the read in Untrack for a deliberately untracked snapshot.");
+        }
+    }
+
     // A tracked read of a node that lives on a DIFFERENT GraphActor would capture a foreign
     // source: the reader's commit turn would then rewire that source's observer list while
     // running on the reader's actor -- mutating actor-confined state from the wrong actor (the
@@ -85,6 +107,11 @@ public abstract class ActorNodeBase
 {
     internal readonly GraphActor Actor;
 
+    // The owning context: actor nodes are citizens of exactly one context's graph (its actor
+    // serializes their bookkeeping), and the read guards use it to detect a lock-engine
+    // computation of the SAME context capturing on the current flow.
+    internal readonly Context Context;
+
     // Up/down links. Sources is swapped wholesale in commit turns (so a Scan may iterate a
     // snapshot off-actor); Observers is mutated in place -- safe here, unlike the lock-based
     // engine, precisely because only turns touch it. Observers are weak so dropped nodes are
@@ -108,9 +135,10 @@ public abstract class ActorNodeBase
         }
     }
 
-    internal ActorNodeBase(GraphActor actor, CacheState initialState)
+    internal ActorNodeBase(Context context, CacheState initialState)
     {
-        Actor = actor;
+        Context = context;
+        Actor = context.GraphActor;
         state = initialState;
     }
 
@@ -216,8 +244,8 @@ public abstract class ActorValueNode<T> : ActorNodeBase
 {
     private volatile Box box;
 
-    internal ActorValueNode(T initialValue, GraphActor actor, CacheState initialState)
-        : base(actor, initialState)
+    internal ActorValueNode(T initialValue, Context context, CacheState initialState)
+        : base(context, initialState)
     {
         box = new(initialValue);
     }

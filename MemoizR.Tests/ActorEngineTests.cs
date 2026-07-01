@@ -451,6 +451,29 @@ public class ActorEngineTests
         Assert.Equal(writes * 2 + 1, await m2.Get());
     }
 
+    // The reverse mixing direction: a lock-engine computation reading an actor node registers a
+    // dependency in NEITHER graph (lock computations carry no ActorFlow frame; actor nodes
+    // implement no lock-engine interface), so it would cache a value no later actor Set can
+    // invalidate. Rejected at the read; top-level reads stay legal (untracked by definition).
+    [Fact(Timeout = 10000)]
+    public async Task ActorRead_InsideALockEngineComputation_IsRejected()
+    {
+        var f = new MemoFactory();
+        var actorValue = f.CreateActorSignal(1);
+        var actorMemo = f.CreateActorMemoizR(async () => await actorValue.Get() + 1);
+
+        var readsActorSignal = f.CreateMemoizR(async () => await actorValue.Get());
+        var readsActorMemo = f.CreateMemoizR(async () => await actorMemo.Get());
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => readsActorSignal.Get());
+        Assert.Contains("lock-engine computation", ex.Message);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => readsActorMemo.Get());
+
+        // Outside any computation the same reads are fine -- and the actor graph still works.
+        Assert.Equal(1, await actorValue.Get());
+        Assert.Equal(2, await actorMemo.Get());
+    }
+
     // A tracked read of a node from another context would capture a foreign source, and the
     // commit turn would then mutate that source's observer list on the WRONG actor. Rejected at
     // the read, on the flow, with an error naming the mistake.

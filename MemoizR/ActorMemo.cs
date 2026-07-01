@@ -28,8 +28,8 @@ public sealed class ActorMemo<T> : ActorValueNode<T>
     private bool evaluating;
     private readonly List<TaskCompletionSource> waiters = [];
 
-    internal ActorMemo(Func<Task<T>> fn, GraphActor actor)
-        : base(default!, actor, CacheState.CacheDirty)
+    internal ActorMemo(Func<Task<T>> fn, Context context)
+        : base(default!, context, CacheState.CacheDirty)
     {
         this.fn = fn;
     }
@@ -37,12 +37,18 @@ public sealed class ActorMemo<T> : ActorValueNode<T>
     public Task<T> Get()
     {
         var frame = ActorFlow.Frame.Value;
-        if (frame == null && State == CacheState.CacheClean)
+        if (frame == null)
         {
-            // Lock-free fast path: volatile state (acquire) read before the value box, exactly
-            // the ADR 0001 rule-4 pairing -- a reader observing Clean sees the box of
-            // that-or-a-newer clean generation.
-            return Task.FromResult(Value);
+            ActorFlowGuards.RejectUntrackedReadInsideLockComputation(this);
+            if (State == CacheState.CacheClean)
+            {
+                // Lock-free fast path: volatile state (acquire) read before the value box,
+                // exactly the ADR 0001 rule-4 pairing -- a reader observing Clean sees the box
+                // of that-or-a-newer clean generation.
+                return Task.FromResult(Value);
+            }
+
+            return Drive(null, null);
         }
 
         ActorFlowGuards.RejectCrossActorRead(frame, this);

@@ -62,8 +62,16 @@ own in-flight evaluation is a cycle and throws; every other reader waits — inc
 sibling reads of one memo issued by the same computation, which share a flow but are not a cycle
 (bare flow identity, the first cut, wrongly rejected those). A tracked read of a node from a
 *different* context is rejected at the read: capturing a foreign source would make the reader's
-commit rewire another actor's observer list. Independent computations still run fully in
-parallel — the actor serializes *turns*, never user code (pinned by test).
+commit rewire another actor's observer list. Reads of actor nodes from inside a **lock-engine
+computation** are rejected the same way — the read would register in *neither* graph (lock
+computations carry no ActorFlow frame; actor nodes implement no lock-engine interface), so the
+computation would cache a value no actor-side Set can ever invalidate; `Untrack` remains the
+escape hatch for a deliberate snapshot read. The mirror direction — an actor computation
+reading a lock-engine node — has the same silent-staleness shape but is only detectable from
+the lock engine's getters, whose fast paths are the repo's most optimized; guarding it costs an
+AsyncLocal probe on the shipping hot path and is deliberately left open pending that trade-off.
+Independent computations still run fully in parallel — the actor serializes *turns*, never user
+code (pinned by test).
 
 Kept, deliberately:
 

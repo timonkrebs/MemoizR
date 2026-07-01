@@ -310,6 +310,12 @@ public class Context
     /// </summary>
     public bool IsEvaluationIsolated => AsyncLocalScope.Value != 0 && ReactionScope.ContextLock.IsHeldByCurrentFlow;
 
+    // A lock-engine computation is actively CAPTURING dependencies on this flow (a memo
+    // recompute or a reaction run; null during Set callbacks and inside Untrack). Read by the
+    // actor engine to reject cross-engine reads that would silently escape capture; the
+    // HasFlowScope short-circuit keeps unpinned flows from minting a throwaway scope.
+    internal bool IsComputationCapturing => HasFlowScope && ReactionScope.CurrentReaction is not null;
+
     /// <summary>
     /// Dynamic isolation check (issue #36), the runtime analog of Swift's
     /// <c>preconditionIsolated()</c>: throws when the current async flow is not inside a

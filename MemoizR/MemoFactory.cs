@@ -157,7 +157,7 @@ public sealed class MemoFactory
     public ActorSignal<T> CreateActorSignal<T>(T value)
     {
         EnsureSendableIfStrict<T>();
-        return new(value, Context.GraphActor);
+        return new(value, Context);
     }
 
     /// <summary>
@@ -169,7 +169,7 @@ public sealed class MemoFactory
     public ActorMemo<T> CreateActorMemoizR<T>(Func<Task<T>> fn)
     {
         EnsureSendableIfStrict<T>();
-        return new(fn, Context.GraphActor);
+        return new(fn, Context);
     }
 
     // Strict-mode boundary check (issue #36): every node type whose value crosses flows funnels

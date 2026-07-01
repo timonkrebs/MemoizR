@@ -10,8 +10,8 @@ namespace MemoizR;
 /// </summary>
 public sealed class ActorSignal<T> : ActorValueNode<T>
 {
-    internal ActorSignal(T value, GraphActor actor)
-        : base(value, actor, CacheState.CacheClean)
+    internal ActorSignal(T value, Context context)
+        : base(value, context, CacheState.CacheClean)
     {
     }
 
@@ -57,6 +57,8 @@ public sealed class ActorSignal<T> : ActorValueNode<T>
         var frame = ActorFlow.Frame.Value;
         if (frame == null)
         {
+            ActorFlowGuards.RejectUntrackedReadInsideLockComputation(this);
+
             // Untracked read: signals are always current; the box read is a complete value.
             return Task.FromResult(Value);
         }
