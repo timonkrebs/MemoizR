@@ -70,16 +70,12 @@ public sealed class CausalityStamp : IEquatable<CausalityStamp>
         return new(EventTree.Singleton(signalId, bits, trigger + 1), bits, epoch);
     }
 
-    // Diagnostic view; materialized per call (one entry per tracked signal).
-    public IReadOnlyDictionary<int, long> Triggers
-    {
-        get
-        {
-            var triggers = new Dictionary<int, long>();
-            root.CollectTracked(spanBits, 0, 0, triggers);
-            return triggers;
-        }
-    }
+    // A LAZY read-only view over the tree, in id order: lookups are O(tree depth), Count is
+    // O(tree size), and enumeration streams. Deliberately never materialized -- a dense foreign
+    // stamp can track billions of ids from a handful of tree nodes (that density IS the
+    // compression), so building a dictionary here would let a few wire bytes exhaust memory;
+    // only a caller that chooses to drain the enumeration pays for the density.
+    public IReadOnlyDictionary<int, long> Triggers => new TriggerView(this);
 
     public bool TryGetTrigger(int signalId, out long trigger)
     {
@@ -192,7 +188,13 @@ public sealed class CausalityStamp : IEquatable<CausalityStamp>
 
     public override string ToString()
     {
-        var map = "{" + string.Join(", ", Triggers.OrderBy(t => t.Key).Select(t => $"#{t.Key}: {t.Value}")) + "}";
+        // Streams the lazy view (already in id order) with a cap: a diagnostic string must not
+        // try to render the billions of entries a dense stamp can track.
+        const int maxRendered = 32;
+        var rendered = Triggers.Take(maxRendered + 1).ToList();
+        var truncated = rendered.Count > maxRendered;
+        var map = "{" + string.Join(", ", rendered.Take(maxRendered).Select(t => $"#{t.Key}: {t.Value}"))
+            + (truncated ? ", …" : "") + "}";
         return IsEmpty ? map : $"{map}@{Epoch:x}";
     }
 
@@ -492,26 +494,45 @@ public sealed class CausalityStamp : IEquatable<CausalityStamp>
         public EventTree Canonicalize() =>
             IsLeaf ? Leaf(N) : MkNode(N, Left!.Canonicalize(), Right!.Canonicalize());
 
-        public void CollectTracked(int bits, int baseId, long acc, Dictionary<int, long> into)
+        // Long arithmetic throughout: a leaf can span the full 31-bit id space, where 1 << bits
+        // overflows int and the tracked count can reach 2^31.
+        public long CountTracked(int bits, long acc)
         {
             var value = acc + N;
             if (IsLeaf)
             {
-                if (value == 0)
-                {
-                    return;
-                }
-                // Long arithmetic: a leaf can span the full 31-bit id space, where 1 << bits
-                // overflows int.
-                for (var id = (long)baseId; id < baseId + (1L << bits); id++)
-                {
-                    into[(int)id] = value - 1;
-                }
-                return;
+                return value == 0 ? 0 : 1L << bits;
             }
 
-            Left!.CollectTracked(bits - 1, baseId, value, into);
-            Right!.CollectTracked(bits - 1, baseId + (1 << (bits - 1)), value, into);
+            return Left!.CountTracked(bits - 1, value) + Right!.CountTracked(bits - 1, value);
+        }
+
+        // Streams the tracked (id, trigger) entries in id order without materializing them; the
+        // nested iterators cost O(tree depth <= 31) per element.
+        public static IEnumerable<KeyValuePair<int, long>> EnumerateTracked(EventTree tree, int bits, long baseId, long acc)
+        {
+            var value = acc + tree.N;
+            if (tree.IsLeaf)
+            {
+                if (value == 0)
+                {
+                    yield break;
+                }
+                for (var id = baseId; id < baseId + (1L << bits); id++)
+                {
+                    yield return new((int)id, value - 1);
+                }
+                yield break;
+            }
+
+            foreach (var entry in EnumerateTracked(tree.Left!, bits - 1, baseId, value))
+            {
+                yield return entry;
+            }
+            foreach (var entry in EnumerateTracked(tree.Right!, bits - 1, baseId + (1L << (bits - 1)), value))
+            {
+                yield return entry;
+            }
         }
 
         public void WriteTo(List<byte> bytes)
@@ -551,5 +572,37 @@ public sealed class CausalityStamp : IEquatable<CausalityStamp>
             var right = ReadFrom(bytes, ref position, bits - 1, pathSum + n);
             return new(n, left, right);
         }
+    }
+
+    // The lazy IReadOnlyDictionary over the tree behind Triggers. Stateless beyond the stamp
+    // reference; every operation delegates to the tree walkers.
+    private sealed class TriggerView(CausalityStamp stamp) : IReadOnlyDictionary<int, long>
+    {
+        public long this[int key] =>
+            stamp.TryGetTrigger(key, out var trigger) ? trigger : throw new KeyNotFoundException();
+
+        public IEnumerable<int> Keys => this.Select(entry => entry.Key);
+
+        public IEnumerable<long> Values => this.Select(entry => entry.Value);
+
+        // The interface caps Count at int; a stamp can track up to 2^31 ids (one more than
+        // int.MaxValue), so the count saturates rather than overflowing negative.
+        public int Count
+        {
+            get
+            {
+                var count = stamp.root.CountTracked(stamp.spanBits, 0);
+                return count > int.MaxValue ? int.MaxValue : (int)count;
+            }
+        }
+
+        public bool ContainsKey(int key) => stamp.TryGetTrigger(key, out _);
+
+        public bool TryGetValue(int key, out long value) => stamp.TryGetTrigger(key, out value);
+
+        public IEnumerator<KeyValuePair<int, long>> GetEnumerator() =>
+            EventTree.EnumerateTracked(stamp.root, stamp.spanBits, 0, 0).GetEnumerator();
+
+        System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
     }
 }

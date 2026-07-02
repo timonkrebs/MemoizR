@@ -40,7 +40,18 @@ public sealed class ConcurrentRace<T, I> : MemoHandlR<T>, IMemoizR, IStampedGetR
     public Task<(T Value, CausalityStamp Stamp)> GetWithStamp()
     {
         ActorFlowGuards.RejectLockNodeReadInsideActorComputation();
-        return Context.EvaluateUnderLockAsync(mutex, Update);
+        return Context.EvaluateUnderLockAsync(mutex, async () =>
+        {
+            // The capturing computation this read belongs to, resolved BEFORE Update installs
+            // the race as CurrentReaction: a race is uncached and registers no dependency edge,
+            // but the caller's value still consumed this result, so the caller's evidence must
+            // include the race's stamp (keyed by the race's id, like any derived source) or the
+            // causality of the signals the race read would silently vanish from the caller.
+            var caller = Context.ReactionScope.CurrentReaction;
+            var pair = await Update();
+            Context.RecordSourceStamp(caller, Id, pair.Stamp);
+            return pair;
+        });
     }
 
     /** run the computation fn, updating the cached value */
@@ -63,10 +74,12 @@ public sealed class ConcurrentRace<T, I> : MemoHandlR<T>, IMemoizR, IStampedGetR
 
         // Tracked reads by the racing branches (the parent-flow action plus the child tasks,
         // which inherit this scope) record the source stamps they observed to this node's
-        // bucket. The bucket is closed the MOMENT a winner is selected -- Run still awaits the
+        // bucket. The bucket is closed the MOMENT the winner is selected -- Run still awaits the
         // losers, so reads they perform after that point would otherwise land in the capture
         // and widen the published stamp with versions the winning value never consumed. The
-        // CompareExchange latch keeps the first close when a slower sibling also completes.
+        // job's win latch invokes the callback exactly once, atomically with recording the
+        // winning result, so the value and its capture always come from the same moment; the
+        // WhenAll join inside Run is the barrier that publishes winnerCapture to this flow.
         Context.BeginStampCapture(this);
         StampCapture? winnerCapture = null;
 
@@ -75,7 +88,7 @@ public sealed class ConcurrentRace<T, I> : MemoHandlR<T>, IMemoizR, IStampedGetR
             State = CacheState.Evaluating;
             using var job = new StructuredRaceJob<T, I>(action, fns, Context.CancellationTokenSource!)
             {
-                OnWinnerSelected = () => Interlocked.CompareExchange(ref winnerCapture, Context.TakeStampCapture(this), null),
+                OnWinnerSelected = () => winnerCapture = Context.TakeStampCapture(this),
             };
             var newValue = await job.Run(Context.CancellationTokenSource!.Token);
             PublishValueWithStamps(newValue, winnerCapture ?? Context.TakeStampCapture(this));

@@ -485,6 +485,26 @@ public class CausalityTriggerClockTests
     }
 
     [Fact]
+    public async Task Memo_ReadingARace_InheritsTheRaceEvidence()
+    {
+        var f = new MemoFactory();
+        var s = f.CreateSignal(3);
+        var race = f.CreateConcurrentRace<int, int>(
+            async () => await s.Get(),
+            (_, i) => Task.FromResult(i * 2));
+        var m = f.CreateMemoizR(async () => await race.Get() + 1);
+
+        Assert.Equal(7, await m.Get());
+
+        // A race registers no dependency edge (it is uncached), but the memo's value still
+        // consumed its result: the race's stamp must flow into the caller's evidence like any
+        // derived source's, or the causality of the signals the race read would vanish.
+        Assert.True(m.Stamp.TryGetTrigger(s.Id, out var trigger));
+        Assert.Equal(0, trigger);
+        Assert.Equal(race.Stamp, m.SourceStamps[race.Id]);
+    }
+
+    [Fact]
     public async Task Signal_ConcurrentDistinctSets_CountEveryChange()
     {
         var f = new MemoFactory();

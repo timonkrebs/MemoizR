@@ -277,6 +277,23 @@ public class CausalityStampEncodingTests
     }
 
     [Fact]
+    public void DenseForeignStamp_StaysLazy_AndNeverMaterializes()
+    {
+        // Six wire bytes claiming 2^30 tracked ids (the upper half of a spanBits-31 tree).
+        // Density is legitimate compression, so the payload must parse -- but Triggers is a
+        // lazy view and ToString caps its rendering, so no operation here materializes the
+        // 2^30 entries a hostile payload could otherwise turn into memory exhaustion.
+        var dense = CausalityStamp.Deserialize(new byte[] { 2, 9, 31, 0, 1, 3 });
+
+        Assert.True(dense.TryGetTrigger(1 << 30, out var trigger));
+        Assert.Equal(0, trigger);
+        Assert.False(dense.Triggers.ContainsKey(5));
+        Assert.Equal(1 << 30, dense.Triggers.Count);          // O(tree), not O(entries)
+        Assert.Equal(1 << 30, dense.Triggers.Keys.First());   // streaming, id order
+        Assert.EndsWith(", …}@9", dense.ToString());          // bounded rendering
+    }
+
+    [Fact]
     public void LargeIds_NearTheEdgeOfTheIdSpace_Work()
     {
         var huge = CausalityStamp.ForSignal(int.MaxValue, 7, Epoch).Join(CausalityStamp.ForSignal(3, 1, Epoch));

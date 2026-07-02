@@ -239,3 +239,10 @@ truncate into a *different* valid value), the epoch must fit the positive signed
 must not overflow `long`. It then **re-canonicalizes** defensively, so the equality and
 determinism guarantees hold for any parseable input, not just payloads we produced
 (`Deserialize_CanonicalizesForeignInput`).
+
+Density is deliberately *not* rejected — a leaf spanning millions of ids is the compression
+working as designed — so the surfaces that could amplify it stay lazy: `Triggers` is a
+read-only **view** over the tree (O(depth) lookups, O(tree) `Count`, streaming enumeration in
+id order) and `ToString` caps its rendering. A hostile six-byte payload claiming 2³⁰ tracked
+ids therefore parses, joins and queries cheaply, and only a caller that chooses to drain the
+enumeration pays for the density (`DenseForeignStamp_StaysLazy_AndNeverMaterializes`).
