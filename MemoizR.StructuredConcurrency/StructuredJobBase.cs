@@ -9,41 +9,12 @@ public abstract class StructuredJobBase<T>
     protected T? result;
     protected AsyncLock mutex = new();
 
-    // Sources captured by the parallel child tasks, accumulated under Lock; the owning node's
-    // HandleSubscriptions reads them after the Task.WhenAll join (the join is the barrier).
-    private protected IList<IMemoHandlR> allSources = [];
-    private protected Lock Lock { get; } = new();
-
     protected abstract Task AddConcurrentWork(StructuredResourceGroup resourceGroup);
 
+    // Called on the success path after the run completes. The source-wiring jobs override it (via
+    // OwnedStructuredJob) to publish their captured dependencies onto the owning node; the race,
+    // which captures eagerly during evaluation and owns no node, keeps this no-op.
     protected virtual void HandleSubscriptions() { }
-
-    // Folds the sources captured on the given scope into allSources and appends the owning
-    // node to each new source's observer down-links, under Lock (children run in parallel).
-    // Shared by the reduce/results jobs, whose children each call it after running one mapped fn.
-    //
-    // A child's reads split between prefix-matches against the owner's previous Sources
-    // (CurrentGetsIndex) and fresh captures (CurrentGets); BOTH must be unioned in. The previous
-    // replace-on-index-0 branch let each forced-scope child overwrite its siblings' captures, and
-    // prefix-matched re-runs contributed nothing at all -- either way HandleSubscriptions then
-    // wired the owner's Sources to a subset (or none) of its real dependencies, and the owner's
-    // CacheCheck parent scan missed invalidations: a deterministic stale read.
-    private protected void AccumulateSourcesAndObservers(ReactionScope scope, IMemoizR owner)
-    {
-        lock (Lock)
-        {
-            foreach (var source in owner.Sources.Take(scope.CurrentGetsIndex))
-            {
-                allSources.Add(source);
-            }
-            foreach (var source in scope.CurrentGets)
-            {
-                allSources.Add(source);
-                // Usually a no-op: capture-time eager subscription already wired the link.
-                source.AddObserver(owner);
-            }
-        }
-    }
 
     public async Task<T> Run(CancellationToken token)
     {
