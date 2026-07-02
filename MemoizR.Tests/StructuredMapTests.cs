@@ -4,6 +4,23 @@ namespace MemoizR.Tests.StructuredConcurrency
 {
     public class ConcurrentMapTests
     {
+        // The shared value must not be castable back to a writable array: one reader mutating
+        // it would race every other flow, bypassing the Sendable rules that reject arrays as
+        // writable shared state. The map publishes an O(1) read-only wrapper instead.
+        [Fact(Timeout = 10000)]
+        public async Task ConcurrentMap_PublishesAReadOnlyValue_NotTheBackingArray()
+        {
+            var f = new MemoFactory();
+            var map = f.CreateConcurrentMap(
+                async (cts) => 1,
+                async (cts) => 2);
+
+            var value = await map.Get();
+
+            Assert.Equal([1, 2], value);
+            Assert.IsNotType<int[]>(value, exactMatch: false);
+        }
+
         [Fact(Timeout = 1000)]
         public async Task TestConcurrentMap()
         {
