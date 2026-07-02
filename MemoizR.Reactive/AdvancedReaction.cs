@@ -1,4 +1,4 @@
-﻿namespace MemoizR.Reactive;
+namespace MemoizR.Reactive;
 
 public sealed class AdvancedReaction : ReactionBase
 {
@@ -6,9 +6,9 @@ public sealed class AdvancedReaction : ReactionBase
 
     internal AdvancedReaction(Func<Task> fn,
     Context context,
-    SynchronizationContext? synchronizationContext = null,
+    IExecutor? executor = null,
     TimeProvider? timeProvider = null)
-    : base(context, synchronizationContext, timeProvider)
+    : base(context, executor, timeProvider)
     {
         this.fn = fn;
         // The eager initial run is NOT started here: the builder calls ScheduleInitialRun()

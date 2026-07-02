@@ -1,4 +1,4 @@
-﻿using System.Collections.Concurrent;
+using System.Collections.Concurrent;
 
 namespace MemoizR.StructuredConcurrency;
 
@@ -33,6 +33,8 @@ public sealed class StructuredResultsJob<T> : OwnedStructuredJob<ConcurrentDicti
         // whose CurrentReaction is null, and the child's dependencies are silently not captured.
         var scope = context.ForceNewScope();
         scope.CurrentReaction = owner;
+        var prevAmbientContext = LockEngineFlow.EvaluatingContext.Value;
+        LockEngineFlow.EvaluatingContext.Value = context;
         try
         {
             result!.TryAdd(i, await x(resourceGroup));
@@ -41,6 +43,10 @@ public sealed class StructuredResultsJob<T> : OwnedStructuredJob<ConcurrentDicti
         {
             cancellationTokenSource.Cancel();
             throw;
+        }
+        finally
+        {
+            LockEngineFlow.EvaluatingContext.Value = prevAmbientContext;
         }
         AccumulateSourcesAndObservers(scope);
         GC.KeepAlive(scope);

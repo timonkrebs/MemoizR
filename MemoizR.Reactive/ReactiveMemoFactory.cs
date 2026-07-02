@@ -4,9 +4,21 @@ namespace MemoizR;
 
 public static class ReactiveMemoFactory
 {
+    /// <summary>
+    /// Pins the side effects of reactions built from this factory to an executor (a UI thread's
+    /// SynchronizationContext wrapped in a <see cref="SynchronizationContextExecutor"/>, a
+    /// <see cref="DedicatedThreadExecutor"/>, or a custom <see cref="IExecutor"/>) -- the custom
+    /// actor executor analog (SE-0392, issue #36). Applies to reactions built AFTER the call.
+    /// </summary>
+    public static MemoFactory AddExecutor(this MemoFactory memoFactory, IExecutor executor)
+    {
+        memoFactory.Executor = executor;
+        return memoFactory;
+    }
+
     public static MemoFactory AddSynchronizationContext(this MemoFactory memoFactory, SynchronizationContext synchronizationContext)
     {
-        memoFactory.SynchronizationContext = synchronizationContext;
+        memoFactory.Executor = new SynchronizationContextExecutor(synchronizationContext);
         return memoFactory;
     }
 
@@ -22,7 +34,7 @@ public static class ReactiveMemoFactory
 
     public static ReactionBuilder BuildReaction(this MemoFactory memoFactory, string label = "Reaction")
     {
-        return new(memoFactory, memoFactory.SynchronizationContext, label);
+        return new(memoFactory, memoFactory.Executor, label);
     }
 
     // Factory-level sugar for the common case: identical to BuildReaction().CreateReaction(..)
@@ -109,4 +121,5 @@ public static class ReactiveMemoFactory
     public static Reaction CreateReaction<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15, T16>(this MemoFactory memoFactory, IStateGetR<T1> memo1, IStateGetR<T2> memo2, IStateGetR<T3> memo3, IStateGetR<T4> memo4, IStateGetR<T5> memo5, IStateGetR<T6> memo6, IStateGetR<T7> memo7, IStateGetR<T8> memo8, IStateGetR<T9> memo9, IStateGetR<T10> memo10, IStateGetR<T11> memo11, IStateGetR<T12> memo12, IStateGetR<T13> memo13, IStateGetR<T14> memo14, IStateGetR<T15> memo15, IStateGetR<T16> memo16, Action<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15, T16> action)
     {
         return memoFactory.BuildReaction().CreateReaction(memo1, memo2, memo3, memo4, memo5, memo6, memo7, memo8, memo9, memo10, memo11, memo12, memo13, memo14, memo15, memo16, action);
-    }}
+    }
+}

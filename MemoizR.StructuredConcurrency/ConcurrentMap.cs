@@ -19,8 +19,11 @@ public sealed class ConcurrentMap<T> : MemoBase<IEnumerable<T>>
         var results = await new StructuredResultsJob<T>(fns, Context!, this).Run(Context.CancellationTokenSource!.Token);
         // Materialized, in fns order: ConcurrentDictionary enumeration order is an implementation
         // detail (bucket order), and a lazy Select would re-enumerate -- and could re-order --
-        // on every read and every ValuesEqual comparison.
-        return results.OrderBy(x => x.Key).Select(x => x.Value).ToArray();
+        // on every read and every ValuesEqual comparison. Published READ-ONLY (an O(1) wrapper):
+        // the value is shared by every reader on every flow, and a bare array behind the
+        // IEnumerable could be cast back to T[] and mutated -- the very writable-shared-state
+        // shape the Sendable rules reject arrays for.
+        return Array.AsReadOnly(results.OrderBy(x => x.Key).Select(x => x.Value).ToArray());
     }
 
     // The results job's parallel children capture and wire the source/observer links themselves
