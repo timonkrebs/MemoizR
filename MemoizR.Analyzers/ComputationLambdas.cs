@@ -79,22 +79,8 @@ internal static class ComputationLambdas
                 }
 
                 break;
-            case ILocalReferenceOperation localReference:
-                foreach (var body in BodiesFromVariableInitializer(localReference.Local, semanticModel, visitedVariables))
-                {
-                    yield return body;
-                }
-
-                break;
-            case IFieldReferenceOperation fieldReference:
-                foreach (var body in BodiesFromVariableInitializer(fieldReference.Field, semanticModel, visitedVariables))
-                {
-                    yield return body;
-                }
-
-                break;
-            case IPropertyReferenceOperation propertyReference:
-                foreach (var body in BodiesFromVariableInitializer(propertyReference.Property, semanticModel, visitedVariables))
+            case ILocalReferenceOperation or IFieldReferenceOperation or IPropertyReferenceOperation:
+                foreach (var body in BodiesFromVariableInitializer(ReferencedVariable(value), semanticModel, visitedVariables))
                 {
                     yield return body;
                 }
@@ -103,16 +89,27 @@ internal static class ComputationLambdas
         }
     }
 
+    private static ISymbol? ReferencedVariable(IOperation reference)
+    {
+        return reference switch
+        {
+            ILocalReferenceOperation local => local.Local,
+            IFieldReferenceOperation field => field.Field,
+            IPropertyReferenceOperation property => property.Property,
+            _ => null,
+        };
+    }
+
     // `Func<Task<int>> compute = async () => ...; f.CreateMemoizR(compute);` is the same
     // computation as the inline form, reached through a variable. Best-effort resolution: the
     // variable's same-tree INITIALIZER (a later reassignment is dataflow the analyzer does not
     // chase -- the runtime checks cover what this cannot see, like the method-group rule
     // above). The visited set breaks initializer reference cycles (two fields initialized from
     // each other).
-    private static IEnumerable<ComputationBody> BodiesFromVariableInitializer(ISymbol variable, SemanticModel? semanticModel, HashSet<ISymbol>? visitedVariables)
+    private static IEnumerable<ComputationBody> BodiesFromVariableInitializer(ISymbol? variable, SemanticModel? semanticModel, HashSet<ISymbol>? visitedVariables)
     {
         visitedVariables ??= new HashSet<ISymbol>(SymbolEqualityComparer.Default);
-        if (semanticModel is null || !visitedVariables.Add(variable))
+        if (variable is null || semanticModel is null || !visitedVariables.Add(variable))
         {
             yield break;
         }
