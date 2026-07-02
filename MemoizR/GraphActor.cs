@@ -28,8 +28,16 @@ public sealed class GraphActor : IExecutor
     [ThreadStatic]
     private static GraphActor? running;
 
+    // Installed for the duration of every turn: ASYNC work enqueued on the actor (a reaction
+    // pinned to it as its IExecutor) captures this context at its awaits, so each continuation
+    // segment posts back as a new turn instead of escaping to the thread pool -- IsCurrent
+    // stays true across the whole async body, exactly like DedicatedThreadExecutor's installed
+    // context. Graph bookkeeping turns never await, so for them the context is inert.
+    private readonly SynchronizationContext continuationsContext;
+
     public GraphActor()
     {
+        continuationsContext = new ActorSynchronizationContext(this);
         _ = RunLoop();
     }
 
@@ -94,18 +102,49 @@ public sealed class GraphActor : IExecutor
     private async Task RunLoop()
     {
         // Turn delegates own their exceptions (they complete a TCS), so nothing here can throw
-        // past the marker bookkeeping -- the loop survives any turn.
+        // past the marker bookkeeping -- the loop survives any turn. The loop hops pool threads
+        // between turns, so the continuation context is installed and restored PER TURN.
         await foreach (var turn in turns.Reader.ReadAllAsync().ConfigureAwait(false))
         {
             running = this;
+            var previousContext = SynchronizationContext.Current;
+            SynchronizationContext.SetSynchronizationContext(continuationsContext);
             try
             {
                 turn();
             }
             finally
             {
+                SynchronizationContext.SetSynchronizationContext(previousContext);
                 running = null;
             }
+        }
+    }
+
+    // Posts continuations back to the actor as fresh turns. Each continuation SEGMENT (the code
+    // between awaits) is synchronous, so the turns-never-await invariant holds; the actor is
+    // never blocked across the await itself -- other turns interleave freely.
+    private sealed class ActorSynchronizationContext(GraphActor actor) : SynchronizationContext
+    {
+        public override void Post(SendOrPostCallback d, object? state)
+        {
+            actor.Enqueue(() => d(state));
+        }
+
+        public override void Send(SendOrPostCallback d, object? state)
+        {
+            if (actor.IsCurrent)
+            {
+                d(state);
+                return;
+            }
+
+            actor.Run(() => d(state)).GetAwaiter().GetResult();
+        }
+
+        public override SynchronizationContext CreateCopy()
+        {
+            return this;
         }
     }
 }

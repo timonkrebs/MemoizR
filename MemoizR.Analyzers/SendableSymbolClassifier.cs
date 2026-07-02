@@ -231,13 +231,24 @@ internal sealed class SendableSymbolClassifier
         {
             var attributeClass = attribute.AttributeClass;
             if (attributeClass is { Name: "SendableAttribute" }
-                && attributeClass.ContainingNamespace?.ToDisplayString() == "MemoizR")
+                && attributeClass.ContainingNamespace?.ToDisplayString() == "MemoizR"
+                && IsTheMemoizRAttribute(attributeClass))
             {
                 return true;
             }
         }
 
         return false;
+    }
+
+    // The trust escape hatch must be THE library's attribute, not a source-shadowed lookalike
+    // (which binds over the referenced one with a conflict warning): strict runtime mode checks
+    // typeof(MemoizR.SendableAttribute) identity and would reject the same type, so trusting a
+    // fake here would leave the analyzer silent for a value that throws at node creation.
+    private static bool IsTheMemoizRAttribute(INamedTypeSymbol attributeClass)
+    {
+        return !attributeClass.Locations.Any(location => location.IsInSource)
+            && attributeClass.ContainingAssembly?.Identity.Name == "MemoizR";
     }
 
     // Categories that can never be verified structurally, whatever their fields say.

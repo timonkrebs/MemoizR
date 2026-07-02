@@ -847,4 +847,27 @@ public class GraphActorTests
         executor.Enqueue(() => tcs.SetResult(executor.IsCurrent));
         Assert.True(await tcs.Task);
     }
+
+    // Async work pinned to the actor (an advanced reaction using it as its IExecutor) must stay
+    // on the actor ACROSS awaits: the per-turn installed SynchronizationContext posts each
+    // continuation segment back as a new turn. Without it, everything after the first await
+    // escaped to the thread pool with IsCurrent == false, failing executor.AssertIsolated() in
+    // code that was explicitly pinned to this executor.
+    [Fact(Timeout = 10000)]
+    public async Task GraphActorExecutor_AsyncContinuations_ResumeOnTheActor()
+    {
+        IExecutor executor = new GraphActor();
+        var result = new TaskCompletionSource<(bool BeforeAwait, bool AfterAwait)>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        executor.Enqueue(async () =>
+        {
+            var beforeAwait = executor.IsCurrent;
+            await Task.Yield();
+            result.TrySetResult((beforeAwait, executor.IsCurrent));
+        });
+
+        var (before, after) = await result.Task;
+        Assert.True(before);
+        Assert.True(after);
+    }
 }

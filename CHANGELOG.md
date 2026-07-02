@@ -56,7 +56,10 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
   single static-bool branch per read), scan-crossed dependency cycles surface as the new
   `CyclicDependencyException` instead of hiding behind a stale serve, and
   `EagerRelativeSignal.Set` pins the scope it locks so `AssertEvaluationIsolated` recognizes
-  its callbacks.
+  its callbacks. `GraphActor` turns install a SynchronizationContext that posts continuations
+  back as fresh turns, so async work pinned to the actor as its executor stays on the actor
+  across awaits, and `ConcurrentMap` publishes its materialized results read-only so the shared
+  value cannot be cast back to the backing array and mutated.
 - `CreateReaction(...)` convenience overloads directly on the factory — sugar for `BuildReaction().CreateReaction(...)` with the default label and debounce
 - MemoizR.Wpf package: `AddWpfDispatcher` routes reaction actions to the WPF UI thread (via `Application.Current.Dispatcher` or an explicit `Dispatcher`) while the dependency graph keeps evaluating on the thread pool (#13)
 

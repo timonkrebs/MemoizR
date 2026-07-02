@@ -87,7 +87,8 @@ verdict computed mid-recursion can rest on an unproven cycle assumption about an
 creation validate its value type and throw `InvalidOperationException` with the structural
 reason and fix guidance. Enforced on: `CreateSignal<T>`, `CreateEagerRelativeSignal<T>`,
 `CreateMemoizR<T>`, `CreateConcurrentMap<T>` (the *element* type — the enumerable wrapper is
-rebuilt per recompute, the elements are the shared payload), `CreateConcurrentMapReduce<T>`, and
+rebuilt per recompute and published READ-ONLY, so it cannot be cast back to the backing array
+and mutated; the elements are the shared payload), `CreateConcurrentMapReduce<T>`, and
 `CreateConcurrentRace<T, R>` (both `T` and `R`: the resolver's `R` is handed to every racing
 child in parallel).
 

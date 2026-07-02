@@ -166,6 +166,43 @@ public class SendableTypeArgumentAnalyzerTests
     }
 
     [Fact]
+    public async Task SourceShadowedSendableAttribute_IsNotTrusted()
+    {
+        // A source-declared MemoizR.SendableAttribute binds over the library's (with a conflict
+        // warning); trusting it would leave MZR001 silent for a type strict runtime mode
+        // rejects, since the runtime checks typeof identity of the REAL attribute.
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            namespace MemoizR
+            {
+                public sealed class SendableAttribute : System.Attribute
+                {
+                }
+            }
+
+            [MemoizR.Sendable]
+            public sealed class ClaimsToBeSafe
+            {
+                public int State;
+            }
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    f.CreateSignal(new ClaimsToBeSafe());
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR001", diagnostic.Id);
+        Assert.Contains("State", diagnostic.GetMessage());
+    }
+
+    [Fact]
     public async Task SourceDeclaredKnownImmutableLookalike_IsFlagged()
     {
         // Same rule as the collection lookalike below, applied to the known-immutable

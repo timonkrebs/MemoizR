@@ -36,7 +36,10 @@ Get ──fast path (2 volatile reads)──────────────
 `GraphActor` implements `IExecutor` (ADR 0005) with exact `IsCurrent` identity, so every
 actor-confined mutator carries the layer-3 dynamic check (`Actor.AssertIsolated()`, DEBUG-only):
 the confinement claim is *proven on every operation of every Debug test run*, not asserted in
-prose. The loop parks on its own channel when idle and holds no external roots, so a dropped
+prose. Turns run under an installed `SynchronizationContext` that posts continuations back as
+fresh turns, so ASYNC work pinned to the actor as its executor (an advanced reaction, say)
+stays on the actor across its awaits — each continuation segment is synchronous, preserving the
+turns-never-await invariant, and the actor is never held across the await itself. The loop parks on its own channel when idle and holds no external roots, so a dropped
 context is collectable, actor and all.
 
 The engine ships as a parallel, deliberately type-separated surface —
