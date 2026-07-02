@@ -29,13 +29,25 @@ public sealed class MemoFactory
     public MemoFactoryOptions Options { get; }
 
     public MemoFactory(string? contextKey = null, MemoFactoryOptions options = MemoFactoryOptions.None)
+        : this(contextKey, 1, int.MaxValue, options)
     {
+    }
+
+    // Pins this factory's context to the node-id slice [idRangeStart, idRangeEnd): distributed
+    // peers use disjoint slices so causality stamps merged across peers can never collide on an
+    // id, and a contiguous slice keeps merged stamps compact (see
+    // docs/architecture/causality-trigger-clock.md). Rebinding an existing context key to a
+    // different slice is a configuration conflict and throws.
+    public MemoFactory(string? contextKey, int idRangeStart, int idRangeEnd = int.MaxValue, MemoFactoryOptions options = MemoFactoryOptions.None)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(idRangeStart);
+        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(idRangeEnd, idRangeStart);
         Options = options;
 
         // Default context is mapped to empty string
         if (string.IsNullOrWhiteSpace(contextKey))
         {
-            Context = new();
+            Context = new(idRangeStart, idRangeEnd);
             return;
         }
 
@@ -50,17 +62,23 @@ public sealed class MemoFactory
             {
                 if (weakContext.TryGetTarget(out var context))
                 {
+                    if (context.IdRangeStart != idRangeStart || context.IdRangeEnd != idRangeEnd)
+                    {
+                        throw new ArgumentException(
+                            $"Context key '{contextKey}' is already bound to the node-id slice [{context.IdRangeStart}, {context.IdRangeEnd}) and cannot be rebound to [{idRangeStart}, {idRangeEnd}).",
+                            nameof(contextKey));
+                    }
                     Context = context;
                 }
                 else
                 {
-                    Context = new();
+                    Context = new(idRangeStart, idRangeEnd);
                     weakContext.SetTarget(Context);
                 }
             }
             else
             {
-                Context = new();
+                Context = new(idRangeStart, idRangeEnd);
                 CONTEXTS.Add(contextKey, new(Context));
             }
         }

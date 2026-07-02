@@ -7,7 +7,7 @@ namespace MemoizR.StructuredConcurrency;
 // observers straight to CacheDirty: a race result is non-memoized, so observers cannot verify
 // "did it really change?" via a cheap re-check and must recompute. The inherited stateCell is
 // intentionally unused; State here is only a cycle-detection marker.
-public sealed class ConcurrentRace<T, I> : MemoHandlR<T>, IMemoizR, IStateGetR<T>
+public sealed class ConcurrentRace<T, I> : MemoHandlR<T>, IMemoizR, IStampedGetR<T>
 {
     private CacheState State { get; set; } = CacheState.CacheDirty;
     private readonly Func<Task<I>> action;
@@ -30,15 +30,21 @@ public sealed class ConcurrentRace<T, I> : MemoHandlR<T>, IMemoizR, IStateGetR<T
     }
 
     // A race recomputes on every Get (no clean fast path); the locked evaluation scaffold is the
-    // shared one. Update returns the value, so the generic overload threads it straight through.
-    public Task<T> Get()
+    // shared one. Update returns the freshly published (value, stamp) pair, so both entry points
+    // thread it straight through.
+    public async Task<T> Get()
+    {
+        return (await GetWithStamp()).Value;
+    }
+
+    public Task<(T Value, CausalityStamp Stamp)> GetWithStamp()
     {
         ActorFlowGuards.RejectLockNodeReadInsideActorComputation();
         return Context.EvaluateUnderLockAsync(mutex, Update);
     }
 
     /** run the computation fn, updating the cached value */
-    private async Task<T> Update()
+    private async Task<(T Value, CausalityStamp Stamp)> Update()
     {
         if (State == CacheState.Evaluating) throw new InvalidOperationException("Cyclic behavior detected");
         var oldValue = Value;
@@ -55,11 +61,17 @@ public sealed class ConcurrentRace<T, I> : MemoHandlR<T>, IMemoizR, IStateGetR<T
         var prevAmbientContext = LockEngineFlow.EvaluatingContext.Value;
         LockEngineFlow.EvaluatingContext.Value = Context;
 
+        // Tracked reads by the racing branches (the parent-flow action plus the child tasks,
+        // which inherit this scope) record the source stamps they observed to this node's
+        // bucket; a loser that reads after the winner published finds the bucket closed and is
+        // dropped, so the published stamp only ever describes reads that fed this publication.
+        Context.BeginStampCapture(this);
+
         try
         {
             State = CacheState.Evaluating;
             using var job = new StructuredRaceJob<T, I>(action, fns, Context.CancellationTokenSource!);
-            Value = await job.Run(Context.CancellationTokenSource!.Token);
+            PublishValueWithCapturedStamps(await job.Run(Context.CancellationTokenSource!.Token));
             State = CacheState.CacheClean;
         }
         catch
@@ -69,6 +81,8 @@ public sealed class ConcurrentRace<T, I> : MemoHandlR<T>, IMemoizR, IStateGetR<T
         }
         finally
         {
+            // Drop a capture left open by the failure paths; a no-op after a successful publish.
+            Context.TakeStampCapture(this);
             scope.CurrentGets = prevGets;
             scope.CurrentReaction = prevReaction;
             scope.CurrentGetsIndex = prevIndex;
@@ -81,7 +95,9 @@ public sealed class ConcurrentRace<T, I> : MemoHandlR<T>, IMemoizR, IStateGetR<T
             MarkObserversDirty();
         }
 
-        return Value;
+        // The node mutex is still held: nothing can republish between the update above and this
+        // box read, so the pair is the one this update produced.
+        return ValueAndStamp;
     }
 
     // Same scaffold as Get; the recomputed value is awaited for effect and discarded.

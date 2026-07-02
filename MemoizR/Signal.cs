@@ -1,11 +1,11 @@
 namespace MemoizR;
 
-public sealed class Signal<T> : MemoHandlR<T>, IStateGetR<T?>
+public sealed class Signal<T> : MemoHandlR<T>, IStampedGetR<T?>
 {
     private Lock Lock { get; } = new();
     internal Signal(T value, Context context) : base(context)
     {
-        Value = value;
+        SetValueAndStamp(value, CausalityStamp.ForSignal(Id, 0, context.Epoch));
     }
 
     public async Task Set(T value)
@@ -24,14 +24,21 @@ public sealed class Signal<T> : MemoHandlR<T>, IStateGetR<T?>
                     // The value did not change: nothing derived from this signal can have become
                     // stale, so do not notify. (Propagating CacheCheck here bumped observer
                     // generations and refused their in-flight commits -- under an equal-value
-                    // write storm a long recompute could never commit at all.)
+                    // write storm a long recompute could never commit at all.) The causality
+                    // trigger counts value CHANGES (issue #39), so it is not bumped either.
                     return;
                 }
 
                 // only updating the value should be locked
                 lock (Lock)
                 {
-                    Value = value;
+                    // Read the current trigger and publish (value, trigger + 1) under the same
+                    // monitor: concurrent Sets run under different flows' ContextLocks, so this
+                    // Lock is what makes the trigger read-modify-write atomic. The bumped stamp
+                    // rides in the same box swap as the value, so readers can never pair them
+                    // inconsistently.
+                    Stamp.TryGetTrigger(Id, out var trigger);
+                    SetValueAndStamp(value, CausalityStamp.ForSignal(Id, trigger + 1, Context.Epoch));
                 }
 
                 await PropagateStaleToObserversAsync(CacheState.CacheDirty);
@@ -43,11 +50,15 @@ public sealed class Signal<T> : MemoHandlR<T>, IStateGetR<T?>
         }
     }
 
-    // Tracked read shared with EagerRelativeSignal.Get via MemoHandlR.TrackDependency; each reads
-    // its own Value, so the nullable (Signal) / non-nullable (EagerRelativeSignal) return is exact.
+    // Tracked read shared with EagerRelativeSignal via MemoHandlR.TrackDependencyAndRead; the
+    // (T, stamp) pair converts to this signal's nullable (T?, stamp) surface.
     public async Task<T?> Get()
     {
-        await TrackDependency();
-        return Value;
+        return (await TrackDependencyAndRead()).Value;
+    }
+
+    public async Task<(T? Value, CausalityStamp Stamp)> GetWithStamp()
+    {
+        return await TrackDependencyAndRead();
     }
 }

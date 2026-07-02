@@ -41,11 +41,49 @@ public abstract class SignalHandlR : IMemoHandlR
     // recompute state), they just carry the tiny unused cell so the protocol lives in one place.
     internal readonly CacheStateCell stateCell = new(CacheState.CacheClean);
 
+    private static readonly IReadOnlyDictionary<int, CausalityStamp> NoSourceStamps = new Dictionary<int, CausalityStamp>();
+
+    /// <summary>
+    /// Stable per-context identity for causality stamps (issue #39): signals appear in stamps
+    /// under this id, and derived nodes key their per-source stamp map by it.
+    /// </summary>
+    public int Id { get; }
+
+    // Backs SourceStamps: swap-published as a whole map that is never mutated after publish;
+    // volatile so readers get a coherent reference without a lock. Written only through the
+    // publish helpers below and MemoHandlR.PublishValueWithCapturedStamps.
+    private protected volatile IReadOnlyDictionary<int, CausalityStamp> sourceStamps = NoSourceStamps;
+
+    /// <summary>
+    /// "Every Node keeps a Stamp for each of its Sources" (issue #39): the stamp observed on
+    /// each tracked source read of the last completed evaluation, keyed by source id -- the
+    /// data a distributed sync layer exchanges. Signals keep the empty map.
+    /// </summary>
+    public IReadOnlyDictionary<int, CausalityStamp> SourceStamps => sourceStamps;
+
+    // The node's own published stamp: which signal versions its current state reflects. Value
+    // nodes override Stamp to read it from the same volatile box as the value (an untorn
+    // pair); this base field carries it for reactions, which have no value box.
+    private volatile CausalityStamp ownStamp = CausalityStamp.Empty;
+
+    public virtual CausalityStamp Stamp => ownStamp;
+
+    // Publish the source stamps captured during a completed evaluation of a VALUE-LESS node
+    // (reactions): the node's own stamp is their join. Value nodes publish through
+    // MemoHandlR.PublishValueWithCapturedStamps instead, which pairs the join with the value.
+    internal void PublishCapturedStamps()
+    {
+        var captured = Context.TakeStampCapture(this);
+        ownStamp = CausalityStamp.JoinAll(captured.Values);
+        sourceStamps = captured;
+    }
+
     public string Label { get; init; } = "Label";
 
     internal SignalHandlR(Context context)
     {
         this.Context = context;
+        this.Id = context.NextNodeId();
     }
 
     // Atomic add-if-absent on our observer down-links. The membership check and the array swap
@@ -221,33 +259,59 @@ public abstract class MemoHandlR<T> : SignalHandlR
     // generic overload is class-constrained), and a large struct T can tear under a concurrent
     // write. So the value is published through an immutable box held in a single volatile
     // reference: a write swaps in a fully-constructed box (an atomic reference store with release
-    // semantics), and a read takes the reference once and returns its readonly field -- always a
-    // complete, untorn value. Every Update writes Value before setting State = CacheClean (a
+    // semantics), and a read takes the reference once and returns its readonly fields -- always a
+    // complete, untorn value. Every Update writes the box before setting State = CacheClean (a
     // volatile release) and the fast path reads State (a volatile acquire) before Value, so a
     // reader that observes CacheClean is guaranteed to see the box of that-or-a-newer clean
     // generation. The read is therefore a linearizable snapshot, not an eventually-consistent one.
-    private volatile ValueBox valueBox = new(default!);
+    // The causality stamp rides in the same box (issue #39): the stamp describing which signal
+    // versions the value reflects is published in the same atomic swap, so a (value, stamp) pair
+    // can never be split by a concurrent write.
+    private volatile ValueBox valueBox = new(default!, CausalityStamp.Empty);
 
-    internal T Value
+    internal T Value => valueBox.Value;
+
+    public override CausalityStamp Stamp => valueBox.Stamp;
+
+    // The (value, stamp) pair of one publication -- a single volatile box read, never torn.
+    internal (T Value, CausalityStamp Stamp) ValueAndStamp
     {
-        get => valueBox.Value;
-        set => valueBox = new ValueBox(value);
+        get
+        {
+            var box = valueBox;
+            return (box.Value, box.Stamp);
+        }
+    }
+
+    // The only value writer: every publication carries the stamp describing exactly which
+    // signal versions the value reflects, in one atomic box swap.
+    internal void SetValueAndStamp(T value, CausalityStamp stamp)
+    {
+        valueBox = new ValueBox(value, stamp);
+    }
+
+    // Publish a computed value together with the source stamps captured during the evaluation
+    // that produced it: the node's own stamp is their join, the per-source map is kept for the
+    // distributed sync layer. Shared by MemoBase and ConcurrentRace.
+    internal void PublishValueWithCapturedStamps(T value)
+    {
+        var captured = Context.TakeStampCapture(this);
+        SetValueAndStamp(value, CausalityStamp.JoinAll(captured.Values));
+        sourceStamps = captured;
     }
 
     internal MemoHandlR(Context context) : base(context)
     {
     }
 
-    // The dependency-tracking half of the leaf-signal read path, shared by Signal.Get and
-    // EagerRelativeSignal.Get: when a reaction is capturing, register this node as one of its
-    // dependencies. Returns nothing -- each Get reads Value itself, so the two keep their own
-    // return nullability (Signal is Task<T?>, EagerRelativeSignal is Task<T>) with no invariant
-    // Task<T>/Task<T?> conversion warning, and no extra allocation (the untracked fast path
-    // returns the cached completed Task). The per-node mutex is deliberately NOT taken --
-    // CheckDependenciesTheSame is already serialized by Context.Lock, and a signal has no recompute
-    // for the mutex to guard (ADR 0002). MemoBase overrides Get with its own cached fast path, so
-    // this stays a leaf-signal helper.
-    private protected async Task TrackDependency()
+    // The leaf-signal tracked read, shared by Signal and EagerRelativeSignal (Get and
+    // GetWithStamp alike): when a computation is capturing, register this node as one of its
+    // dependencies and record the stamp of the SAME box publication as the returned value -- the
+    // pair must never be split, so there is exactly one box read per call. The per-node mutex is
+    // deliberately NOT taken -- CheckDependenciesTheSame is already serialized by Context.Lock,
+    // and a signal has no recompute for the mutex to guard (ADR 0002). MemoBase overrides
+    // GetWithStamp with its own cached fast path, so this stays a leaf-signal helper.
+    private protected async Task<(T Value, CausalityStamp Stamp)> TrackDependencyAndRead()
     {
         ActorFlowGuards.RejectLockNodeReadInsideActorComputation();
 
@@ -255,24 +319,29 @@ public abstract class MemoHandlR<T> : SignalHandlR
         // so the read needs no scope at all.
         if (!Context.HasFlowScope)
         {
-            return;
+            return ValueAndStamp;
         }
 
         var scope = Context.GetOrCreateScope();
         if (scope.CurrentReaction == null)
         {
-            return;
+            return ValueAndStamp;
         }
 
+        (T Value, CausalityStamp Stamp) pair;
         using (await scope.ContextLock.UpgradeableLockAsync())
         {
             Context.CheckDependenciesTheSame(this);
+            pair = ValueAndStamp;
+            Context.RecordSourceStamp(scope.CurrentReaction, Id, pair.Stamp);
         }
         GC.KeepAlive(scope); // strong root: the lock identity must outlive the tracked read
+        return pair;
     }
 
-    private sealed class ValueBox(T value)
+    private sealed class ValueBox(T value, CausalityStamp stamp)
     {
         public readonly T Value = value;
+        public readonly CausalityStamp Stamp = stamp;
     }
 }

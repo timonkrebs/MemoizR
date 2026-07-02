@@ -93,6 +93,93 @@ public class Context
     private readonly Lazy<GraphActor> graphActor = new(() => new());
     internal GraphActor GraphActor => graphActor.Value;
 
+    // The node-id slice this context allocates from: ids are handed out monotonically in
+    // [IdRangeStart, IdRangeEnd). They are the stable per-context identity signals carry in
+    // causality stamps (issue #39). Distributed peers carve the shared 31-bit id space into
+    // DISJOINT contiguous slices so stamps merged across peers can never collide on an id (and
+    // each peer occupies its own subtree of the interval encoding, keeping merged stamps
+    // compact); exhausting a slice throws rather than silently bleeding into a neighbour's ids.
+    internal int IdRangeStart { get; }
+    internal int IdRangeEnd { get; }
+    private int nextNodeId;
+
+    // The incarnation epoch every causality stamp of this context carries: ids and triggers
+    // restart when a process (and so its context) restarts, so a recreated graph reissues
+    // (id, trigger) pairs that already escaped over the wire -- the random nonzero epoch is
+    // what keeps pre- and post-reset observations from ever being confused (see
+    // CausalityStamp). Within a living context a "reset" node is simply a new node, with a
+    // fresh id that was never handed out before.
+    internal long Epoch { get; } = Random.Shared.NextInt64(1, long.MaxValue);
+
+    /** causality-stamp capture (issue #39): while a node evaluates, the stamps observed on its
+    * tracked source reads accumulate here, keyed by the EVALUATING NODE rather than by flow:
+    * structured-concurrency children read on child flows/scopes but evaluate on behalf of the
+    * owning node (their CurrentReaction), and nested evaluations stay naturally disjoint with
+    * no push/pop (the per-node mutex guarantees at most one open capture per node). All access
+    * under Lock; a record against a node with no open bucket is dropped (e.g. a superseded race
+    * loser reading after the winner already published and closed the bucket). */
+    private readonly Dictionary<IMemoHandlR, Dictionary<int, CausalityStamp>> stampCaptures = new();
+    private static readonly Dictionary<int, CausalityStamp> EmptyStampCapture = new();
+
+    internal Context(int idRangeStart = 1, int idRangeEnd = int.MaxValue)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(idRangeStart);
+        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(idRangeEnd, idRangeStart);
+        IdRangeStart = idRangeStart;
+        IdRangeEnd = idRangeEnd;
+        nextNodeId = idRangeStart - 1;
+    }
+
+    internal int NextNodeId()
+    {
+        var id = Interlocked.Increment(ref nextNodeId);
+        // The lower-bound check also catches int wrap-around past int.MaxValue.
+        if (id < IdRangeStart || id >= IdRangeEnd)
+        {
+            throw new InvalidOperationException(
+                $"The context exhausted its node-id slice [{IdRangeStart}, {IdRangeEnd}). Distributed peers must be provisioned with slices sized for their graphs.");
+        }
+        return id;
+    }
+
+    internal void BeginStampCapture(IMemoHandlR node)
+    {
+        lock (Lock)
+        {
+            stampCaptures[node] = new();
+        }
+    }
+
+    internal void RecordSourceStamp(IMemoHandlR? evaluatingNode, int sourceId, CausalityStamp stamp)
+    {
+        if (evaluatingNode == null)
+        {
+            return;
+        }
+
+        lock (Lock)
+        {
+            if (!stampCaptures.TryGetValue(evaluatingNode, out var bucket))
+            {
+                return;
+            }
+
+            // Re-reads of the same source within one evaluation join: the computed value may
+            // have consumed both publications, and the join is their monotone upper bound.
+            bucket[sourceId] = bucket.TryGetValue(sourceId, out var existing) ? existing.Join(stamp) : stamp;
+        }
+    }
+
+    // Closes and returns the node's capture (a shared empty map when none is open). The failure
+    // paths call this too, discarding the result -- the node then keeps its previous stamp.
+    internal Dictionary<int, CausalityStamp> TakeStampCapture(IMemoHandlR node)
+    {
+        lock (Lock)
+        {
+            return stampCaptures.Remove(node, out var bucket) ? bucket : EmptyStampCapture;
+        }
+    }
+
     private int evaluationDepth;
 
     // The context-wide CancellationTokenSource is shared by every evaluation in flight (so

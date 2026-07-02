@@ -225,14 +225,28 @@ public sealed class ReactionBuilder
     {
         return Task.Run(async () =>
         {
-            var scope = memoFactory.Context.ForceNewScope();
+            var context = memoFactory.Context;
+            // The reaction this evaluation computes for, resolved from the inherited flow
+            // BEFORE the scope is replaced: the isolated-scope read below is untracked by
+            // design, so the causality stamp it observes must be recorded into the reaction's
+            // open capture explicitly (issue #39) -- from the same publication as the returned
+            // value, like any tracked read.
+            var evaluatingReaction = context.ReactionScope.CurrentReaction;
+            var scope = context.ForceNewScope();
             try
             {
+                if (memo is SignalHandlR node && memo is IStampedGetR<T> stamped)
+                {
+                    var (value, stamp) = await stamped.GetWithStamp();
+                    context.RecordSourceStamp(evaluatingReaction, node.Id, stamp);
+                    return value;
+                }
+
                 return await memo.Get();
             }
             finally
             {
-                memoFactory.Context.CleanScope();
+                context.CleanScope();
                 GC.KeepAlive(scope);
             }
         });
