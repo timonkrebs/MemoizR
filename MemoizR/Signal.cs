@@ -54,7 +54,7 @@ public sealed class Signal<T> : MemoHandlR<T>, IStampedGetR<T?>
     }
 
     // Tracked read shared with EagerRelativeSignal via MemoHandlR.TrackDependencyAndRead; the
-    // (T, stamp) pair converts to this signal's nullable (T?, stamp) surface.
+    // (T, stamp) projection converts to this signal's nullable (T?, stamp) surface.
     public async Task<T?> Get()
     {
         return (await TrackDependencyAndRead()).Value;
@@ -62,6 +62,7 @@ public sealed class Signal<T> : MemoHandlR<T>, IStampedGetR<T?>
 
     public async Task<(T? Value, CausalityStamp Stamp)> GetWithStamp()
     {
-        return await TrackDependencyAndRead();
+        var (value, evidence) = await TrackDependencyAndRead();
+        return (value, evidence.Stamp);
     }
 }

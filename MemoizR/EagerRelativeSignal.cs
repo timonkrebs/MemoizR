@@ -54,6 +54,7 @@ public sealed class EagerRelativeSignal<T> : MemoHandlR<T>, IStampedGetR<T>
 
     public async Task<(T Value, CausalityStamp Stamp)> GetWithStamp()
     {
-        return await TrackDependencyAndRead();
+        var (value, evidence) = await TrackDependencyAndRead();
+        return (value, evidence.Stamp);
     }
 }

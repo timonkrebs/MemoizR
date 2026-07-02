@@ -659,6 +659,36 @@ public class CausalityTriggerClockTests
     }
 
     [Fact]
+    public async Task Reaction_WithAnUnverifiableDependency_PublishesNoClaim()
+    {
+        var f = new MemoFactory();
+        var s = f.CreateSignal(7);
+        var broken = f.CreateMemoizR<int>(() => throw new InvalidOperationException("boom"));
+        var unverifiable = f.CreateMemoizR(async () =>
+        {
+            try
+            {
+                return await broken.Get();
+            }
+            catch (InvalidOperationException)
+            {
+                return -1;
+            }
+        });
+        Assert.Equal(-1, await unverifiable.Get());
+        Assert.True(unverifiable.Evidence.Unverifiable);
+
+        // The multi-parameter reaction evaluates its dependencies through the builder's
+        // isolated-scope fan-in: the unverifiable dependency must poison the reaction's
+        // capture there too, not be laundered into an honest-looking empty stamp.
+        var r = f.BuildReaction().CreateReaction(unverifiable, s, (_, _) => { });
+        await TestHelpers.WaitForConvergenceAsync(() => r.Evidence.Unverifiable);
+        Assert.True(r.Evidence.Unverifiable);
+        Assert.Equal(CausalityStamp.Empty, r.Stamp);
+        Assert.Empty(r.SourceStamps);
+    }
+
+    [Fact]
     public async Task CaughtFaultedDependency_MakesTheCallerUnverifiable()
     {
         var f = new MemoFactory();

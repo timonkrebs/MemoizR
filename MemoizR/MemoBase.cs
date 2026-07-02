@@ -40,10 +40,16 @@ public abstract class MemoBase<T> : MemoHandlR<T>, IMemoizR, IStampedGetR<T>
 
     public async Task<T> Get()
     {
-        return (await GetWithStamp()).Value;
+        return (await GetWithEvidence()).Value;
     }
 
     public async Task<(T Value, CausalityStamp Stamp)> GetWithStamp()
+    {
+        var (value, evidence) = await GetWithEvidence();
+        return (value, evidence.Stamp);
+    }
+
+    internal override async Task<(T Value, StampEvidence Evidence)> GetWithEvidence()
     {
         ActorFlowGuards.RejectLockNodeReadInsideActorComputation();
 
@@ -51,16 +57,16 @@ public abstract class MemoBase<T> : MemoHandlR<T>, IMemoizR, IStampedGetR<T>
         // construction, so a clean read from one needs no scope at all: two volatile reads and
         // out -- no lock, no allocation. (Without this, every top-level Get minted and
         // registered a scope just to look at a field that is always null.) The single box read
-        // returns the (value, stamp) pair of one publication -- never torn (see MemoHandlR).
+        // returns the (value, evidence) pair of one publication -- never torn (see MemoHandlR).
         if (State == CacheState.CacheClean && !Context.HasFlowScope)
         {
-            return ValueAndStamp;
+            return ValueAndEvidence;
         }
 
         var scope = Context.GetOrCreateScope();
         if (State == CacheState.CacheClean && scope.CurrentReaction == null)
         {
-            return ValueAndStamp;
+            return ValueAndEvidence;
         }
 
         // Only one thread should evaluate the graph at a time. otherwise the context could get messed up.
@@ -113,7 +119,7 @@ public abstract class MemoBase<T> : MemoHandlR<T>, IMemoizR, IStampedGetR<T>
                     {
                         Context.RecordSourceStamp(scope.CurrentReaction, Id, sourceEvidence.Stamp);
                     }
-                    return (value, sourceEvidence.Stamp);
+                    return (value, sourceEvidence);
                 }
                 finally
                 {

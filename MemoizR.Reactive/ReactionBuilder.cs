@@ -228,21 +228,39 @@ public sealed class ReactionBuilder
             var context = memoFactory.Context;
             // The reaction this evaluation computes for, resolved from the inherited flow
             // BEFORE the scope is replaced: the isolated-scope read below is untracked by
-            // design, so the causality stamp it observes must be recorded into the reaction's
-            // open capture explicitly (issue #39) -- from the same publication as the returned
-            // value, like any tracked read.
+            // design, so the causality evidence it observes must be carried into the reaction's
+            // open capture explicitly (issue #39) -- the full evidence snapshot from the same
+            // publication as the returned value, because a dependency whose evidence is
+            // unverifiable must poison the reaction's capture like any tracked read would
+            // (recording its empty stamp instead would launder it into an honest-looking
+            // no-dependency claim).
             var evaluatingReaction = context.ReactionScope.CurrentReaction;
             var scope = context.ForceNewScope();
             try
             {
-                if (memo is SignalHandlR node && memo is IStampedGetR<T> stamped)
+                if (memo is MemoHandlR<T> node)
                 {
-                    var (value, stamp) = await stamped.GetWithStamp();
-                    context.RecordSourceStamp(evaluatingReaction, node.Id, stamp);
+                    var (value, evidence) = await node.GetWithEvidence();
+                    if (evidence.Unverifiable)
+                    {
+                        context.MarkStampCaptureUnverifiable(evaluatingReaction);
+                    }
+                    else
+                    {
+                        context.RecordSourceStamp(evaluatingReaction, node.Id, evidence.Stamp);
+                    }
                     return value;
                 }
 
                 return await memo.Get();
+            }
+            catch
+            {
+                // A faulted dependency read fed the reaction's control flow even if a composed
+                // body were to swallow it; evidence omitting it would hide that (see
+                // MemoBase.GetWithEvidence).
+                context.MarkStampCaptureUnverifiable(evaluatingReaction);
+                throw;
             }
             finally
             {

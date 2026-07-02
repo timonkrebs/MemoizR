@@ -34,10 +34,16 @@ public sealed class ConcurrentRace<T, I> : MemoHandlR<T>, IMemoizR, IStampedGetR
     // thread it straight through.
     public async Task<T> Get()
     {
-        return (await GetWithStamp()).Value;
+        return (await GetWithEvidence()).Value;
     }
 
-    public Task<(T Value, CausalityStamp Stamp)> GetWithStamp()
+    public async Task<(T Value, CausalityStamp Stamp)> GetWithStamp()
+    {
+        var (value, evidence) = await GetWithEvidence();
+        return (value, evidence.Stamp);
+    }
+
+    internal override Task<(T Value, StampEvidence Evidence)> GetWithEvidence()
     {
         ActorFlowGuards.RejectLockNodeReadInsideActorComputation();
         return Context.EvaluateUnderLockAsync(mutex, async () =>
@@ -48,7 +54,7 @@ public sealed class ConcurrentRace<T, I> : MemoHandlR<T>, IMemoizR, IStampedGetR
             // include the race's stamp (keyed by the race's id, like any derived source) or the
             // causality of the signals the race read would silently vanish from the caller.
             // Unverifiable race evidence -- and a faulted race whose fallback a caller may
-            // publish -- poisons the caller's capture instead (see MemoBase.GetWithStamp).
+            // publish -- poisons the caller's capture instead (see MemoBase.GetWithEvidence).
             var caller = Context.ReactionScope.CurrentReaction;
             try
             {
@@ -61,7 +67,7 @@ public sealed class ConcurrentRace<T, I> : MemoHandlR<T>, IMemoizR, IStampedGetR
                 {
                     Context.RecordSourceStamp(caller, Id, raceEvidence.Stamp);
                 }
-                return (value, raceEvidence.Stamp);
+                return (value, raceEvidence);
             }
             catch
             {

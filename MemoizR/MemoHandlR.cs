@@ -313,14 +313,22 @@ public abstract class MemoHandlR<T> : SignalHandlR
     {
     }
 
+    // The (value, evidence) read every entry point projects from: GetWithStamp keeps only the
+    // stamp, while infrastructure fan-ins (ReactionBuilder's isolated-scope dependency
+    // evaluations) need the verifiability of the SAME publication as the value -- reading
+    // Evidence separately could straddle a concurrent republish. This base implementation is
+    // the leaf-signal tracked read; MemoBase and ConcurrentRace override with their pull
+    // protocols.
+    internal virtual Task<(T Value, StampEvidence Evidence)> GetWithEvidence() => TrackDependencyAndRead();
+
     // The leaf-signal tracked read, shared by Signal and EagerRelativeSignal (Get and
     // GetWithStamp alike): when a computation is capturing, register this node as one of its
     // dependencies and record the stamp of the SAME box publication as the returned value -- the
     // pair must never be split, so there is exactly one box read per call. The per-node mutex is
     // deliberately NOT taken -- CheckDependenciesTheSame is already serialized by Context.Lock,
     // and a signal has no recompute for the mutex to guard (ADR 0002). MemoBase overrides
-    // GetWithStamp with its own cached fast path, so this stays a leaf-signal helper.
-    private protected async Task<(T Value, CausalityStamp Stamp)> TrackDependencyAndRead()
+    // GetWithEvidence with its own cached fast path, so this stays a leaf-signal helper.
+    private protected async Task<(T Value, StampEvidence Evidence)> TrackDependencyAndRead()
     {
         ActorFlowGuards.RejectLockNodeReadInsideActorComputation();
 
@@ -328,21 +336,23 @@ public abstract class MemoHandlR<T> : SignalHandlR
         // so the read needs no scope at all.
         if (!Context.HasFlowScope)
         {
-            return ValueAndStamp;
+            return ValueAndEvidence;
         }
 
         var scope = Context.GetOrCreateScope();
         if (scope.CurrentReaction == null)
         {
-            return ValueAndStamp;
+            return ValueAndEvidence;
         }
 
-        (T Value, CausalityStamp Stamp) pair;
+        (T Value, StampEvidence Evidence) pair;
         using (await scope.ContextLock.UpgradeableLockAsync())
         {
             Context.CheckDependenciesTheSame(this);
-            pair = ValueAndStamp;
-            Context.RecordSourceStamp(scope.CurrentReaction, Id, pair.Stamp);
+            pair = ValueAndEvidence;
+            // A signal's own evidence is never unverifiable (ForOwnStamp), so this records
+            // unconditionally.
+            Context.RecordSourceStamp(scope.CurrentReaction, Id, pair.Evidence.Stamp);
         }
         GC.KeepAlive(scope); // strong root: the lock identity must outlive the tracked read
         return pair;
