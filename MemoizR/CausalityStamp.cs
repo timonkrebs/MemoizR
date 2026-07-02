@@ -225,7 +225,15 @@ public sealed class CausalityStamp : IEquatable<CausalityStamp>
         }
 
         var position = 1;
-        var epoch = (long)ReadVarint(bytes, ref position);
+        var rawEpoch = ReadVarint(bytes, ref position);
+        if (rawEpoch > long.MaxValue)
+        {
+            // An unchecked cast would wrap negative -- an epoch no Context can ever produce --
+            // and cross-epoch checks would then treat the malformed payload as a valid
+            // incarnation instead of rejecting it at the boundary.
+            throw new FormatException("Causality stamp epoch is out of range.");
+        }
+        var epoch = (long)rawEpoch;
         if (position >= bytes.Length)
         {
             throw new FormatException("Causality stamp payload is truncated.");
@@ -236,7 +244,7 @@ public sealed class CausalityStamp : IEquatable<CausalityStamp>
             throw new FormatException($"Causality stamp span 2^{bits} exceeds the id space.");
         }
 
-        var tree = EventTree.ReadFrom(bytes, ref position, bits);
+        var tree = EventTree.ReadFrom(bytes, ref position, bits, 0);
         if (position != bytes.Length)
         {
             throw new FormatException("Causality stamp payload has trailing bytes.");
@@ -291,6 +299,13 @@ public sealed class CausalityStamp : IEquatable<CausalityStamp>
                 throw new FormatException("Causality stamp payload is truncated.");
             }
             var b = bytes[position++];
+            if (shift == 63 && (b & 0x7E) != 0)
+            {
+                // The tenth group can only contribute its lowest bit; higher payload bits would
+                // be shifted past bit 63 and silently truncate the value into a DIFFERENT valid
+                // stamp instead of failing the parse.
+                throw new FormatException("Causality stamp varint is malformed.");
+            }
             value |= (ulong)(b & 0x7F) << shift;
             if ((b & 0x80) == 0)
             {
@@ -511,10 +526,18 @@ public sealed class CausalityStamp : IEquatable<CausalityStamp>
 
         // bits is the remaining span: a node spanning a single id (bits == 0) must be a leaf,
         // which both validates the payload and bounds the recursion at the 31-bit id space.
-        public static EventTree ReadFrom(ReadOnlySpan<byte> bytes, ref int position, int bits)
+        // pathSum carries the N total accumulated above this node: an id's value is the SUM
+        // along its path, so per-node range checks are not enough -- a payload whose path sums
+        // overflow long would wrap into nonsense triggers in ValueAt/Consistent/CollectTracked
+        // instead of being rejected at the boundary.
+        public static EventTree ReadFrom(ReadOnlySpan<byte> bytes, ref int position, int bits, long pathSum)
         {
             var header = ReadVarint(bytes, ref position);
             var n = (long)(header >> 1);
+            if (n > long.MaxValue - pathSum)
+            {
+                throw new FormatException("Causality stamp trigger overflows.");
+            }
             if ((header & 1) != 0)
             {
                 return Leaf(n);
@@ -524,8 +547,8 @@ public sealed class CausalityStamp : IEquatable<CausalityStamp>
                 throw new FormatException("Causality stamp tree is deeper than its span.");
             }
 
-            var left = ReadFrom(bytes, ref position, bits - 1);
-            var right = ReadFrom(bytes, ref position, bits - 1);
+            var left = ReadFrom(bytes, ref position, bits - 1, pathSum + n);
+            var right = ReadFrom(bytes, ref position, bits - 1, pathSum + n);
             return new(n, left, right);
         }
     }

@@ -93,7 +93,21 @@ below follows from choosing the safe direction:
    under a racing `Set` (the refreshed stamp could absorb a write whose recompute outcome was
    never verified), so the stamp stays old. Documented by
    `Memo_SkippedRecompute_KeepsOlderStamp_NeverOverclaims`.
-3. **Untracked reads (`Untrack`) are not stamped** — the stamp mirrors the dependency graph,
+3. **Mixed re-reads publish no evidence.** When a computation re-reads a source and a `Set`
+   landed between the reads, the value mixes two versions of one write history — no single
+   per-source stamp is honest in either direction (the older would show false agreement with
+   the newer ingredient; the newer is exactly the forbidden over-claim). The capture is
+   **poisoned** and the node publishes the empty stamp, which claims nothing and is always
+   safe; the same mid-evaluation `Set` refused the Clean commit, so the next recompute
+   publishes clean evidence (`Memo_MixedRereadAcrossASet_PublishesNoEvidence`).
+4. **The race's sibling window.** `ConcurrentRace` closes its capture the moment the winning
+   result is selected, so reads by losing branches after that point never widen the stamp
+   (`ConcurrentRace_LoserReadsAfterTheWinner_DoNotWidenTheStamp`). Reads a losing branch
+   performed *before* that moment are still joined — branch reads share one capture identity —
+   so a pre-selection loser read of a signal the winner never consumed can still widen the
+   race's stamp. Exact per-branch attribution needs per-branch capture identity; deferred until
+   a sync layer demonstrates the need.
+5. **Untracked reads (`Untrack`) are not stamped** — the stamp mirrors the dependency graph,
    which deliberately does not see them.
 
 ## 3. How capture works
@@ -116,30 +130,36 @@ The registry is keyed by the **evaluating node**, not by flow or scope, because:
 - the per-node mutex (invariant I1) guarantees at most one open capture per node.
 
 A record against a node with no open bucket is **dropped**: that is the correct fate of a
-superseded `ConcurrentRace` loser that reads a source after the winner already published and
-closed the bucket — its read did not feed the published value.
+`ConcurrentRace` loser that reads a source after the winner was selected — the race closes its
+capture at that very moment (see §2), so the read cannot widen a stamp it never fed.
 
-Re-reads of the same source within one evaluation join into one entry (the join is the monotone
-upper bound of the publications the value may have consumed).
+Re-reading a source within one evaluation is only evidence when every read observed the *same*
+publication; a re-read that observed a different one **poisons** the capture (§2) and the
+evaluation publishes no evidence.
 
 On success the evaluation **takes** the bucket and publishes: own stamp = join of the captured
-stamps, `SourceStamps` = the bucket (swap-published, never mutated afterwards). On the failure
+stamps plus the per-source map, sealed into one immutable, read-only snapshot. On the failure
 paths (exception, cancellation, paused reaction) the bucket is discarded and the node keeps its
-previous stamp — matching the value, which also stays.
+previous evidence — matching the value, which also stays.
 
 ## 4. Publication and the memory model
 
-The stamp rides **inside the existing `ValueBox`** (`MemoHandlR<T>`): one volatile reference
-swap publishes `(value, stamp)` together, so the release/acquire argument of concurrency.md §7
-covers the pair unchanged, and no reader can ever pair a new value with an old stamp
-(`GetWithStamp_ReturnsThePairOfOnePublication` stresses this through the public read path).
+The evidence rides **inside the existing `ValueBox`** (`MemoHandlR<T>`): one volatile reference
+swap publishes value, stamp AND the per-source map together, so the release/acquire argument of
+concurrency.md §7 covers the whole snapshot unchanged — no reader can ever pair a new value
+with an old stamp (`GetWithStamp_ReturnsThePairOfOnePublication` stresses this through the
+public read path) or a fresh `Stamp` with the previous evaluation's `SourceStamps`. The
+per-source map is wrapped read-only before it becomes reachable, so the public reference cannot
+be downcast and mutated (`PublishedEvidence_CannotBeMutatedThroughThePublicSurface`).
 
-Signal trigger bumps are a read-modify-write of that box under the signal's own `Lock` — the
-same monitor that already serialized value writes across concurrent `Set` flows
-(`Signal_ConcurrentDistinctSets_CountEveryChange` pins the exactly-once bump).
+Signal trigger bumps are a read-modify-write of that box under the signal's own `Lock`,
+**including the value-unchanged check** — the same monitor serializes racing `Set` flows, so a
+same-value write race cannot double-bump the single logical change
+(`Signal_ConcurrentDistinctSets_CountEveryChange`,
+`Signal_ConcurrentSameValueSets_BumpTheTriggerAtMostOnce`).
 
-Reactions have no value box; their joined stamp lives in a volatile field on `SignalHandlR`
-(`ownStamp`), written only inside their serialized update path.
+Reactions have no value box; their evidence snapshot lives in one volatile field on
+`SignalHandlR`, written only inside their serialized update path.
 
 The interplay with the cache-state protocol is deliberately one-way: stamps piggyback on the
 existing evaluation windows and commit points and add **no** new states, generations, or
@@ -212,6 +232,10 @@ varint := little-endian base-128, high bit = continuation
 A preorder walk with varint-coded headers: the common leaf costs one byte (a real-world epoch
 adds ~9 bytes per stamp). `Deserialize` validates structurally — version, `spanBits ≤ 31`, a
 node spanning a single id must be a leaf (which also bounds the recursion), no truncation, no
-trailing bytes, and a non-empty stamp must carry a nonzero epoch — and **re-canonicalizes**
-defensively, so the equality and determinism guarantees hold for any parseable input, not just
-payloads we produced (`Deserialize_CanonicalizesForeignInput`).
+trailing bytes, a non-empty stamp must carry a nonzero epoch, and every numeric range is
+guarded: a varint's tenth byte may only contribute bit 63 (higher payload bits would silently
+truncate into a *different* valid value), the epoch must fit the positive signed domain no
+`Context` can exceed, and tree path *sums* — an id's value is the sum of `N` along its path —
+must not overflow `long`. It then **re-canonicalizes** defensively, so the equality and
+determinism guarantees hold for any parseable input, not just payloads we produced
+(`Deserialize_CanonicalizesForeignInput`).

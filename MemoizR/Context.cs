@@ -118,8 +118,7 @@ public class Context
     * no push/pop (the per-node mutex guarantees at most one open capture per node). All access
     * under Lock; a record against a node with no open bucket is dropped (e.g. a superseded race
     * loser reading after the winner already published and closed the bucket). */
-    private readonly Dictionary<IMemoHandlR, Dictionary<int, CausalityStamp>> stampCaptures = new();
-    private static readonly Dictionary<int, CausalityStamp> EmptyStampCapture = new();
+    private readonly Dictionary<IMemoHandlR, StampCapture> stampCaptures = new();
 
     internal Context(int idRangeStart = 1, int idRangeEnd = int.MaxValue)
     {
@@ -159,24 +158,20 @@ public class Context
 
         lock (Lock)
         {
-            if (!stampCaptures.TryGetValue(evaluatingNode, out var bucket))
+            if (stampCaptures.TryGetValue(evaluatingNode, out var capture))
             {
-                return;
+                capture.Record(sourceId, stamp);
             }
-
-            // Re-reads of the same source within one evaluation join: the computed value may
-            // have consumed both publications, and the join is their monotone upper bound.
-            bucket[sourceId] = bucket.TryGetValue(sourceId, out var existing) ? existing.Join(stamp) : stamp;
         }
     }
 
-    // Closes and returns the node's capture (a shared empty map when none is open). The failure
+    // Closes and returns the node's capture (a shared empty one when none is open). The failure
     // paths call this too, discarding the result -- the node then keeps its previous stamp.
-    internal Dictionary<int, CausalityStamp> TakeStampCapture(IMemoHandlR node)
+    internal StampCapture TakeStampCapture(IMemoHandlR node)
     {
         lock (Lock)
         {
-            return stampCaptures.Remove(node, out var bucket) ? bucket : EmptyStampCapture;
+            return stampCaptures.Remove(node, out var capture) ? capture : StampCapture.Empty;
         }
     }
 
@@ -462,5 +457,38 @@ public class Context
         {
             scope.CurrentReaction = listener;
         }
+    }
+}
+
+// One evaluation's observed source stamps (issue #39), keyed by source id. All mutation happens
+// under Context.Lock. The capture is POISONED when the same source is re-read across DIFFERENT
+// publications: the computed value then mixes two versions of one write history, so no single
+// per-source stamp is honest -- not the older (a consumer comparing against the newer
+// ingredient would see false agreement) and not the newer (the over-claim the capture
+// discipline forbids). A poisoned capture publishes no evidence at all (the empty stamp claims
+// nothing, which is always safe); the mid-evaluation Set that caused the mix also bumped the
+// node's generation, so the Clean commit is refused and the next recompute publishes clean
+// evidence.
+internal sealed class StampCapture
+{
+    // Returned by TakeStampCapture when no capture is open; never registered, so never mutated.
+    internal static readonly StampCapture Empty = new();
+
+    public Dictionary<int, CausalityStamp> Stamps { get; } = new();
+
+    public bool Poisoned { get; private set; }
+
+    public void Record(int sourceId, CausalityStamp stamp)
+    {
+        if (Stamps.TryGetValue(sourceId, out var existing))
+        {
+            if (!existing.Equals(stamp))
+            {
+                Poisoned = true;
+            }
+            return;
+        }
+
+        Stamps[sourceId] = stamp;
     }
 }

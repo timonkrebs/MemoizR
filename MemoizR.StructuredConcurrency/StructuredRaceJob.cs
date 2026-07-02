@@ -10,6 +10,13 @@ public sealed class StructuredRaceJob<T, R> : StructuredJobBase<T>, IDisposable
     // or fault during teardown, but they must not turn a completed race into a failed one.
     private volatile bool finished;
 
+    // Invoked on the winning racer's flow the moment its result is recorded, BEFORE the losers
+    // are cancelled. ConcurrentRace closes its causality-stamp capture here: reads performed by
+    // losing branches after this point did not feed the winning value and must not widen its
+    // published stamp (issue #39). Slower siblings can also complete and re-invoke this;
+    // subscribers must tolerate that (the race's latch keeps the first capture).
+    internal Action? OnWinnerSelected { get; init; }
+
     public StructuredRaceJob(Func<Task<R>> action,
         IReadOnlyCollection<Func<IStructuredResourceGroup, R, Task<T>>> fns, CancellationTokenSource cancellationTokenSource)
     {
@@ -45,6 +52,7 @@ public sealed class StructuredRaceJob<T, R> : StructuredJobBase<T>, IDisposable
                 {
                     result = await x(raceResourceGroup, inputs);
                     finished = true;
+                    OnWinnerSelected?.Invoke();
                     innerCancellationTokenSource.Cancel();
                 }
                 catch

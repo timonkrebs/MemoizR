@@ -41,41 +41,34 @@ public abstract class SignalHandlR : IMemoHandlR
     // recompute state), they just carry the tiny unused cell so the protocol lives in one place.
     internal readonly CacheStateCell stateCell = new(CacheState.CacheClean);
 
-    private static readonly IReadOnlyDictionary<int, CausalityStamp> NoSourceStamps = new Dictionary<int, CausalityStamp>();
-
     /// <summary>
     /// Stable per-context identity for causality stamps (issue #39): signals appear in stamps
     /// under this id, and derived nodes key their per-source stamp map by it.
     /// </summary>
     public int Id { get; }
 
-    // Backs SourceStamps: swap-published as a whole map that is never mutated after publish;
-    // volatile so readers get a coherent reference without a lock. Written only through the
-    // publish helpers below and MemoHandlR.PublishValueWithCapturedStamps.
-    private protected volatile IReadOnlyDictionary<int, CausalityStamp> sourceStamps = NoSourceStamps;
+    // The published causality evidence of the last completed evaluation, behind a single
+    // volatile reference so Stamp and SourceStamps are always ONE consistent snapshot -- a
+    // reader can never pair a fresh stamp with the previous evaluation's per-source map. Value
+    // nodes override both accessors to read the evidence from the same volatile box as the
+    // value; this base field carries it for reactions, which have no value box.
+    private volatile StampEvidence evidence = StampEvidence.None;
+
+    public virtual CausalityStamp Stamp => evidence.Stamp;
 
     /// <summary>
     /// "Every Node keeps a Stamp for each of its Sources" (issue #39): the stamp observed on
     /// each tracked source read of the last completed evaluation, keyed by source id -- the
     /// data a distributed sync layer exchanges. Signals keep the empty map.
     /// </summary>
-    public IReadOnlyDictionary<int, CausalityStamp> SourceStamps => sourceStamps;
+    public virtual IReadOnlyDictionary<int, CausalityStamp> SourceStamps => evidence.SourceStamps;
 
-    // The node's own published stamp: which signal versions its current state reflects. Value
-    // nodes override Stamp to read it from the same volatile box as the value (an untorn
-    // pair); this base field carries it for reactions, which have no value box.
-    private volatile CausalityStamp ownStamp = CausalityStamp.Empty;
-
-    public virtual CausalityStamp Stamp => ownStamp;
-
-    // Publish the source stamps captured during a completed evaluation of a VALUE-LESS node
-    // (reactions): the node's own stamp is their join. Value nodes publish through
-    // MemoHandlR.PublishValueWithCapturedStamps instead, which pairs the join with the value.
+    // Publish the evidence captured during a completed evaluation of a VALUE-LESS node
+    // (reactions). Value nodes publish through MemoHandlR.PublishValueWithStamps instead, which
+    // puts the evidence in the value box.
     internal void PublishCapturedStamps()
     {
-        var captured = Context.TakeStampCapture(this);
-        ownStamp = CausalityStamp.JoinAll(captured.Values);
-        sourceStamps = captured;
+        evidence = StampEvidence.FromCapture(Context.TakeStampCapture(this));
     }
 
     public string Label { get; init; } = "Label";
@@ -264,14 +257,16 @@ public abstract class MemoHandlR<T> : SignalHandlR
     // volatile release) and the fast path reads State (a volatile acquire) before Value, so a
     // reader that observes CacheClean is guaranteed to see the box of that-or-a-newer clean
     // generation. The read is therefore a linearizable snapshot, not an eventually-consistent one.
-    // The causality stamp rides in the same box (issue #39): the stamp describing which signal
-    // versions the value reflects is published in the same atomic swap, so a (value, stamp) pair
-    // can never be split by a concurrent write.
-    private volatile ValueBox valueBox = new(default!, CausalityStamp.Empty);
+    // The causality evidence rides in the same box (issue #39): the stamp AND the per-source map
+    // describing which signal versions the value reflects are published in the same atomic swap,
+    // so neither can ever be paired with a neighbouring publication's value.
+    private volatile ValueBox valueBox = new(default!, StampEvidence.None);
 
     internal T Value => valueBox.Value;
 
-    public override CausalityStamp Stamp => valueBox.Stamp;
+    public override CausalityStamp Stamp => valueBox.Evidence.Stamp;
+
+    public override IReadOnlyDictionary<int, CausalityStamp> SourceStamps => valueBox.Evidence.SourceStamps;
 
     // The (value, stamp) pair of one publication -- a single volatile box read, never torn.
     internal (T Value, CausalityStamp Stamp) ValueAndStamp
@@ -279,25 +274,25 @@ public abstract class MemoHandlR<T> : SignalHandlR
         get
         {
             var box = valueBox;
-            return (box.Value, box.Stamp);
+            return (box.Value, box.Evidence.Stamp);
         }
     }
 
-    // The only value writer: every publication carries the stamp describing exactly which
-    // signal versions the value reflects, in one atomic box swap.
+    // The signal write path: publishes the value with its own single-entry stamp (a signal has
+    // no sources), in one atomic box swap.
     internal void SetValueAndStamp(T value, CausalityStamp stamp)
     {
-        valueBox = new ValueBox(value, stamp);
+        valueBox = new ValueBox(value, StampEvidence.ForOwnStamp(stamp));
     }
 
-    // Publish a computed value together with the source stamps captured during the evaluation
-    // that produced it: the node's own stamp is their join, the per-source map is kept for the
-    // distributed sync layer. Shared by MemoBase and ConcurrentRace.
-    internal void PublishValueWithCapturedStamps(T value)
+    // Publish a computed value together with the evidence captured during the evaluation that
+    // produced it. Shared by MemoBase and ConcurrentRace; the race passes the capture it closed
+    // at winner selection.
+    internal void PublishValueWithCapturedStamps(T value) => PublishValueWithStamps(value, Context.TakeStampCapture(this));
+
+    internal void PublishValueWithStamps(T value, StampCapture capture)
     {
-        var captured = Context.TakeStampCapture(this);
-        SetValueAndStamp(value, CausalityStamp.JoinAll(captured.Values));
-        sourceStamps = captured;
+        valueBox = new ValueBox(value, StampEvidence.FromCapture(capture));
     }
 
     internal MemoHandlR(Context context) : base(context)
@@ -339,9 +334,44 @@ public abstract class MemoHandlR<T> : SignalHandlR
         return pair;
     }
 
-    private sealed class ValueBox(T value, CausalityStamp stamp)
+    private sealed class ValueBox(T value, StampEvidence evidence)
     {
         public readonly T Value = value;
-        public readonly CausalityStamp Stamp = stamp;
+        public readonly StampEvidence Evidence = evidence;
     }
+}
+
+// One publication's causality evidence (issue #39): the node's own stamp and the per-source map
+// it was joined from, immutable and published as one reference. The per-source map is wrapped
+// read-only before it becomes reachable from the public SourceStamps, so a consumer can never
+// downcast and mutate the node's published evidence.
+internal sealed class StampEvidence
+{
+    private static readonly IReadOnlyDictionary<int, CausalityStamp> NoSourceStamps =
+        new System.Collections.ObjectModel.ReadOnlyDictionary<int, CausalityStamp>(new Dictionary<int, CausalityStamp>());
+
+    internal static readonly StampEvidence None = new(CausalityStamp.Empty, NoSourceStamps);
+
+    public readonly CausalityStamp Stamp;
+    public readonly IReadOnlyDictionary<int, CausalityStamp> SourceStamps;
+
+    private StampEvidence(CausalityStamp stamp, IReadOnlyDictionary<int, CausalityStamp> sourceStamps)
+    {
+        Stamp = stamp;
+        SourceStamps = sourceStamps;
+    }
+
+    // A signal's evidence: its own single-entry stamp, no sources.
+    public static StampEvidence ForOwnStamp(CausalityStamp stamp) => new(stamp, NoSourceStamps);
+
+    // A derived node's evidence: the join of the captured source stamps plus the per-source
+    // map. A POISONED capture (the same source re-read across different publications -- see
+    // StampCapture) publishes no evidence at all: the empty stamp claims nothing, which is the
+    // only honest description of a value that mixed two versions of one write history.
+    public static StampEvidence FromCapture(StampCapture capture) =>
+        capture.Poisoned || capture.Stamps.Count == 0
+            ? None
+            : new(
+                CausalityStamp.JoinAll(capture.Stamps.Values),
+                new System.Collections.ObjectModel.ReadOnlyDictionary<int, CausalityStamp>(capture.Stamps));
 }

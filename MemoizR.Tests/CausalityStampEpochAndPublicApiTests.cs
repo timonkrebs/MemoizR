@@ -180,6 +180,22 @@ public class CausalityStampEpochAndPublicApiTests
     }
 
     [Fact]
+    public async Task PublishedEvidence_CannotBeMutatedThroughThePublicSurface()
+    {
+        var f = new MemoFactory();
+        var s = f.CreateSignal(1);
+        var m = f.CreateMemoizR(async () => await s.Get() + 1);
+        Assert.Equal(2, await m.Get());
+
+        // The public maps must not be downcastable to their mutable backing type -- a consumer
+        // could otherwise corrupt a node's published evidence in place (and, for the shared
+        // empty map, EVERY node's).
+        Assert.Null(s.SourceStamps as Dictionary<int, CausalityStamp>);
+        Assert.Null(m.SourceStamps as Dictionary<int, CausalityStamp>);
+        Assert.True(m.SourceStamps.ContainsKey(s.Id));
+    }
+
+    [Fact]
     public void PublicSurface_IsActuallyPublic()
     {
         // The friend assembly makes internals invisible to these tests' compiler errors, so pin

@@ -219,6 +219,39 @@ public class CausalityStampEncodingTests
 
         // A non-empty stamp must carry an incarnation epoch (Leaf 1 over id 0, epoch 0).
         Assert.Throws<FormatException>(() => CausalityStamp.Deserialize(new byte[] { 2, 0, 0, 3 }));
+
+        // An epoch of 2^63: the unchecked cast would wrap it to a negative epoch no Context can
+        // ever produce, so it must be rejected instead of parsed into a "valid" incarnation.
+        Assert.Throws<FormatException>(() => CausalityStamp.Deserialize(
+            new byte[] { 2, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x01, 0, 1 }));
+
+        // A tenth varint byte with payload bits beyond bit 63: they would shift out and silently
+        // truncate the value into a DIFFERENT valid stamp.
+        Assert.Throws<FormatException>(() => CausalityStamp.Deserialize(
+            new byte[] { 2, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x02, 0, 1 }));
+    }
+
+    [Fact]
+    public void Deserialize_RejectsPathSumsThatOverflow()
+    {
+        // Values are SUMS of N along a tree path, so per-node range checks are not enough: an
+        // internal node with N = long.MaxValue plus a child leaf with N = 1 overflows.
+        var payload = new List<byte> { 2, 9, 1 };
+        payload.AddRange(Varint(((ulong)long.MaxValue << 1) | 0)); // internal node, N = long.MaxValue
+        payload.AddRange(Varint((1UL << 1) | 1));                  // left leaf, N = 1 -> overflow
+        payload.AddRange(Varint((0UL << 1) | 1));                  // right leaf, N = 0
+
+        Assert.Throws<FormatException>(() => CausalityStamp.Deserialize(payload.ToArray()));
+    }
+
+    private static IEnumerable<byte> Varint(ulong value)
+    {
+        while (value >= 0x80)
+        {
+            yield return (byte)(value | 0x80);
+            value >>= 7;
+        }
+        yield return (byte)value;
     }
 
     [Fact]

@@ -197,6 +197,10 @@ public class CausalityTriggerClockTests
         Assert.Equal(2, outer.SourceStamps.Count);
         Assert.Equal(Stamp((s1, 2)), outer.SourceStamps[s1.Id]);
         Assert.Equal(Stamp((s2, 1)), outer.SourceStamps[inner.Id]);
+
+        // Stamp and SourceStamps are one atomic snapshot: the own stamp is exactly the join of
+        // the published per-source map.
+        Assert.Equal(outer.Stamp, CausalityStamp.JoinAll(outer.SourceStamps.Values));
     }
 
     [Fact]
@@ -390,6 +394,94 @@ public class CausalityTriggerClockTests
 
         Assert.Equal(12, await race.Get());
         Assert.Equal(Stamp((s, 1)), race.Stamp);
+    }
+
+    [Fact]
+    public async Task Signal_ConcurrentSameValueSets_BumpTheTriggerAtMostOnce()
+    {
+        var f = new MemoFactory();
+        var s = f.CreateSignal(0);
+
+        // All writers race the same new value: only the first one to enter the signal's monitor
+        // observes a change; the equality check lives under the same monitor as the bump, so
+        // the losers must not double-count the single logical change.
+        var writers = Enumerable.Range(0, 8).Select(_ => Task.Run(() => s.Set(42))).ToArray();
+        await Task.WhenAll(writers);
+
+        Assert.Equal(42, await s.Get());
+        Assert.Equal(1, TriggerOf(s));
+    }
+
+    [Fact]
+    public async Task Memo_MixedRereadAcrossASet_PublishesNoEvidence()
+    {
+        var f = new MemoFactory();
+        var s = f.CreateSignal(1);
+        var gate = new RecomputeGate();
+        var m = f.CreateMemoizR(async () =>
+        {
+            var first = await s.Get();
+            await gate.PauseIfArmedAsync();
+            return first + await s.Get();
+        });
+
+        gate.Arm();
+        var get = Task.Run(() => m.Get());
+        await gate.ReadDone;
+        await s.Set(10); // lands between the two reads: the value mixes both publications
+        gate.Proceed();
+        Assert.Equal(11, await get);
+
+        // No single per-source stamp is honest for a mixed value -- not the older (false
+        // agreement against the newer ingredient) and not the newer (an over-claim) -- so the
+        // poisoned capture publishes no evidence at all.
+        Assert.Equal(CausalityStamp.Empty, m.Stamp);
+        Assert.Empty(m.SourceStamps);
+
+        // The mid-evaluation Set also refused the Clean commit, so the next Get recomputes and
+        // publishes clean evidence again.
+        Assert.Equal(20, await m.Get());
+        Assert.Equal(Stamp((s, 1)), m.Stamp);
+    }
+
+    [Fact]
+    public async Task ConcurrentRace_LoserReadsAfterTheWinner_DoNotWidenTheStamp()
+    {
+        var f = new MemoFactory();
+        var input = f.CreateSignal(5);
+        var lateRead = f.CreateSignal(100);
+        var winnerDone = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var loserGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var race = f.CreateConcurrentRace<int, int>(
+            async () => await input.Get(),
+            (_, i) =>
+            {
+                winnerDone.TrySetResult();
+                return Task.FromResult(i * 2);
+            },
+            async (group, _) =>
+            {
+                await loserGate.Task;
+                await lateRead.Get(); // must be dropped: the capture closed at winner selection
+                group.Token.ThrowIfCancellationRequested(); // lose like a token-honouring branch
+                return -1;
+            });
+
+        var get = race.GetWithStamp();
+        await winnerDone.Task;
+        // Let the winning branch record its result and close the capture. A fixed delay is the
+        // tool here because the assertion below is negative (the loser's read must NOT appear).
+        await Task.Delay(50);
+
+        await lateRead.Set(101); // a write the winning value cannot reflect
+        loserGate.SetResult();
+
+        var (value, stamp) = await get;
+        Assert.Equal(10, value);
+        Assert.True(stamp.TryGetTrigger(input.Id, out _));
+        Assert.False(stamp.TryGetTrigger(lateRead.Id, out _));
+        Assert.Equal(stamp, race.Stamp);
     }
 
     [Fact]

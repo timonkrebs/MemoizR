@@ -63,15 +63,22 @@ public sealed class ConcurrentRace<T, I> : MemoHandlR<T>, IMemoizR, IStampedGetR
 
         // Tracked reads by the racing branches (the parent-flow action plus the child tasks,
         // which inherit this scope) record the source stamps they observed to this node's
-        // bucket; a loser that reads after the winner published finds the bucket closed and is
-        // dropped, so the published stamp only ever describes reads that fed this publication.
+        // bucket. The bucket is closed the MOMENT a winner is selected -- Run still awaits the
+        // losers, so reads they perform after that point would otherwise land in the capture
+        // and widen the published stamp with versions the winning value never consumed. The
+        // CompareExchange latch keeps the first close when a slower sibling also completes.
         Context.BeginStampCapture(this);
+        StampCapture? winnerCapture = null;
 
         try
         {
             State = CacheState.Evaluating;
-            using var job = new StructuredRaceJob<T, I>(action, fns, Context.CancellationTokenSource!);
-            PublishValueWithCapturedStamps(await job.Run(Context.CancellationTokenSource!.Token));
+            using var job = new StructuredRaceJob<T, I>(action, fns, Context.CancellationTokenSource!)
+            {
+                OnWinnerSelected = () => Interlocked.CompareExchange(ref winnerCapture, Context.TakeStampCapture(this), null),
+            };
+            var newValue = await job.Run(Context.CancellationTokenSource!.Token);
+            PublishValueWithStamps(newValue, winnerCapture ?? Context.TakeStampCapture(this));
             State = CacheState.CacheClean;
         }
         catch
