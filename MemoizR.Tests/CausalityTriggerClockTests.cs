@@ -557,6 +557,138 @@ public class CausalityTriggerClockTests
     }
 
     [Fact]
+    public async Task ConcurrentRace_BranchReadingAMemo_KeepsBothEvidences()
+    {
+        var f = new MemoFactory();
+        var s = f.CreateSignal(4);
+        var m = f.CreateMemoizR(async () => await s.Get() + 1); // dirty: evaluates inside the branch
+        var race = f.CreateConcurrentRace<int, int>(
+            () => Task.FromResult(0),
+            async (_, _) => await m.Get() * 10);
+
+        var (value, stamp) = await race.GetWithStamp();
+        Assert.Equal(50, value);
+
+        // The memo evaluated INSIDE the racing branch opens its own, non-branch-aware capture:
+        // the enclosing branch tag must not leak into it, or its Seal(0) would discard its own
+        // reads and it would publish no evidence.
+        Assert.False(m.Evidence.Unverifiable);
+        Assert.Equal(Stamp((s, 0)), m.Stamp);
+
+        // And the branch's read of the memo lands in the race's winning-branch evidence.
+        Assert.True(stamp.TryGetTrigger(s.Id, out _));
+    }
+
+    [Fact]
+    public async Task ConcurrentRace_LoserPoison_DoesNotDestroyTheWinnersEvidence()
+    {
+        var f = new MemoFactory();
+        var input = f.CreateSignal(5);
+        var mixed = f.CreateSignal(1);
+        var loserFirstRead = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var loserSecondGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var loserPoisoned = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var winnerGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var race = f.CreateConcurrentRace<int, int>(
+            async () => await input.Get(),
+            async (_, i) =>
+            {
+                await winnerGate.Task;
+                return i * 2;
+            },
+            async (group, _) =>
+            {
+                await mixed.Get(); // {mixed: 0}
+                loserFirstRead.TrySetResult();
+                await loserSecondGate.Task;
+                await mixed.Get(); // {mixed: 1} -> mixed re-read poisons THIS branch only
+                loserPoisoned.TrySetResult();
+                await Task.Delay(Timeout.Infinite, group.Token);
+                return -1;
+            });
+
+        var get = race.GetWithStamp();
+        await loserFirstRead.Task;
+        await mixed.Set(2);
+        loserSecondGate.SetResult();
+        await loserPoisoned.Task;
+        winnerGate.SetResult();
+
+        // Poison is per branch: the losing branch's mixed re-read must not destroy the
+        // evidence of the clean winning value.
+        var (value, stamp) = await get;
+        Assert.Equal(10, value);
+        Assert.False(race.Evidence.Unverifiable);
+        Assert.True(stamp.TryGetTrigger(input.Id, out _));
+        Assert.False(stamp.TryGetTrigger(mixed.Id, out _));
+    }
+
+    [Fact]
+    public async Task UnverifiableEvidence_IsContagious()
+    {
+        var f = new MemoFactory();
+        var s = f.CreateSignal(1);
+        var firstRead = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var proceed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var race = f.CreateConcurrentRace<int, int>(
+            () => Task.FromResult(0),
+            async (_, _) =>
+            {
+                var first = await s.Get();
+                firstRead.TrySetResult();
+                await proceed.Task;
+                return first + await s.Get(); // mixed re-read across the Set: winner poisoned
+            });
+        var m = f.CreateMemoizR(async () => await race.Get() + 100);
+
+        var get = Task.Run(() => m.Get());
+        await firstRead.Task;
+        await s.Set(10);
+        proceed.SetResult();
+        Assert.Equal(111, await get);
+
+        // The race's winning evaluation mixed two publications of s, so its evidence is
+        // unverifiable -- and unverifiability is contagious: the memo that consumed the result
+        // publishes no claim either, never a partial one.
+        Assert.True(race.Evidence.Unverifiable);
+        Assert.True(m.Evidence.Unverifiable);
+        Assert.Equal(CausalityStamp.Empty, m.Stamp);
+        Assert.Empty(m.SourceStamps);
+    }
+
+    [Fact]
+    public async Task CaughtFaultedDependency_MakesTheCallerUnverifiable()
+    {
+        var f = new MemoFactory();
+        var s = f.CreateSignal(7);
+        var broken = f.CreateMemoizR<int>(() => throw new InvalidOperationException("boom"));
+        var m = f.CreateMemoizR(async () =>
+        {
+            int fallback;
+            try
+            {
+                fallback = await broken.Get();
+            }
+            catch (InvalidOperationException)
+            {
+                fallback = -1;
+            }
+            return fallback + await s.Get();
+        });
+
+        Assert.Equal(6, await m.Get());
+
+        // The faulted read fed m's control flow (the fallback exists because broken threw);
+        // evidence listing only s would hide that dependency, so the evaluation publishes no
+        // claim at all.
+        Assert.True(m.Evidence.Unverifiable);
+        Assert.Equal(CausalityStamp.Empty, m.Stamp);
+        Assert.Empty(m.SourceStamps);
+    }
+
+    [Fact]
     public async Task Memo_ReadingARace_InheritsTheRaceEvidence()
     {
         var f = new MemoFactory();

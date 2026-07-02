@@ -93,27 +93,41 @@ below follows from choosing the safe direction:
    under a racing `Set` (the refreshed stamp could absorb a write whose recompute outcome was
    never verified), so the stamp stays old. Documented by
    `Memo_SkippedRecompute_KeepsOlderStamp_NeverOverclaims`.
-3. **Internally inconsistent evidence publishes as no evidence.** When a computation's reads
-   straddle a `Set`, the value mixes two versions of one write history and no per-source stamp
-   is honest in either direction (the older would show false agreement with the newer
-   ingredient; the newer is exactly the forbidden over-claim). Both shapes are detected and the
-   node publishes the empty stamp — which claims nothing and is always safe — while the same
-   mid-evaluation `Set` refused the Clean commit, so the next recompute publishes clean
-   evidence:
+3. **Unverifiable evaluations publish no claim — and unverifiability is contagious.** When a
+   computation's reads straddle a `Set`, the value mixes two versions of one write history and
+   no per-source stamp is honest in either direction (the older would show false agreement with
+   the newer ingredient; the newer is exactly the forbidden over-claim). Such an evaluation
+   publishes `StampEvidence` with `Unverifiable` set: the empty stamp (no claim) plus a flag
+   that distinguishes it from an honestly-empty stamp ("this value depends on no tracked
+   signals"). The detected shapes:
    - a **re-read of the same source** across different publications poisons the capture
      (`Memo_MixedRereadAcrossASet_PublishesNoEvidence`);
    - **two different sources disagreeing on a shared signal** (e.g. two memos both depending on
-     `s`, one read carrying `{s:0}` and the other `{s:1}`) fail the consistency fold when the
-     evidence is sealed (`Memo_SourcesDisagreeingOnASharedSignal_PublishNoEvidence`).
-   Note the flip side for consumers: the empty stamp means *no claim*, not *verified* — a sync
-   protocol must treat absent evidence as unverifiable rather than trivially consistent.
+     `s`, one read carrying `{s:0}` and the other `{s:1}`) fail the consistency fold at sealing
+     (`Memo_SourcesDisagreeingOnASharedSignal_PublishNoEvidence`);
+   - a **consumed source whose own evidence is unverifiable** poisons the consumer's capture
+     instead of contributing a stamp — otherwise a partial claim could be built on a value
+     nobody can vouch for (`UnverifiableEvidence_IsContagious`);
+   - a **faulted tracked read** poisons the caller's capture before the exception propagates: a
+     caller that catches the fault and publishes a fallback would otherwise publish evidence
+     silently omitting a real control-flow dependency
+     (`CaughtFaultedDependency_MakesTheCallerUnverifiable`).
+   For mid-evaluation `Set`s the same write refused the Clean commit, so the next recompute
+   publishes clean evidence. Consumers must treat `Unverifiable` (and absent) evidence as
+   *cannot verify*, never as *trivially consistent*.
 4. **Races publish only the evidence that fed the winner.** Every tracked read inside a racing
    branch is tagged with its branch (an ambient `AsyncLocal` set per branch task, so
-   `CurrentReaction` — which observer wiring hangs off — stays the race itself). The capture is
-   closed the moment the winner is claimed *and* sealed to the shared action's reads plus the
-   winning branch's, so a losing branch's reads never widen the stamp — whether they happened
-   before or after the selection (`ConcurrentRace_LoserReadsBeforeTheWinner_AreNotPublished`,
-   `ConcurrentRace_LoserReadsAfterTheWinner_DoNotWidenTheStamp`).
+   `CurrentReaction` — which observer wiring hangs off — stays the race itself; only the race's
+   own capture is branch-aware, so a node evaluated *inside* a branch opens an ordinary capture
+   the tag cannot leak into, and a nested race resets the tag for its own frame). The capture
+   is closed the moment the winner is claimed *and* sealed to the shared action's reads plus
+   the winning branch's, so a losing branch's reads never widen the stamp — whether they
+   happened before or after the selection
+   (`ConcurrentRace_LoserReadsBeforeTheWinner_AreNotPublished`,
+   `ConcurrentRace_LoserReadsAfterTheWinner_DoNotWidenTheStamp`,
+   `ConcurrentRace_BranchReadingAMemo_KeepsBothEvidences`). Poison is tracked per branch, so a
+   losing branch's mixed re-read cannot destroy a clean winner's evidence
+   (`ConcurrentRace_LoserPoison_DoesNotDestroyTheWinnersEvidence`).
 5. **Untracked reads (`Untrack`) are not stamped** — the stamp mirrors the dependency graph,
    which deliberately does not see them.
 
@@ -195,9 +209,12 @@ reads — and the node stays dirty, so the next `Get` replaces both.
   together with the bridge layer.
 - **Public surface** (frozen alongside the wire format): `IStampedGetR<T>.GetWithStamp()` —
   the `(value, stamp)` pair of one publication — on signals, memos and the
-  structured-concurrency nodes; `Stamp`, `SourceStamps` and `Id` on every node (reactions have
-  no value, so they expose only these); `CausalityStamp` with `Epoch`, `Triggers`,
-  `TryGetTrigger`, `Join`, `IsConsistentWith`, `IsDominatedBy`, value equality,
+  structured-concurrency nodes; `Evidence` on every node — the ONE immutable snapshot
+  (`StampEvidence`: `Stamp`, `SourceStamps`, `Unverifiable`) describing the last completed
+  evaluation, which a sync exporter must read when it needs the fields to belong together (the
+  `Stamp`/`SourceStamps` conveniences each take their own snapshot, so two separate calls can
+  straddle a recompute); plus `Id` on every node, and `CausalityStamp` with `Epoch`,
+  `Triggers`, `TryGetTrigger`, `Join`, `IsConsistentWith`, `IsDominatedBy`, value equality,
   `Serialize`/`Deserialize`. Stamp *creation* stays internal.
 
 ## 6. The encoding (phase 2): a canonical event tree

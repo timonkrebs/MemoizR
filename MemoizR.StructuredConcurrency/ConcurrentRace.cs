@@ -47,15 +47,32 @@ public sealed class ConcurrentRace<T, I> : MemoHandlR<T>, IMemoizR, IStampedGetR
             // but the caller's value still consumed this result, so the caller's evidence must
             // include the race's stamp (keyed by the race's id, like any derived source) or the
             // causality of the signals the race read would silently vanish from the caller.
+            // Unverifiable race evidence -- and a faulted race whose fallback a caller may
+            // publish -- poisons the caller's capture instead (see MemoBase.GetWithStamp).
             var caller = Context.ReactionScope.CurrentReaction;
-            var pair = await Update();
-            Context.RecordSourceStamp(caller, Id, pair.Stamp);
-            return pair;
+            try
+            {
+                var (value, raceEvidence) = await Update();
+                if (raceEvidence.Unverifiable)
+                {
+                    Context.MarkStampCaptureUnverifiable(caller);
+                }
+                else
+                {
+                    Context.RecordSourceStamp(caller, Id, raceEvidence.Stamp);
+                }
+                return (value, raceEvidence.Stamp);
+            }
+            catch
+            {
+                Context.MarkStampCaptureUnverifiable(caller);
+                throw;
+            }
         });
     }
 
     /** run the computation fn, updating the cached value */
-    private async Task<(T Value, CausalityStamp Stamp)> Update()
+    private async Task<(T Value, StampEvidence Evidence)> Update()
     {
         if (State == CacheState.Evaluating) throw new InvalidOperationException("Cyclic behavior detected");
         var oldValue = Value;
@@ -71,17 +88,26 @@ public sealed class ConcurrentRace<T, I> : MemoHandlR<T>, IMemoizR, IStampedGetR
         scope.CurrentGetsIndex = 0;
         var prevAmbientContext = LockEngineFlow.EvaluatingContext.Value;
         LockEngineFlow.EvaluatingContext.Value = Context;
+        // Reset the ambient racing-branch tag for this race's own frame: when THIS race runs
+        // inside another race's branch, its shared action must record as branch 0 of THIS
+        // capture, not under the enclosing race's branch id. Restored in the finally (an
+        // AsyncLocal mutation would otherwise survive a synchronously-completing evaluation).
+        var prevBranch = RaceBranchFlow.Current.Value;
+        RaceBranchFlow.Current.Value = 0;
 
-        // Tracked reads record the source stamps they observed to this node's bucket, tagged
-        // with the racing branch that performed them (0 = the shared action on this flow). Two
-        // cuts keep the published stamp exactly the evidence that fed the winning value:
+        // Tracked reads record the source stamps they observed to this node's BRANCH-AWARE
+        // bucket, tagged with the racing branch that performed them (0 = the shared action on
+        // this flow). Ordinary nodes evaluated inside a branch open their own, non-branch-aware
+        // captures, which ignore the ambient tag. Two cuts keep the published stamp exactly the
+        // evidence that fed the winning value:
         //  - the bucket is CLOSED the moment the winner is selected (the job's win latch
         //    invokes the callback exactly once, atomically with claiming the result), dropping
         //    everything a loser reads afterwards, and
         //  - the capture is SEALED to branch 0 + the winning branch, dropping what losers read
-        //    BEFORE the selection too -- their reads never fed the returned value.
+        //    BEFORE the selection too -- their reads never fed the returned value. Poison is
+        //    per branch, so a losing branch's mixed re-read cannot destroy a clean winner.
         // The WhenAll join inside Run is the barrier that publishes the locals to this flow.
-        Context.BeginStampCapture(this);
+        Context.BeginStampCapture(this, branchAware: true);
         StampCapture? winnerCapture = null;
         var winnerBranch = 0;
 
@@ -113,6 +139,7 @@ public sealed class ConcurrentRace<T, I> : MemoHandlR<T>, IMemoizR, IStampedGetR
             scope.CurrentReaction = prevReaction;
             scope.CurrentGetsIndex = prevIndex;
             LockEngineFlow.EvaluatingContext.Value = prevAmbientContext;
+            RaceBranchFlow.Current.Value = prevBranch;
         }
 
         // handles diamond dependencies if we're the parent of a diamond.
@@ -123,7 +150,7 @@ public sealed class ConcurrentRace<T, I> : MemoHandlR<T>, IMemoizR, IStampedGetR
 
         // The node mutex is still held: nothing can republish between the update above and this
         // box read, so the pair is the one this update produced.
-        return ValueAndStamp;
+        return ValueAndEvidence;
     }
 
     // Same scaffold as Get; the recomputed value is awaited for effect and discarded.

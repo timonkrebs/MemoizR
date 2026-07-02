@@ -141,11 +141,32 @@ public class Context
         return id;
     }
 
-    internal void BeginStampCapture(IMemoHandlR node)
+    internal void BeginStampCapture(IMemoHandlR node, bool branchAware = false)
     {
         lock (Lock)
         {
-            stampCaptures[node] = new();
+            stampCaptures[node] = new(branchAware);
+        }
+    }
+
+    // Marks the evaluating node's open capture unverifiable for the ambient branch: used when a
+    // tracked read observed a source whose own evidence is unverifiable, or when a tracked read
+    // faulted (the caller may catch the fault and publish a fallback -- evidence omitting the
+    // faulted source would hide a real control-flow dependency).
+    internal void MarkStampCaptureUnverifiable(IMemoHandlR? evaluatingNode)
+    {
+        if (evaluatingNode == null)
+        {
+            return;
+        }
+
+        var branch = RaceBranchFlow.Current.Value;
+        lock (Lock)
+        {
+            if (stampCaptures.TryGetValue(evaluatingNode, out var capture))
+            {
+                capture.Poison(branch);
+            }
         }
     }
 
@@ -484,36 +505,50 @@ internal static class RaceBranchFlow
 }
 
 // One evaluation's observed source stamps (issue #39), keyed by (source id, racing branch).
-// All mutation happens under Context.Lock. The capture is POISONED when the same source is
-// re-read by the same branch across DIFFERENT publications: the computed value then mixes two
-// versions of one write history, so no single per-source stamp is honest -- not the older (a
-// consumer comparing against the newer ingredient would see false agreement) and not the newer
-// (the over-claim the capture discipline forbids). A poisoned capture publishes no evidence at
-// all (the empty stamp claims nothing); the mid-evaluation Set that caused the mix also bumped
-// the node's generation, so the Clean commit is refused and the next recompute publishes clean
-// evidence. The same source read differently by DIFFERENT branches is not poison -- branches
-// are alternative computations, and Seal resolves them by keeping only the winner's evidence.
+// All mutation happens under Context.Lock. Only a RACE's capture is branch-aware: an ordinary
+// node evaluated inside a racing branch opens its own capture, and the ambient branch tag of
+// the enclosing race must not leak into it (its Seal(0) would discard everything) -- so a
+// non-branch-aware capture files every record under branch 0.
+//
+// A branch is POISONED -- its evidence is unverifiable -- when the same source is re-read by
+// that branch across DIFFERENT publications (the computed value then mixes two versions of one
+// write history, so no single per-source stamp is honest: not the older, which would show
+// false agreement with the newer ingredient, and not the newer, which is the forbidden
+// over-claim), or when a read observed a source whose own evidence is unverifiable, or when a
+// tracked read faulted (the caller may catch and publish a fallback whose control flow the
+// missing entry would hide). Poison is tracked PER BRANCH so a losing racer's mixed re-read
+// cannot destroy the evidence of a clean winner; Seal treats it as fatal only for branch 0 and
+// the winning branch. The same source read differently by DIFFERENT branches is not poison --
+// branches are alternative computations, resolved by the seal.
 internal sealed class StampCapture
 {
     // Returned by TakeStampCapture when no capture is open; never registered, so never mutated.
-    internal static readonly StampCapture Empty = new();
+    internal static readonly StampCapture Empty = new(false);
 
+    private readonly bool branchAware;
     private readonly Dictionary<(int Source, int Branch), CausalityStamp> entries = new();
+    private readonly HashSet<int> poisonedBranches = new();
 
-    public bool Poisoned { get; private set; }
+    public StampCapture(bool branchAware)
+    {
+        this.branchAware = branchAware;
+    }
+
+    public void Poison(int branch) => poisonedBranches.Add(branchAware ? branch : 0);
 
     public void Record(int sourceId, CausalityStamp stamp, int branch)
     {
-        if (entries.TryGetValue((sourceId, branch), out var existing))
+        var key = (sourceId, branchAware ? branch : 0);
+        if (entries.TryGetValue(key, out var existing))
         {
             if (!existing.Equals(stamp))
             {
-                Poisoned = true;
+                Poison(branch);
             }
             return;
         }
 
-        entries[(sourceId, branch)] = stamp;
+        entries[key] = stamp;
     }
 
     // Reduce the branch-tagged entries to one stamp per source, keeping only the evidence that
@@ -524,7 +559,7 @@ internal sealed class StampCapture
     public (bool Poisoned, Dictionary<int, CausalityStamp> Stamps) Seal(int winningBranch)
     {
         var stamps = new Dictionary<int, CausalityStamp>();
-        if (Poisoned)
+        if (poisonedBranches.Contains(0) || poisonedBranches.Contains(winningBranch))
         {
             return (true, stamps);
         }

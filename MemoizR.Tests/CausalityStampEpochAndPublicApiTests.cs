@@ -209,6 +209,15 @@ public class CausalityStampEpochAndPublicApiTests
         Assert.NotNull(typeof(SignalHandlR).GetProperty("SourceStamps", BindingFlags.Public | BindingFlags.Instance));
         Assert.NotNull(typeof(SignalHandlR).GetProperty("Id", BindingFlags.Public | BindingFlags.Instance));
 
+        // The one-snapshot evidence surface: a sync exporter reads Evidence once and gets a
+        // stamp, per-source map and verifiability that all describe the same publication.
+        Assert.NotNull(typeof(SignalHandlR).GetProperty("Evidence", BindingFlags.Public | BindingFlags.Instance));
+        Assert.True(typeof(StampEvidence).IsPublic);
+        foreach (var member in new[] { "Stamp", "SourceStamps", "Unverifiable" })
+        {
+            Assert.NotNull(typeof(StampEvidence).GetProperty(member, BindingFlags.Public | BindingFlags.Instance));
+        }
+
         foreach (var member in new[] { "Epoch", "Triggers" })
         {
             Assert.NotNull(typeof(CausalityStamp).GetProperty(member, BindingFlags.Public | BindingFlags.Instance));

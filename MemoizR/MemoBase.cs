@@ -81,16 +81,39 @@ public abstract class MemoBase<T> : MemoHandlR<T>, IMemoizR, IStampedGetR<T>
                     // if someone else did read the graph while this thread was blocked it could be that this is already Clean
                     if (State != CacheState.CacheClean)
                     {
-                        await UpdateIfNecessary();
+                        try
+                        {
+                            await UpdateIfNecessary();
+                        }
+                        catch
+                        {
+                            // The dependency edge is already registered, but no stamp will be
+                            // recorded for this read. A caller that catches this fault and
+                            // publishes a fallback would otherwise publish evidence silently
+                            // omitting a real control-flow dependency -- so its capture is
+                            // marked unverifiable before the fault propagates.
+                            Context.MarkStampCaptureUnverifiable(scope.CurrentReaction);
+                            throw;
+                        }
                     }
 
-                    // One box read: the stamp recorded for the capturing evaluation (if this
-                    // read is tracked) -- and the one returned to the caller -- must describe
-                    // exactly the value returned; a concurrent recompute or Set must not split
-                    // the pair.
-                    var pair = ValueAndStamp;
-                    Context.RecordSourceStamp(scope.CurrentReaction, Id, pair.Stamp);
-                    return pair;
+                    // One box read: what is recorded for the capturing evaluation (if this read
+                    // is tracked) -- and what is returned to the caller -- must describe exactly
+                    // the value returned; a concurrent recompute or Set must not split the
+                    // pair. A source whose own evidence is unverifiable poisons the caller's
+                    // capture instead of contributing a stamp: unverifiability is contagious,
+                    // or a consumer could trust evidence partly built on a value nobody can
+                    // vouch for.
+                    var (value, sourceEvidence) = ValueAndEvidence;
+                    if (sourceEvidence.Unverifiable)
+                    {
+                        Context.MarkStampCaptureUnverifiable(scope.CurrentReaction);
+                    }
+                    else
+                    {
+                        Context.RecordSourceStamp(scope.CurrentReaction, Id, sourceEvidence.Stamp);
+                    }
+                    return (value, sourceEvidence.Stamp);
                 }
                 finally
                 {

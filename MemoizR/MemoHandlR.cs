@@ -47,21 +47,27 @@ public abstract class SignalHandlR : IMemoHandlR
     /// </summary>
     public int Id { get; }
 
-    // The published causality evidence of the last completed evaluation, behind a single
-    // volatile reference so Stamp and SourceStamps are always ONE consistent snapshot -- a
-    // reader can never pair a fresh stamp with the previous evaluation's per-source map. Value
-    // nodes override both accessors to read the evidence from the same volatile box as the
-    // value; this base field carries it for reactions, which have no value box.
+    // Backs Evidence for value-less nodes (reactions); value nodes override Evidence to read it
+    // from the same volatile box as the value.
     private volatile StampEvidence evidence = StampEvidence.None;
 
-    public virtual CausalityStamp Stamp => evidence.Stamp;
+    /// <summary>
+    /// The published causality evidence of the last completed evaluation, as ONE immutable
+    /// snapshot: the node's own stamp, the per-source map it was sealed from, and whether the
+    /// evaluation was unverifiable. Read this when you need the fields to describe the same
+    /// publication -- the convenience accessors below each take their own snapshot, so two
+    /// separate calls can straddle a concurrent recompute.
+    /// </summary>
+    public virtual StampEvidence Evidence => evidence;
+
+    public CausalityStamp Stamp => Evidence.Stamp;
 
     /// <summary>
     /// "Every Node keeps a Stamp for each of its Sources" (issue #39): the stamp observed on
     /// each tracked source read of the last completed evaluation, keyed by source id -- the
     /// data a distributed sync layer exchanges. Signals keep the empty map.
     /// </summary>
-    public virtual IReadOnlyDictionary<int, CausalityStamp> SourceStamps => evidence.SourceStamps;
+    public IReadOnlyDictionary<int, CausalityStamp> SourceStamps => Evidence.SourceStamps;
 
     // Publish the evidence captured during a completed evaluation of a VALUE-LESS node
     // (reactions). Value nodes publish through MemoHandlR.PublishValueWithStamps instead, which
@@ -264,11 +270,19 @@ public abstract class MemoHandlR<T> : SignalHandlR
 
     internal T Value => valueBox.Value;
 
-    public override CausalityStamp Stamp => valueBox.Evidence.Stamp;
+    public override StampEvidence Evidence => valueBox.Evidence;
 
-    public override IReadOnlyDictionary<int, CausalityStamp> SourceStamps => valueBox.Evidence.SourceStamps;
+    // The (value, evidence) pair of one publication -- a single volatile box read, never torn.
+    internal (T Value, StampEvidence Evidence) ValueAndEvidence
+    {
+        get
+        {
+            var box = valueBox;
+            return (box.Value, box.Evidence);
+        }
+    }
 
-    // The (value, stamp) pair of one publication -- a single volatile box read, never torn.
+    // The (value, stamp) projection of one publication.
     internal (T Value, CausalityStamp Stamp) ValueAndStamp
     {
         get
@@ -341,46 +355,63 @@ public abstract class MemoHandlR<T> : SignalHandlR
     }
 }
 
-// One publication's causality evidence (issue #39): the node's own stamp and the per-source map
-// it was joined from, immutable and published as one reference. The per-source map is wrapped
-// read-only before it becomes reachable from the public SourceStamps, so a consumer can never
-// downcast and mutate the node's published evidence.
-internal sealed class StampEvidence
+/// <summary>
+/// One publication's causality evidence (issue #39): the node's own stamp and the per-source
+/// map it was sealed from, immutable and published as one reference -- reading this property
+/// gives fields that describe the same completed evaluation. The per-source map is wrapped
+/// read-only before it becomes reachable, so a consumer can never downcast and mutate the
+/// node's published evidence. <see cref="Unverifiable"/> distinguishes "this value depends on
+/// no tracked signals" (an honest empty stamp) from "no honest claim can be made about this
+/// value" (a mixed/faulted evaluation): both carry the empty stamp, but only the former can be
+/// trusted by a consistency check -- and unverifiability is contagious, poisoning the evidence
+/// of any evaluation that consumed it.
+/// </summary>
+public sealed class StampEvidence
 {
     private static readonly IReadOnlyDictionary<int, CausalityStamp> NoSourceStamps =
         new System.Collections.ObjectModel.ReadOnlyDictionary<int, CausalityStamp>(new Dictionary<int, CausalityStamp>());
 
-    internal static readonly StampEvidence None = new(CausalityStamp.Empty, NoSourceStamps);
+    internal static readonly StampEvidence None = new(CausalityStamp.Empty, NoSourceStamps, false);
+    internal static readonly StampEvidence UnverifiableEvidence = new(CausalityStamp.Empty, NoSourceStamps, true);
 
-    public readonly CausalityStamp Stamp;
-    public readonly IReadOnlyDictionary<int, CausalityStamp> SourceStamps;
+    public CausalityStamp Stamp { get; }
+    public IReadOnlyDictionary<int, CausalityStamp> SourceStamps { get; }
+    public bool Unverifiable { get; }
 
-    private StampEvidence(CausalityStamp stamp, IReadOnlyDictionary<int, CausalityStamp> sourceStamps)
+    private StampEvidence(CausalityStamp stamp, IReadOnlyDictionary<int, CausalityStamp> sourceStamps, bool unverifiable)
     {
         Stamp = stamp;
         SourceStamps = sourceStamps;
+        Unverifiable = unverifiable;
     }
 
     // A signal's evidence: its own single-entry stamp, no sources.
-    public static StampEvidence ForOwnStamp(CausalityStamp stamp) => new(stamp, NoSourceStamps);
+    internal static StampEvidence ForOwnStamp(CausalityStamp stamp) => new(stamp, NoSourceStamps, false);
 
     // A derived node's evidence: the join of the sealed source stamps plus the per-source map
     // (only branch 0 and, for races, the winning branch survive the seal -- see
-    // StampCapture.Seal). No evidence at all -- the empty stamp claims nothing, which is the
-    // only honest description of a value that mixed two versions of one write history -- is
-    // published when:
-    //  - the capture is POISONED (the same source re-read across different publications), or
+    // StampCapture.Seal). UNVERIFIABLE evidence -- the empty stamp plus the flag, claiming
+    // nothing, which is the only honest description of a value no single stamp can describe --
+    // is published when:
+    //  - the winning evidence is POISONED (a same-source re-read across different
+    //    publications, a consumed source that was itself unverifiable, or a faulted read whose
+    //    fallback the evidence would otherwise hide), or
     //  - two DIFFERENT sources disagree on a shared signal (e.g. two memos both depending on s,
     //    read across a Set: one carries {s:0}, the other {s:1} -- joining would over-claim that
     //    the whole value reflects the newer write). The fold detects any such pair: the running
     //    join always carries the maximum trigger seen for a signal, so a conflicting stamp
     //    fails the consistency check no matter the fold order.
-    // Either way the same mid-evaluation Set refused the node's Clean commit, so the next
-    // recompute publishes clean evidence.
-    public static StampEvidence FromCapture(StampCapture capture, int winningBranch = 0)
+    // For a mid-evaluation Set the same write refused the node's Clean commit, so the next
+    // recompute publishes clean evidence. An evaluation with NO tracked reads publishes None:
+    // the same empty stamp, but verifiable -- the value genuinely depends on nothing.
+    internal static StampEvidence FromCapture(StampCapture capture, int winningBranch = 0)
     {
         var (poisoned, stamps) = capture.Seal(winningBranch);
-        if (poisoned || stamps.Count == 0)
+        if (poisoned)
+        {
+            return UnverifiableEvidence;
+        }
+        if (stamps.Count == 0)
         {
             return None;
         }
@@ -390,11 +421,11 @@ internal sealed class StampEvidence
         {
             if (!stamp.IsConsistentWith(joined))
             {
-                return None;
+                return UnverifiableEvidence;
             }
             joined = joined.Join(stamp);
         }
 
-        return new(joined, new System.Collections.ObjectModel.ReadOnlyDictionary<int, CausalityStamp>(stamps));
+        return new(joined, new System.Collections.ObjectModel.ReadOnlyDictionary<int, CausalityStamp>(stamps), false);
     }
 }
