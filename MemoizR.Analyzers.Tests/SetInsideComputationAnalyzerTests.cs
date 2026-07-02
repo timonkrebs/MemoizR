@@ -217,6 +217,59 @@ public class SetInsideComputationAnalyzerTests
     }
 
     [Fact]
+    public async Task PropertyHeldComputationDelegate_IsAnalyzed()
+    {
+        // The computation reaches the factory through an auto-PROPERTY initializer: same lambda
+        // as the inline/local/field forms, same diagnosis. (Property initializers cannot touch
+        // instance state, hence the statics.)
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using System.Threading.Tasks;
+            using MemoizR;
+
+            public class C
+            {
+                private static readonly MemoFactory F = new();
+                private static readonly Signal<int> S = F.CreateSignal(1);
+
+                public static Func<Task<int>> Compute { get; } = async () => { await S.Set(2); return 0; };
+
+                public void M()
+                {
+                    F.CreateMemoizR(Compute);
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR003", diagnostic.Id);
+    }
+
+    [Fact]
+    public async Task PropertyHeldCrossContextSet_IsNotFlagged()
+    {
+        // Host factory and Set target live in auto-properties: their initializers resolve like
+        // variable initializers, so the provably-different-context suppression applies.
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public class C
+            {
+                private static MemoFactory F1 { get; } = new MemoFactory();
+                private static MemoFactory F2 { get; } = new MemoFactory();
+                private static Signal<int> S { get; } = F2.CreateSignal(0);
+
+                public void M()
+                {
+                    F1.CreateMemoizR(async () => { await S.Set(1); return 0; });
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
     public async Task ShadowedSignalLookalikeSet_IsNotFlagged()
     {
         // A source-shadowed MemoizR.Signal<T> lookalike's Set takes no evaluation lock and does

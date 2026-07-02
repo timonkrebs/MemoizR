@@ -93,6 +93,13 @@ internal static class ComputationLambdas
                 }
 
                 break;
+            case IPropertyReferenceOperation propertyReference:
+                foreach (var body in BodiesFromVariableInitializer(propertyReference.Property, semanticModel, visitedVariables))
+                {
+                    yield return body;
+                }
+
+                break;
         }
     }
 
@@ -111,9 +118,22 @@ internal static class ComputationLambdas
         }
 
         var declaration = variable.DeclaringSyntaxReferences.FirstOrDefault();
-        if (declaration is null
-            || declaration.SyntaxTree != semanticModel.SyntaxTree
-            || declaration.GetSyntax() is not VariableDeclaratorSyntax { Initializer.Value: { } initializer })
+        if (declaration is null || declaration.SyntaxTree != semanticModel.SyntaxTree)
+        {
+            yield break;
+        }
+
+        // Locals and fields declare through VariableDeclaratorSyntax; auto-properties with an
+        // initializer (`Func<...> Compute { get; } = async () => ...`) through
+        // PropertyDeclarationSyntax. Computed properties have no initializer and stay
+        // unresolvable, as they should.
+        var initializer = declaration.GetSyntax() switch
+        {
+            VariableDeclaratorSyntax { Initializer.Value: { } value } => value,
+            PropertyDeclarationSyntax { Initializer.Value: { } value } => value,
+            _ => null,
+        };
+        if (initializer is null)
         {
             yield break;
         }

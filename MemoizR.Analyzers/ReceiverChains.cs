@@ -146,13 +146,21 @@ internal static class ReceiverChains
         }
 
         var declaration = variable.DeclaringSyntaxReferences.FirstOrDefault();
-        if (declaration is null
-            || declaration.SyntaxTree != semanticModel.SyntaxTree
-            || declaration.GetSyntax() is not VariableDeclaratorSyntax { Initializer.Value: { } initializer })
+        if (declaration is null || declaration.SyntaxTree != semanticModel.SyntaxTree)
         {
             return null;
         }
 
-        return semanticModel.GetOperation(initializer);
+        // Locals and fields declare through VariableDeclaratorSyntax; auto-properties with an
+        // initializer (`MemoFactory F { get; } = new MemoFactory();`) through
+        // PropertyDeclarationSyntax. Computed properties have no initializer and stay
+        // unresolvable, as they should.
+        var initializer = declaration.GetSyntax() switch
+        {
+            VariableDeclaratorSyntax { Initializer.Value: { } value } => value,
+            PropertyDeclarationSyntax { Initializer.Value: { } value } => value,
+            _ => null,
+        };
+        return initializer is null ? null : semanticModel.GetOperation(initializer);
     }
 }
