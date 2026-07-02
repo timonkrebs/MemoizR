@@ -53,11 +53,13 @@ public sealed class SetInsideComputationAnalyzer : DiagnosticAnalyzer
         }
     }
 
-    // A cross-FACTORY lock-engine Set does not throw at runtime: the Set locks the target
-    // signal's own context, where the computing graph holds nothing. Skipped only when BOTH the
-    // host's factory and the Set target's creating factory resolve and provably differ --
-    // anything unprovable (a field signal wired in a constructor, a parameter) keeps the
-    // diagnostic, because the overwhelmingly common case is one factory and the runtime
+    // A cross-CONTEXT lock-engine Set does not throw at runtime: the Set locks the target
+    // signal's own context, where the computing graph holds nothing. Skipped only when the
+    // host's and the Set target's factories resolve to different symbols AND their CONTEXTS
+    // provably differ -- two factory variables constructed with the same key share one context
+    // (and its lock), so mere variable inequality proves nothing there. Anything unprovable (a
+    // field signal wired in a constructor, a parameter, a non-constant key) keeps the
+    // diagnostic, because the overwhelmingly common case is one shared context and the runtime
     // exception is deterministic there. Actor hosts are exempt from the check: ActorSignal.Set
     // rejects on the flow's frame, which any actor computation carries regardless of context.
     private static bool IsProvablyCrossFactory(IInvocationOperation host, IInvocationOperation setInvocation, bool actorHost)
@@ -69,9 +71,25 @@ public sealed class SetInsideComputationAnalyzer : DiagnosticAnalyzer
 
         var hostFactory = ReceiverChains.ResolveFactorySymbol(host, host.SemanticModel);
         var targetFactory = ReceiverChains.ResolveCreatingFactorySymbol(setInvocation.Instance, setInvocation.SemanticModel);
-        return hostFactory is not null
-            && targetFactory is not null
-            && !SymbolEqualityComparer.Default.Equals(hostFactory, targetFactory);
+        if (hostFactory is null
+            || targetFactory is null
+            || SymbolEqualityComparer.Default.Equals(hostFactory, targetFactory))
+        {
+            return false;
+        }
+
+        var hostContext = ReceiverChains.ResolveFactoryContextKey(hostFactory, host.SemanticModel);
+        var targetContext = ReceiverChains.ResolveFactoryContextKey(targetFactory, setInvocation.SemanticModel);
+        if (!hostContext.Resolved || !targetContext.Resolved)
+        {
+            return false;
+        }
+
+        // An unkeyed instance owns a fresh context, so any pairing involving one is disjoint;
+        // two keyed instances share exactly when their constant keys match.
+        return hostContext.ContextKey is null
+            || targetContext.ContextKey is null
+            || !Equals(hostContext.ContextKey, targetContext.ContextKey);
     }
 
     // A Set that throws in THIS host's engine: ActorSignal.Set inside an actor computation, or

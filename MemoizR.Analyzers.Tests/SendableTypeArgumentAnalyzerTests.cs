@@ -166,6 +166,71 @@ public class SendableTypeArgumentAnalyzerTests
     }
 
     [Fact]
+    public async Task ExplicitInterfaceProperty_OfMutableType_IsFlagged()
+    {
+        // Explicit implementations are declared private but reachable through a cast to the
+        // interface: the exposed List is shared mutable state like any visible property.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public interface IHasItems
+            {
+                List<int> Items { get; }
+            }
+
+            public sealed class ExplicitLeak : IHasItems
+            {
+                private static readonly List<int> shared = new();
+
+                List<int> IHasItems.Items => shared;
+            }
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    f.CreateSignal(new ExplicitLeak());
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR001", diagnostic.Id);
+        Assert.Contains("Items", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task ShadowedFactoryLookalike_DoesNotDrawDiagnostics()
+    {
+        // A source-shadowed MemoizR.MemoFactory is NOT the reactive factory: its APIs publish
+        // nothing into a graph, so the rules must not classify its invocations as creations.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+
+            namespace MemoizR
+            {
+                public class MemoFactory
+                {
+                    public T CreateSignal<T>(T value) => value;
+                }
+            }
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoizR.MemoFactory();
+                    f.CreateSignal(new List<int>()); // not a graph value: must not be MZR001
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
     public async Task SourceShadowedSendableAttribute_IsNotTrusted()
     {
         // A source-declared MemoizR.SendableAttribute binds over the library's (with a conflict

@@ -60,7 +60,9 @@ what a compiler can and cannot see:
    require the symbol to come from a framework assembly and not from source: a source-declared
    lookalike (`namespace System { class Uri { public int State; } }`) binds over the BCL type
    and must go through the structural walk, exactly as the runtime's `typeof` identity match
-   treats it. A metadata type with *purely private* mutable state still passes the analyzer
+   treats it; the same identity rule guards the `[Sendable]` attribute, and the factory-method
+   classification itself (a source-shadowed `MemoizR.MemoFactory` must not draw MZR001–003 onto
+   unrelated APIs). A metadata type with *purely private* mutable state still passes the analyzer
    silently — that includes a `{ get; private set; }` auto-property on a referenced assembly,
    whose private setter and writable backing field are both invisible under public-only import,
    making it indistinguishable from a get-only property; the runtime strict mode remains the
@@ -117,12 +119,14 @@ Host scoping follows the lock semantics exactly: `CreateMemoizR`, `CreateConcurr
 (its children share the parent flow's scope), and the reaction builders are flagged;
 `CreateConcurrentMap` and `CreateConcurrentRace` are **not**, because their children run on
 forced fresh scopes where the same-flow conflict does not exist. A Set whose target signal
-*provably* belongs to a **different factory** than the host is not flagged either — the write
+*provably* belongs to a **different context** than the host is not flagged either — the write
 locks the target's own context, where the computing graph holds nothing, so the runtime does
-not throw. Both factories must resolve (through receiver chains and same-tree initializers) and
-differ; an unprovable target (a field wired in a constructor, a parameter) keeps the
-diagnostic, since one shared factory is the overwhelmingly common case and the runtime
-exception is deterministic there.
+not throw. Both factories must resolve (through receiver chains and same-tree initializers) to
+different symbols AND to provably disjoint contexts — unkeyed `new MemoFactory()` instances
+each own a fresh context, keyed ones share per constant key, so two factories with the same key
+keep the diagnostic. Anything unprovable (a field wired in a constructor, a parameter, a
+non-constant key) keeps the diagnostic, since one shared context is the overwhelmingly common
+case and the runtime exception is deterministic there.
 
 The walk is likewise scoped to the lock semantics: only the computation's **direct execution
 path** is inspected. Nested anonymous functions and local-function declarations are pruned,

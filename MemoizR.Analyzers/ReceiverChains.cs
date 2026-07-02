@@ -72,6 +72,38 @@ internal static class ReceiverChains
         }
     }
 
+    // The CONTEXT identity behind a factory symbol, resolved through its same-tree
+    // `new MemoFactory(key)` initializer: unkeyed instances (null key) each own a fresh
+    // context, keyed ones share one context per key. Resolved=false means unprovable (no
+    // visible creation, or a non-constant key).
+    public static (bool Resolved, object? ContextKey) ResolveFactoryContextKey(ISymbol factorySymbol, SemanticModel? semanticModel)
+    {
+        var initializer = InitializerOf(factorySymbol, semanticModel);
+        while (initializer is IConversionOperation conversion)
+        {
+            initializer = conversion.Operand;
+        }
+
+        if (initializer is not IObjectCreationOperation creation
+            || creation.Type is not INamedTypeSymbol { Name: "MemoFactory" } named
+            || named.ContainingNamespace?.ToDisplayString() != "MemoizR")
+        {
+            return (false, null);
+        }
+
+        foreach (var argument in creation.Arguments)
+        {
+            if (argument.Parameter?.Name == "contextKey")
+            {
+                return argument.Value.ConstantValue is { HasValue: true } constant
+                    ? (true, constant.Value)
+                    : (false, null);
+            }
+        }
+
+        return (true, null);
+    }
+
     private static ISymbol? SymbolOf(IOperation? reference)
     {
         return reference switch

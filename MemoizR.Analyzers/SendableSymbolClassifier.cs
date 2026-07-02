@@ -319,8 +319,11 @@ internal sealed class SendableSymbolClassifier
             return $"{Display(named)} has {SettableDisplay(property)}";
         }
 
+        // Private properties are unreachable by consumers -- EXCEPT explicit interface
+        // implementations, which are declared private but reachable through a cast to the
+        // interface (kept in lockstep with the runtime checker's IsVisibleAccessor).
         if (property.IsStatic || property.IsIndexer || property.GetMethod is null
-            || property.DeclaredAccessibility == Accessibility.Private)
+            || (property.DeclaredAccessibility == Accessibility.Private && property.ExplicitInterfaceImplementations.IsEmpty))
         {
             return null;
         }
@@ -377,9 +380,11 @@ internal sealed class SendableSymbolClassifier
     private static bool HasVisibleNonInitSetter(IPropertySymbol property)
     {
         // Private setters are covered by the field walk where visible (source types) and are
-        // unreachable by consumers; everything else can mutate the shared instance.
+        // unreachable by consumers -- except explicit interface implementations, reachable
+        // through a cast to the interface; everything else can mutate the shared instance.
         return property.SetMethod is { IsInitOnly: false } setter
-            && setter.DeclaredAccessibility != Accessibility.Private;
+            && (setter.DeclaredAccessibility != Accessibility.Private
+                || !setter.ExplicitInterfaceImplementations.IsEmpty);
     }
 
     private static string SettableDisplay(IPropertySymbol property)

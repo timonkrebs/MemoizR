@@ -130,6 +130,15 @@ public class SendableCheckerTests
     }
 
     [Fact]
+    public void ExplicitInterfaceProperty_OfMutableType_IsNotSendable()
+    {
+        // Reflection reports explicit implementations as private, but any consumer reaches
+        // them by casting to the interface -- the exposed List is shared mutable state.
+        Assert.False(SendableChecker.IsSendable(typeof(ExplicitInterfaceLeak), out var reason));
+        Assert.Contains("Items", reason);
+    }
+
+    [Fact]
     public void TypeWithVisibleCustomEvent_IsNotSendable()
     {
         // A custom event (explicit add/remove) has no instance backing field for the field walk,
@@ -244,6 +253,20 @@ internal sealed class HolderOfMutable
 internal sealed class TrustedMutable
 {
     public int Count { get; set; }
+}
+
+internal interface IHasItemsForExplicitLeak
+{
+    List<int> Items { get; }
+}
+
+// The mutable state is reachable ONLY through the interface cast: no instance fields, no
+// visible property -- the explicit implementation is the whole leak surface.
+internal sealed class ExplicitInterfaceLeak : IHasItemsForExplicitLeak
+{
+    private static readonly List<int> shared = [];
+
+    List<int> IHasItemsForExplicitLeak.Items => shared;
 }
 
 internal sealed class HasCustomEvent

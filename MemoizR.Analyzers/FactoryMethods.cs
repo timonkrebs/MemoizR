@@ -1,10 +1,12 @@
+using System.Linq;
 using Microsoft.CodeAnalysis;
 
 namespace MemoizR.Analyzers;
 
 // Classification of the MemoizR factory methods the rules hook into. Matching is by containing
 // type + method name (extension methods arrive reduced; ContainingType is still the static
-// class), so the analyzer needs no reference to MemoizR itself.
+// class) PLUS library-assembly identity, so the analyzer needs no reference to MemoizR itself
+// and a source-shadowed lookalike factory cannot draw the diagnostics onto unrelated APIs.
 internal static class FactoryMethods
 {
     // Methods whose generic type arguments are value types the graph shares across flows
@@ -81,7 +83,8 @@ internal static class FactoryMethods
     private static bool IsOn(IMethodSymbol method, string namespaceName, string typeName, string[] names)
     {
         var type = method.ContainingType;
-        if (type is null || type.Name != typeName || type.ContainingNamespace?.ToDisplayString() != namespaceName)
+        if (type is null || type.Name != typeName || type.ContainingNamespace?.ToDisplayString() != namespaceName
+            || !IsLibraryType(type))
         {
             return false;
         }
@@ -95,5 +98,21 @@ internal static class FactoryMethods
         }
 
         return false;
+    }
+
+    // A source-shadowed lookalike (a project's own MemoizR.MemoFactory, which source-wins over
+    // the referenced one) must not be classified as the reactive factory: its APIs publish
+    // nothing into a MemoizR graph, so firing MZR001-003 on them would be pure false positives
+    // (a build break under warnings-as-errors). Kept in lockstep with the identity checks on
+    // the SendableAttribute and the green-lists in SendableSymbolClassifier.
+    private static bool IsLibraryType(INamedTypeSymbol type)
+    {
+        if (type.Locations.Any(location => location.IsInSource))
+        {
+            return false;
+        }
+
+        return type.ContainingAssembly?.Identity.Name is
+            "MemoizR" or "MemoizR.Reactive" or "MemoizR.StructuredConcurrency";
     }
 }

@@ -279,7 +279,7 @@ public static class SendableChecker
         foreach (var property in declaringLevel.GetProperties(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.DeclaredOnly))
         {
             var setter = property.SetMethod;
-            if (!type.IsValueType && setter is not null && !setter.IsPrivate && !IsInitOnly(setter))
+            if (!type.IsValueType && setter is not null && IsVisibleAccessor(setter) && !IsInitOnly(setter))
             {
                 return property.GetIndexParameters().Length > 0
                     ? $"{Pretty(type)} has a settable indexer"
@@ -296,6 +296,21 @@ public static class SendableChecker
         return null;
     }
 
+    // An accessor is a mutation/exposure surface when consumers can reach it. Private accessors
+    // cannot be reached -- EXCEPT explicit interface implementations, which reflection reports
+    // as private but any consumer reaches by casting to the interface (their reflection
+    // signature is private+virtual+final with a dotted name). Kept in lockstep with the MZR001
+    // analyzer's ExplicitInterfaceImplementations handling.
+    private static bool IsVisibleAccessor(MethodInfo accessor)
+    {
+        if (!accessor.IsPrivate)
+        {
+            return true;
+        }
+
+        return accessor.IsVirtual && accessor.IsFinal && accessor.Name.Contains('.');
+    }
+
     // The property's TYPE is checked too (not just its setter), in lockstep with the MZR001
     // analyzer, where that rule catches a get-only `List<int> Items { get; }` on a metadata type
     // whose private backing field the compiler does not import. Here it catches what the field
@@ -304,7 +319,7 @@ public static class SendableChecker
     private static string? CheckPropertyType(Type type, PropertyInfo property, HashSet<Type> inProgress)
     {
         var getter = property.GetGetMethod(nonPublic: true);
-        if (getter is null || getter.IsPrivate || property.GetIndexParameters().Length > 0)
+        if (getter is null || !IsVisibleAccessor(getter) || property.GetIndexParameters().Length > 0)
         {
             return null;
         }

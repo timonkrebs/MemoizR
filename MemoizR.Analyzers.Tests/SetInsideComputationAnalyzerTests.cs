@@ -146,6 +146,31 @@ public class SetInsideComputationAnalyzerTests
     }
 
     [Fact]
+    public async Task SameKeyFactoriesSet_IsStillFlagged()
+    {
+        // Two factory VARIABLES constructed with the same key share one context -- and its
+        // lock -- so the Set throws at runtime exactly like the same-factory case: variable
+        // inequality alone must not suppress the diagnostic.
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f1 = new MemoFactory("shared");
+                    var f2 = new MemoFactory("shared");
+                    var s = f2.CreateSignal(0);
+                    f1.CreateMemoizR(async () => { await s.Set(1); return 0; });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR003", diagnostic.Id);
+    }
+
+    [Fact]
     public async Task CrossEngineSet_IsNotFlagged()
     {
         var diagnostics = await AnalyzeAsync("""
