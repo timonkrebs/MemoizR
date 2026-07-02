@@ -93,20 +93,27 @@ below follows from choosing the safe direction:
    under a racing `Set` (the refreshed stamp could absorb a write whose recompute outcome was
    never verified), so the stamp stays old. Documented by
    `Memo_SkippedRecompute_KeepsOlderStamp_NeverOverclaims`.
-3. **Mixed re-reads publish no evidence.** When a computation re-reads a source and a `Set`
-   landed between the reads, the value mixes two versions of one write history — no single
-   per-source stamp is honest in either direction (the older would show false agreement with
-   the newer ingredient; the newer is exactly the forbidden over-claim). The capture is
-   **poisoned** and the node publishes the empty stamp, which claims nothing and is always
-   safe; the same mid-evaluation `Set` refused the Clean commit, so the next recompute
-   publishes clean evidence (`Memo_MixedRereadAcrossASet_PublishesNoEvidence`).
-4. **The race's sibling window.** `ConcurrentRace` closes its capture the moment the winning
-   result is selected, so reads by losing branches after that point never widen the stamp
-   (`ConcurrentRace_LoserReadsAfterTheWinner_DoNotWidenTheStamp`). Reads a losing branch
-   performed *before* that moment are still joined — branch reads share one capture identity —
-   so a pre-selection loser read of a signal the winner never consumed can still widen the
-   race's stamp. Exact per-branch attribution needs per-branch capture identity; deferred until
-   a sync layer demonstrates the need.
+3. **Internally inconsistent evidence publishes as no evidence.** When a computation's reads
+   straddle a `Set`, the value mixes two versions of one write history and no per-source stamp
+   is honest in either direction (the older would show false agreement with the newer
+   ingredient; the newer is exactly the forbidden over-claim). Both shapes are detected and the
+   node publishes the empty stamp — which claims nothing and is always safe — while the same
+   mid-evaluation `Set` refused the Clean commit, so the next recompute publishes clean
+   evidence:
+   - a **re-read of the same source** across different publications poisons the capture
+     (`Memo_MixedRereadAcrossASet_PublishesNoEvidence`);
+   - **two different sources disagreeing on a shared signal** (e.g. two memos both depending on
+     `s`, one read carrying `{s:0}` and the other `{s:1}`) fail the consistency fold when the
+     evidence is sealed (`Memo_SourcesDisagreeingOnASharedSignal_PublishNoEvidence`).
+   Note the flip side for consumers: the empty stamp means *no claim*, not *verified* — a sync
+   protocol must treat absent evidence as unverifiable rather than trivially consistent.
+4. **Races publish only the evidence that fed the winner.** Every tracked read inside a racing
+   branch is tagged with its branch (an ambient `AsyncLocal` set per branch task, so
+   `CurrentReaction` — which observer wiring hangs off — stays the race itself). The capture is
+   closed the moment the winner is claimed *and* sealed to the shared action's reads plus the
+   winning branch's, so a losing branch's reads never widen the stamp — whether they happened
+   before or after the selection (`ConcurrentRace_LoserReadsBeforeTheWinner_AreNotPublished`,
+   `ConcurrentRace_LoserReadsAfterTheWinner_DoNotWidenTheStamp`).
 5. **Untracked reads (`Untrack`) are not stamped** — the stamp mirrors the dependency graph,
    which deliberately does not see them.
 

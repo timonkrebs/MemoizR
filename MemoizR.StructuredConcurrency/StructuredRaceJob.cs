@@ -6,20 +6,18 @@ public sealed class StructuredRaceJob<T, R> : StructuredJobBase<T>, IDisposable
     private readonly IReadOnlyCollection<Func<IStructuredResourceGroup, R, Task<T>>> fns;
     private readonly CancellationTokenSource innerCancellationTokenSource;
     private readonly CancellationTokenSource groupCancellationTokenSource;
-    // Cross-task winner flag: once any racer succeeds, slower siblings may observe cancellation
-    // or fault during teardown, but they must not turn a completed race into a failed one.
-    private volatile bool finished;
-
-    // First-successful-racer latch: the value, the winner flag and the capture-closing callback
-    // are claimed TOGETHER by exactly one racer, so a slower successful sibling can neither
-    // overwrite the result nor detach it from the evidence captured for it.
+    // First-successful-racer latch: the value and the capture-closing callback are claimed
+    // TOGETHER by exactly one racer, so a slower successful sibling can neither overwrite the
+    // result nor detach it from the evidence captured for it. The loser-forgiveness in the
+    // catch below keys off this same latch (not a separate flag set later), so there is no gap
+    // in which a faulting sibling could fail a race whose winner is already claimed.
     private int winClaimed;
 
-    // Invoked exactly once, on the winning racer's flow, the moment its result is recorded --
-    // BEFORE the losers are cancelled. ConcurrentRace closes its causality-stamp capture here:
-    // reads performed by losing branches after this point did not feed the winning value and
-    // must not widen its published stamp (issue #39).
-    internal Action? OnWinnerSelected { get; init; }
+    // Invoked exactly once, on the winning racer's flow, with the 1-based index of the winning
+    // branch, BEFORE the losers are cancelled. ConcurrentRace closes its causality-stamp
+    // capture here and later seals it to this branch: reads performed by losing branches did
+    // not feed the winning value and must not widen its published stamp (issue #39).
+    internal Action<int>? OnWinnerSelected { get; init; }
 
     public StructuredRaceJob(Func<Task<R>> action,
         IReadOnlyCollection<Func<IStructuredResourceGroup, R, Task<T>>> fns, CancellationTokenSource cancellationTokenSource)
@@ -56,31 +54,41 @@ public sealed class StructuredRaceJob<T, R> : StructuredJobBase<T>, IDisposable
         // fails a race that has a perfectly good winner (seen on slow CI runners). Cancellation
         // flows to the branch BODIES through raceResourceGroup.Token instead, where the catch
         // owns the winner-aware forgiveness.
-        tasks.AddRange(fns.Select(x => new Task<Task>(async () =>
+        tasks.AddRange(fns.Select((x, index) => new Task<Task>(async () =>
             {
+                // Tag this branch's flow (1-based) so its tracked reads are attributed to it in
+                // the race's stamp capture; the AsyncLocal write lives in the branch task's own
+                // ExecutionContext and never leaks to the parent flow.
+                RaceBranchFlow.Current.Value = index + 1;
                 try
                 {
+                    // A branch whose cold task starts only after a sibling already won (or the
+                    // group was cancelled) must not run user code against a dead token; the
+                    // throw lands in the catch below, which forgives it when a winner exists.
+                    raceResourceGroup.Token.ThrowIfCancellationRequested();
+
                     var candidate = await x(raceResourceGroup, inputs);
                     if (Interlocked.CompareExchange(ref winClaimed, 1, 0) != 0)
                     {
                         return; // a sibling already won; this result never becomes visible
                     }
-                    finished = true;
                     // Close the capture BEFORE recording the winning value. The value only
                     // becomes visible at Run's WhenAll barrier -- strictly after this whole
                     // block -- and the close is atomic against sibling records (both run under
                     // Context.Lock), so this ordering is not load-bearing; it keeps the
                     // invariant textual: once the winner exists anywhere, the capture is shut.
-                    OnWinnerSelected?.Invoke();
+                    OnWinnerSelected?.Invoke(index + 1);
                     result = candidate;
                     innerCancellationTokenSource.Cancel();
                 }
                 catch
                 {
-                    // A loser that faults (including via cancellation) after a winner finished must
-                    // not turn the completed race into a failure; propagate only while no winner
-                    // has been recorded yet.
-                    if (!finished)
+                    // A loser that faults (including via cancellation) after a winner was
+                    // claimed must not turn the completed race into a failure; propagate only
+                    // while no winner exists. Keyed off the win latch itself -- not a flag set
+                    // afterwards -- so there is no instruction window in which a sibling's
+                    // fault could sink a race whose winner is already claimed.
+                    if (Volatile.Read(ref winClaimed) == 0)
                     {
                         groupCancellationTokenSource.Cancel();
                         throw;

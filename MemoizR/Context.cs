@@ -156,11 +156,14 @@ public class Context
             return;
         }
 
+        // Resolve the ambient racing-branch tag outside the monitor (an AsyncLocal read); 0 for
+        // every read that is not inside a racing branch.
+        var branch = RaceBranchFlow.Current.Value;
         lock (Lock)
         {
             if (stampCaptures.TryGetValue(evaluatingNode, out var capture))
             {
-                capture.Record(sourceId, stamp);
+                capture.Record(sourceId, stamp, branch);
             }
         }
     }
@@ -469,18 +472,39 @@ public class Context
 // nothing, which is always safe); the mid-evaluation Set that caused the mix also bumped the
 // node's generation, so the Clean commit is refused and the next recompute publishes clean
 // evidence.
+// The ambient tag of the racing branch currently evaluating on this flow (0 = not inside a
+// racing branch: ordinary evaluations and a race's shared action). Set by StructuredRaceJob at
+// the top of each branch body, so the tag flows into everything the branch spawns; the mutation
+// lives in the branch task's own ExecutionContext and never leaks to the parent flow. It lets
+// one race capture attribute entries per branch WITHOUT touching CurrentReaction -- which must
+// stay the race itself, because capture-time observer wiring hangs off it.
+internal static class RaceBranchFlow
+{
+    internal static readonly AsyncLocal<int> Current = new();
+}
+
+// One evaluation's observed source stamps (issue #39), keyed by (source id, racing branch).
+// All mutation happens under Context.Lock. The capture is POISONED when the same source is
+// re-read by the same branch across DIFFERENT publications: the computed value then mixes two
+// versions of one write history, so no single per-source stamp is honest -- not the older (a
+// consumer comparing against the newer ingredient would see false agreement) and not the newer
+// (the over-claim the capture discipline forbids). A poisoned capture publishes no evidence at
+// all (the empty stamp claims nothing); the mid-evaluation Set that caused the mix also bumped
+// the node's generation, so the Clean commit is refused and the next recompute publishes clean
+// evidence. The same source read differently by DIFFERENT branches is not poison -- branches
+// are alternative computations, and Seal resolves them by keeping only the winner's evidence.
 internal sealed class StampCapture
 {
     // Returned by TakeStampCapture when no capture is open; never registered, so never mutated.
     internal static readonly StampCapture Empty = new();
 
-    public Dictionary<int, CausalityStamp> Stamps { get; } = new();
+    private readonly Dictionary<(int Source, int Branch), CausalityStamp> entries = new();
 
     public bool Poisoned { get; private set; }
 
-    public void Record(int sourceId, CausalityStamp stamp)
+    public void Record(int sourceId, CausalityStamp stamp, int branch)
     {
-        if (Stamps.TryGetValue(sourceId, out var existing))
+        if (entries.TryGetValue((sourceId, branch), out var existing))
         {
             if (!existing.Equals(stamp))
             {
@@ -489,6 +513,38 @@ internal sealed class StampCapture
             return;
         }
 
-        Stamps[sourceId] = stamp;
+        entries[(sourceId, branch)] = stamp;
+    }
+
+    // Reduce the branch-tagged entries to one stamp per source, keeping only the evidence that
+    // fed the published value: branch 0 (the owning evaluation itself, or a race's shared
+    // action) plus the winning branch. For every non-race capture all entries carry branch 0,
+    // so Seal(0) keeps everything. A disagreement between the shared and the winning entry for
+    // one source is the same mixed-publication situation as a poisoned re-read.
+    public (bool Poisoned, Dictionary<int, CausalityStamp> Stamps) Seal(int winningBranch)
+    {
+        var stamps = new Dictionary<int, CausalityStamp>();
+        if (Poisoned)
+        {
+            return (true, stamps);
+        }
+
+        foreach (var ((source, branch), stamp) in entries)
+        {
+            if (branch != 0 && branch != winningBranch)
+            {
+                continue;
+            }
+            if (stamps.TryGetValue(source, out var existing))
+            {
+                if (!existing.Equals(stamp))
+                {
+                    return (true, stamps);
+                }
+                continue;
+            }
+            stamps[source] = stamp;
+        }
+        return (false, stamps);
     }
 }

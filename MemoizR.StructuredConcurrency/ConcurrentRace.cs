@@ -72,26 +72,32 @@ public sealed class ConcurrentRace<T, I> : MemoHandlR<T>, IMemoizR, IStampedGetR
         var prevAmbientContext = LockEngineFlow.EvaluatingContext.Value;
         LockEngineFlow.EvaluatingContext.Value = Context;
 
-        // Tracked reads by the racing branches (the parent-flow action plus the child tasks,
-        // which inherit this scope) record the source stamps they observed to this node's
-        // bucket. The bucket is closed the MOMENT the winner is selected -- Run still awaits the
-        // losers, so reads they perform after that point would otherwise land in the capture
-        // and widen the published stamp with versions the winning value never consumed. The
-        // job's win latch invokes the callback exactly once, atomically with recording the
-        // winning result, so the value and its capture always come from the same moment; the
-        // WhenAll join inside Run is the barrier that publishes winnerCapture to this flow.
+        // Tracked reads record the source stamps they observed to this node's bucket, tagged
+        // with the racing branch that performed them (0 = the shared action on this flow). Two
+        // cuts keep the published stamp exactly the evidence that fed the winning value:
+        //  - the bucket is CLOSED the moment the winner is selected (the job's win latch
+        //    invokes the callback exactly once, atomically with claiming the result), dropping
+        //    everything a loser reads afterwards, and
+        //  - the capture is SEALED to branch 0 + the winning branch, dropping what losers read
+        //    BEFORE the selection too -- their reads never fed the returned value.
+        // The WhenAll join inside Run is the barrier that publishes the locals to this flow.
         Context.BeginStampCapture(this);
         StampCapture? winnerCapture = null;
+        var winnerBranch = 0;
 
         try
         {
             State = CacheState.Evaluating;
             using var job = new StructuredRaceJob<T, I>(action, fns, Context.CancellationTokenSource!)
             {
-                OnWinnerSelected = () => winnerCapture = Context.TakeStampCapture(this),
+                OnWinnerSelected = branch =>
+                {
+                    winnerBranch = branch;
+                    winnerCapture = Context.TakeStampCapture(this);
+                },
             };
             var newValue = await job.Run(Context.CancellationTokenSource!.Token);
-            PublishValueWithStamps(newValue, winnerCapture ?? Context.TakeStampCapture(this));
+            PublishValueWithStamps(newValue, winnerCapture ?? Context.TakeStampCapture(this), winnerBranch);
             State = CacheState.CacheClean;
         }
         catch

@@ -290,9 +290,9 @@ public abstract class MemoHandlR<T> : SignalHandlR
     // at winner selection.
     internal void PublishValueWithCapturedStamps(T value) => PublishValueWithStamps(value, Context.TakeStampCapture(this));
 
-    internal void PublishValueWithStamps(T value, StampCapture capture)
+    internal void PublishValueWithStamps(T value, StampCapture capture, int winningBranch = 0)
     {
-        valueBox = new ValueBox(value, StampEvidence.FromCapture(capture));
+        valueBox = new ValueBox(value, StampEvidence.FromCapture(capture, winningBranch));
     }
 
     internal MemoHandlR(Context context) : base(context)
@@ -364,14 +364,37 @@ internal sealed class StampEvidence
     // A signal's evidence: its own single-entry stamp, no sources.
     public static StampEvidence ForOwnStamp(CausalityStamp stamp) => new(stamp, NoSourceStamps);
 
-    // A derived node's evidence: the join of the captured source stamps plus the per-source
-    // map. A POISONED capture (the same source re-read across different publications -- see
-    // StampCapture) publishes no evidence at all: the empty stamp claims nothing, which is the
-    // only honest description of a value that mixed two versions of one write history.
-    public static StampEvidence FromCapture(StampCapture capture) =>
-        capture.Poisoned || capture.Stamps.Count == 0
-            ? None
-            : new(
-                CausalityStamp.JoinAll(capture.Stamps.Values),
-                new System.Collections.ObjectModel.ReadOnlyDictionary<int, CausalityStamp>(capture.Stamps));
+    // A derived node's evidence: the join of the sealed source stamps plus the per-source map
+    // (only branch 0 and, for races, the winning branch survive the seal -- see
+    // StampCapture.Seal). No evidence at all -- the empty stamp claims nothing, which is the
+    // only honest description of a value that mixed two versions of one write history -- is
+    // published when:
+    //  - the capture is POISONED (the same source re-read across different publications), or
+    //  - two DIFFERENT sources disagree on a shared signal (e.g. two memos both depending on s,
+    //    read across a Set: one carries {s:0}, the other {s:1} -- joining would over-claim that
+    //    the whole value reflects the newer write). The fold detects any such pair: the running
+    //    join always carries the maximum trigger seen for a signal, so a conflicting stamp
+    //    fails the consistency check no matter the fold order.
+    // Either way the same mid-evaluation Set refused the node's Clean commit, so the next
+    // recompute publishes clean evidence.
+    public static StampEvidence FromCapture(StampCapture capture, int winningBranch = 0)
+    {
+        var (poisoned, stamps) = capture.Seal(winningBranch);
+        if (poisoned || stamps.Count == 0)
+        {
+            return None;
+        }
+
+        var joined = CausalityStamp.Empty;
+        foreach (var stamp in stamps.Values)
+        {
+            if (!stamp.IsConsistentWith(joined))
+            {
+                return None;
+            }
+            joined = joined.Join(stamp);
+        }
+
+        return new(joined, new System.Collections.ObjectModel.ReadOnlyDictionary<int, CausalityStamp>(stamps));
+    }
 }

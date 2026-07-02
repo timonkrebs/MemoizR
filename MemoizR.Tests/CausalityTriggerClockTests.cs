@@ -485,6 +485,78 @@ public class CausalityTriggerClockTests
     }
 
     [Fact]
+    public async Task ConcurrentRace_LoserReadsBeforeTheWinner_AreNotPublished()
+    {
+        var f = new MemoFactory();
+        var input = f.CreateSignal(5);
+        var loserSignal = f.CreateSignal(100);
+        var loserHasRead = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var winnerGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var race = f.CreateConcurrentRace<int, int>(
+            async () => await input.Get(),
+            async (_, i) =>
+            {
+                await winnerGate.Task; // deliberately slow: the loser reads FIRST
+                return i * 2;
+            },
+            async (group, _) =>
+            {
+                await loserSignal.Get(); // recorded before any winner exists...
+                loserHasRead.TrySetResult();
+                await Task.Delay(Timeout.Infinite, group.Token); // ...then loses via cancellation
+                return -1;
+            });
+
+        var get = race.GetWithStamp();
+        await loserHasRead.Task; // the losing branch's read is definitely in the capture
+        winnerGate.SetResult();
+
+        // The capture is sealed to the winning branch (plus the shared action), so the loser's
+        // pre-selection read never fed the returned value and must not appear in its evidence.
+        var (value, stamp) = await get;
+        Assert.Equal(10, value);
+        Assert.True(stamp.TryGetTrigger(input.Id, out _));
+        Assert.False(stamp.TryGetTrigger(loserSignal.Id, out _));
+    }
+
+    [Fact]
+    public async Task Memo_SourcesDisagreeingOnASharedSignal_PublishNoEvidence()
+    {
+        var f = new MemoFactory();
+        var s = f.CreateSignal(1);
+        var a = f.CreateMemoizR(async () => await s.Get() * 10);
+        Assert.Equal(10, await a.Get()); // a caches with evidence {s: 0}
+
+        var gate = new RecomputeGate();
+        var m = f.CreateMemoizR(async () =>
+        {
+            var viaA = await a.Get(); // records a's stamp {s: 0}
+            await gate.PauseIfArmedAsync();
+            return viaA + await s.Get(); // records {s: 1} after the injected Set
+        });
+
+        gate.Arm();
+        var get = Task.Run(() => m.Get());
+        await gate.ReadDone;
+        await s.Set(2); // lands between the two source reads
+        gate.Proceed();
+        Assert.Equal(12, await get);
+
+        // Two DIFFERENT sources now disagree on the shared signal: a contributed {s: 0}, the
+        // direct read {s: 1}. Joining would over-claim the newer write for a value that partly
+        // used the older one, so the node publishes no evidence at all.
+        Assert.Equal(CausalityStamp.Empty, m.Stamp);
+        Assert.Empty(m.SourceStamps);
+
+        // The same Set refused the Clean commit: the next Get recomputes consistently.
+        Assert.Equal(22, await m.Get());
+        Assert.True(m.Stamp.TryGetTrigger(s.Id, out var trigger));
+        Assert.Equal(1, trigger);
+        Assert.Equal(m.Stamp, CausalityStamp.JoinAll(m.SourceStamps.Values));
+    }
+
+    [Fact]
     public async Task Memo_ReadingARace_InheritsTheRaceEvidence()
     {
         var f = new MemoFactory();
