@@ -36,7 +36,7 @@ public class ReactiveTests
             await foreach (var m in m1)
             {
                 result = m;
-                invocationCount++;
+                Interlocked.Increment(ref invocationCount); // full fence: result is visible before the count
             }
         });
 
@@ -46,26 +46,38 @@ public class ReactiveTests
         Assert.Equal(0, result);
         Assert.Equal(0, invocationCount);
 
+        // Fixed 20ms sleeps lost the race on loaded 2-core CI runners (the suite runs storm
+        // tests in parallel); each emission is awaited by condition instead, with only the
+        // NEGATIVE check below keeping a (generous) grace delay.
         await v1.Set(2);
-        await Task.Delay(20);
+        await WaitForInvocationsAsync(() => Volatile.Read(ref invocationCount), 1);
         Assert.Equal(2, result);
         Assert.Equal(1, invocationCount);
 
         await v1.Set(3);
-        await Task.Delay(20);
+        await WaitForInvocationsAsync(() => Volatile.Read(ref invocationCount), 2);
         Assert.Equal(3, result);
         Assert.Equal(2, invocationCount);
 
-        await v1.Set(3);
-        await Task.Delay(20);
+        await v1.Set(3); // equal value: no new emission may appear
+        await Task.Delay(100);
         Assert.Equal(3, result);
         Assert.Equal(2, invocationCount);
 
         await v1.Set(4);
-        await Task.Delay(20);
+        await WaitForInvocationsAsync(() => Volatile.Read(ref invocationCount), 3);
         Assert.Equal(4, result);
         Assert.Equal(3, invocationCount);
         Assert.NotNull(m1);
+    }
+
+    private static async Task WaitForInvocationsAsync(Func<int> count, int atLeast)
+    {
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+        while (count() < atLeast && stopwatch.ElapsedMilliseconds < 5000)
+        {
+            await Task.Delay(5);
+        }
     }
 
     [Fact(Timeout = 2000)]

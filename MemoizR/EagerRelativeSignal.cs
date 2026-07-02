@@ -11,8 +11,15 @@ public sealed class EagerRelativeSignal<T> : MemoHandlR<T>, IStateGetR<T>
 
     public async Task Set(Func<T, T> fn)
     {
-        // Resolve once + strong root: see Signal.Set.
-        var scope = Context.ReactionScope;
+        // PINNED scope (not the throwaway the plain getter would mint on an unpinned flow), and
+        // strongly rooted for the write: this Set runs USER code (fn) under the exclusive lock,
+        // and that code may legitimately call AssertEvaluationIsolated -- which resolves the
+        // flow's scope and asks whether ITS lock is held. On a throwaway scope the callback
+        // would resolve a different instance and read as not isolated; pinning makes the
+        // callback see the very scope whose lock is held. (The pin is an AsyncLocal write, but
+        // acquiring the exclusive lock below already pays AsyncLocal writes for its own
+        // reentrancy scope; plain Signal.Set runs no user code and keeps the cheaper getter.)
+        var scope = Context.GetOrCreateScope();
         try
         {
             // There can be multiple threads updating the CacheState at the same time but no reads should be possible while in the process.

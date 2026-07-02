@@ -3,21 +3,35 @@ namespace MemoizR.Reactive;
 public sealed class ReactionBuilder
 {
     private readonly MemoFactory memoFactory;
-    private readonly SynchronizationContext? synchronizationContext;
+    // The executor reaction side effects are marshalled to (a UI SynchronizationContext wrapped
+    // in a SynchronizationContextExecutor, a DedicatedThreadExecutor, or a custom IExecutor) --
+    // the SE-0392 custom-executor analog. Captured from the factory at build time; AddExecutor
+    // overrides it for this builder's reactions. Mutable so that override can apply.
+    private IExecutor? executor;
 
     private string label;
     private TimeSpan debounceTime = TimeSpan.FromMilliseconds(1);
-    // Captured from the factory at build time (mirroring the SynchronizationContext contract):
-    // an AddTimeProvider on the factory after BuildReaction does not affect this builder. Null
+    // Captured from the factory at build time (mirroring the executor contract): an
+    // AddTimeProvider on the factory after BuildReaction does not affect this builder. Null
     // means TimeProvider.System.
     private TimeProvider? timeProvider;
 
-    public ReactionBuilder(MemoFactory memoFactory, SynchronizationContext? synchronizationContext, string label)
+    public ReactionBuilder(MemoFactory memoFactory, IExecutor? executor, string label)
     {
         this.memoFactory = memoFactory;
-        this.synchronizationContext = synchronizationContext;
+        this.executor = executor;
         this.label = label;
         this.timeProvider = memoFactory.TimeProvider;
+    }
+
+    /// <summary>
+    /// Overrides the factory-level executor for the reactions built by THIS builder -- per-node
+    /// executor selection, like a Swift actor declaring its own unownedExecutor (SE-0392).
+    /// </summary>
+    public ReactionBuilder AddExecutor(IExecutor executor)
+    {
+        this.executor = executor;
+        return this;
     }
 
     public ReactionBuilder AddDebounceTime(TimeSpan debounceTime)
@@ -123,27 +137,27 @@ public sealed class ReactionBuilder
         return new AsyncEnumerable<T>(enumerator);
     }
 
-    // Run the already-composed UI action: inline when no SynchronizationContext is configured,
-    // otherwise posted to it -- and awaited, so the reaction's update pipeline (link rewiring,
-    // state commit, fault handling) still observes an exception the action throws. Unlike
+    // Run the already-composed UI action: inline when no executor is configured, otherwise
+    // enqueued to it -- and awaited, so the reaction's update pipeline (link rewiring, state
+    // commit, fault handling) still observes an exception the action throws. Unlike
     // ReactionBase.InvokeExecute there is no async void here: the action is synchronous, so the
     // callback completes the TCS exactly once on both the success and the throw path.
     private async Task InvokeActionAsync(Action uiAction)
     {
-        if (synchronizationContext == null)
+        if (executor == null)
         {
             uiAction();
             return;
         }
 
         // RunContinuationsAsynchronously: completing the TCS must not run the rest of the update
-        // pipeline (link rewiring, state commit, lock releases) inline inside the posted
+        // pipeline (link rewiring, state commit, lock releases) inline inside the enqueued
         // callback -- that work belongs to the update's own flow, and running it on e.g. a UI
-        // thread inside the post both blocks that thread and exposes the pipeline to whatever
-        // exception handling wraps the context's callbacks.
+        // thread inside the executor's slot both blocks that thread and exposes the pipeline to
+        // whatever exception handling wraps the executor's callbacks.
         var tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        synchronizationContext.Post(_ =>
+        void Run()
         {
             try
             {
@@ -154,7 +168,28 @@ public sealed class ReactionBuilder
             {
                 tcs.SetException(e);
             }
-        }, null);
+        }
+
+        // Carry the reaction's Context scope across the executor hop (see
+        // ReactionBase.InvokeExecute): an executor that runs the callback on its own thread
+        // without flowing ExecutionContext (e.g. DedicatedThreadExecutor) would otherwise drop
+        // the AsyncLocal scope, so a signal the action reads would be captured untracked and a
+        // later Set on it would never re-trigger the reaction.
+        var executionContext = ExecutionContext.Capture();
+        Action callback = executionContext is null
+            ? Run
+            : () => ExecutionContext.Run(executionContext, static state => ((Action)state!)(), (Action)Run);
+
+        try
+        {
+            executor.Enqueue(callback);
+        }
+        catch (Exception e)
+        {
+            // A custom IExecutor may reject scheduling (e.g. disposed): fault the awaited task so
+            // the failure flows through the update pipeline rather than throwing synchronously.
+            tcs.TrySetException(e);
+        }
 
         await tcs.Task;
     }
@@ -764,7 +799,7 @@ public sealed class ReactionBuilder
     {
         lock (memoFactory.Lock)
         {
-            var reaction = new AdvancedReaction(fn, memoFactory.Context, synchronizationContext, timeProvider)
+            var reaction = new AdvancedReaction(fn, memoFactory.Context, executor, timeProvider)
             {
                 Label = label,
                 DebounceTime = debounceTime
