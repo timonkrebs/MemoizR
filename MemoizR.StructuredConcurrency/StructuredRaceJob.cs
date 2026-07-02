@@ -66,8 +66,13 @@ public sealed class StructuredRaceJob<T, R> : StructuredJobBase<T>, IDisposable
                         return; // a sibling already won; this result never becomes visible
                     }
                     finished = true;
-                    result = candidate;
+                    // Close the capture BEFORE recording the winning value. The value only
+                    // becomes visible at Run's WhenAll barrier -- strictly after this whole
+                    // block -- and the close is atomic against sibling records (both run under
+                    // Context.Lock), so this ordering is not load-bearing; it keeps the
+                    // invariant textual: once the winner exists anywhere, the capture is shut.
                     OnWinnerSelected?.Invoke();
+                    result = candidate;
                     innerCancellationTokenSource.Cancel();
                 }
                 catch
