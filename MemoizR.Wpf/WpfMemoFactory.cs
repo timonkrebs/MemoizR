@@ -29,6 +29,19 @@ public static class WpfMemoFactory
     public static MemoFactory AddWpfDispatcher(this MemoFactory memoFactory, Dispatcher dispatcher)
     {
         ArgumentNullException.ThrowIfNull(dispatcher);
-        return memoFactory.AddSynchronizationContext(new DispatcherSynchronizationContext(dispatcher));
+        return memoFactory.AddExecutor(new WpfDispatcherExecutor(dispatcher));
     }
+}
+
+// A dispatcher-backed IExecutor. Unlike wrapping a DispatcherSynchronizationContext in a
+// SynchronizationContextExecutor (whose IsCurrent compares the wrapped instance by reference and
+// so reads false against the DIFFERENT DispatcherSynchronizationContext WPF installs on its own
+// loop), IsCurrent here asks the dispatcher directly via CheckAccess -- true exactly when the
+// caller is on the dispatcher thread -- so executor.AssertIsolated() works for WPF-dispatched
+// reaction actions.
+internal sealed class WpfDispatcherExecutor(Dispatcher dispatcher) : IExecutor
+{
+    public void Enqueue(Action work) => dispatcher.BeginInvoke(work);
+
+    public bool IsCurrent => dispatcher.CheckAccess();
 }
