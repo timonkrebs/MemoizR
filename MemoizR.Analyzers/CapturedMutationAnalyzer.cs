@@ -101,7 +101,10 @@ public sealed class CapturedMutationAnalyzer : DiagnosticAnalyzer
     {
         return receiver switch
         {
-            IPropertyReferenceOperation => true, // the getter hands out a copy (direct writes there are already compiler errors)
+            // A ref-RETURNING property hands out the storage itself, so a mutating call writes
+            // shared state; an ordinary (or ref-readonly) getter hands out a copy, and direct
+            // writes through those are already compiler errors.
+            IPropertyReferenceOperation property => property.Property.RefKind != RefKind.Ref,
             IFieldReferenceOperation field => field.Field.IsReadOnly,
             IParameterReferenceOperation parameter => parameter.Parameter.RefKind == RefKind.In,
             ILocalReferenceOperation local => local.Local.RefKind == RefKind.RefReadOnly,

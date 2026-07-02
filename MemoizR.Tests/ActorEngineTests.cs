@@ -695,4 +695,34 @@ public class GraphActorTests
         Assert.True(before);
         Assert.True(after);
     }
+
+    // Posted continuations must be QUEUED turns, never run inline inside the posting turn:
+    // otherwise Task.Yield() inside actor work is a no-op instead of an interleaving point (the
+    // continuation would run reentrantly within the very turn that posted it, producing 1,3,2
+    // here). A blocker turn parks the loop until all three are queued, so the channel order is
+    // deterministic: yielder's prefix, then the second action, then the posted continuation.
+    [Fact(Timeout = 10000)]
+    public async Task GraphActorExecutor_Yield_InterleavesQueuedTurns()
+    {
+        var actor = new GraphActor();
+        IExecutor executor = actor;
+        var order = new List<int>(); // actor-confined: mutated only in turns
+        var release = new ManualResetEventSlim();
+        var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        executor.Enqueue(() => release.Wait()); // parks the loop until everything below is queued
+        executor.Enqueue(async () =>
+        {
+            order.Add(1);
+            await Task.Yield();
+            order.Add(3);
+            done.TrySetResult();
+        });
+        executor.Enqueue(() => order.Add(2));
+        release.Set();
+
+        await done.Task;
+        var observed = await actor.Run(() => order.ToArray());
+        Assert.Equal([1, 2, 3], observed);
+    }
 }

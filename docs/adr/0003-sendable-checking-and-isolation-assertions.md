@@ -10,10 +10,12 @@
   itself be Sendable (catches a computed property handing out shared static state, which no field
   walk can see), with `System.Type` green-listed on both sides so the synthesized
   `EqualityContract` does not falsely reject non-sealed records (ADR 0004 has the details).
-- Updated: 2026-07-02 — explicit interface implementations count as visible surface in both
-  property rules (reflection reports their accessors as private, but any consumer reaches them
-  by casting to the interface), kept in lockstep with the MZR001 analyzer's
-  `ExplicitInterfaceImplementations` handling.
+- Updated: 2026-07-02 — explicit interface implementations count as visible surface in the
+  property and event rules on REFERENCE types (reflection reports their accessors as private,
+  but any consumer reaches them by casting to the interface; value types stay exempt — the cast
+  boxes a copy, and BCL-mandated surfaces like ValueTuple's object-typed `ITuple` indexer would
+  otherwise all false-positive), and get-only INDEXERS get their return type checked like any
+  property. Kept in lockstep with the MZR001 analyzer.
 - Updated: 2026-07-01 — the collection trust is matched by known framework *definitions* (type
   identity at runtime, namespace+name+arity in the analyzer) instead of by namespace, closing a
   hole where user types declared inside `System.Collections.*` bypassed the structural walk;

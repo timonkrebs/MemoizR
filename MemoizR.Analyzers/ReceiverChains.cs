@@ -95,9 +95,19 @@ internal static class ReceiverChains
         {
             if (argument.Parameter?.Name == "contextKey")
             {
-                return argument.Value.ConstantValue is { HasValue: true } constant
-                    ? (true, constant.Value)
-                    : (false, null);
+                if (argument.Value.ConstantValue is not { HasValue: true } constant)
+                {
+                    return (false, null);
+                }
+
+                // The runtime constructor treats null/whitespace keys as UNKEYED
+                // (string.IsNullOrWhiteSpace): each such factory owns a fresh context, so a
+                // blank constant must normalize to the unkeyed case here or two
+                // new MemoFactory("") instances would wrongly count as one shared context.
+                var key = constant.Value is string text && string.IsNullOrWhiteSpace(text)
+                    ? null
+                    : constant.Value;
+                return (true, key);
             }
         }
 

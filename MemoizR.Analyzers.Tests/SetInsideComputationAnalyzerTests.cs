@@ -171,6 +171,61 @@ public class SetInsideComputationAnalyzerTests
     }
 
     [Fact]
+    public async Task BlankKeyFactoriesSet_IsNotFlagged()
+    {
+        // The runtime treats whitespace keys as UNKEYED (each factory owns a fresh context), so
+        // two new MemoFactory("") instances do NOT share a lock and the Set does not throw:
+        // the raw blank strings must not count as one shared key.
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f1 = new MemoFactory("");
+                    var f2 = new MemoFactory("");
+                    var s = f2.CreateSignal(0);
+                    f1.CreateMemoizR(async () => { await s.Set(1); return 0; });
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task ShadowedSignalLookalikeSet_IsNotFlagged()
+    {
+        // A source-shadowed MemoizR.Signal<T> lookalike's Set takes no evaluation lock and does
+        // not throw; name matching alone must not claim a deterministic runtime failure.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Threading.Tasks;
+            using MemoizR;
+
+            namespace MemoizR
+            {
+                public class Signal<T>
+                {
+                    public Task Set(T value) => Task.CompletedTask;
+                }
+            }
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var fake = new MemoizR.Signal<int>();
+                    f.CreateMemoizR(async () => { await fake.Set(1); return 0; });
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
     public async Task CrossEngineSet_IsNotFlagged()
     {
         var diagnostics = await AnalyzeAsync("""

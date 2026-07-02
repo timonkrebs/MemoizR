@@ -237,6 +237,43 @@ public class CapturedMutationAnalyzerTests
     }
 
     [Fact]
+    public async Task MutatingCall_OnRefReturnPropertyReceiver_IsFlagged()
+    {
+        // A ref-returning property hands out the storage itself (no defensive copy), so the
+        // mutating call writes the enclosing object's field on every recompute.
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public struct Counter
+            {
+                public int Value;
+                public void Increment() => Value++;
+            }
+
+            public class C
+            {
+                private Counter counter;
+
+                private ref Counter CounterRef => ref counter;
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    f.CreateMemoizR(async () =>
+                    {
+                        CounterRef.Increment();
+                        return counter.Value;
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR002", diagnostic.Id);
+        Assert.Contains("'CounterRef'", diagnostic.GetMessage());
+    }
+
+    [Fact]
     public async Task WriteToMemberOfEnclosingStructField_IsFlagged()
     {
         var diagnostics = await AnalyzeAsync("""

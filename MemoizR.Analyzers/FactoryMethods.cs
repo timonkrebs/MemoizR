@@ -105,7 +105,7 @@ internal static class FactoryMethods
     // nothing into a MemoizR graph, so firing MZR001-003 on them would be pure false positives
     // (a build break under warnings-as-errors). Kept in lockstep with the identity checks on
     // the SendableAttribute and the green-lists in SendableSymbolClassifier.
-    private static bool IsLibraryType(INamedTypeSymbol type)
+    internal static bool IsLibraryType(INamedTypeSymbol type)
     {
         if (type.Locations.Any(location => location.IsInSource))
         {

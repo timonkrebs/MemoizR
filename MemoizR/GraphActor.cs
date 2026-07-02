@@ -99,6 +99,25 @@ public sealed class GraphActor : IExecutor
         _ = Run(work);
     }
 
+    // A turn that is queued UNCONDITIONALLY (no inline-if-current shortcut): the posted
+    // continuations of async executor work must interleave with other turns, not run inside
+    // the turn that posted them. Exceptions are contained (the loop must survive any turn);
+    // posted work owns its own error handling, exactly like Enqueue's dropped task.
+    private void QueueTurn(Action work)
+    {
+        turns.Writer.TryWrite(() =>
+        {
+            try
+            {
+                work();
+            }
+            catch
+            {
+                // Deliberately swallowed: see the Enqueue contract.
+            }
+        });
+    }
+
     private async Task RunLoop()
     {
         // Turn delegates own their exceptions (they complete a TCS), so nothing here can throw
@@ -128,7 +147,11 @@ public sealed class GraphActor : IExecutor
     {
         public override void Post(SendOrPostCallback d, object? state)
         {
-            actor.Enqueue(() => d(state));
+            // ALWAYS a fresh queued turn -- never Run, whose inline-if-current fast path would
+            // execute the continuation inside the posting turn: a Task.Yield() from actor work
+            // would then be a no-op instead of an interleaving point, and the "continuation"
+            // would run reentrantly within the very turn that posted it.
+            actor.QueueTurn(() => d(state));
         }
 
         public override void Send(SendOrPostCallback d, object? state)

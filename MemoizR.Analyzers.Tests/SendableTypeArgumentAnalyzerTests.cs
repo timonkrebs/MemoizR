@@ -231,6 +231,77 @@ public class SendableTypeArgumentAnalyzerTests
     }
 
     [Fact]
+    public async Task ExplicitInterfaceEvent_IsFlagged()
+    {
+        // Declared private, reachable through the interface cast: subscribing mutates shared
+        // state, exactly like a visible event.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public interface IHasChanged
+            {
+                event EventHandler Changed;
+            }
+
+            public sealed class ExplicitEventLeak : IHasChanged
+            {
+                private static EventHandler? shared;
+
+                event EventHandler IHasChanged.Changed
+                {
+                    add => shared += value;
+                    remove => shared -= value;
+                }
+            }
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    f.CreateSignal(new ExplicitEventLeak());
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR001", diagnostic.Id);
+        Assert.Contains("Changed", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task GetOnlyIndexer_OfMutableType_IsFlagged()
+    {
+        // A computed get-only indexer hands out the same shared mutable state as a get-only
+        // property; there is no setter and no field for any other rule to catch.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public sealed class IndexerLeak
+            {
+                private static readonly List<List<int>> shared = new();
+
+                public List<int> this[int i] => shared[i];
+            }
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    f.CreateSignal(new IndexerLeak());
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR001", diagnostic.Id);
+        Assert.Contains("indexer", diagnostic.GetMessage());
+    }
+
+    [Fact]
     public async Task SourceShadowedSendableAttribute_IsNotTrusted()
     {
         // A source-declared MemoizR.SendableAttribute binds over the library's (with a conflict

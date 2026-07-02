@@ -103,8 +103,12 @@ public sealed class SetInsideComputationAnalyzer : DiagnosticAnalyzer
         }
 
         var type = method.ContainingType?.OriginalDefinition;
-        if (type is not { Arity: 1 } || type.ContainingNamespace?.ToDisplayString() != "MemoizR")
+        if (type is not { Arity: 1 } || type.ContainingNamespace?.ToDisplayString() != "MemoizR"
+            || !FactoryMethods.IsLibraryType(type))
         {
+            // A source-shadowed MemoizR.Signal<T> lookalike's Set takes no evaluation lock and
+            // does not throw -- name matching alone must not claim it does (same identity rule
+            // as the factory-host classification).
             return false;
         }
 

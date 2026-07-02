@@ -279,7 +279,7 @@ public static class SendableChecker
         foreach (var property in declaringLevel.GetProperties(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.DeclaredOnly))
         {
             var setter = property.SetMethod;
-            if (!type.IsValueType && setter is not null && IsVisibleAccessor(setter) && !IsInitOnly(setter))
+            if (!type.IsValueType && setter is not null && IsVisibleAccessor(setter, explicitImplementationsVisible: true) && !IsInitOnly(setter))
             {
                 return property.GetIndexParameters().Length > 0
                     ? $"{Pretty(type)} has a settable indexer"
@@ -299,16 +299,19 @@ public static class SendableChecker
     // An accessor is a mutation/exposure surface when consumers can reach it. Private accessors
     // cannot be reached -- EXCEPT explicit interface implementations, which reflection reports
     // as private but any consumer reaches by casting to the interface (their reflection
-    // signature is private+virtual+final with a dotted name). Kept in lockstep with the MZR001
-    // analyzer's ExplicitInterfaceImplementations handling.
-    private static bool IsVisibleAccessor(MethodInfo accessor)
+    // signature is private+virtual+final with a dotted name). On VALUE types explicit
+    // implementations stay invisible: reaching them requires boxing a copy, and the mandated
+    // BCL surfaces (ValueTuple's object-typed ITuple indexer, say) would otherwise all be
+    // false positives. Kept in lockstep with the MZR001 analyzer's
+    // ExplicitInterfaceImplementations handling.
+    private static bool IsVisibleAccessor(MethodInfo accessor, bool explicitImplementationsVisible)
     {
         if (!accessor.IsPrivate)
         {
             return true;
         }
 
-        return accessor.IsVirtual && accessor.IsFinal && accessor.Name.Contains('.');
+        return explicitImplementationsVisible && accessor.IsVirtual && accessor.IsFinal && accessor.Name.Contains('.');
     }
 
     // The property's TYPE is checked too (not just its setter), in lockstep with the MZR001
@@ -318,16 +321,22 @@ public static class SendableChecker
     // `public List<int> Items => sharedStatic;` -- static fields are not instance fields).
     private static string? CheckPropertyType(Type type, PropertyInfo property, HashSet<Type> inProgress)
     {
+        // Indexers are checked too: a computed get-only `List<int> this[int i]` hands out the
+        // same shared mutable state as a get-only property, with no field for the walk to see.
         var getter = property.GetGetMethod(nonPublic: true);
-        if (getter is null || !IsVisibleAccessor(getter) || property.GetIndexParameters().Length > 0)
+        if (getter is null || !IsVisibleAccessor(getter, explicitImplementationsVisible: !type.IsValueType))
         {
             return null;
         }
 
         var inner = CheckCached(property.PropertyType, inProgress);
-        return inner is null
-            ? null
-            : $"{Pretty(type)}'s property '{property.Name}' is of non-Sendable type {Pretty(property.PropertyType)} ({inner})";
+        if (inner is null)
+        {
+            return null;
+        }
+
+        var display = property.GetIndexParameters().Length > 0 ? "indexer" : $"property '{property.Name}'";
+        return $"{Pretty(type)}'s {display} is of non-Sendable type {Pretty(property.PropertyType)} ({inner})";
     }
 
     // A visible (non-private) instance event is a mutation surface like a settable property:
@@ -339,8 +348,10 @@ public static class SendableChecker
     {
         foreach (var @event in declaringLevel.GetEvents(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.DeclaredOnly))
         {
+            // IsVisibleAccessor, not a bare IsPrivate test: an explicit interface event's add
+            // accessor is reflected as private but reachable through a cast to the interface.
             var add = @event.GetAddMethod(nonPublic: true);
-            if (add is null || add.IsPrivate)
+            if (add is null || !IsVisibleAccessor(add, explicitImplementationsVisible: true))
             {
                 continue;
             }

@@ -139,6 +139,24 @@ public class SendableCheckerTests
     }
 
     [Fact]
+    public void ExplicitInterfaceEvent_IsNotSendable()
+    {
+        // The add accessor reflects as private but is reachable through the interface cast.
+        Assert.False(SendableChecker.IsSendable(typeof(ExplicitEventLeak), out var reason));
+        Assert.Contains("event", reason);
+    }
+
+    [Fact]
+    public void GetOnlyIndexer_OfMutableType_IsNotSendable()
+    {
+        // A computed get-only indexer hands out shared mutable state like a get-only property;
+        // no setter, no instance field -- the indexer's return type is the whole leak surface.
+        Assert.False(SendableChecker.IsSendable(typeof(IndexerLeak), out var reason));
+        Assert.Contains("indexer", reason);
+        Assert.Contains("List", reason);
+    }
+
+    [Fact]
     public void TypeWithVisibleCustomEvent_IsNotSendable()
     {
         // A custom event (explicit add/remove) has no instance backing field for the field walk,
@@ -267,6 +285,29 @@ internal sealed class ExplicitInterfaceLeak : IHasItemsForExplicitLeak
     private static readonly List<int> shared = [];
 
     List<int> IHasItemsForExplicitLeak.Items => shared;
+}
+
+internal interface IHasChangedForExplicitLeak
+{
+    event Action Changed;
+}
+
+internal sealed class ExplicitEventLeak : IHasChangedForExplicitLeak
+{
+    private static Action? shared;
+
+    event Action IHasChangedForExplicitLeak.Changed
+    {
+        add => shared += value;
+        remove => shared -= value;
+    }
+}
+
+internal sealed class IndexerLeak
+{
+    private static readonly List<List<int>> shared = [];
+
+    public List<int> this[int i] => shared[i];
 }
 
 internal sealed class HasCustomEvent

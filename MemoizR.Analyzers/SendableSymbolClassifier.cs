@@ -321,17 +321,24 @@ internal sealed class SendableSymbolClassifier
 
         // Private properties are unreachable by consumers -- EXCEPT explicit interface
         // implementations, which are declared private but reachable through a cast to the
-        // interface (kept in lockstep with the runtime checker's IsVisibleAccessor).
-        if (property.IsStatic || property.IsIndexer || property.GetMethod is null
-            || (property.DeclaredAccessibility == Accessibility.Private && property.ExplicitInterfaceImplementations.IsEmpty))
+        // interface (kept in lockstep with the runtime checker's IsVisibleAccessor). Indexers
+        // are checked like any property: a computed get-only `List<int> this[int i]` hands out
+        // the same shared mutable state.
+        if (property.IsStatic || property.GetMethod is null
+            || (property.DeclaredAccessibility == Accessibility.Private
+                && (property.ExplicitInterfaceImplementations.IsEmpty || named.IsValueType)))
         {
             return null;
         }
 
         var propertyReason = CheckCached(property.Type, inProgress);
-        return propertyReason is null
-            ? null
-            : $"{Display(named)}'s property '{property.Name}' is of non-Sendable type {Display(property.Type)} ({propertyReason})";
+        if (propertyReason is null)
+        {
+            return null;
+        }
+
+        var display = property.IsIndexer ? "indexer" : $"property '{property.Name}'";
+        return $"{Display(named)}'s {display} is of non-Sendable type {Display(property.Type)} ({propertyReason})";
     }
 
     private string? CheckMember(INamedTypeSymbol named, ISymbol member, HashSet<ITypeSymbol> inProgress)
@@ -349,7 +356,8 @@ internal sealed class SendableSymbolClassifier
         // fields/properties -- the event lives on the reader's private copy.)
         if (member is IEventSymbol { IsStatic: false } @event
             && !named.IsValueType
-            && @event.DeclaredAccessibility != Accessibility.Private)
+            && (@event.DeclaredAccessibility != Accessibility.Private
+                || !@event.ExplicitInterfaceImplementations.IsEmpty))
         {
             return $"{Display(named)} has event '{@event.Name}' (subscribing mutates the shared instance)";
         }
