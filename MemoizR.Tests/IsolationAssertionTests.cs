@@ -9,6 +9,32 @@ namespace MemoizR.Tests;
 // rewiring assert in SignalHandlR is exercised implicitly by every recompute in the suite.
 public class IsolationAssertionTests
 {
+    // The pin the Set above takes must NOT leak past the Set: the async-method builder
+    // restores the caller's ExecutionContext even when the synchronous prefix mutated the
+    // AsyncLocal, so the caller's flow stays unpinned -- later evaluations from that flow get
+    // their own scopes instead of inheriting Set's (which would make them recursive same-flow
+    // acquisitions of one lock).
+    [Fact(Timeout = 10000)]
+    public async Task SetPin_DoesNotLeakToTheCallerFlow()
+    {
+        var f = new MemoFactory();
+        var relative = f.CreateEagerRelativeSignal(1);
+        Assert.False(relative.Context.HasFlowScope);
+        await relative.Set(v => v + 1);
+        Assert.False(relative.Context.HasFlowScope); // pin insulated by the async-method boundary?
+    }
+
+    [Fact(Timeout = 10000)]
+    public async Task SetPin_DoesNotLeak_EvenWhenSetCompletesSynchronouslyOnTheCallerFlow()
+    {
+        var f = new MemoFactory();
+        var relative = f.CreateEagerRelativeSignal(1);
+        var setTask = relative.Set(v => v + 1); // synchronous prefix runs on this flow
+        Assert.False(relative.Context.HasFlowScope); // restored before Set returned its task
+        await setTask;
+        Assert.False(relative.Context.HasFlowScope);
+    }
+
     // The error message lists Set among the isolated graph evaluations, and
     // EagerRelativeSignal.Set runs USER code under the exclusive lock -- so that callback must
     // read as isolated. It only can if Set pins the scope whose lock it holds (a throwaway

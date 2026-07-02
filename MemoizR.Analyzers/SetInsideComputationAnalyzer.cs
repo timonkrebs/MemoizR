@@ -40,7 +40,9 @@ public sealed class SetInsideComputationAnalyzer : DiagnosticAnalyzer
             // (the diagnostic's suggested escape) runs later, off the evaluation's flow.
             foreach (var operation in ComputationLambdas.DescendDirectExecution(computation.Body))
             {
-                if (operation is IInvocationOperation inner && IsSameEngineSet(inner.TargetMethod, actorHost))
+                if (operation is IInvocationOperation inner
+                    && IsSameEngineSet(inner.TargetMethod, actorHost)
+                    && !IsProvablyCrossFactory(invocation, inner, actorHost))
                 {
                     context.ReportDiagnostic(Diagnostic.Create(
                         DiagnosticDescriptors.SetInsideComputation,
@@ -49,6 +51,27 @@ public sealed class SetInsideComputationAnalyzer : DiagnosticAnalyzer
                 }
             }
         }
+    }
+
+    // A cross-FACTORY lock-engine Set does not throw at runtime: the Set locks the target
+    // signal's own context, where the computing graph holds nothing. Skipped only when BOTH the
+    // host's factory and the Set target's creating factory resolve and provably differ --
+    // anything unprovable (a field signal wired in a constructor, a parameter) keeps the
+    // diagnostic, because the overwhelmingly common case is one factory and the runtime
+    // exception is deterministic there. Actor hosts are exempt from the check: ActorSignal.Set
+    // rejects on the flow's frame, which any actor computation carries regardless of context.
+    private static bool IsProvablyCrossFactory(IInvocationOperation host, IInvocationOperation setInvocation, bool actorHost)
+    {
+        if (actorHost)
+        {
+            return false;
+        }
+
+        var hostFactory = ReceiverChains.ResolveFactorySymbol(host, host.SemanticModel);
+        var targetFactory = ReceiverChains.ResolveCreatingFactorySymbol(setInvocation.Instance, setInvocation.SemanticModel);
+        return hostFactory is not null
+            && targetFactory is not null
+            && !SymbolEqualityComparer.Default.Equals(hostFactory, targetFactory);
     }
 
     // A Set that throws in THIS host's engine: ActorSignal.Set inside an actor computation, or

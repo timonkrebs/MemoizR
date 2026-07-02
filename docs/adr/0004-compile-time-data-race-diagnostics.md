@@ -116,7 +116,13 @@ surfaces that runtime exception at build time.
 Host scoping follows the lock semantics exactly: `CreateMemoizR`, `CreateConcurrentMapReduce`
 (its children share the parent flow's scope), and the reaction builders are flagged;
 `CreateConcurrentMap` and `CreateConcurrentRace` are **not**, because their children run on
-forced fresh scopes where the same-flow conflict does not exist.
+forced fresh scopes where the same-flow conflict does not exist. A Set whose target signal
+*provably* belongs to a **different factory** than the host is not flagged either — the write
+locks the target's own context, where the computing graph holds nothing, so the runtime does
+not throw. Both factories must resolve (through receiver chains and same-tree initializers) and
+differ; an unprovable target (a field wired in a constructor, a parameter) keeps the
+diagnostic, since one shared factory is the overwhelmingly common case and the runtime
+exception is deterministic there.
 
 The walk is likewise scoped to the lock semantics: only the computation's **direct execution
 path** is inspected. Nested anonymous functions and local-function declarations are pruned,

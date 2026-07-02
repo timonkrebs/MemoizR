@@ -122,6 +122,30 @@ public class SetInsideComputationAnalyzerTests
     }
 
     [Fact]
+    public async Task ProvablyCrossFactorySet_IsNotFlagged()
+    {
+        // The Set locks the TARGET signal's own context, where f1's computation holds nothing:
+        // no exclusive-inside-upgradeable conflict, no runtime throw. Skipped only because both
+        // factories resolve and differ -- an unprovable target keeps the diagnostic.
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f1 = new MemoFactory();
+                    var f2 = new MemoFactory();
+                    var other = f2.CreateSignal(1);
+                    f1.CreateMemoizR(async () => { await other.Set(2); return 0; });
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
     public async Task CrossEngineSet_IsNotFlagged()
     {
         var diagnostics = await AnalyzeAsync("""
