@@ -75,7 +75,7 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
   end of an un-primed evaluation could commit Clean over that source and never be re-dirtied. It
   is closed by eager capture-time subscription (the observer link is in place before the source
   recomputes, so an in-flight Set bumps the generation and the commit is refused) and guarded by
-  `RegressionTests.LockEngine_UnprimedChainUnderStorm_NeverStrandsStale`. The actor engine reaches
+  `LockEngineStormTests.LockEngine_UnprimedChainUnderStorm_NeverStrandsStale`. The actor engine reaches
   the same guarantee via read-evidence pairs.
 - Debounced reaction updates no longer capture the scheduling thread's SynchronizationContext for their continuation, so creating a reaction (or setting a signal) on a UI thread no longer evaluates the dependency graph on that thread (#13)
 

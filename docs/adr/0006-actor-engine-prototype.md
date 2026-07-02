@@ -116,7 +116,7 @@ the hole was latent there too, masked only by the priming patterns of the existi
   to a source at *capture time*, before the source recomputes, instead of only at the end of the
   evaluation. An in-flight `Set` then reaches the reader mid-evaluation and bumps its generation,
   so the existing generation guard refuses the stale commit. (Verified causally:
-  `RegressionTests.LockEngine_UnprimedChainUnderStorm_NeverStrandsStale` passes with the eager
+  `LockEngineStormTests.LockEngine_UnprimedChainUnderStorm_NeverStrandsStale` passes with the eager
   subscription and fails within a round or two when it is reverted.)
 - **Actor engine — read evidence** (below).
 
@@ -141,7 +141,7 @@ two pairs cannot both match.) Signals bump their generation only on value-*chang
 equal-value writes are complete no-ops — nothing derived can have become stale, and notifying
 anyway bumped observer generations and refused their still-valid in-flight commits (the lock
 engine's `Signal.Set` follows the same rule). The regression test is
-`ActorEngineTests.UnprimedChainUnderStorm_NeverStrandsStale`.
+`ActorEngineStormTests.UnprimedChainUnderStorm_NeverStrandsStale`.
 
 ### Deliberate divergences from the lock engine
 
