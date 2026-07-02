@@ -195,6 +195,28 @@ public class SetInsideComputationAnalyzerTests
     }
 
     [Fact]
+    public async Task InlineCrossFactorySet_IsNotFlagged()
+    {
+        // The Set target is created INLINE by a different unkeyed factory: its provenance is
+        // the creation invocation itself, no variable initializer needed.
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f1 = new MemoFactory();
+                    var f2 = new MemoFactory();
+                    f1.CreateMemoizR(async () => { await f2.CreateSignal(0).Set(1); return 0; });
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
     public async Task ShadowedSignalLookalikeSet_IsNotFlagged()
     {
         // A source-shadowed MemoizR.Signal<T> lookalike's Set takes no evaluation lock and does

@@ -18,10 +18,22 @@ internal static class ReceiverChains
     }
 
     // A node reference (the signal a Set is invoked on) resolves through its same-tree
-    // initializer to the creating invocation, then to that creation's factory.
+    // initializer to the creating invocation, then to that creation's factory. An INLINE
+    // creation (`f.CreateSignal(0).Set(1)`) is its own provenance and resolves directly.
     public static ISymbol? ResolveCreatingFactorySymbol(IOperation? nodeReference, SemanticModel? semanticModel)
     {
-        var creation = InitializerOf(SymbolOf(nodeReference), semanticModel);
+        var reference = nodeReference;
+        while (reference is IConversionOperation conversion)
+        {
+            reference = conversion.Operand;
+        }
+
+        if (reference is IInvocationOperation inlineCreation)
+        {
+            return ResolveFactorySymbol(inlineCreation, semanticModel);
+        }
+
+        var creation = InitializerOf(SymbolOf(reference), semanticModel);
         return creation is IInvocationOperation invocation
             ? ResolveFactorySymbol(invocation, semanticModel)
             : null;

@@ -88,6 +88,16 @@ public class SendableCheckerTests
     }
 
     [Fact]
+    public void PlainClass_WithInitOnlyAutoProperties_IsSendable()
+    {
+        // Roslyn emits INITONLY backing fields for { get; init; } auto-properties (init
+        // accessors are the sanctioned way to assign readonly fields), so the field walk
+        // accepts idiomatic init DTOs -- records and plain classes alike. Pinned because it is
+        // easy to assume the opposite.
+        Assert.True(SendableChecker.IsSendable(typeof(PlainInitDto), out var reason), reason);
+    }
+
+    [Fact]
     public void NonSealedRecord_WithInitOnlyMembers_IsSendable()
     {
         // A non-sealed record synthesizes `protected virtual Type EqualityContract { get; }`; the
@@ -242,6 +252,13 @@ internal sealed record SendablePerson(string Name, int Age);
 
 // Deliberately NOT sealed: exercises the synthesized `protected virtual Type EqualityContract`.
 internal record SendableOpenRecord(string Name, int Age);
+
+internal sealed class PlainInitDto
+{
+    public string Name { get; init; } = "";
+
+    public int Age { get; init; }
+}
 
 // The mutable state leaks through a computed get-only property; there is no instance field.
 internal sealed class LeakyComputedView
