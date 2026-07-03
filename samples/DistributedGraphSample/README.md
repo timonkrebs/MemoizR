@@ -29,6 +29,9 @@ so every mechanism is visible:
    evidence; reordered and at-least-once transports are harmless.
 4. **A peer restart** — the fresh incarnation epoch is detected on the first payload; held
    evidence is discarded, never merged.
+5. **Late traffic from the pre-reset incarnation** — dropped: epochs are random identifiers,
+   not ordered, so the mirror remembers the epochs it abandoned instead of trusting a
+   mismatch to mean "newer".
 
 Run it:
 

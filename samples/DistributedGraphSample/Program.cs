@@ -138,6 +138,9 @@ var dewPoint2 = restartedA.CreateMemoizR("dewPoint", async () =>
 var (value2, evidence2) = await dewPoint2.GetWithEvidence();
 await dewMirror.OnValueAsync(new ValueMsg(dewPoint2.Id, value2, evidence2.Stamp.Serialize(), evidence2.Unverifiable));
 
+Console.WriteLine("\n5) a late payload from the PRE-RESET incarnation arrives -- its abandoned epoch drops it");
+await dewMirror.OnValueAsync(staleDewPayload);
+
 Console.WriteLine("\ndone.");
 GC.KeepAlive(exportDew);
 GC.KeepAlive(exportHeat);
@@ -162,6 +165,17 @@ sealed class Mirror(string name, EagerRelativeSignal<double> local, Func<Task<Va
     public EagerRelativeSignal<double> Local { get; } = local;
     public Func<Task<ValueMsg>> Pull { get; } = pull;
     public CausalityStamp Remote { get; private set; } = CausalityStamp.Empty;
+    // ORDERING FLOOR: the join of every non-empty stamp adopted in the current epoch. Late and
+    // duplicate deliveries are ordered against this, not against Remote: adopting an honestly-
+    // empty publication rightly clears the CURRENT evidence (an empty stamp claims nothing),
+    // but it must not amnesty older non-empty payloads still in flight on a reordered
+    // transport.
+    private CausalityStamp floor = CausalityStamp.Empty;
+    // Epochs this mirror has moved on from. Epochs are random identifiers, not ordered: a
+    // mismatch alone cannot tell "the peer restarted" from "a payload of the incarnation we
+    // already left arrived late", so the mirror remembers what it abandoned. (A real bridge
+    // bounds this set by resubscribing on reset.)
+    private readonly HashSet<long> abandonedEpochs = [];
     public volatile bool Unverifiable;
     // Whether any payload was adopted at all: an honestly-empty stamp (a value that depends on
     // no tracked signals) is real, verifiable evidence, so "synced" cannot be derived from the
@@ -192,10 +206,10 @@ sealed class Mirror(string name, EagerRelativeSignal<double> local, Func<Task<Va
         // An UNVERIFIABLE payload carries the empty stamp, so it must be adopted BEFORE the
         // ordering checks below (an empty stamp is dominated by anything): the consumer has to
         // stop trusting its held evidence now, not keep rendering stale verified state. The
-        // held stamp is kept -- it still orders future verified payloads -- but the dominance
-        // drop below is bypassed while unverifiable, so a recovery republishing the SAME stamp
-        // (a transient fault healing without any trigger advancing) is not mistaken for a
-        // duplicate.
+        // held stamps are kept -- they still order future verified payloads -- but the
+        // dominance drop below relaxes to strictly-older-only while unverifiable, so a recovery
+        // republishing the SAME stamp (a transient fault healing without any trigger advancing)
+        // is not mistaken for a duplicate.
         if (msg.Unverifiable)
         {
             Console.WriteLine($"   [B] {Name}: host published UNVERIFIABLE evidence -> rendering blocked until verified again");
@@ -205,31 +219,47 @@ sealed class Mirror(string name, EagerRelativeSignal<double> local, Func<Task<Va
             return;
         }
 
-        // RESET detection: a different incarnation epoch means the host restarted -- its ids
-        // and triggers started over, so held evidence must be discarded, never merged (Join
-        // across epochs throws by design). A real bridge would resubscribe here.
-        if (Remote.Epoch != 0 && incoming.Epoch != 0 && incoming.Epoch != Remote.Epoch)
+        // LATE TRAFFIC FROM A DEAD INCARNATION: a payload stamped with an epoch this mirror
+        // already abandoned is stale by definition. Without this check the reset detection
+        // below would fire AGAIN on the mismatch (epochs carry no order -- "different" cannot
+        // mean "newer") and roll the mirror back to the dead incarnation's state.
+        if (incoming.Epoch != 0 && abandonedEpochs.Contains(incoming.Epoch))
         {
-            Console.WriteLine($"   [B] {Name}: peer RESET detected (epoch changed) -> discarding held evidence");
-            Remote = CausalityStamp.Empty;
+            Console.WriteLine($"   [B] {Name}: DROPPED delivery (stamp from an abandoned incarnation)");
+            return;
         }
 
-        // LATE / DUPLICATE delivery: ordering information only exists between two NON-EMPTY
-        // stamps -- an honestly-empty stamp (the exported node legitimately depends on no
-        // tracked signals) is a real publication, not old news. While VERIFIED, anything
-        // dominated (including equal re-deliveries) is dropped, which is what makes
-        // at-least-once transports harmless. While UNVERIFIABLE, only STRICTLY older payloads
-        // are dropped: an equal-stamp verified payload is exactly the recovery (a transient
-        // fault healed without any trigger advancing) and must be adopted -- but a genuinely
-        // older late delivery must still not resurrect stale verified state.
-        if (Remote.Epoch != 0 && incoming.Epoch != 0 && incoming.IsDominatedBy(Remote)
-            && (!Unverifiable || !Remote.IsDominatedBy(incoming)))
+        // RESET detection: a different incarnation epoch means the host restarted -- its ids
+        // and triggers started over, so held evidence must be discarded, never merged (Join
+        // across epochs throws by design). Keyed off the ordering floor, not Remote: the floor
+        // still carries the old epoch while Remote is honestly empty. A real bridge would
+        // resubscribe here.
+        if (floor.Epoch != 0 && incoming.Epoch != 0 && incoming.Epoch != floor.Epoch)
+        {
+            Console.WriteLine($"   [B] {Name}: peer RESET detected (epoch changed) -> discarding held evidence");
+            abandonedEpochs.Add(floor.Epoch);
+            Remote = CausalityStamp.Empty;
+            floor = CausalityStamp.Empty;
+        }
+
+        // LATE / DUPLICATE delivery, ordered against the FLOOR: ordering information only
+        // exists between two NON-EMPTY stamps -- an honestly-empty stamp (the exported node
+        // legitimately depends on no tracked signals) is a real publication, not old news.
+        // While VERIFIED, anything dominated (including equal re-deliveries) is dropped, which
+        // is what makes at-least-once transports harmless. While UNVERIFIABLE, only payloads
+        // STRICTLY below the floor are dropped: a floor-equal verified payload is exactly the
+        // recovery (a transient fault healed without any trigger advancing) and must be
+        // adopted -- but a genuinely older late delivery must still not resurrect stale
+        // verified state.
+        if (floor.Epoch != 0 && incoming.Epoch != 0 && incoming.IsDominatedBy(floor)
+            && (!Unverifiable || !floor.IsDominatedBy(incoming)))
         {
             Console.WriteLine($"   [B] {Name}: DROPPED delivery (stamp dominated by held evidence)");
             return;
         }
 
         Remote = incoming;
+        floor = floor.Join(incoming); // empty joins as identity; same epoch is guaranteed above
         Unverifiable = false;
         HasEvidence = true;
         await Local.Set(_ => msg.Value); // from here, B's ordinary local reactivity takes over
