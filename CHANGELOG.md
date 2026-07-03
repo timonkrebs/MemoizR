@@ -76,7 +76,8 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
   every node, `CausalityStamp` (`Epoch`, `Join`, `IsConsistentWith`, `IsDominatedBy`,
   `Serialize`/`Deserialize`; creation stays internal), plus per-context node-id slices
   (`MemoFactory(contextKey, idRangeStart, idRangeEnd)`) so distributed peers' merged stamps can
-  never collide on an id.
+  never collide on an id. A runnable two-peer bridge sample (stale/pull protocol, glitch
+  barrier, late-delivery dropping, reset detection) lives in samples/DistributedGraphSample.
 
 ### Changed
 - Reactions now evaluate their separate-parameter dependencies in parallel on the thread pool; with an executor registered (e.g. via `AddSynchronizationContext`/`AddWpfDispatcher`/`AddExecutor`), only the action (with the already-evaluated values) is marshalled to it, and `CreateAdvancedReaction` keeps running its whole body on the executor (#13)

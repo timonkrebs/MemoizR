@@ -8,6 +8,10 @@ locking layers already guarantee glitch-freedom (see
 [concurrency.md](concurrency.md)); stamps make that property *checkable* where locks cannot
 reach — across process boundaries, in dynamically changing graphs.
 
+A runnable two-peer bridge built on this — the stale/pull protocol, the glitch barrier,
+late-delivery dropping and reset detection — lives in
+[samples/DistributedGraphSample](../../samples/DistributedGraphSample).
+
 Phase 1 delivers the semantics: node identity, per-signal trigger counters, per-node stamps
 captured at source-read time, and the untorn `(value, stamp)` publication. Phase 2 (§6)
 replaces the naive dictionary inside `CausalityStamp` with the ITC-inspired canonical event

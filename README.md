@@ -145,6 +145,8 @@ var payload = stamp.Serialize();              // compact, deterministic wire for
 Stamps are space-efficient (uniform regions collapse, ITC-style), reset-resilient (a restarted
 graph's stamps are never confused with their pre-restart incarnation), and documented in
 [docs/architecture/causality-trigger-clock.md](docs/architecture/causality-trigger-clock.md).
+A runnable two-peer bridge — stale/pull protocol, glitch barrier, late-delivery dropping and
+reset detection — lives in [samples/DistributedGraphSample](samples/DistributedGraphSample).
 
 ### Data-race safety (strict mode)
 
