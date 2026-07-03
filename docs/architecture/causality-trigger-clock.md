@@ -207,15 +207,17 @@ reads — and the node stays dirty, so the next `Get` replaces both.
   peers spans several incarnations. The planned evolution is an epoch *table* keyed by id-range
   (slices are contiguous, so the table stays one entry per peer), arriving as wire-format v3
   together with the bridge layer.
-- **Public surface** (frozen alongside the wire format): `IStampedGetR<T>.GetWithStamp()` —
-  the `(value, stamp)` pair of one publication — on signals, memos and the
-  structured-concurrency nodes; `Evidence` on every node — the ONE immutable snapshot
-  (`StampEvidence`: `Stamp`, `SourceStamps`, `Unverifiable`) describing the last completed
-  evaluation, which a sync exporter must read when it needs the fields to belong together (the
-  `Stamp`/`SourceStamps` conveniences each take their own snapshot, so two separate calls can
-  straddle a recompute); plus `Id` on every node, and `CausalityStamp` with `Epoch`,
-  `Triggers`, `TryGetTrigger`, `Join`, `IsConsistentWith`, `IsDominatedBy`, value equality,
-  `Serialize`/`Deserialize`. Stamp *creation* stays internal.
+- **Public surface** (frozen alongside the wire format): `IStampedGetR<T>.GetWithEvidence()` —
+  the `(value, evidence)` pair of one publication, carrying verifiability so an interface-typed
+  consumer can never mistake a poisoned publication for an honest no-dependency value — on
+  signals, memos and the structured-concurrency nodes, with a `GetWithStamp()` convenience on
+  the concrete types projecting just the `(value, stamp)` pair; `Evidence` on every node — the
+  ONE immutable snapshot (`StampEvidence`: `Stamp`, `SourceStamps`, `Unverifiable`) describing
+  the last completed evaluation, which a sync exporter must read when it needs the fields to
+  belong together (the `Stamp`/`SourceStamps` conveniences each take their own snapshot, so two
+  separate calls can straddle a recompute); plus `Id` on every node, and `CausalityStamp` with
+  `Epoch`, `Triggers`, `TryGetTrigger`, `Join`, `IsConsistentWith`, `IsDominatedBy`, value
+  equality, `Serialize`/`Deserialize`. Stamp *creation* stays internal.
 
 ## 6. The encoding (phase 2): a canonical event tree
 

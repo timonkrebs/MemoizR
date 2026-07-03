@@ -40,16 +40,18 @@ public abstract class MemoBase<T> : MemoHandlR<T>, IMemoizR, IStampedGetR<T>
 
     public async Task<T> Get()
     {
-        return (await GetWithEvidence()).Value;
+        return (await ReadWithEvidence()).Value;
     }
 
     public async Task<(T Value, CausalityStamp Stamp)> GetWithStamp()
     {
-        var (value, evidence) = await GetWithEvidence();
+        var (value, evidence) = await ReadWithEvidence();
         return (value, evidence.Stamp);
     }
 
-    internal override async Task<(T Value, StampEvidence Evidence)> GetWithEvidence()
+    public Task<(T Value, StampEvidence Evidence)> GetWithEvidence() => ReadWithEvidence();
+
+    internal override async Task<(T Value, StampEvidence Evidence)> ReadWithEvidence()
     {
         ActorFlowGuards.RejectLockNodeReadInsideActorComputation();
 

@@ -659,6 +659,48 @@ public class CausalityTriggerClockTests
     }
 
     [Fact]
+    public async Task Reaction_MultiParameter_RecordsValueTypeSignalStamps()
+    {
+        var f = new MemoFactory();
+        var s1 = f.CreateSignal(1); // value-type signal: enters the builder as IStateGetR<int?>
+        var s2 = f.CreateSignal(2);
+
+        // The builder's fan-in must match the dependency THROUGH the interface: as a class
+        // pattern on T (== int?) it would silently miss MemoHandlR<int> and record no stamp.
+        var r = f.BuildReaction().CreateReaction(s1, s2, (_, _) => { });
+
+        await TestHelpers.WaitForConvergenceAsync(() => Stamp((s1, 0), (s2, 0)).Equals(r.Stamp));
+        Assert.Equal(Stamp((s1, 0), (s2, 0)), r.Stamp);
+        Assert.Equal(2, r.SourceStamps.Count);
+    }
+
+    [Fact]
+    public async Task GetWithEvidence_CarriesUnverifiabilityThroughTheInterface()
+    {
+        var f = new MemoFactory();
+        var broken = f.CreateMemoizR<int>(() => throw new InvalidOperationException("boom"));
+        var unverifiable = f.CreateMemoizR(async () =>
+        {
+            try
+            {
+                return await broken.Get();
+            }
+            catch (InvalidOperationException)
+            {
+                return -1;
+            }
+        });
+
+        // A consumer typed against the interface must be able to tell a poisoned publication
+        // from an honest no-dependency value -- the bare stamp cannot (both are Empty).
+        IStampedGetR<int> typed = unverifiable;
+        var (value, evidence) = await typed.GetWithEvidence();
+        Assert.Equal(-1, value);
+        Assert.True(evidence.Unverifiable);
+        Assert.Equal(CausalityStamp.Empty, evidence.Stamp);
+    }
+
+    [Fact]
     public async Task Reaction_WithAnUnverifiableDependency_PublishesNoClaim()
     {
         var f = new MemoFactory();

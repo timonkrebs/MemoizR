@@ -65,4 +65,10 @@ public sealed class Signal<T> : MemoHandlR<T>, IStampedGetR<T?>
         var (value, evidence) = await TrackDependencyAndRead();
         return (value, evidence.Stamp);
     }
+
+    public async Task<(T? Value, StampEvidence Evidence)> GetWithEvidence()
+    {
+        var (value, evidence) = await TrackDependencyAndRead();
+        return (value, evidence);
+    }
 }

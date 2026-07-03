@@ -319,7 +319,7 @@ public abstract class MemoHandlR<T> : SignalHandlR
     // Evidence separately could straddle a concurrent republish. This base implementation is
     // the leaf-signal tracked read; MemoBase and ConcurrentRace override with their pull
     // protocols.
-    internal virtual Task<(T Value, StampEvidence Evidence)> GetWithEvidence() => TrackDependencyAndRead();
+    internal virtual Task<(T Value, StampEvidence Evidence)> ReadWithEvidence() => TrackDependencyAndRead();
 
     // The leaf-signal tracked read, shared by Signal and EagerRelativeSignal (Get and
     // GetWithStamp alike): when a computation is capturing, register this node as one of its
@@ -327,7 +327,7 @@ public abstract class MemoHandlR<T> : SignalHandlR
     // pair must never be split, so there is exactly one box read per call. The per-node mutex is
     // deliberately NOT taken -- CheckDependenciesTheSame is already serialized by Context.Lock,
     // and a signal has no recompute for the mutex to guard (ADR 0002). MemoBase overrides
-    // GetWithEvidence with its own cached fast path, so this stays a leaf-signal helper.
+    // ReadWithEvidence with its own cached fast path, so this stays a leaf-signal helper.
     private protected async Task<(T Value, StampEvidence Evidence)> TrackDependencyAndRead()
     {
         ActorFlowGuards.RejectLockNodeReadInsideActorComputation();

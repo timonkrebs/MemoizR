@@ -205,6 +205,8 @@ public class CausalityStampEpochAndPublicApiTests
 
         Assert.NotNull(typeof(Signal<int>).GetMethod("GetWithStamp", BindingFlags.Public | BindingFlags.Instance));
         Assert.NotNull(typeof(MemoizR<int>).GetMethod("GetWithStamp", BindingFlags.Public | BindingFlags.Instance));
+        Assert.NotNull(typeof(Signal<int>).GetMethod("GetWithEvidence", BindingFlags.Public | BindingFlags.Instance));
+        Assert.NotNull(typeof(IStampedGetR<int>).GetMethod("GetWithEvidence"));
         Assert.NotNull(typeof(SignalHandlR).GetProperty("Stamp", BindingFlags.Public | BindingFlags.Instance));
         Assert.NotNull(typeof(SignalHandlR).GetProperty("SourceStamps", BindingFlags.Public | BindingFlags.Instance));
         Assert.NotNull(typeof(SignalHandlR).GetProperty("Id", BindingFlags.Public | BindingFlags.Instance));

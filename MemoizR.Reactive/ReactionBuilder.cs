@@ -238,9 +238,12 @@ public sealed class ReactionBuilder
             var scope = context.ForceNewScope();
             try
             {
-                if (memo is MemoHandlR<T> node)
+                // Matched via the INTERFACE, not MemoHandlR<T>: a value-type Signal<int> enters
+                // here as IStateGetR<int?> (T == int?), and the node is MemoHandlR<int> -- a
+                // class pattern on T would silently miss it and drop the signal's stamp.
+                if (memo is IStampedGetR<T> stamped && memo is SignalHandlR node)
                 {
-                    var (value, evidence) = await node.GetWithEvidence();
+                    var (value, evidence) = await stamped.GetWithEvidence();
                     if (evidence.Unverifiable)
                     {
                         context.MarkStampCaptureUnverifiable(evaluatingReaction);
