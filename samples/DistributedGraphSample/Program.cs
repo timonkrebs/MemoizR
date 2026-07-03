@@ -73,9 +73,11 @@ var comfort = peerB.BuildReaction("comfort").CreateReaction(
     dewMirror.Local, heatMirror.Local,
     (dew, heat) =>
     {
-        // Absent evidence (epoch 0: nothing synced yet) and unverifiable evidence mean the
-        // same thing to a consumer: CANNOT VERIFY -- so no render, never a guess.
-        if (dewMirror.Remote.Epoch == 0 || heatMirror.Remote.Epoch == 0
+        // Absent evidence (nothing synced yet) and unverifiable evidence mean the same thing
+        // to a consumer: CANNOT VERIFY -- so no render, never a guess. Gated on HasEvidence,
+        // not on the stamp being non-empty: an honestly-empty stamp (a value depending on no
+        // tracked signals) is verifiable evidence and consistent with anything.
+        if (!dewMirror.HasEvidence || !heatMirror.HasEvidence
             || dewMirror.Unverifiable || heatMirror.Unverifiable)
         {
             return;
@@ -150,6 +152,10 @@ sealed class Mirror(string name, EagerRelativeSignal<double> local, Func<Task<Va
     public Func<Task<ValueMsg>> Pull { get; } = pull;
     public CausalityStamp Remote { get; private set; } = CausalityStamp.Empty;
     public volatile bool Unverifiable;
+    // Whether any payload was adopted at all: an honestly-empty stamp (a value that depends on
+    // no tracked signals) is real, verifiable evidence, so "synced" cannot be derived from the
+    // stamp being non-empty.
+    public volatile bool HasEvidence;
 
     public async Task PullAsync() => await OnValueAsync(await Pull());
 
@@ -172,11 +178,16 @@ sealed class Mirror(string name, EagerRelativeSignal<double> local, Func<Task<Va
 
         // An UNVERIFIABLE payload carries the empty stamp, so it must be adopted BEFORE the
         // ordering checks below (an empty stamp is dominated by anything): the consumer has to
-        // stop trusting its held evidence now, not keep rendering stale verified state.
+        // stop trusting its held evidence now, not keep rendering stale verified state. The
+        // held stamp is kept -- it still orders future verified payloads -- but the dominance
+        // drop below is bypassed while unverifiable, so a recovery republishing the SAME stamp
+        // (a transient fault healing without any trigger advancing) is not mistaken for a
+        // duplicate.
         if (msg.Unverifiable)
         {
             Console.WriteLine($"   [B] {Name}: host published UNVERIFIABLE evidence -> rendering blocked until verified again");
             Unverifiable = true;
+            HasEvidence = true;
             await Local.Set(_ => msg.Value);
             return;
         }
@@ -184,16 +195,19 @@ sealed class Mirror(string name, EagerRelativeSignal<double> local, Func<Task<Va
         // RESET detection: a different incarnation epoch means the host restarted -- its ids
         // and triggers started over, so held evidence must be discarded, never merged (Join
         // across epochs throws by design). A real bridge would resubscribe here.
-        if (Remote.Epoch != 0 && incoming.Epoch != Remote.Epoch)
+        if (Remote.Epoch != 0 && incoming.Epoch != 0 && incoming.Epoch != Remote.Epoch)
         {
             Console.WriteLine($"   [B] {Name}: peer RESET detected (epoch changed) -> discarding held evidence");
             Remote = CausalityStamp.Empty;
         }
 
-        // LATE / DUPLICATE delivery: a payload whose stamp is dominated by what we already
-        // hold is old news (equality counts as dominated, so re-deliveries drop too). This is
-        // what makes reordered or at-least-once transports harmless.
-        if (incoming.IsDominatedBy(Remote))
+        // LATE / DUPLICATE delivery: ordering information only exists between two NON-EMPTY
+        // stamps -- an honestly-empty stamp (the exported node legitimately depends on no
+        // tracked signals) is a real publication, not old news -- and a mirror recovering from
+        // an unverifiable spell must adopt even a stamp identical to the held one. Under those
+        // conditions a dominated payload is a late, duplicated or reordered delivery, which is
+        // what makes at-least-once transports harmless.
+        if (!Unverifiable && Remote.Epoch != 0 && incoming.Epoch != 0 && incoming.IsDominatedBy(Remote))
         {
             Console.WriteLine($"   [B] {Name}: DROPPED delivery (stamp dominated by held evidence)");
             return;
@@ -201,6 +215,7 @@ sealed class Mirror(string name, EagerRelativeSignal<double> local, Func<Task<Va
 
         Remote = incoming;
         Unverifiable = false;
+        HasEvidence = true;
         await Local.Set(_ => msg.Value); // from here, B's ordinary local reactivity takes over
     }
 }
