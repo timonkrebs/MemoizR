@@ -50,12 +50,12 @@ var peerB = new MemoFactory("sample-peer-b", idRangeStart: 2_000, idRangeEnd: 3_
 
 // Each mirror carries the consumer side of the wire protocol; its Pull delegate is the host's
 // endpoint for that node: recompute lazily, answer with the untorn (value, evidence) pair.
-var dewMirror = new Mirror("dewPoint", peerB.CreateSignal("dewMirror", 0.0), async () =>
+var dewMirror = new Mirror("dewPoint", peerB.CreateEagerRelativeSignal("dewMirror", 0.0), async () =>
 {
     var (value, evidence) = await dewPoint.GetWithEvidence();
     return new ValueMsg(dewPoint.Id, value, evidence.Stamp.Serialize(), evidence.Unverifiable);
 });
-var heatMirror = new Mirror("heatIndex", peerB.CreateSignal("heatMirror", 0.0), async () =>
+var heatMirror = new Mirror("heatIndex", peerB.CreateEagerRelativeSignal("heatMirror", 0.0), async () =>
 {
     var (value, evidence) = await heatIndex.GetWithEvidence();
     return new ValueMsg(heatIndex.Id, value, evidence.Stamp.Serialize(), evidence.Unverifiable);
@@ -139,10 +139,14 @@ record ValueMsg(int NodeId, double Value, byte[] Stamp, bool Unverifiable);
 // FOREIGN evidence the current value arrived with (so cross-peer consistency stays checkable)
 // and the consumer side of the wire protocol. A future MemoizR.Distributed package folds these
 // into one stamp-adopting RemoteSignal<T>; until then the evidence travels beside the graph.
-sealed class Mirror(string name, Signal<double> local, Func<Task<ValueMsg>> pull)
+sealed class Mirror(string name, EagerRelativeSignal<double> local, Func<Task<ValueMsg>> pull)
 {
     public string Name { get; } = name;
-    public Signal<double> Local { get; } = local;
+    // An EAGER relative signal on purpose: a re-pull can change the EVIDENCE while the numeric
+    // value stays identical (e.g. the lagging side of a glitch recomputes to the same number).
+    // A plain Signal.Set would suppress the notification and the barrier would never re-run to
+    // observe the fresh evidence; the eager signal always notifies.
+    public EagerRelativeSignal<double> Local { get; } = local;
     public Func<Task<ValueMsg>> Pull { get; } = pull;
     public CausalityStamp Remote { get; private set; } = CausalityStamp.Empty;
     public volatile bool Unverifiable;
@@ -150,10 +154,13 @@ sealed class Mirror(string name, Signal<double> local, Func<Task<ValueMsg>> pull
     public async Task PullAsync() => await OnValueAsync(await Pull());
 
     // STALE handler: pull only when the host advertises something newer than we hold -- the
-    // value itself moves lazily.
+    // value itself moves lazily. An EMPTY advertisement (the host published no claim, e.g. an
+    // unverifiable evaluation) carries no ordering information at all, so it always pulls
+    // instead of being mistaken for old news.
     public async Task OnStaleAsync(StaleMsg msg)
     {
-        if (!CausalityStamp.Deserialize(msg.Stamp).IsDominatedBy(Remote))
+        var advertised = CausalityStamp.Deserialize(msg.Stamp);
+        if (advertised.Epoch == 0 || !advertised.IsDominatedBy(Remote))
         {
             await PullAsync();
         }
@@ -162,6 +169,17 @@ sealed class Mirror(string name, Signal<double> local, Func<Task<ValueMsg>> pull
     public async Task OnValueAsync(ValueMsg msg)
     {
         var incoming = CausalityStamp.Deserialize(msg.Stamp);
+
+        // An UNVERIFIABLE payload carries the empty stamp, so it must be adopted BEFORE the
+        // ordering checks below (an empty stamp is dominated by anything): the consumer has to
+        // stop trusting its held evidence now, not keep rendering stale verified state.
+        if (msg.Unverifiable)
+        {
+            Console.WriteLine($"   [B] {Name}: host published UNVERIFIABLE evidence -> rendering blocked until verified again");
+            Unverifiable = true;
+            await Local.Set(_ => msg.Value);
+            return;
+        }
 
         // RESET detection: a different incarnation epoch means the host restarted -- its ids
         // and triggers started over, so held evidence must be discarded, never merged (Join
@@ -182,8 +200,8 @@ sealed class Mirror(string name, Signal<double> local, Func<Task<ValueMsg>> pull
         }
 
         Remote = incoming;
-        Unverifiable = msg.Unverifiable;
-        await Local.Set(msg.Value); // from here, B's ordinary local reactivity takes over
+        Unverifiable = false;
+        await Local.Set(_ => msg.Value); // from here, B's ordinary local reactivity takes over
     }
 }
 

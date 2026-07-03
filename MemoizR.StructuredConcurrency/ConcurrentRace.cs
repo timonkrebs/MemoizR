@@ -58,6 +58,15 @@ public sealed class ConcurrentRace<T, I> : MemoHandlR<T>, IMemoizR, IStampedGetR
             // Unverifiable race evidence -- and a faulted race whose fallback a caller may
             // publish -- poisons the caller's capture instead (see MemoBase.ReadWithEvidence).
             var caller = Context.ReactionScope.CurrentReaction;
+            if (caller != null)
+            {
+                // Register the race as the caller's dependency BEFORE Update installs the race
+                // as CurrentReaction: the stamp recorded below and the invalidation edge must
+                // go together, or a Set on a signal the race consumed would dirty the race but
+                // never the caller -- which would then serve the old race result from its
+                // clean fast path forever.
+                Context.CheckDependenciesTheSame(this);
+            }
             try
             {
                 var (value, raceEvidence) = await Update();

@@ -49,6 +49,14 @@ public sealed class EagerRelativeSignal<T> : MemoHandlR<T>, IStampedGetR<T>
     // Tracked read shared with Signal via MemoHandlR.TrackDependencyAndRead.
     public async Task<T> Get()
     {
+        ActorFlowGuards.RejectLockNodeReadInsideActorComputation();
+
+        // An unpinned flow cannot be capturing: skip the tracked-read core (and its tuple-task
+        // allocation) entirely for plain top-level reads.
+        if (!Context.HasFlowScope)
+        {
+            return Value;
+        }
         return (await TrackDependencyAndRead()).Value;
     }
 

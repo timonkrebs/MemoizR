@@ -40,6 +40,16 @@ public abstract class MemoBase<T> : MemoHandlR<T>, IMemoizR, IStampedGetR<T>
 
     public async Task<T> Get()
     {
+        ActorFlowGuards.RejectLockNodeReadInsideActorComputation();
+
+        // The clean untracked read stays the two-volatile-reads, zero-allocation fast path
+        // (concurrency.md §7): delegating unconditionally through ReadWithEvidence would cost
+        // a tuple-task allocation per read on the hottest path in the library. ReadWithEvidence
+        // re-checks the same condition for callers that need the pair.
+        if (State == CacheState.CacheClean && !Context.HasFlowScope)
+        {
+            return Value;
+        }
         return (await ReadWithEvidence()).Value;
     }
 

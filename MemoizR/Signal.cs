@@ -57,6 +57,14 @@ public sealed class Signal<T> : MemoHandlR<T>, IStampedGetR<T?>
     // (T, stamp) projection converts to this signal's nullable (T?, stamp) surface.
     public async Task<T?> Get()
     {
+        ActorFlowGuards.RejectLockNodeReadInsideActorComputation();
+
+        // An unpinned flow cannot be capturing: skip the tracked-read core (and its tuple-task
+        // allocation) entirely for plain top-level reads.
+        if (!Context.HasFlowScope)
+        {
+            return Value;
+        }
         return (await TrackDependencyAndRead()).Value;
     }
 

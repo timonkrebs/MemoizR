@@ -761,6 +761,27 @@ public class CausalityTriggerClockTests
     }
 
     [Fact]
+    public async Task Memo_OverARace_IsInvalidatedWhenTheRacesInputsChange()
+    {
+        var f = new MemoFactory();
+        var s = f.CreateSignal(1);
+        var race = f.CreateConcurrentRace<int, int>(
+            async () => await s.Get(),
+            (_, i) => Task.FromResult(i * 2));
+        var m = f.CreateMemoizR(async () => await race.Get() + 1);
+
+        Assert.Equal(3, await m.Get());
+
+        // The race read must register the dependency edge together with the recorded stamp:
+        // without it, the Set below dirties the race but never the memo, and the memo's clean
+        // fast path would serve the old race result forever.
+        await s.Set(5);
+        Assert.Equal(11, await m.Get());
+        Assert.True(m.Stamp.TryGetTrigger(s.Id, out var trigger));
+        Assert.Equal(1, trigger);
+    }
+
+    [Fact]
     public async Task Memo_ReadingARace_InheritsTheRaceEvidence()
     {
         var f = new MemoFactory();
