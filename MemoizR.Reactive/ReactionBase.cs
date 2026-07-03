@@ -204,6 +204,11 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
         var prevAmbientContext = LockEngineFlow.EvaluatingContext.Value;
         LockEngineFlow.EvaluatingContext.Value = Context;
 
+        // Open the stamp-capture bucket: tracked reads inside Execute record the source stamps
+        // they observed, keyed by this node. A reaction has no value box, so on success the
+        // joined stamp is published through the inherited PublishCapturedStamps.
+        Context.BeginStampCapture(this);
+
         // Mark Evaluating and snapshot the generation so a Stale during Execute escalates past
         // Evaluating (bumping the generation) and blocks the commit below.
         var token = stateCell.BeginEvaluation();
@@ -238,10 +243,14 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
                 throw;
             }
 
+            PublishCapturedStamps();
             UpdateSourceAndObserverLinks();
         }
         finally
         {
+            // Drop a capture left open by the paused/throwing paths (the reaction keeps its
+            // previous stamp); a no-op after a successful publish.
+            Context.TakeStampCapture(this);
             scope.CurrentGets = prevGets;
             scope.CurrentReaction = prevReaction;
             scope.CurrentGetsIndex = prevIndex;

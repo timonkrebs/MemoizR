@@ -1,12 +1,12 @@
 namespace MemoizR;
 
-public sealed class EagerRelativeSignal<T> : MemoHandlR<T>, IStateGetR<T>
+public sealed class EagerRelativeSignal<T> : MemoHandlR<T>, IStampedGetR<T>
 {
     private Lock Lock { get; } = new();
 
     internal EagerRelativeSignal(T value, Context context) : base(context)
     {
-        this.Value = value;
+        SetValueAndStamp(value, CausalityStamp.ForSignal(Id, 0, context.Epoch));
     }
 
     public async Task Set(Func<T, T> fn)
@@ -30,7 +30,11 @@ public sealed class EagerRelativeSignal<T> : MemoHandlR<T>, IStateGetR<T>
                 // the mutex to recomputing nodes), so, like Signal.Set, it is not taken.
                 lock (Lock)
                 {
-                    Value = fn(Value);
+                    // Every Set bumps the causality trigger: a relative update always propagates
+                    // CacheDirty (there is no equality short-cut here), so the trigger mirrors
+                    // exactly what observers are told (issue #39).
+                    Stamp.TryGetTrigger(Id, out var trigger);
+                    SetValueAndStamp(fn(Value), CausalityStamp.ForSignal(Id, trigger + 1, Context.Epoch));
                 }
 
                 await PropagateStaleToObserversAsync(CacheState.CacheDirty);
@@ -42,10 +46,25 @@ public sealed class EagerRelativeSignal<T> : MemoHandlR<T>, IStateGetR<T>
         }
     }
 
-    // Tracked read shared with Signal.Get via MemoHandlR.TrackDependency.
+    // Tracked read shared with Signal via MemoHandlR.TrackDependencyAndRead.
     public async Task<T> Get()
     {
-        await TrackDependency();
-        return Value;
+        ActorFlowGuards.RejectLockNodeReadInsideActorComputation();
+
+        // An unpinned flow cannot be capturing: skip the tracked-read core (and its tuple-task
+        // allocation) entirely for plain top-level reads.
+        if (!Context.HasFlowScope)
+        {
+            return Value;
+        }
+        return (await TrackDependencyAndRead()).Value;
     }
+
+    public async Task<(T Value, CausalityStamp Stamp)> GetWithStamp()
+    {
+        var (value, evidence) = await TrackDependencyAndRead();
+        return (value, evidence.Stamp);
+    }
+
+    public Task<(T Value, StampEvidence Evidence)> GetWithEvidence() => ReadWithEvidence();
 }

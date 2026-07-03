@@ -62,6 +62,22 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
   value cannot be cast back to the backing array and mutated.
 - `CreateReaction(...)` convenience overloads directly on the factory — sugar for `BuildReaction().CreateReaction(...)` with the default label and debounce
 - MemoizR.Wpf package: `AddWpfDispatcher` routes reaction actions to the WPF UI thread (via `Application.Current.Dispatcher` or an explicit `Dispatcher`) while the dependency graph keeps evaluating on the thread pool (#13)
+- Causality Trigger Clock (#39, see docs/architecture/causality-trigger-clock.md): every node
+  carries a causality stamp recording exactly which signal versions its current value reflects
+  — per-signal trigger counters bumped on value-changing Sets, per-node stamps (own + one per
+  source) captured at source-read time and published atomically with the value (the stamp rides
+  in the value box, so a (value, stamp) pair can never tear). Stamps are ITC-inspired canonical
+  event trees (uniform regions collapse — 64 fresh contiguous signals serialize to a handful of
+  bytes; joins share subtrees; equal maps have identical representations) with a frozen,
+  deterministic binary wire format (v2), incarnation epochs for reset resilience (a restarted
+  graph's stamps are never equal/consistent with, and refuse to join, their pre-reset
+  incarnation), and the read surface for a distributed sync layer:
+  `IStampedGetR<T>.GetWithStamp()` on all value nodes, public `Stamp`/`SourceStamps`/`Id` on
+  every node, `CausalityStamp` (`Epoch`, `Join`, `IsConsistentWith`, `IsDominatedBy`,
+  `Serialize`/`Deserialize`; creation stays internal), plus per-context node-id slices
+  (`MemoFactory(contextKey, idRangeStart, idRangeEnd)`) so distributed peers' merged stamps can
+  never collide on an id. A runnable two-peer bridge sample (stale/pull protocol, glitch
+  barrier, late-delivery dropping, reset detection) lives in samples/DistributedGraphSample.
 
 ### Changed
 - Reactions now evaluate their separate-parameter dependencies in parallel on the thread pool; with an executor registered (e.g. via `AddSynchronizationContext`/`AddWpfDispatcher`/`AddExecutor`), only the action (with the already-evaluated values) is marshalled to it, and `CreateAdvancedReaction` keeps running its whole body on the executor (#13)

@@ -10,7 +10,7 @@ namespace MemoizR;
 //
 // Deliberately NOT on this base: ReactionBase (push-driven, no Get, debounce-scheduled commits)
 // and ConcurrentRace (uncached -- it recomputes on every Get, so the guard buys it nothing).
-public abstract class MemoBase<T> : MemoHandlR<T>, IMemoizR, IStateGetR<T>
+public abstract class MemoBase<T> : MemoHandlR<T>, IMemoizR, IStampedGetR<T>
 {
     // State is read on the lock-free Get fast path (alongside the volatile CurrentReaction); the
     // inherited cell exposes a lock-free volatile read and guards transitions so a concurrent
@@ -42,19 +42,43 @@ public abstract class MemoBase<T> : MemoHandlR<T>, IMemoizR, IStateGetR<T>
     {
         ActorFlowGuards.RejectLockNodeReadInsideActorComputation();
 
-        // An UNPINNED flow's scope would be freshly minted with CurrentReaction == null by
-        // construction, so a clean read from one needs no scope at all: two volatile reads and
-        // out -- no lock, no allocation. (Without this, every top-level Get minted and
-        // registered a scope just to look at a field that is always null.)
+        // The clean untracked read stays the two-volatile-reads, zero-allocation fast path
+        // (concurrency.md §7): delegating unconditionally through ReadWithEvidence would cost
+        // a tuple-task allocation per read on the hottest path in the library. ReadWithEvidence
+        // re-checks the same condition for callers that need the pair.
         if (State == CacheState.CacheClean && !Context.HasFlowScope)
         {
             return Value;
+        }
+        return (await ReadWithEvidence()).Value;
+    }
+
+    public async Task<(T Value, CausalityStamp Stamp)> GetWithStamp()
+    {
+        var (value, evidence) = await ReadWithEvidence();
+        return (value, evidence.Stamp);
+    }
+
+    public Task<(T Value, StampEvidence Evidence)> GetWithEvidence() => ReadWithEvidence();
+
+    internal override async Task<(T Value, StampEvidence Evidence)> ReadWithEvidence()
+    {
+        ActorFlowGuards.RejectLockNodeReadInsideActorComputation();
+
+        // An UNPINNED flow's scope would be freshly minted with CurrentReaction == null by
+        // construction, so a clean read from one needs no scope at all: two volatile reads and
+        // out -- no lock, no allocation. (Without this, every top-level Get minted and
+        // registered a scope just to look at a field that is always null.) The single box read
+        // returns the (value, evidence) pair of one publication -- never torn (see MemoHandlR).
+        if (State == CacheState.CacheClean && !Context.HasFlowScope)
+        {
+            return ValueAndEvidence;
         }
 
         var scope = Context.GetOrCreateScope();
         if (State == CacheState.CacheClean && scope.CurrentReaction == null)
         {
-            return Value;
+            return ValueAndEvidence;
         }
 
         // Only one thread should evaluate the graph at a time. otherwise the context could get messed up.
@@ -73,12 +97,41 @@ public abstract class MemoBase<T> : MemoHandlR<T>, IMemoizR, IStateGetR<T>
                     }
 
                     // if someone else did read the graph while this thread was blocked it could be that this is already Clean
-                    if (State == CacheState.CacheClean)
+                    if (State != CacheState.CacheClean)
                     {
-                        return Value;
+                        try
+                        {
+                            await UpdateIfNecessary();
+                        }
+                        catch
+                        {
+                            // The dependency edge is already registered, but no stamp will be
+                            // recorded for this read. A caller that catches this fault and
+                            // publishes a fallback would otherwise publish evidence silently
+                            // omitting a real control-flow dependency -- so its capture is
+                            // marked unverifiable before the fault propagates.
+                            Context.MarkStampCaptureUnverifiable(scope.CurrentReaction);
+                            throw;
+                        }
                     }
 
-                    await UpdateIfNecessary();
+                    // One box read: what is recorded for the capturing evaluation (if this read
+                    // is tracked) -- and what is returned to the caller -- must describe exactly
+                    // the value returned; a concurrent recompute or Set must not split the
+                    // pair. A source whose own evidence is unverifiable poisons the caller's
+                    // capture instead of contributing a stamp: unverifiability is contagious,
+                    // or a consumer could trust evidence partly built on a value nobody can
+                    // vouch for.
+                    var (value, sourceEvidence) = ValueAndEvidence;
+                    if (sourceEvidence.Unverifiable)
+                    {
+                        Context.MarkStampCaptureUnverifiable(scope.CurrentReaction);
+                    }
+                    else
+                    {
+                        Context.RecordSourceStamp(scope.CurrentReaction, Id, sourceEvidence.Stamp);
+                    }
+                    return (value, sourceEvidence);
                 }
                 finally
                 {
@@ -93,8 +146,6 @@ public abstract class MemoBase<T> : MemoHandlR<T>, IMemoizR, IStateGetR<T>
             // instance whose fresh ContextLock is not the one this evaluation holds.
             GC.KeepAlive(scope);
         }
-
-        return Value;
     }
 
     /** update() if dirty, or a parent turns out to be dirty. */
@@ -157,16 +208,22 @@ public abstract class MemoBase<T> : MemoHandlR<T>, IMemoizR, IStateGetR<T>
         var prevAmbientContext = LockEngineFlow.EvaluatingContext.Value;
         LockEngineFlow.EvaluatingContext.Value = Context;
 
+        // Open the stamp-capture bucket for this evaluation: tracked source reads -- including
+        // those performed by structured-concurrency children on other flows, which evaluate on
+        // this node's behalf -- record the source stamps they observed, keyed by this node.
+        Context.BeginStampCapture(this);
+
         // Mark Evaluating and snapshot the generation; commit Clean below only if no Stale
         // invalidates us while the computation runs.
         var token = stateCell.BeginEvaluation();
         try
         {
-            Value = await ComputeAsync();
+            var newValue = await ComputeAsync();
             hasComputedOnce = true;
-            // Publish Clean early so lock-free fast-path readers can serve the new value while
-            // the links are rewired; the trailing commit below re-confirms after the diamond
-            // propagation.
+            // Publish the value with the joined captured stamps in one box swap, then Clean
+            // early so lock-free fast-path readers can serve the new value while the links are
+            // rewired; the trailing commit below re-confirms after the diamond propagation.
+            PublishValueWithCapturedStamps(newValue);
             stateCell.TryCommitClean(token);
 
             if (RewireOwnLinks)
@@ -200,6 +257,9 @@ public abstract class MemoBase<T> : MemoHandlR<T>, IMemoizR, IStateGetR<T>
         }
         finally
         {
+            // Drop a capture left open by the failure paths (the previous value keeps its
+            // previous stamp); a no-op after a successful publish.
+            Context.TakeStampCapture(this);
             scope.CurrentGets = prevGets;
             scope.CurrentReaction = prevReaction;
             scope.CurrentGetsIndex = prevIndex;

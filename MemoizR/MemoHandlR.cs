@@ -41,11 +41,48 @@ public abstract class SignalHandlR : IMemoHandlR
     // recompute state), they just carry the tiny unused cell so the protocol lives in one place.
     internal readonly CacheStateCell stateCell = new(CacheState.CacheClean);
 
+    /// <summary>
+    /// Stable per-context identity for causality stamps (issue #39): signals appear in stamps
+    /// under this id, and derived nodes key their per-source stamp map by it.
+    /// </summary>
+    public int Id { get; }
+
+    // Backs Evidence for value-less nodes (reactions); value nodes override Evidence to read it
+    // from the same volatile box as the value.
+    private volatile StampEvidence evidence = StampEvidence.None;
+
+    /// <summary>
+    /// The published causality evidence of the last completed evaluation, as ONE immutable
+    /// snapshot: the node's own stamp, the per-source map it was sealed from, and whether the
+    /// evaluation was unverifiable. Read this when you need the fields to describe the same
+    /// publication -- the convenience accessors below each take their own snapshot, so two
+    /// separate calls can straddle a concurrent recompute.
+    /// </summary>
+    public virtual StampEvidence Evidence => evidence;
+
+    public CausalityStamp Stamp => Evidence.Stamp;
+
+    /// <summary>
+    /// "Every Node keeps a Stamp for each of its Sources" (issue #39): the stamp observed on
+    /// each tracked source read of the last completed evaluation, keyed by source id -- the
+    /// data a distributed sync layer exchanges. Signals keep the empty map.
+    /// </summary>
+    public IReadOnlyDictionary<int, CausalityStamp> SourceStamps => Evidence.SourceStamps;
+
+    // Publish the evidence captured during a completed evaluation of a VALUE-LESS node
+    // (reactions). Value nodes publish through MemoHandlR.PublishValueWithStamps instead, which
+    // puts the evidence in the value box.
+    internal void PublishCapturedStamps()
+    {
+        evidence = StampEvidence.FromCapture(Context.TakeStampCapture(this));
+    }
+
     public string Label { get; init; } = "Label";
 
     internal SignalHandlR(Context context)
     {
         this.Context = context;
+        this.Id = context.NextNodeId();
     }
 
     // Atomic add-if-absent on our observer down-links. The membership check and the array swap
@@ -250,33 +287,77 @@ public abstract class MemoHandlR<T> : SignalHandlR
     // generic overload is class-constrained), and a large struct T can tear under a concurrent
     // write. So the value is published through an immutable box held in a single volatile
     // reference: a write swaps in a fully-constructed box (an atomic reference store with release
-    // semantics), and a read takes the reference once and returns its readonly field -- always a
-    // complete, untorn value. Every Update writes Value before setting State = CacheClean (a
+    // semantics), and a read takes the reference once and returns its readonly fields -- always a
+    // complete, untorn value. Every Update writes the box before setting State = CacheClean (a
     // volatile release) and the fast path reads State (a volatile acquire) before Value, so a
     // reader that observes CacheClean is guaranteed to see the box of that-or-a-newer clean
     // generation. The read is therefore a linearizable snapshot, not an eventually-consistent one.
-    private volatile ValueBox valueBox = new(default!);
+    // The causality evidence rides in the same box (issue #39): the stamp AND the per-source map
+    // describing which signal versions the value reflects are published in the same atomic swap,
+    // so neither can ever be paired with a neighbouring publication's value.
+    private volatile ValueBox valueBox = new(default!, StampEvidence.None);
 
-    internal T Value
+    internal T Value => valueBox.Value;
+
+    public override StampEvidence Evidence => valueBox.Evidence;
+
+    // The (value, evidence) pair of one publication -- a single volatile box read, never torn.
+    internal (T Value, StampEvidence Evidence) ValueAndEvidence
     {
-        get => valueBox.Value;
-        set => valueBox = new ValueBox(value);
+        get
+        {
+            var box = valueBox;
+            return (box.Value, box.Evidence);
+        }
+    }
+
+    // The (value, stamp) projection of one publication.
+    internal (T Value, CausalityStamp Stamp) ValueAndStamp
+    {
+        get
+        {
+            var box = valueBox;
+            return (box.Value, box.Evidence.Stamp);
+        }
+    }
+
+    // The signal write path: publishes the value with its own single-entry stamp (a signal has
+    // no sources), in one atomic box swap.
+    internal void SetValueAndStamp(T value, CausalityStamp stamp)
+    {
+        valueBox = new ValueBox(value, StampEvidence.ForOwnStamp(stamp));
+    }
+
+    // Publish a computed value together with the evidence captured during the evaluation that
+    // produced it. Shared by MemoBase and ConcurrentRace; the race passes the capture it closed
+    // at winner selection.
+    internal void PublishValueWithCapturedStamps(T value) => PublishValueWithStamps(value, Context.TakeStampCapture(this));
+
+    internal void PublishValueWithStamps(T value, StampCapture capture, int winningBranch = 0)
+    {
+        valueBox = new ValueBox(value, StampEvidence.FromCapture(capture, winningBranch));
     }
 
     internal MemoHandlR(Context context) : base(context)
     {
     }
 
-    // The dependency-tracking half of the leaf-signal read path, shared by Signal.Get and
-    // EagerRelativeSignal.Get: when a reaction is capturing, register this node as one of its
-    // dependencies. Returns nothing -- each Get reads Value itself, so the two keep their own
-    // return nullability (Signal is Task<T?>, EagerRelativeSignal is Task<T>) with no invariant
-    // Task<T>/Task<T?> conversion warning, and no extra allocation (the untracked fast path
-    // returns the cached completed Task). The per-node mutex is deliberately NOT taken --
-    // CheckDependenciesTheSame is already serialized by Context.Lock, and a signal has no recompute
-    // for the mutex to guard (ADR 0002). MemoBase overrides Get with its own cached fast path, so
-    // this stays a leaf-signal helper.
-    private protected async Task TrackDependency()
+    // The (value, evidence) read every entry point projects from: GetWithStamp keeps only the
+    // stamp, while infrastructure fan-ins (ReactionBuilder's isolated-scope dependency
+    // evaluations) need the verifiability of the SAME publication as the value -- reading
+    // Evidence separately could straddle a concurrent republish. This base implementation is
+    // the leaf-signal tracked read; MemoBase and ConcurrentRace override with their pull
+    // protocols.
+    internal virtual Task<(T Value, StampEvidence Evidence)> ReadWithEvidence() => TrackDependencyAndRead();
+
+    // The leaf-signal tracked read, shared by Signal and EagerRelativeSignal (Get and
+    // GetWithStamp alike): when a computation is capturing, register this node as one of its
+    // dependencies and record the stamp of the SAME box publication as the returned value -- the
+    // pair must never be split, so there is exactly one box read per call. The per-node mutex is
+    // deliberately NOT taken -- CheckDependenciesTheSame is already serialized by Context.Lock,
+    // and a signal has no recompute for the mutex to guard (ADR 0002). MemoBase overrides
+    // ReadWithEvidence with its own cached fast path, so this stays a leaf-signal helper.
+    private protected async Task<(T Value, StampEvidence Evidence)> TrackDependencyAndRead()
     {
         ActorFlowGuards.RejectLockNodeReadInsideActorComputation();
 
@@ -284,24 +365,106 @@ public abstract class MemoHandlR<T> : SignalHandlR
         // so the read needs no scope at all.
         if (!Context.HasFlowScope)
         {
-            return;
+            return ValueAndEvidence;
         }
 
         var scope = Context.GetOrCreateScope();
         if (scope.CurrentReaction == null)
         {
-            return;
+            return ValueAndEvidence;
         }
 
+        (T Value, StampEvidence Evidence) pair;
         using (await scope.ContextLock.UpgradeableLockAsync())
         {
             Context.CheckDependenciesTheSame(this);
+            pair = ValueAndEvidence;
+            // A signal's own evidence is never unverifiable (ForOwnStamp), so this records
+            // unconditionally.
+            Context.RecordSourceStamp(scope.CurrentReaction, Id, pair.Evidence.Stamp);
         }
         GC.KeepAlive(scope); // strong root: the lock identity must outlive the tracked read
+        return pair;
     }
 
-    private sealed class ValueBox(T value)
+    private sealed class ValueBox(T value, StampEvidence evidence)
     {
         public readonly T Value = value;
+        public readonly StampEvidence Evidence = evidence;
+    }
+}
+
+/// <summary>
+/// One publication's causality evidence (issue #39): the node's own stamp and the per-source
+/// map it was sealed from, immutable and published as one reference -- reading this property
+/// gives fields that describe the same completed evaluation. The per-source map is wrapped
+/// read-only before it becomes reachable, so a consumer can never downcast and mutate the
+/// node's published evidence. <see cref="Unverifiable"/> distinguishes "this value depends on
+/// no tracked signals" (an honest empty stamp) from "no honest claim can be made about this
+/// value" (a mixed/faulted evaluation): both carry the empty stamp, but only the former can be
+/// trusted by a consistency check -- and unverifiability is contagious, poisoning the evidence
+/// of any evaluation that consumed it.
+/// </summary>
+public sealed class StampEvidence
+{
+    private static readonly IReadOnlyDictionary<int, CausalityStamp> NoSourceStamps =
+        new System.Collections.ObjectModel.ReadOnlyDictionary<int, CausalityStamp>(new Dictionary<int, CausalityStamp>());
+
+    internal static readonly StampEvidence None = new(CausalityStamp.Empty, NoSourceStamps, false);
+    internal static readonly StampEvidence UnverifiableEvidence = new(CausalityStamp.Empty, NoSourceStamps, true);
+
+    public CausalityStamp Stamp { get; }
+    public IReadOnlyDictionary<int, CausalityStamp> SourceStamps { get; }
+    public bool Unverifiable { get; }
+
+    private StampEvidence(CausalityStamp stamp, IReadOnlyDictionary<int, CausalityStamp> sourceStamps, bool unverifiable)
+    {
+        Stamp = stamp;
+        SourceStamps = sourceStamps;
+        Unverifiable = unverifiable;
+    }
+
+    // A signal's evidence: its own single-entry stamp, no sources.
+    internal static StampEvidence ForOwnStamp(CausalityStamp stamp) => new(stamp, NoSourceStamps, false);
+
+    // A derived node's evidence: the join of the sealed source stamps plus the per-source map
+    // (only branch 0 and, for races, the winning branch survive the seal -- see
+    // StampCapture.Seal). UNVERIFIABLE evidence -- the empty stamp plus the flag, claiming
+    // nothing, which is the only honest description of a value no single stamp can describe --
+    // is published when:
+    //  - the winning evidence is POISONED (a same-source re-read across different
+    //    publications, a consumed source that was itself unverifiable, or a faulted read whose
+    //    fallback the evidence would otherwise hide), or
+    //  - two DIFFERENT sources disagree on a shared signal (e.g. two memos both depending on s,
+    //    read across a Set: one carries {s:0}, the other {s:1} -- joining would over-claim that
+    //    the whole value reflects the newer write). The fold detects any such pair: the running
+    //    join always carries the maximum trigger seen for a signal, so a conflicting stamp
+    //    fails the consistency check no matter the fold order.
+    // For a mid-evaluation Set the same write refused the node's Clean commit, so the next
+    // recompute publishes clean evidence. An evaluation with NO tracked reads publishes None:
+    // the same empty stamp, but verifiable -- the value genuinely depends on nothing.
+    internal static StampEvidence FromCapture(StampCapture capture, int winningBranch = 0)
+    {
+        var (poisoned, stamps) = capture.Seal(winningBranch);
+        if (poisoned)
+        {
+            return UnverifiableEvidence;
+        }
+        if (stamps.Count == 0)
+        {
+            return None;
+        }
+
+        var joined = CausalityStamp.Empty;
+        foreach (var stamp in stamps.Values)
+        {
+            if (!stamp.IsConsistentWith(joined))
+            {
+                return UnverifiableEvidence;
+            }
+            joined = joined.Join(stamp);
+        }
+
+        return new(joined, new System.Collections.ObjectModel.ReadOnlyDictionary<int, CausalityStamp>(stamps), false);
     }
 }

@@ -93,6 +93,112 @@ public class Context
     private readonly Lazy<GraphActor> graphActor = new(() => new());
     internal GraphActor GraphActor => graphActor.Value;
 
+    // The node-id slice this context allocates from: ids are handed out monotonically in
+    // [IdRangeStart, IdRangeEnd). They are the stable per-context identity signals carry in
+    // causality stamps (issue #39). Distributed peers carve the shared 31-bit id space into
+    // DISJOINT contiguous slices so stamps merged across peers can never collide on an id (and
+    // each peer occupies its own subtree of the interval encoding, keeping merged stamps
+    // compact); exhausting a slice throws rather than silently bleeding into a neighbour's ids.
+    internal int IdRangeStart { get; }
+    internal int IdRangeEnd { get; }
+    private int nextNodeId;
+
+    // The incarnation epoch every causality stamp of this context carries: ids and triggers
+    // restart when a process (and so its context) restarts, so a recreated graph reissues
+    // (id, trigger) pairs that already escaped over the wire -- the random nonzero epoch is
+    // what keeps pre- and post-reset observations from ever being confused (see
+    // CausalityStamp). Within a living context a "reset" node is simply a new node, with a
+    // fresh id that was never handed out before.
+    internal long Epoch { get; } = Random.Shared.NextInt64(1, long.MaxValue);
+
+    /** causality-stamp capture (issue #39): while a node evaluates, the stamps observed on its
+    * tracked source reads accumulate here, keyed by the EVALUATING NODE rather than by flow:
+    * structured-concurrency children read on child flows/scopes but evaluate on behalf of the
+    * owning node (their CurrentReaction), and nested evaluations stay naturally disjoint with
+    * no push/pop (the per-node mutex guarantees at most one open capture per node). All access
+    * under Lock; a record against a node with no open bucket is dropped (e.g. a superseded race
+    * loser reading after the winner already published and closed the bucket). */
+    private readonly Dictionary<IMemoHandlR, StampCapture> stampCaptures = new();
+
+    internal Context(int idRangeStart = 1, int idRangeEnd = int.MaxValue)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(idRangeStart);
+        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(idRangeEnd, idRangeStart);
+        IdRangeStart = idRangeStart;
+        IdRangeEnd = idRangeEnd;
+        nextNodeId = idRangeStart - 1;
+    }
+
+    internal int NextNodeId()
+    {
+        var id = Interlocked.Increment(ref nextNodeId);
+        // The lower-bound check also catches int wrap-around past int.MaxValue.
+        if (id < IdRangeStart || id >= IdRangeEnd)
+        {
+            throw new InvalidOperationException(
+                $"The context exhausted its node-id slice [{IdRangeStart}, {IdRangeEnd}). Distributed peers must be provisioned with slices sized for their graphs.");
+        }
+        return id;
+    }
+
+    internal void BeginStampCapture(IMemoHandlR node, bool branchAware = false)
+    {
+        lock (Lock)
+        {
+            stampCaptures[node] = new(branchAware);
+        }
+    }
+
+    // Marks the evaluating node's open capture unverifiable for the ambient branch: used when a
+    // tracked read observed a source whose own evidence is unverifiable, or when a tracked read
+    // faulted (the caller may catch the fault and publish a fallback -- evidence omitting the
+    // faulted source would hide a real control-flow dependency).
+    internal void MarkStampCaptureUnverifiable(IMemoHandlR? evaluatingNode)
+    {
+        if (evaluatingNode == null)
+        {
+            return;
+        }
+
+        var branch = RaceBranchFlow.Current.Value;
+        lock (Lock)
+        {
+            if (stampCaptures.TryGetValue(evaluatingNode, out var capture))
+            {
+                capture.Poison(branch);
+            }
+        }
+    }
+
+    internal void RecordSourceStamp(IMemoHandlR? evaluatingNode, int sourceId, CausalityStamp stamp)
+    {
+        if (evaluatingNode == null)
+        {
+            return;
+        }
+
+        // Resolve the ambient racing-branch tag outside the monitor (an AsyncLocal read); 0 for
+        // every read that is not inside a racing branch.
+        var branch = RaceBranchFlow.Current.Value;
+        lock (Lock)
+        {
+            if (stampCaptures.TryGetValue(evaluatingNode, out var capture))
+            {
+                capture.Record(sourceId, stamp, branch);
+            }
+        }
+    }
+
+    // Closes and returns the node's capture (a shared empty one when none is open). The failure
+    // paths call this too, discarding the result -- the node then keeps its previous stamp.
+    internal StampCapture TakeStampCapture(IMemoHandlR node)
+    {
+        lock (Lock)
+        {
+            return stampCaptures.Remove(node, out var capture) ? capture : StampCapture.Empty;
+        }
+    }
+
     private int evaluationDepth;
 
     // The context-wide CancellationTokenSource is shared by every evaluation in flight (so
@@ -375,5 +481,105 @@ public class Context
         {
             scope.CurrentReaction = listener;
         }
+    }
+}
+
+// One evaluation's observed source stamps (issue #39), keyed by source id. All mutation happens
+// under Context.Lock. The capture is POISONED when the same source is re-read across DIFFERENT
+// publications: the computed value then mixes two versions of one write history, so no single
+// per-source stamp is honest -- not the older (a consumer comparing against the newer
+// ingredient would see false agreement) and not the newer (the over-claim the capture
+// discipline forbids). A poisoned capture publishes no evidence at all (the empty stamp claims
+// nothing, which is always safe); the mid-evaluation Set that caused the mix also bumped the
+// node's generation, so the Clean commit is refused and the next recompute publishes clean
+// evidence.
+// The ambient tag of the racing branch currently evaluating on this flow (0 = not inside a
+// racing branch: ordinary evaluations and a race's shared action). Set by StructuredRaceJob at
+// the top of each branch body, so the tag flows into everything the branch spawns; the mutation
+// lives in the branch task's own ExecutionContext and never leaks to the parent flow. It lets
+// one race capture attribute entries per branch WITHOUT touching CurrentReaction -- which must
+// stay the race itself, because capture-time observer wiring hangs off it.
+internal static class RaceBranchFlow
+{
+    internal static readonly AsyncLocal<int> Current = new();
+}
+
+// One evaluation's observed source stamps (issue #39), keyed by (source id, racing branch).
+// All mutation happens under Context.Lock. Only a RACE's capture is branch-aware: an ordinary
+// node evaluated inside a racing branch opens its own capture, and the ambient branch tag of
+// the enclosing race must not leak into it (its Seal(0) would discard everything) -- so a
+// non-branch-aware capture files every record under branch 0.
+//
+// A branch is POISONED -- its evidence is unverifiable -- when the same source is re-read by
+// that branch across DIFFERENT publications (the computed value then mixes two versions of one
+// write history, so no single per-source stamp is honest: not the older, which would show
+// false agreement with the newer ingredient, and not the newer, which is the forbidden
+// over-claim), or when a read observed a source whose own evidence is unverifiable, or when a
+// tracked read faulted (the caller may catch and publish a fallback whose control flow the
+// missing entry would hide). Poison is tracked PER BRANCH so a losing racer's mixed re-read
+// cannot destroy the evidence of a clean winner; Seal treats it as fatal only for branch 0 and
+// the winning branch. The same source read differently by DIFFERENT branches is not poison --
+// branches are alternative computations, resolved by the seal.
+internal sealed class StampCapture
+{
+    // Returned by TakeStampCapture when no capture is open; never registered, so never mutated.
+    internal static readonly StampCapture Empty = new(false);
+
+    private readonly bool branchAware;
+    private readonly Dictionary<(int Source, int Branch), CausalityStamp> entries = new();
+    private readonly HashSet<int> poisonedBranches = new();
+
+    public StampCapture(bool branchAware)
+    {
+        this.branchAware = branchAware;
+    }
+
+    public void Poison(int branch) => poisonedBranches.Add(branchAware ? branch : 0);
+
+    public void Record(int sourceId, CausalityStamp stamp, int branch)
+    {
+        var key = (sourceId, branchAware ? branch : 0);
+        if (entries.TryGetValue(key, out var existing))
+        {
+            if (!existing.Equals(stamp))
+            {
+                Poison(branch);
+            }
+            return;
+        }
+
+        entries[key] = stamp;
+    }
+
+    // Reduce the branch-tagged entries to one stamp per source, keeping only the evidence that
+    // fed the published value: branch 0 (the owning evaluation itself, or a race's shared
+    // action) plus the winning branch. For every non-race capture all entries carry branch 0,
+    // so Seal(0) keeps everything. A disagreement between the shared and the winning entry for
+    // one source is the same mixed-publication situation as a poisoned re-read.
+    public (bool Poisoned, Dictionary<int, CausalityStamp> Stamps) Seal(int winningBranch)
+    {
+        var stamps = new Dictionary<int, CausalityStamp>();
+        if (poisonedBranches.Contains(0) || poisonedBranches.Contains(winningBranch))
+        {
+            return (true, stamps);
+        }
+
+        foreach (var ((source, branch), stamp) in entries)
+        {
+            if (branch != 0 && branch != winningBranch)
+            {
+                continue;
+            }
+            if (stamps.TryGetValue(source, out var existing))
+            {
+                if (!existing.Equals(stamp))
+                {
+                    return (true, stamps);
+                }
+                continue;
+            }
+            stamps[source] = stamp;
+        }
+        return (false, stamps);
     }
 }
