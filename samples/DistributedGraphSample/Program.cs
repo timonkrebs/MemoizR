@@ -36,9 +36,14 @@ var dewPoint = peerA.CreateMemoizR("dewPoint", async () =>
 var heatIndex = peerA.CreateMemoizR("heatIndex", async () =>
     await temperature.Get() + 0.1 * await humidity.Get() * (await temperature.Get() - 14.5));
 
-// An EXPORT is just a reaction: whenever the node's value advances, push a stale notification
+// An EXPORT is just a reaction: whenever the node's VALUE advances, push a stale notification
 // (id + stamp, no value). This sample parks them in per-node outboxes so the "network" can
 // deliver them out of order below; a real bridge would write to its transport here.
+// Deliberate design boundary: the local invalidation cascade propagates only value changes, so
+// an evaluation that keeps the value but changes the EVIDENCE (a stamp refresh, or an
+// unverifiable spell healing) emits no notification -- evidence-only transitions are
+// discovered by PULLING (the glitch barrier re-pulls lagging inputs, and an unverifiable
+// mirror chases every advertisement); a real bridge adds a heartbeat/poll for liveness.
 var outbox = new Outbox(dewPoint.Id, heatIndex.Id);
 var exportDew = peerA.BuildReaction("export dewPoint").CreateReaction(dewPoint, _ =>
     outbox.Enqueue(new StaleMsg(dewPoint.Id, dewPoint.Stamp.Serialize())));
@@ -160,13 +165,15 @@ sealed class Mirror(string name, EagerRelativeSignal<double> local, Func<Task<Va
     public async Task PullAsync() => await OnValueAsync(await Pull());
 
     // STALE handler: pull only when the host advertises something newer than we hold -- the
-    // value itself moves lazily. An EMPTY advertisement (the host published no claim, e.g. an
-    // unverifiable evaluation) carries no ordering information at all, so it always pulls
-    // instead of being mistaken for old news.
+    // value itself moves lazily. Two exceptions always pull: an EMPTY advertisement (the host
+    // published no claim, e.g. an unverifiable evaluation) carries no ordering information,
+    // and a mirror that is currently UNVERIFIABLE must chase every advertisement -- a host
+    // recovering without any trigger advancing re-advertises the very stamp we already hold,
+    // which dominance would otherwise mistake for old news.
     public async Task OnStaleAsync(StaleMsg msg)
     {
         var advertised = CausalityStamp.Deserialize(msg.Stamp);
-        if (advertised.Epoch == 0 || !advertised.IsDominatedBy(Remote))
+        if (Unverifiable || advertised.Epoch == 0 || !advertised.IsDominatedBy(Remote))
         {
             await PullAsync();
         }
@@ -203,11 +210,14 @@ sealed class Mirror(string name, EagerRelativeSignal<double> local, Func<Task<Va
 
         // LATE / DUPLICATE delivery: ordering information only exists between two NON-EMPTY
         // stamps -- an honestly-empty stamp (the exported node legitimately depends on no
-        // tracked signals) is a real publication, not old news -- and a mirror recovering from
-        // an unverifiable spell must adopt even a stamp identical to the held one. Under those
-        // conditions a dominated payload is a late, duplicated or reordered delivery, which is
-        // what makes at-least-once transports harmless.
-        if (!Unverifiable && Remote.Epoch != 0 && incoming.Epoch != 0 && incoming.IsDominatedBy(Remote))
+        // tracked signals) is a real publication, not old news. While VERIFIED, anything
+        // dominated (including equal re-deliveries) is dropped, which is what makes
+        // at-least-once transports harmless. While UNVERIFIABLE, only STRICTLY older payloads
+        // are dropped: an equal-stamp verified payload is exactly the recovery (a transient
+        // fault healed without any trigger advancing) and must be adopted -- but a genuinely
+        // older late delivery must still not resurrect stale verified state.
+        if (Remote.Epoch != 0 && incoming.Epoch != 0 && incoming.IsDominatedBy(Remote)
+            && (!Unverifiable || !Remote.IsDominatedBy(incoming)))
         {
             Console.WriteLine($"   [B] {Name}: DROPPED delivery (stamp dominated by held evidence)");
             return;
