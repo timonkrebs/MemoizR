@@ -109,7 +109,13 @@ await rendered.Task;
 Console.WriteLine("\n2) temperature changes on A; the two stale notifications race -- deliver only dewPoint's");
 rendered = new(TaskCreationOptions.RunContinuationsAsynchronously);
 var staleDewPayload = await dewMirror.Pull(); // keep a pre-change payload for step 3
-outbox.Drain(); // drop the initial eager-run notifications; step 2 cares about the post-change ones
+// The export reactions each run once EAGERLY on creation; wait for those initial
+// notifications to land before discarding them. Draining first would race the initial runs:
+// one landing after the drain (but before the Set) would leave a pre-change stamp as the only
+// dewPoint message, the dominance check in OnStaleAsync would skip the pull, and the glitch
+// this step demonstrates would never materialize -- the script would hang on glitched.Task.
+await outbox.WaitForAllAsync();
+outbox.Drain(); // step 2 cares about the post-change notifications only
 await temperature.Set(30.0);
 await outbox.WaitForAllAsync(); // let A's (debounced) export reactions run
 await dewMirror.OnStaleAsync(outbox.DequeueLatest(dewPoint.Id));
