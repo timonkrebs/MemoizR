@@ -77,15 +77,31 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         {
             if (reference.Parent is ISimpleAssignmentOperation assignment && ReferenceEquals(assignment.Target, reference))
             {
-                return; // reassigned: the old, transferred value is gone
+                // A reassignment gives the variable a fresh value -- but only if its RHS does
+                // not itself READ the transferred one (`list = Clone(list)` uses it to build
+                // the replacement, which is exactly a use after transfer).
+                var rhsUse = assignment.Value.DescendantsAndSelf()
+                    .FirstOrDefault(operation => SymbolEqualityComparer.Default.Equals(ReferencedVariable(operation), variable));
+                if (rhsUse is null)
+                {
+                    return;
+                }
+
+                Report(context, rhsUse, variable);
+                return;
             }
 
-            context.ReportDiagnostic(Diagnostic.Create(
-                DiagnosticDescriptors.UseAfterTransfer,
-                reference.Syntax.GetLocation(),
-                variable.Name));
+            Report(context, reference, variable);
             return; // one report per transfer keeps the noise proportional
         }
+    }
+
+    private static void Report(OperationBlockAnalysisContext context, IOperation reference, ISymbol variable)
+    {
+        context.ReportDiagnostic(Diagnostic.Create(
+            DiagnosticDescriptors.UseAfterTransfer,
+            reference.Syntax.GetLocation(),
+            variable.Name));
     }
 
     private static ISymbol? ReferencedVariable(IOperation? operation)

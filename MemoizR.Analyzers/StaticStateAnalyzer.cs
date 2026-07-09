@@ -41,16 +41,29 @@ public sealed class StaticStateAnalyzer : DiagnosticAnalyzer
 
             var classifier = new SendableSymbolClassifier();
             var treeUsesMemoizR = new ConcurrentDictionary<SyntaxTree, bool>();
+
+            // A `global using MemoizR;` anywhere puts MemoizR in scope for EVERY file, so the
+            // per-tree check must not exempt projects that centralize their usings. One shallow
+            // scan per compilation, computed lazily on the first static symbol seen.
+            var compilation = compilationStart.Compilation;
+            var hasGlobalMemoizRUsing = new System.Lazy<bool>(() =>
+                compilation.SyntaxTrees.Any(tree => MemoizRUsingsIn(tree).Any(directive => directive.GlobalKeyword != default)));
+
             compilationStart.RegisterSymbolAction(
-                symbolContext => Analyze(symbolContext, classifier, treeUsesMemoizR),
+                symbolContext => Analyze(symbolContext, classifier, treeUsesMemoizR, hasGlobalMemoizRUsing),
                 SymbolKind.Field, SymbolKind.Property, SymbolKind.Event);
         });
     }
 
-    private static void Analyze(SymbolAnalysisContext context, SendableSymbolClassifier classifier, ConcurrentDictionary<SyntaxTree, bool> treeUsesMemoizR)
+    private static void Analyze(SymbolAnalysisContext context, SendableSymbolClassifier classifier, ConcurrentDictionary<SyntaxTree, bool> treeUsesMemoizR, System.Lazy<bool> hasGlobalMemoizRUsing)
     {
         var symbol = context.Symbol;
-        if (!symbol.IsStatic || symbol.IsImplicitlyDeclared || !IsInMemoizRUsingFile(symbol, treeUsesMemoizR))
+        if (!symbol.IsStatic || symbol.IsImplicitlyDeclared)
+        {
+            return;
+        }
+
+        if (!hasGlobalMemoizRUsing.Value && !IsInMemoizRUsingFile(symbol, treeUsesMemoizR))
         {
             return;
         }
@@ -119,11 +132,15 @@ public sealed class StaticStateAnalyzer : DiagnosticAnalyzer
             return false;
         }
 
-        return treeUsesMemoizR.GetOrAdd(tree, static t =>
-            t.GetRoot()
-                .DescendantNodes(node => node is CompilationUnitSyntax or BaseNamespaceDeclarationSyntax)
-                .OfType<UsingDirectiveSyntax>()
-                .Any(directive => directive.Name?.ToString() is { } name
-                    && (name == "MemoizR" || name.StartsWith("MemoizR.", System.StringComparison.Ordinal))));
+        return treeUsesMemoizR.GetOrAdd(tree, static t => MemoizRUsingsIn(t).Any());
+    }
+
+    private static System.Collections.Generic.IEnumerable<UsingDirectiveSyntax> MemoizRUsingsIn(SyntaxTree tree)
+    {
+        return tree.GetRoot()
+            .DescendantNodes(node => node is CompilationUnitSyntax or BaseNamespaceDeclarationSyntax)
+            .OfType<UsingDirectiveSyntax>()
+            .Where(directive => directive.Name?.ToString() is { } name
+                && (name == "MemoizR" || name.StartsWith("MemoizR.", System.StringComparison.Ordinal)));
     }
 }

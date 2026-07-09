@@ -97,6 +97,39 @@ public class StaticStateAnalyzerTests
     }
 
     [Fact]
+    public async Task GlobalUsings_PutEveryFileInScope()
+    {
+        // Centralized `global using MemoizR;` (a separate GlobalUsings.cs) puts MemoizR in
+        // scope for every file, so the per-FILE using check must not exempt such projects: the
+        // static's own file has no using directive at all here.
+        var diagnostics = await AnalyzerTestHarness.AnalyzeAsync(
+            [
+                """
+                global using MemoizR;
+                """,
+                """
+                using System.Collections.Generic;
+
+                public class C
+                {
+                    private static readonly List<int> Cache = new();
+
+                    public void M()
+                    {
+                        var f = new MemoFactory();
+                        Cache.Add(1);
+                    }
+                }
+                """,
+            ],
+            new StaticStateAnalyzer());
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR004", diagnostic.Id);
+        Assert.Contains("'Cache'", diagnostic.GetMessage());
+    }
+
+    [Fact]
     public async Task FilesWithoutMemoizRUsing_AreOutOfScope()
     {
         var diagnostics = await AnalyzeAsync("""

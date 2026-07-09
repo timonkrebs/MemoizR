@@ -167,7 +167,10 @@ Sendable classes to be `final`. MZR006 hints (Info severity: non-sealed records 
 and the hole needs an actual mutable subclass to bite) at non-sealed, non-abstract class type
 arguments at creation sites; green-listed framework types (`Uri` is not sealed) are exempt. The
 runtime counterpart is `MemoFactoryOptions.ValidateWrittenValues`, which validates each written
-instance's runtime type on `Set`.
+instance's runtime type on `Set` — SIGNAL writes only (memo outputs are the computation's own
+doing and publish unchecked), which is why the MZR006 hint only suggests the option at signal
+creation sites. The nested type arguments of Sendable containers (`ImmutableArray<OpenBase>`)
+are unfolded: the container passes the green-lists, the element type is the smuggle surface.
 
 ### Testing strategy
 

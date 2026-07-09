@@ -36,6 +36,31 @@ public class UseAfterTransferAnalyzerTests
     }
 
     [Fact]
+    public async Task ReassignmentWhoseRhsReadsTheTransferredValue_IsFlagged()
+    {
+        // `list = Clone(list)` LOOKS like a fresh value, but the RHS reads the transferred one
+        // to build the replacement -- exactly a use after transfer.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public Sending<List<int>> M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(list);
+                    list = new List<int>(list); // reads the transferred list
+                    return sending;
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+    }
+
+    [Fact]
     public async Task UsesBeforeTransfer_AndReassignedVariables_AreNotFlagged()
     {
         var diagnostics = await AnalyzeAsync("""

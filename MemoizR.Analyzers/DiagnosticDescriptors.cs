@@ -74,8 +74,7 @@ internal static class DiagnosticDescriptors
         id: "MZR006",
         title: "Non-sealed class shared by the reactive graph can smuggle mutable subclass state",
         messageFormat: "'{0}' is not sealed — a mutable subclass behind an upcast passes the creation-time " +
-                       "Sendable checks (Swift requires Sendable classes to be final); consider sealing it, " +
-                       "or enable MemoFactoryOptions.ValidateWrittenValues to check written instances at runtime",
+                       "Sendable checks (Swift requires Sendable classes to be final); consider sealing it{1}",
         category: Category,
         defaultSeverity: DiagnosticSeverity.Info,
         isEnabledByDefault: true,

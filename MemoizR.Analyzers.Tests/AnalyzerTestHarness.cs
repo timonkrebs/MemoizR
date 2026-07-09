@@ -22,12 +22,19 @@ internal static class AnalyzerTestHarness
         return [.. paths.Distinct().Select(p => (MetadataReference)MetadataReference.CreateFromFile(p))];
     }
 
-    public static async Task<ImmutableArray<Diagnostic>> AnalyzeAsync(string source, DiagnosticAnalyzer analyzer)
+    public static Task<ImmutableArray<Diagnostic>> AnalyzeAsync(string source, DiagnosticAnalyzer analyzer)
     {
-        var tree = CSharpSyntaxTree.ParseText(source, new CSharpParseOptions(LanguageVersion.Latest));
+        return AnalyzeAsync([source], analyzer);
+    }
+
+    // Multi-file overload: some rules are scoped per FILE (MZR004's using-directive mandate),
+    // so proving cross-file behavior (a centralized GlobalUsings.cs) needs separate trees.
+    public static async Task<ImmutableArray<Diagnostic>> AnalyzeAsync(string[] sources, DiagnosticAnalyzer analyzer)
+    {
+        var trees = sources.Select(source => CSharpSyntaxTree.ParseText(source, new CSharpParseOptions(LanguageVersion.Latest))).ToArray();
         var compilation = CSharpCompilation.Create(
             "AnalyzerTestSnippet",
-            [tree],
+            trees,
             References.Value,
             new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary, nullableContextOptions: NullableContextOptions.Enable));
 
