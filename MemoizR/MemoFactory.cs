@@ -161,7 +161,7 @@ public sealed class MemoFactory
     public Signal<T> CreateSignal<T>(string label, T value)
     {
         EnsureSendableIfStrict<T>();
-        return new(value, Context, Options.HasFlag(MemoFactoryOptions.ValidateWrittenValues))
+        return new(value, Context, ShouldValidateWrittenValues)
         {
             Label = label
         };
@@ -175,7 +175,7 @@ public sealed class MemoFactory
     public EagerRelativeSignal<T> CreateEagerRelativeSignal<T>(string label, T value)
     {
         EnsureSendableIfStrict<T>();
-        return new(value, Context, Options.HasFlag(MemoFactoryOptions.ValidateWrittenValues))
+        return new(value, Context, ShouldValidateWrittenValues)
         {
             Label = label
         };
@@ -191,7 +191,7 @@ public sealed class MemoFactory
     public ActorSignal<T> CreateActorSignal<T>(T value)
     {
         EnsureSendableIfStrict<T>();
-        return new(value, Context, Options.HasFlag(MemoFactoryOptions.ValidateWrittenValues));
+        return new(value, Context, ShouldValidateWrittenValues);
     }
 
     /// <summary>
@@ -209,6 +209,13 @@ public sealed class MemoFactory
     // Strict-mode boundary check (issue #36): every node type whose value crosses flows funnels
     // its creation through this. Internal so the structured-concurrency factory extensions (a
     // friend assembly) enforce the same contract for their nodes.
+    // ValidateWrittenValues rides ON TOP of the Sendable checks, so the migration escape hatch
+    // must switch both off: a factory that opted out via DisableSendableChecks would otherwise
+    // still throw on later writes -- an incomplete escape hatch (review finding on #147).
+    private bool ShouldValidateWrittenValues =>
+        Options.HasFlag(MemoFactoryOptions.ValidateWrittenValues)
+        && !Options.HasFlag(MemoFactoryOptions.DisableSendableChecks);
+
     internal void EnsureSendableIfStrict<T>()
     {
         // Strict is the DEFAULT (issue #145 part A4, the Swift 6 language-mode analog);

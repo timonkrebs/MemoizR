@@ -33,14 +33,17 @@ public enum MemoFactoryOptions
     /// INSTANCE'S RUNTIME TYPE is Sendable -- closing the subclass-smuggling hole the
     /// creation-time check cannot see (a mutable subclass behind an upcast; see MZR006 and ADR
     /// 0003). Costs one cached type probe per Set, so it is a separate opt-in on top of
-    /// <see cref="StrictSendableChecks"/>.
+    /// <see cref="StrictSendableChecks"/>. Ignored when <see cref="DisableSendableChecks"/>
+    /// is set: the migration escape hatch switches off ALL Sendable validation.
     /// </summary>
     ValidateWrittenValues = 1 << 2,
 
     /// <summary>
     /// Opt OUT of the (default) creation-time Sendable checks -- the migration escape hatch,
     /// the analog of staying on Swift 5's language mode. Values of non-Sendable types are then
-    /// shared across flows unchecked, exactly as before the Swift-6-parity step.
+    /// shared across flows unchecked, exactly as before the Swift-6-parity step. Takes
+    /// precedence over <see cref="StrictSendableChecks"/> and
+    /// <see cref="ValidateWrittenValues"/>: opting out switches off ALL Sendable validation.
     /// </summary>
     DisableSendableChecks = 1 << 3,
 }

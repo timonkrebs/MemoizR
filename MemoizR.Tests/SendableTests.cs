@@ -216,6 +216,17 @@ public class ValidateWrittenValuesTests
     }
 
     [Fact]
+    public async Task DisableSendableChecks_AlsoDisablesWriteValidation()
+    {
+        // The migration escape hatch is COMPLETE: opting out of the Sendable checks must not
+        // leave write-time validation armed, or migrating code would still throw on Set.
+        var f = new MemoFactory(options: MemoFactoryOptions.ValidateWrittenValues | MemoFactoryOptions.DisableSendableChecks);
+        var signal = f.CreateSignal<OpenBase>(new OpenBase());
+        await signal.Set(new MutableChild());
+        Assert.NotNull(signal);
+    }
+
+    [Fact]
     public async Task EagerRelativeSignal_ValidatesTheComputedResult()
     {
         var f = new MemoFactory(options: MemoFactoryOptions.ValidateWrittenValues);
