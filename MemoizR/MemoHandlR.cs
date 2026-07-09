@@ -299,6 +299,12 @@ public abstract class MemoHandlR<T> : SignalHandlR
 
     internal T Value => valueBox.Value;
 
+    // The clean fast-path read as a completed task, cached in the box so it is created at most
+    // once per publication: the Get fast paths hand it out directly instead of paying an async
+    // state machine whose builder allocates a fresh Task<T> per read (the runtime only caches
+    // result tasks for a handful of primitive values).
+    internal Task<T> CachedValueTask => valueBox.CompletedTask;
+
     public override StampEvidence Evidence => valueBox.Evidence;
 
     // The (value, evidence) pair of one publication -- a single volatile box read, never torn.
@@ -377,11 +383,9 @@ public abstract class MemoHandlR<T> : SignalHandlR
         (T Value, StampEvidence Evidence) pair;
         using (await scope.ContextLock.UpgradeableLockAsync())
         {
-            Context.CheckDependenciesTheSame(this);
-            pair = ValueAndEvidence;
-            // A signal's own evidence is never unverifiable (ForOwnStamp), so this records
-            // unconditionally.
-            Context.RecordSourceStamp(scope.CurrentReaction, Id, pair.Evidence.Stamp);
+            // Registration, box read and stamp record fused under one Context.Lock acquisition
+            // (see Context.TrackedSignalRead).
+            pair = Context.TrackedSignalRead(this, scope);
         }
         GC.KeepAlive(scope); // strong root: the lock identity must outlive the tracked read
         return pair;
@@ -391,6 +395,11 @@ public abstract class MemoHandlR<T> : SignalHandlR
     {
         public readonly T Value = value;
         public readonly StampEvidence Evidence = evidence;
+
+        // Benign race: two concurrent creations produce interchangeable completed tasks over
+        // the same immutable box, so no synchronization is needed.
+        private Task<T>? completedTask;
+        public Task<T> CompletedTask => completedTask ??= Task.FromResult(Value);
     }
 }
 

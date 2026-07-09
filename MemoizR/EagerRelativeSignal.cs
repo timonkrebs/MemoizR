@@ -4,6 +4,10 @@ public sealed class EagerRelativeSignal<T> : MemoHandlR<T>, IStampedGetR<T>
 {
     private Lock Lock { get; } = new();
 
+    // The signal's causality trigger (issue #39), mirroring the published stamp exactly.
+    // Guarded by Lock; a plain counter so Set does not walk the published stamp's event tree.
+    private long trigger;
+
     internal EagerRelativeSignal(T value, Context context) : base(context)
     {
         SetValueAndStamp(value, CausalityStamp.ForSignal(Id, 0, context.Epoch));
@@ -33,8 +37,7 @@ public sealed class EagerRelativeSignal<T> : MemoHandlR<T>, IStampedGetR<T>
                     // Every Set bumps the causality trigger: a relative update always propagates
                     // CacheDirty (there is no equality short-cut here), so the trigger mirrors
                     // exactly what observers are told (issue #39).
-                    Stamp.TryGetTrigger(Id, out var trigger);
-                    SetValueAndStamp(fn(Value), CausalityStamp.ForSignal(Id, trigger + 1, Context.Epoch));
+                    SetValueAndStamp(fn(Value), CausalityStamp.ForSignal(Id, ++trigger, Context.Epoch));
                 }
 
                 await PropagateStaleToObserversAsync(CacheState.CacheDirty);
@@ -47,16 +50,21 @@ public sealed class EagerRelativeSignal<T> : MemoHandlR<T>, IStampedGetR<T>
     }
 
     // Tracked read shared with Signal via MemoHandlR.TrackDependencyAndRead.
-    public async Task<T> Get()
+    public Task<T> Get()
     {
         ActorFlowGuards.RejectLockNodeReadInsideActorComputation();
 
-        // An unpinned flow cannot be capturing: skip the tracked-read core (and its tuple-task
-        // allocation) entirely for plain top-level reads.
+        // An unpinned flow cannot be capturing: hand out the box's cached completed task -- the
+        // plain top-level read allocates nothing.
         if (!Context.HasFlowScope)
         {
-            return Value;
+            return CachedValueTask;
         }
+        return GetTracked();
+    }
+
+    private async Task<T> GetTracked()
+    {
         return (await TrackDependencyAndRead()).Value;
     }
 

@@ -182,10 +182,41 @@ public class Context
         var branch = RaceBranchFlow.Current.Value;
         lock (Lock)
         {
-            if (stampCaptures.TryGetValue(evaluatingNode, out var capture))
-            {
-                capture.Record(sourceId, stamp, branch);
-            }
+            RecordSourceStampCore(evaluatingNode, sourceId, stamp, branch);
+        }
+    }
+
+    // Must be called under Lock.
+    private void RecordSourceStampCore(IMemoHandlR? evaluatingNode, int sourceId, CausalityStamp stamp, int branch)
+    {
+        if (evaluatingNode == null)
+        {
+            return;
+        }
+
+        if (stampCaptures.TryGetValue(evaluatingNode, out var capture))
+        {
+            capture.Record(sourceId, stamp, branch);
+        }
+    }
+
+    // The tracked leaf-signal read, fused: dependency registration, the single box read, and the
+    // stamp record run under ONE Lock acquisition -- the register and the record each took their
+    // own before, doubling context-wide lock traffic on the hottest tracked path. The
+    // register-then-read order is preserved: the eager observer subscription must be in place
+    // before the value is read, or a Set landing in between would notify nobody. The scope is the
+    // caller's already-resolved (and strongly rooted) instance, so no registry probe here.
+    internal (T Value, StampEvidence Evidence) TrackedSignalRead<T>(MemoHandlR<T> source, ReactionScope scope)
+    {
+        var branch = RaceBranchFlow.Current.Value;
+        lock (Lock)
+        {
+            CheckDependenciesCore(scope, source);
+            var pair = source.ValueAndEvidence;
+            // A signal's own evidence is never unverifiable (ForOwnStamp), so this records
+            // unconditionally.
+            RecordSourceStampCore(scope.CurrentReaction, source.Id, pair.Evidence.Stamp, branch);
+            return pair;
         }
     }
 
@@ -367,33 +398,40 @@ public class Context
     {
         lock (Lock)
         {
-            // Resolve the scope once: every ReactionScope access re-enters this very lock and
-            // probes the dictionary, and this method runs on every tracked Get.
-            var scope = ReactionScope;
-            var noNewGets = scope.CurrentGets.Length == 0;
+            // Resolve the scope once: every ReactionScope access probes the registry, and this
+            // method runs on every tracked Get.
+            CheckDependenciesCore(ReactionScope, memoHandlR);
+        }
+    }
 
-            var hasEnoughSources = scope.CurrentReaction?.Sources?.Length > 0 && scope.CurrentReaction.Sources.Length >= scope.CurrentGetsIndex + 1;
-            var currentSourceEqualsThis = hasEnoughSources && scope.CurrentReaction!.Sources?[scope.CurrentGetsIndex] == memoHandlR;
+    // Must be called under Lock.
+    private static void CheckDependenciesCore(ReactionScope scope, IMemoHandlR memoHandlR)
+    {
+        var noNewGets = scope.CurrentGets.Length == 0;
 
-            if (noNewGets && currentSourceEqualsThis)
+        // Sources is never null (initialized to [] and only ever swapped whole).
+        var sources = scope.CurrentReaction?.Sources;
+        var currentSourceEqualsThis = sources != null && sources.Length > scope.CurrentGetsIndex
+            && sources[scope.CurrentGetsIndex] == memoHandlR;
+
+        if (noNewGets && currentSourceEqualsThis)
+        {
+            Interlocked.Increment(ref scope.CurrentGetsIndex);
+        }
+        else
+        {
+            scope.CurrentGets = [.. scope.CurrentGets, memoHandlR];
+
+            // Subscribe EAGERLY, at capture time, not after the evaluation completes: a Set
+            // landing between this read and the deferred link rewiring would otherwise see no
+            // observer and notify nobody -- the node would commit a value computed from the
+            // pre-Set read with no Stale ever bumping its generation (the first-evaluation
+            // subscription window). With the link in place immediately, that Set reaches the
+            // node mid-evaluation, the commit is refused, and the normal machinery re-runs.
+            // (Prefix-matched re-reads above are already subscribed from the previous run.)
+            if (scope.CurrentReaction is IMemoizR reaction)
             {
-                Interlocked.Increment(ref scope.CurrentGetsIndex);
-            }
-            else
-            {
-                scope.CurrentGets = [.. scope.CurrentGets, memoHandlR];
-
-                // Subscribe EAGERLY, at capture time, not after the evaluation completes: a Set
-                // landing between this read and the deferred link rewiring would otherwise see no
-                // observer and notify nobody -- the node would commit a value computed from the
-                // pre-Set read with no Stale ever bumping its generation (the first-evaluation
-                // subscription window). With the link in place immediately, that Set reaches the
-                // node mid-evaluation, the commit is refused, and the normal machinery re-runs.
-                // (Prefix-matched re-reads above are already subscribed from the previous run.)
-                if (scope.CurrentReaction is IMemoizR reaction)
-                {
-                    memoHandlR.AddObserver(reaction);
-                }
+                memoHandlR.AddObserver(reaction);
             }
         }
     }

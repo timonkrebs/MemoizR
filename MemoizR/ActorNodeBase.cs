@@ -306,8 +306,17 @@ public abstract class ActorValueNode<T> : ActorNodeBase
         }
     }
 
+    // The clean fast-path read as a completed task, cached in the box so it is created at most
+    // once per publication (Task.FromResult per read allocated on the hottest path otherwise).
+    internal Task<T> CachedValueTask => box.CompletedTask;
+
     private sealed class Box(T value)
     {
         public readonly T Value = value;
+
+        // Benign race: two concurrent creations produce interchangeable completed tasks over
+        // the same immutable box, so no synchronization is needed.
+        private Task<T>? completedTask;
+        public Task<T> CompletedTask => completedTask ??= Task.FromResult(Value);
     }
 }

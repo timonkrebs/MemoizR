@@ -38,18 +38,24 @@ public abstract class MemoBase<T> : MemoHandlR<T>, IMemoizR, IStampedGetR<T>
     // recomputed value actually changed). ConcurrentMap overrides with a sequence comparison.
     internal virtual bool ValuesEqual(T oldValue, T newValue) => Equals(oldValue, newValue);
 
-    public async Task<T> Get()
+    public Task<T> Get()
     {
         ActorFlowGuards.RejectLockNodeReadInsideActorComputation();
 
         // The clean untracked read stays the two-volatile-reads, zero-allocation fast path
-        // (concurrency.md §7): delegating unconditionally through ReadWithEvidence would cost
-        // a tuple-task allocation per read on the hottest path in the library. ReadWithEvidence
-        // re-checks the same condition for callers that need the pair.
+        // (concurrency.md §7): the box's cached completed task is handed out directly -- no
+        // async state machine, no per-read Task<T> -- and the State (acquire) read still
+        // precedes the box read. ReadWithEvidence re-checks the same condition for callers
+        // that need the (value, evidence) pair.
         if (State == CacheState.CacheClean && !Context.HasFlowScope)
         {
-            return Value;
+            return CachedValueTask;
         }
+        return GetSlow();
+    }
+
+    private async Task<T> GetSlow()
+    {
         return (await ReadWithEvidence()).Value;
     }
 
@@ -196,22 +202,13 @@ public abstract class MemoBase<T> : MemoHandlR<T>, IMemoizR, IStampedGetR<T>
 
         /* Evaluate the reactive function body, dynamically capturing any other reactives used.
            Resolve the scope once -- it is stable for the whole evaluation (same flow), and the
-           local additionally keeps the weakly-held scope strongly referenced until restored. */
+           local additionally keeps the weakly-held scope strongly referenced until restored.
+           The frame installs this node as the capturing reaction and opens its stamp-capture
+           bucket: tracked source reads -- including those performed by structured-concurrency
+           children on other flows, which evaluate on this node's behalf -- record the source
+           stamps they observed, keyed by this node. */
         var scope = Context.ReactionScope;
-        var prevReaction = scope.CurrentReaction;
-        var prevGets = scope.CurrentGets;
-        var prevIndex = scope.CurrentGetsIndex;
-
-        scope.CurrentReaction = this;
-        scope.CurrentGets = [];
-        scope.CurrentGetsIndex = 0;
-        var prevAmbientContext = LockEngineFlow.EvaluatingContext.Value;
-        LockEngineFlow.EvaluatingContext.Value = Context;
-
-        // Open the stamp-capture bucket for this evaluation: tracked source reads -- including
-        // those performed by structured-concurrency children on other flows, which evaluate on
-        // this node's behalf -- record the source stamps they observed, keyed by this node.
-        Context.BeginStampCapture(this);
+        var frame = CaptureFrame.Install(Context, scope, this);
 
         // Mark Evaluating and snapshot the generation; commit Clean below only if no Stale
         // invalidates us while the computation runs.
@@ -257,13 +254,7 @@ public abstract class MemoBase<T> : MemoHandlR<T>, IMemoizR, IStampedGetR<T>
         }
         finally
         {
-            // Drop a capture left open by the failure paths (the previous value keeps its
-            // previous stamp); a no-op after a successful publish.
-            Context.TakeStampCapture(this);
-            scope.CurrentGets = prevGets;
-            scope.CurrentReaction = prevReaction;
-            scope.CurrentGetsIndex = prevIndex;
-            LockEngineFlow.EvaluatingContext.Value = prevAmbientContext;
+            frame.Restore();
         }
 
         // handles diamond dependencies if we're the parent of a diamond. Iterating an empty
