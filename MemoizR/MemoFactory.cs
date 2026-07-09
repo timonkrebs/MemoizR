@@ -211,7 +211,9 @@ public sealed class MemoFactory
     // friend assembly) enforce the same contract for their nodes.
     internal void EnsureSendableIfStrict<T>()
     {
-        if (Options.HasFlag(MemoFactoryOptions.StrictSendableChecks))
+        // Strict is the DEFAULT (issue #145 part A4, the Swift 6 language-mode analog);
+        // DisableSendableChecks is the migration escape hatch.
+        if (!Options.HasFlag(MemoFactoryOptions.DisableSendableChecks))
         {
             SendableChecker.EnsureSendable(typeof(T));
         }

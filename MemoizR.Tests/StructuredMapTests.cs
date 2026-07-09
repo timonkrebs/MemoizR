@@ -50,7 +50,10 @@ namespace MemoizR.Tests.StructuredConcurrency
         [Fact(Timeout = 1000)]
         public async Task TestConcurrentMapWithDiamondDependencies()
         {
-            var f = new MemoFactory();
+            // Memos composed over a ConcurrentMap are typed IEnumerable<T> -- an interface, which
+            // the (now default) strict Sendable checks reject by principle. Known migration
+            // friction: compose over an immutable type, or opt out per factory as here.
+            var f = new MemoFactory(options: MemoFactoryOptions.DisableSendableChecks);
 
             var v1 = f.CreateSignal(1);
             var v2 = f.CreateSignal(2);

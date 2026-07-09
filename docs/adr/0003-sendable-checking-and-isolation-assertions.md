@@ -113,7 +113,11 @@ Design points:
 - **Per-factory, not per-context.** Strictness governs how *this* factory creates nodes; a
   strict and a lax factory may deliberately share one keyed context (e.g. migrating a codebase
   incrementally, exactly like Swift's per-module `-strict-concurrency` staging).
-- **Off by default.** Existing users see zero behavior change.
+- **On by default since the Swift-6-parity step** (issue #145 part A4 — the language-mode
+  analog): a guarantee is only a guarantee when it holds without opt-in.
+  `MemoFactoryOptions.DisableSendableChecks` is the migration escape hatch (the analog of
+  staying on Swift 5's language mode); `StrictSendableChecks` remains as an explicit statement
+  of intent.
 - Reactions are not enforcement points: they store no new value type — the values they read were
   validated where their source nodes were created.
 

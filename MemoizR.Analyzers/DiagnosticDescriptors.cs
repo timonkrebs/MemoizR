@@ -18,7 +18,7 @@ internal static class DiagnosticDescriptors
         messageFormat: "'{0}' is not Sendable ({1}) — values of this type are shared across concurrently " +
                        "running flows; use an immutable type, or mark it [Sendable] to assert thread safety",
         category: Category,
-        defaultSeverity: DiagnosticSeverity.Warning,
+        defaultSeverity: DiagnosticSeverity.Error,
         isEnabledByDefault: true,
         description: "MemoizR publishes a node's value reference tear-free across concurrent flows, but only " +
                      "an immutable or internally synchronized type makes the object behind the reference safe " +
@@ -32,7 +32,7 @@ internal static class DiagnosticDescriptors
                        "computations run concurrently on other flows, so this is a data race — lift the state " +
                        "into a Signal or EagerRelativeSignal instead",
         category: Category,
-        defaultSeverity: DiagnosticSeverity.Warning,
+        defaultSeverity: DiagnosticSeverity.Error,
         isEnabledByDefault: true,
         description: "A memo/reaction/concurrent computation executes on arbitrary flows, concurrently with " +
                      "the code that created it and with other computations. Writing a captured local, a field " +
@@ -94,7 +94,7 @@ internal static class DiagnosticDescriptors
                        "InvalidOperationException at runtime — return the value instead, or schedule the write " +
                        "outside the evaluation",
         category: Category,
-        defaultSeverity: DiagnosticSeverity.Warning,
+        defaultSeverity: DiagnosticSeverity.Error,
         isEnabledByDefault: true,
         description: "The evaluation lock deliberately converts this impossible same-flow wait into an " +
                      "exception (a write inside a read of the same graph is a feedback loop). This rule turns " +

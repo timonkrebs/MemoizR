@@ -9,9 +9,10 @@ public enum MemoFactoryOptions
     /// <summary>
     /// Validate at node creation that the value type handed to a signal/memo/concurrent node is
     /// Sendable (deeply immutable or thread-safe -- see <see cref="SendableChecker"/>), throwing
-    /// otherwise. The runtime analog of Swift's strict concurrency checking (issue #36): MemoizR
-    /// publishes value references tear-free across flows, but only a Sendable type makes the
-    /// object behind the reference safe to share. Off by default for compatibility.
+    /// otherwise. The runtime analog of Swift's strict concurrency checking (issue #36).
+    /// Since the Swift-6-parity step (issue #145 part A4) this is the DEFAULT -- the flag is
+    /// kept for source compatibility and as an explicit statement of intent; opt out with
+    /// <see cref="DisableSendableChecks"/> during migration.
     /// </summary>
     StrictSendableChecks = 1 << 0,
 
@@ -35,4 +36,11 @@ public enum MemoFactoryOptions
     /// <see cref="StrictSendableChecks"/>.
     /// </summary>
     ValidateWrittenValues = 1 << 2,
+
+    /// <summary>
+    /// Opt OUT of the (default) creation-time Sendable checks -- the migration escape hatch,
+    /// the analog of staying on Swift 5's language mode. Values of non-Sendable types are then
+    /// shared across flows unchecked, exactly as before the Swift-6-parity step.
+    /// </summary>
+    DisableSendableChecks = 1 << 3,
 }

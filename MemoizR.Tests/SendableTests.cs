@@ -258,11 +258,14 @@ public class SendingTransferTests
 public class StrictSendableModeTests
 {
     [Fact]
-    public void DefaultFactory_DoesNotCheck()
+    public void DefaultFactory_Checks_AndDisableIsTheEscapeHatch()
     {
+        // The Swift 6 language-mode analog (issue #145 part A4): strict IS the default.
         var f = new MemoFactory();
-        var signal = f.CreateSignal(new List<int>()); // compatibility: lax by default
-        Assert.NotNull(signal);
+        Assert.Throws<InvalidOperationException>(() => f.CreateSignal(new List<int>()));
+
+        var migrating = new MemoFactory(options: MemoFactoryOptions.DisableSendableChecks);
+        Assert.NotNull(migrating.CreateSignal(new List<int>()));
     }
 
     [Fact]
@@ -311,7 +314,7 @@ public class StrictSendableModeTests
         // Strictness is a per-factory creation policy, not a context property.
         var key = $"strict-{Guid.NewGuid():N}";
         var strict = new MemoFactory(key, MemoFactoryOptions.StrictSendableChecks);
-        var lax = new MemoFactory(key);
+        var lax = new MemoFactory(key, MemoFactoryOptions.DisableSendableChecks);
 
         Assert.Same(strict.Context, lax.Context);
         Assert.Throws<InvalidOperationException>(() => strict.CreateSignal(new List<int>()));

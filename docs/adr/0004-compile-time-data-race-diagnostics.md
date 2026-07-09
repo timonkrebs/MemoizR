@@ -19,9 +19,11 @@ deliberately does and does not flag, and the constraints Roslyn imposes.
 
 A new `MemoizR.Analyzers` project (netstandard2.0, Roslyn 4.8 floor so any SDK ≥ 8 can load it)
 ships **inside the MemoizR NuGet package** (`analyzers/dotnet/cs`), so every consumer gets the
-rules on build with no extra reference. All rules default to **Warning** — the Swift 5.x
-"strict concurrency warnings" migration posture — and are configurable per project via
-`.editorconfig` (`dotnet_diagnostic.MZR001.severity = error|suggestion|none`).
+rules on build with no extra reference. Since the Swift-6-parity step (issue #145 part A4),
+MZR001–003 default to **Error** — the Swift 6 language-mode posture, matching the runtime
+checks being on by default — while the newer heuristic rules stay softer (MZR004/005 Warning,
+MZR006 Info). Everything is configurable per project via `.editorconfig`
+(`dotnet_diagnostic.MZR001.severity = warning|suggestion|none` is the migration posture).
 
 ### MZR001 — non-Sendable value type at a creation site
 

@@ -89,6 +89,16 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
   `MemoFactoryOptions.ValidateWrittenValues` validates each written instance's runtime type on
   `Set` as the runtime counterpart.
 
+### Changed (BREAKING)
+- Swift-6-parity default-on (issue #145 part A4): `MemoFactory` now applies the Sendable
+  creation checks BY DEFAULT — creating a signal/memo/concurrent node over a non-Sendable value
+  type throws unless `MemoFactoryOptions.DisableSendableChecks` (the migration escape hatch) is
+  set; `StrictSendableChecks` remains as an explicit statement of intent. The MZR001–003
+  analyzers escalate from Warning to Error by default (downgrade per project via
+  `.editorconfig` during migration). Known friction: memos composed over `ConcurrentMap`
+  results are typed `IEnumerable<T>` (an interface, rejected by principle) — compose over an
+  immutable type or opt out per factory.
+
 ### Changed
 - Reactions now evaluate their separate-parameter dependencies in parallel on the thread pool; with an executor registered (e.g. via `AddSynchronizationContext`/`AddWpfDispatcher`/`AddExecutor`), only the action (with the already-evaluated values) is marshalled to it, and `CreateAdvancedReaction` keeps running its whole body on the executor (#13)
 - `ReactionBuilder`'s public constructor takes `IExecutor?` instead of
