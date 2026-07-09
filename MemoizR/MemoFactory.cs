@@ -1,5 +1,6 @@
 namespace MemoizR;
 
+[Sendable] // internally synchronized by design: safe to share across flows (and to hold in statics, see MZR004)
 public sealed class MemoFactory
 {
     private static readonly Lock contextsLock = new();
@@ -160,7 +161,7 @@ public sealed class MemoFactory
     public Signal<T> CreateSignal<T>(string label, T value)
     {
         EnsureSendableIfStrict<T>();
-        return new(value, Context)
+        return new(value, Context, Options.HasFlag(MemoFactoryOptions.ValidateWrittenValues))
         {
             Label = label
         };
@@ -174,7 +175,7 @@ public sealed class MemoFactory
     public EagerRelativeSignal<T> CreateEagerRelativeSignal<T>(string label, T value)
     {
         EnsureSendableIfStrict<T>();
-        return new(value, Context)
+        return new(value, Context, Options.HasFlag(MemoFactoryOptions.ValidateWrittenValues))
         {
             Label = label
         };
@@ -190,7 +191,7 @@ public sealed class MemoFactory
     public ActorSignal<T> CreateActorSignal<T>(T value)
     {
         EnsureSendableIfStrict<T>();
-        return new(value, Context);
+        return new(value, Context, Options.HasFlag(MemoFactoryOptions.ValidateWrittenValues));
     }
 
     /// <summary>

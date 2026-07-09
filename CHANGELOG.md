@@ -79,6 +79,16 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
   never collide on an id. A runnable two-peer bridge sample (stale/pull protocol, glitch
   barrier, late-delivery dropping, reset detection) lives in samples/DistributedGraphSample.
 
+- Toward full Swift-6-parity (issue #145, part A): a real SE-0412 analog — MZR004 flags
+  statics in MemoizR-using files that are mutable slots or of non-Sendable type, while
+  MemoizR's own nodes, factories and executors are now `[Sendable]` (internally synchronized
+  by design), so node/factory statics are the sanctioned pattern; `Sending<T>` transfer
+  semantics for non-Sendable values (the SE-0430 analog: `[Sendable]` wrapper accepted by
+  strict mode, single-consumption `Receive()`, MZR005 flags sender-side use-after-transfer);
+  MZR006 (Info) hints at non-sealed classes at creation sites (subclass smuggling), and
+  `MemoFactoryOptions.ValidateWrittenValues` validates each written instance's runtime type on
+  `Set` as the runtime counterpart.
+
 ### Changed
 - Reactions now evaluate their separate-parameter dependencies in parallel on the thread pool; with an executor registered (e.g. via `AddSynchronizationContext`/`AddWpfDispatcher`/`AddExecutor`), only the action (with the already-evaluated values) is marshalled to it, and `CreateAdvancedReaction` keeps running its whole body on the executor (#13)
 - `ReactionBuilder`'s public constructor takes `IExecutor?` instead of

@@ -26,4 +26,13 @@ public enum MemoFactoryOptions
     /// different stamp setting throws.
     /// </summary>
     DisableCausalityStamps = 1 << 1,
+
+    /// <summary>
+    /// Additionally validate, on every signal write (and the creation value), that the WRITTEN
+    /// INSTANCE'S RUNTIME TYPE is Sendable -- closing the subclass-smuggling hole the
+    /// creation-time check cannot see (a mutable subclass behind an upcast; see MZR006 and ADR
+    /// 0003). Costs one cached type probe per Set, so it is a separate opt-in on top of
+    /// <see cref="StrictSendableChecks"/>.
+    /// </summary>
+    ValidateWrittenValues = 1 << 2,
 }

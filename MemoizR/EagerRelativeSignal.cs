@@ -1,5 +1,6 @@
 namespace MemoizR;
 
+[Sendable] // internally synchronized by design: safe to share across flows (and to hold in statics, see MZR004)
 public sealed class EagerRelativeSignal<T> : MemoHandlR<T>, IStampedGetR<T>
 {
     private Lock Lock { get; } = new();
@@ -8,8 +9,13 @@ public sealed class EagerRelativeSignal<T> : MemoHandlR<T>, IStampedGetR<T>
     // Guarded by Lock; a plain counter so Set does not walk the published stamp's event tree.
     private long trigger;
 
-    internal EagerRelativeSignal(T value, Context context) : base(context)
+    // See Signal<T>: MemoFactoryOptions.ValidateWrittenValues, applied to fn's result.
+    private readonly bool validateWrittenValues;
+
+    internal EagerRelativeSignal(T value, Context context, bool validateWrittenValues = false) : base(context)
     {
+        this.validateWrittenValues = validateWrittenValues;
+        ValidateWrittenValue(value);
         if (context.StampsEnabled)
         {
             SetValueAndStamp(value, CausalityStamp.ForSignal(Id, 0, context.Epoch));
@@ -17,6 +23,14 @@ public sealed class EagerRelativeSignal<T> : MemoHandlR<T>, IStampedGetR<T>
         else
         {
             SetValueUnstamped(value);
+        }
+    }
+
+    private void ValidateWrittenValue(T value)
+    {
+        if (validateWrittenValues && value is not null)
+        {
+            SendableChecker.EnsureSendable(value.GetType());
         }
     }
 
@@ -45,13 +59,15 @@ public sealed class EagerRelativeSignal<T> : MemoHandlR<T>, IStampedGetR<T>
                     // CacheDirty (there is no equality short-cut here), so the trigger mirrors
                     // exactly what observers are told (issue #39). A stamps-disabled context
                     // builds no stamp at all.
+                    var next = fn(Value);
+                    ValidateWrittenValue(next);
                     if (Context.StampsEnabled)
                     {
-                        SetValueAndStamp(fn(Value), CausalityStamp.ForSignal(Id, ++trigger, Context.Epoch));
+                        SetValueAndStamp(next, CausalityStamp.ForSignal(Id, ++trigger, Context.Epoch));
                     }
                     else
                     {
-                        SetValueUnstamped(fn(Value));
+                        SetValueUnstamped(next);
                     }
                 }
 

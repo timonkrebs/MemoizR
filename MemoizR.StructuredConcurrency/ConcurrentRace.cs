@@ -7,6 +7,7 @@ namespace MemoizR.StructuredConcurrency;
 // observers straight to CacheDirty: a race result is non-memoized, so observers cannot verify
 // "did it really change?" via a cheap re-check and must recompute. The inherited stateCell is
 // intentionally unused; State here is only a cycle-detection marker.
+[Sendable] // internally synchronized by design: safe to share across flows (and to hold in statics, see MZR004)
 public sealed class ConcurrentRace<T, I> : MemoHandlR<T>, IMemoizR, IStampedGetR<T>
 {
     private CacheState State { get; set; } = CacheState.CacheDirty;

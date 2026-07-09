@@ -1,5 +1,6 @@
 namespace MemoizR.StructuredConcurrency;
 
+[Sendable] // internally synchronized by design: safe to share across flows (and to hold in statics, see MZR004)
 public sealed class ConcurrentMap<T> : MemoBase<IEnumerable<T>>
 {
     private readonly IReadOnlyCollection<Func<IStructuredResourceGroup, Task<T>>> fns;

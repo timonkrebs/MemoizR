@@ -1,5 +1,6 @@
 namespace MemoizR.Reactive;
 
+[Sendable] // internally synchronized by design: safe to share across flows (and to hold in statics, see MZR004)
 public sealed class AdvancedReaction : ReactionBase
 {
     private readonly Func<Task> fn;

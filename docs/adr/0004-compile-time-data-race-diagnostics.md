@@ -136,6 +136,37 @@ lock. (The cost is a false negative for a nested function invoked synchronously 
 computation; the runtime exception still guards that path. MZR002 keeps the full walk: a
 captured-state write is a data race whenever the callback runs, deferred or not.)
 
+### MZR004 — static state next to the graph (the SE-0412 analog proper)
+
+Swift 6 rejects every non-isolated mutable global, because a global is reachable from every
+isolation domain. The analog: in files that use MemoizR (a `using` directive for the MemoizR
+namespaces — the rule's mandate boundary), a static must be an **immutable slot of a Sendable
+type**. Flagged: non-readonly static fields, settable static properties, static events (mutable
+slots), and readonly/get-only statics whose TYPE is not Sendable (one shared mutable object
+graph). Not flagged: consts, Sendable readonly statics — and MemoizR's own nodes, factories and
+executors, which are `[Sendable]` by design, so the rule's own fix suggestion ("lift it into a
+Signal") passes the rule. The whole analyzer stays silent in compilations that do not reference
+the real MemoizR assembly.
+
+### MZR005 — use after transfer (the SE-0430 analog)
+
+`Sending<T>` hands a non-Sendable value across flows by TRANSFER: the wrapper is `[Sendable]`
+(strict mode accepts `Sending<List<int>>`), `Receive()` enforces single consumption at runtime,
+and MZR005 flags method-local uses of the transferred variable after the transfer, in source
+order, stopping at a reassignment. Deliberately a heuristic — Swift proves this with
+region-based isolation in the type system; source order approximates execution order, and
+aliases or loop back-edges can evade the rule. The receiver-side runtime check is the backstop.
+
+### MZR006 — subclass smuggling (Info)
+
+Sendable verdicts are computed from the DECLARED type, so a mutable subclass behind an upcast
+passes creation-time checks — ADR 0003's documented limitation, which Swift closes by requiring
+Sendable classes to be `final`. MZR006 hints (Info severity: non-sealed records are idiomatic,
+and the hole needs an actual mutable subclass to bite) at non-sealed, non-abstract class type
+arguments at creation sites; green-listed framework types (`Uri` is not sealed) are exempt. The
+runtime counterpart is `MemoFactoryOptions.ValidateWrittenValues`, which validates each written
+instance's runtime type on `Set`.
+
 ### Testing strategy
 
 The analyzer tests compile snippets in-memory **against the real MemoizR assemblies**

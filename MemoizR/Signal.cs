@@ -1,5 +1,6 @@
 namespace MemoizR;
 
+[Sendable] // internally synchronized by design: safe to share across flows (and to hold in statics, see MZR004)
 public sealed class Signal<T> : MemoHandlR<T>, IStampedGetR<T?>
 {
     private Lock Lock { get; } = new();
@@ -9,8 +10,15 @@ public sealed class Signal<T> : MemoHandlR<T>, IStampedGetR<T?>
     // stamp's event tree just to recover the value this node itself bumped last.
     private long trigger;
 
-    internal Signal(T value, Context context) : base(context)
+    // Creation-time factory option (MemoFactoryOptions.ValidateWrittenValues): validate each
+    // written instance's RUNTIME type, closing the subclass-smuggling hole the declared-type
+    // check cannot see. Per-node because strictness is per-factory.
+    private readonly bool validateWrittenValues;
+
+    internal Signal(T value, Context context, bool validateWrittenValues = false) : base(context)
     {
+        this.validateWrittenValues = validateWrittenValues;
+        ValidateWrittenValue(value);
         if (context.StampsEnabled)
         {
             SetValueAndStamp(value, CausalityStamp.ForSignal(Id, 0, context.Epoch));
@@ -21,8 +29,18 @@ public sealed class Signal<T> : MemoHandlR<T>, IStampedGetR<T?>
         }
     }
 
+    private void ValidateWrittenValue(T value)
+    {
+        if (validateWrittenValues && value is not null)
+        {
+            SendableChecker.EnsureSendable(value.GetType());
+        }
+    }
+
     public async Task Set(T value)
     {
+        ValidateWrittenValue(value);
+
         // Resolve the scope once and keep it strongly rooted for the whole write: repeated getter
         // access can resolve different instances (weak registry + resurrection), which would hand
         // the body a ContextLock other than the one held here.

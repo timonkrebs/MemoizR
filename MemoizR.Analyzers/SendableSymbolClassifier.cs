@@ -116,6 +116,14 @@ internal sealed class SendableSymbolClassifier
     // lookalike (`namespace System { class Uri { public int State; } }`) binds over the BCL
     // type and must go through the structural walk, as the runtime's typeof identity would
     // reject it.
+    // Whether the type is on any framework green-list (known immutables, Task<T>, the known
+    // collections): used by MZR006 to avoid nagging about non-sealed BCL types like Uri, whose
+    // accidental subclassing is not a plausible failure mode.
+    internal static bool IsFrameworkGreenListed(INamedTypeSymbol named)
+    {
+        return IsKnownImmutable(named) || IsTaskOfT(named) || IsKnownSendableCollection(named);
+    }
+
     private static bool IsKnownImmutable(ITypeSymbol type)
     {
         if (type is not INamedTypeSymbol named || named.Arity != 0 || !IsDeclaredInFrameworkAssembly(named))

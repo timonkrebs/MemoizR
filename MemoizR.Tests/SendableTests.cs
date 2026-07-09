@@ -184,6 +184,77 @@ public class SendableCheckerTests
     }
 }
 
+public class ValidateWrittenValuesTests
+{
+    [Fact]
+    public async Task SmuggledMutableSubclass_IsRejectedAtTheWrite()
+    {
+        var f = new MemoFactory(options: MemoFactoryOptions.StrictSendableChecks | MemoFactoryOptions.ValidateWrittenValues);
+        var signal = f.CreateSignal<OpenBase>(new OpenBase()); // declared type passes the creation check
+
+        // The runtime type of the written instance is what the declared-type check cannot see.
+        await Assert.ThrowsAsync<InvalidOperationException>(() => signal.Set(new MutableChild()));
+
+        await signal.Set(new OpenBase()); // a well-behaved instance still writes fine
+    }
+
+    [Fact]
+    public async Task WithoutTheOption_RuntimeTypesAreNotChecked()
+    {
+        var f = new MemoFactory(options: MemoFactoryOptions.StrictSendableChecks);
+        var signal = f.CreateSignal<OpenBase>(new OpenBase());
+        await signal.Set(new MutableChild()); // documented hole when the option is off
+        Assert.NotNull(signal);
+    }
+
+    [Fact]
+    public async Task ActorSignal_ValidatesWrites_Too()
+    {
+        var f = new MemoFactory(options: MemoFactoryOptions.ValidateWrittenValues);
+        var signal = f.CreateActorSignal<OpenBase>(new OpenBase());
+        await Assert.ThrowsAsync<InvalidOperationException>(() => signal.Set(new MutableChild()));
+    }
+
+    [Fact]
+    public async Task EagerRelativeSignal_ValidatesTheComputedResult()
+    {
+        var f = new MemoFactory(options: MemoFactoryOptions.ValidateWrittenValues);
+        var relative = f.CreateEagerRelativeSignal<OpenBase>(new OpenBase());
+        await Assert.ThrowsAsync<InvalidOperationException>(() => relative.Set(_ => new MutableChild()));
+    }
+}
+
+public class SendingTransferTests
+{
+    [Fact]
+    public void Sending_IsSendable_EvenWhenThePayloadIsNot()
+    {
+        // The whole point of the wrapper: transfer semantics stand in for immutability.
+        Assert.True(SendableChecker.IsSendable(typeof(Sending<List<int>>), out var reason), reason);
+    }
+
+    [Fact]
+    public void StrictFactory_AcceptsSendingOfNonSendablePayload()
+    {
+        var f = new MemoFactory(options: MemoFactoryOptions.StrictSendableChecks);
+        var signal = f.CreateSignal(Sending.Transfer(new List<int> { 1, 2 }));
+        Assert.NotNull(signal);
+    }
+
+    [Fact]
+    public async Task Receive_HandsOverTheValue_ExactlyOnce()
+    {
+        var list = new List<int> { 1, 2, 3 };
+        var sending = Sending.Transfer(list);
+
+        var received = await Task.Run(() => sending.Receive()); // one owner, on another flow
+        Assert.Same(list, received);
+
+        // A second receive would mean two owners -- exactly the aliasing the type prevents.
+        Assert.Throws<InvalidOperationException>(() => sending.Receive());
+    }
+}
+
 public class StrictSendableModeTests
 {
     [Fact]
@@ -252,6 +323,18 @@ internal sealed record SendablePerson(string Name, int Age);
 
 // Deliberately NOT sealed: exercises the synthesized `protected virtual Type EqualityContract`.
 internal record SendableOpenRecord(string Name, int Age);
+
+// Immutable, deliberately NON-sealed: the declared type passes creation-time checks...
+internal class OpenBase
+{
+    public string Name { get; init; } = "";
+}
+
+// ...and this is what an upcast smuggles past them: mutable subclass state.
+internal sealed class MutableChild : OpenBase
+{
+    public int Mutable;
+}
 
 internal sealed class PlainInitDto
 {

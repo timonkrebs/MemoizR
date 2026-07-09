@@ -1,0 +1,113 @@
+using Microsoft.CodeAnalysis;
+
+namespace MemoizR.Analyzers.Tests;
+
+// Contracts of MZR004 (the SE-0412 analog): in files that use MemoizR, a static must be an
+// immutable slot of a Sendable type -- mutable slots (non-readonly fields, settable properties,
+// events) and readonly slots of mutable types are flagged; consts, Sendable readonly statics,
+// and MemoizR nodes/factories (which are [Sendable] by design) are not. Files without a MemoizR
+// using directive are out of the rule's mandate.
+public class StaticStateAnalyzerTests
+{
+    private static Task<System.Collections.Immutable.ImmutableArray<Diagnostic>> AnalyzeAsync(string source)
+        => AnalyzerTestHarness.AnalyzeAsync(source, new StaticStateAnalyzer());
+
+    [Fact]
+    public async Task MutableStaticSlots_AreFlagged()
+    {
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                private static int counter; // mutable slot, even though int is Sendable
+                public static string Label { get; set; } = ""; // settable slot
+                public static event Action? Changed; // subscription surface
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    counter++;
+                    Label = "x";
+                    Changed?.Invoke();
+                }
+            }
+            """);
+
+        Assert.Equal(3, diagnostics.Length);
+        Assert.All(diagnostics, d => Assert.Equal("MZR004", d.Id));
+        Assert.Contains(diagnostics, d => d.GetMessage().Contains("'counter'"));
+        Assert.Contains(diagnostics, d => d.GetMessage().Contains("'Label'"));
+        Assert.Contains(diagnostics, d => d.GetMessage().Contains("'Changed'"));
+    }
+
+    [Fact]
+    public async Task ReadonlyStaticOfMutableType_IsFlagged()
+    {
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                private static readonly List<int> Cache = new(); // readonly slot, mutable object
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    Cache.Add(1);
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR004", diagnostic.Id);
+        Assert.Contains("'Cache'", diagnostic.GetMessage());
+        Assert.Contains("List", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task SendableStatics_AndConsts_AndNodes_AreNotFlagged()
+    {
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Immutable;
+            using MemoizR;
+
+            public class C
+            {
+                private const int Limit = 3;
+                private static readonly string Name = "x";
+                private static readonly ImmutableArray<int> Seeds = ImmutableArray.Create(1, 2);
+
+                // The library's own model: nodes and factories are [Sendable] by design, so the
+                // fix suggestion ("lift it into a Signal") itself passes the rule.
+                private static readonly MemoFactory Factory = new();
+                private static readonly Signal<int> Counter = Factory.CreateSignal(0);
+
+                public void M()
+                {
+                    _ = Limit + Name.Length + Seeds.Length;
+                    _ = Counter.Get();
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task FilesWithoutMemoizRUsing_AreOutOfScope()
+    {
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+
+            public class Unrelated
+            {
+                public static List<int> Anything = new(); // mutable static, but not MemoizR's mandate
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+}
