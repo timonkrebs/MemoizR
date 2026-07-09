@@ -94,23 +94,12 @@ public sealed class ConcurrentRace<T, I> : MemoHandlR<T>, IMemoizR, IStampedGetR
         if (State == CacheState.Evaluating) throw new InvalidOperationException("Cyclic behavior detected");
         var oldValue = Value;
 
-        /* Evaluate the reactive function body, dynamically capturing any other reactives used */
+        /* Evaluate the reactive function body, dynamically capturing any other reactives used.
+           The branch-aware frame additionally resets the ambient racing-branch tag: when THIS
+           race runs inside another race's branch, its shared action must record as branch 0 of
+           THIS capture, not under the enclosing race's branch id. */
         var scope = Context.ReactionScope;
-        var prevReaction = scope.CurrentReaction;
-        var prevGets = scope.CurrentGets;
-        var prevIndex = scope.CurrentGetsIndex;
-
-        scope.CurrentReaction = this;
-        scope.CurrentGets = [];
-        scope.CurrentGetsIndex = 0;
-        var prevAmbientContext = LockEngineFlow.EvaluatingContext.Value;
-        LockEngineFlow.EvaluatingContext.Value = Context;
-        // Reset the ambient racing-branch tag for this race's own frame: when THIS race runs
-        // inside another race's branch, its shared action must record as branch 0 of THIS
-        // capture, not under the enclosing race's branch id. Restored in the finally (an
-        // AsyncLocal mutation would otherwise survive a synchronously-completing evaluation).
-        var prevBranch = RaceBranchFlow.Current.Value;
-        RaceBranchFlow.Current.Value = 0;
+        var frame = CaptureFrame.Install(Context, scope, this, branchAware: true);
 
         // Tracked reads record the source stamps they observed to this node's BRANCH-AWARE
         // bucket, tagged with the racing branch that performed them (0 = the shared action on
@@ -124,7 +113,6 @@ public sealed class ConcurrentRace<T, I> : MemoHandlR<T>, IMemoizR, IStampedGetR
         //    BEFORE the selection too -- their reads never fed the returned value. Poison is
         //    per branch, so a losing branch's mixed re-read cannot destroy a clean winner.
         // The WhenAll join inside Run is the barrier that publishes the locals to this flow.
-        Context.BeginStampCapture(this, branchAware: true);
         StampCapture? winnerCapture = null;
         var winnerBranch = 0;
 
@@ -150,13 +138,7 @@ public sealed class ConcurrentRace<T, I> : MemoHandlR<T>, IMemoizR, IStampedGetR
         }
         finally
         {
-            // Drop a capture left open by the failure paths; a no-op after a successful publish.
-            Context.TakeStampCapture(this);
-            scope.CurrentGets = prevGets;
-            scope.CurrentReaction = prevReaction;
-            scope.CurrentGetsIndex = prevIndex;
-            LockEngineFlow.EvaluatingContext.Value = prevAmbientContext;
-            RaceBranchFlow.Current.Value = prevBranch;
+            frame.Restore();
         }
 
         // handles diamond dependencies if we're the parent of a diamond.
