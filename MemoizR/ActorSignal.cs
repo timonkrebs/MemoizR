@@ -63,8 +63,9 @@ public sealed class ActorSignal<T> : ActorValueNode<T>
         {
             ActorFlowGuards.RejectUntrackedReadInsideLockComputation();
 
-            // Untracked read: signals are always current; the box read is a complete value.
-            return Task.FromResult(Value);
+            // Untracked read: signals are always current; the box read is a complete value,
+            // handed out as the box's cached completed task so repeated reads allocate nothing.
+            return CachedValueTask;
         }
 
         ActorFlowGuards.RejectCrossActorRead(frame, this);

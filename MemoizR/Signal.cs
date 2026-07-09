@@ -3,6 +3,12 @@ namespace MemoizR;
 public sealed class Signal<T> : MemoHandlR<T>, IStampedGetR<T?>
 {
     private Lock Lock { get; } = new();
+
+    // The signal's causality trigger (issue #39), mirroring the published stamp exactly.
+    // Guarded by Lock; kept as a plain counter so a Set does not have to walk the published
+    // stamp's event tree just to recover the value this node itself bumped last.
+    private long trigger;
+
     internal Signal(T value, Context context) : base(context)
     {
         SetValueAndStamp(value, CausalityStamp.ForSignal(Id, 0, context.Epoch));
@@ -37,11 +43,9 @@ public sealed class Signal<T> : MemoHandlR<T>, IStampedGetR<T?>
                         return;
                     }
 
-                    // Read the current trigger and publish (value, trigger + 1) atomically with
-                    // the value: the bumped stamp rides in the same box swap, so readers can
-                    // never pair them inconsistently.
-                    Stamp.TryGetTrigger(Id, out var trigger);
-                    SetValueAndStamp(value, CausalityStamp.ForSignal(Id, trigger + 1, Context.Epoch));
+                    // Publish the bumped trigger atomically with the value: the stamp rides in
+                    // the same box swap, so readers can never pair them inconsistently.
+                    SetValueAndStamp(value, CausalityStamp.ForSignal(Id, ++trigger, Context.Epoch));
                 }
 
                 await PropagateStaleToObserversAsync(CacheState.CacheDirty);
@@ -55,16 +59,22 @@ public sealed class Signal<T> : MemoHandlR<T>, IStampedGetR<T?>
 
     // Tracked read shared with EagerRelativeSignal via MemoHandlR.TrackDependencyAndRead; the
     // (T, stamp) projection converts to this signal's nullable (T?, stamp) surface.
-    public async Task<T?> Get()
+    public Task<T?> Get()
     {
         ActorFlowGuards.RejectLockNodeReadInsideActorComputation();
 
-        // An unpinned flow cannot be capturing: skip the tracked-read core (and its tuple-task
-        // allocation) entirely for plain top-level reads.
+        // An unpinned flow cannot be capturing: hand out the box's cached completed task -- the
+        // plain top-level read allocates nothing. Task<T> and Task<T?> are the same runtime type
+        // for an unconstrained T (the ? is annotation-only), hence the cast through object.
         if (!Context.HasFlowScope)
         {
-            return Value;
+            return (Task<T?>)(object)CachedValueTask;
         }
+        return GetTracked();
+    }
+
+    private async Task<T?> GetTracked()
+    {
         return (await TrackDependencyAndRead()).Value;
     }
 

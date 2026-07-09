@@ -1,5 +1,4 @@
 using System.Diagnostics;
-using Nito.Collections;
 
 namespace MemoizR.StructuredAsyncLock.Nito;
 
@@ -29,14 +28,16 @@ internal interface IAsyncWaitQueue<T>
 }
 
 /// <summary>
-/// The default wait queue implementation, which uses a double-ended queue.
+/// The default wait queue implementation, FIFO. Only front-removal and back-insertion are ever
+/// needed, so a plain <see cref="Queue{T}"/> suffices (the Nito Deque this was ported with was
+/// the library's only use of the Nito.Collections.Deque package).
 /// </summary>
 /// <typeparam name="T">The type of the results. If this isn't needed, use <see cref="Object"/>.</typeparam>
 [DebuggerDisplay("Count = {Count}")]
 [DebuggerTypeProxy(typeof(DefaultAsyncWaitQueue<>.DebugView))]
 internal sealed class DefaultAsyncWaitQueue<T> : IAsyncWaitQueue<T>
 {
-    private readonly Deque<(TaskCompletionSource<T>, double)> _queue = new();
+    private readonly Queue<(TaskCompletionSource<T>, double)> _queue = new();
 
     private int Count
     {
@@ -53,13 +54,13 @@ internal sealed class DefaultAsyncWaitQueue<T> : IAsyncWaitQueue<T>
         // RunContinuationsAsynchronously: completing a waiter from a release path must not run
         // the waiter's continuation inline on the releasing thread.
         var tcs = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
-        _queue.AddToBack((tcs, lockScope));
+        _queue.Enqueue((tcs, lockScope));
         return tcs.Task;
     }
 
     double IAsyncWaitQueue<T>.Dequeue(T? result)
     {
-        var res = _queue.RemoveFromFront();
+        var res = _queue.Dequeue();
 
         res.Item1.TrySetResult(result!);
 

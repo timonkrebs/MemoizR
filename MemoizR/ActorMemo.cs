@@ -44,8 +44,9 @@ public sealed class ActorMemo<T> : ActorValueNode<T>
             {
                 // Lock-free fast path: volatile state (acquire) read before the value box,
                 // exactly the ADR 0001 rule-4 pairing -- a reader observing Clean sees the box
-                // of that-or-a-newer clean generation.
-                return Task.FromResult(Value);
+                // of that-or-a-newer clean generation. The box's cached completed task keeps
+                // repeated clean reads allocation-free.
+                return CachedValueTask;
             }
 
             return Drive(null, null);

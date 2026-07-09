@@ -1,13 +1,15 @@
 using System.Runtime.ExceptionServices;
-using Nito.AsyncEx;
 
 namespace MemoizR.StructuredConcurrency;
 
+// A job is single-use: every call site constructs a fresh job per recompute and calls Run
+// exactly once (ConcurrentMap/ConcurrentMapReduce/ConcurrentRace), so Run performs no
+// self-serialization -- the per-job async mutex it used to take guarded a reuse that never
+// happens, at the cost of an allocation plus an acquire/release on every recompute.
 public abstract class StructuredJobBase<T>
 {
-    protected List<Task<Task>> tasks = new();
+    protected readonly List<Task<Task>> tasks = new();
     protected T? result;
-    protected AsyncLock mutex = new();
 
     protected abstract Task AddConcurrentWork(StructuredResourceGroup resourceGroup);
 
@@ -30,35 +32,31 @@ public abstract class StructuredJobBase<T>
         ExceptionDispatchInfo? jobException = null;
         try
         {
-            using (await mutex.LockAsync())
+            await AddConcurrentWork(resourceGroup);
+            // Start the cold tasks on the thread pool without blocking the calling thread.
+            // (A synchronous lock held across awaits plus a blocking Parallel.ForEach were
+            // starving the thread pool, which surfaced as flaky test timeouts.)
+            // A sibling that starts and fails INSTANTLY cancels the group token while this
+            // loop is still running, which transitions the not-yet-started cold tasks to
+            // Canceled -- and Start() on a completed task throws. Such a task behaves
+            // exactly like a child canceled mid-run, so skip it; the catch guards the
+            // unavoidable window between the status check and Start.
+            foreach (var task in tasks)
             {
-                this.tasks = new();
-                await AddConcurrentWork(resourceGroup);
-                // Start the cold tasks on the thread pool without blocking the calling thread.
-                // (A synchronous mutex.Lock() held across awaits plus a blocking Parallel.ForEach
-                // were starving the thread pool, which surfaced as flaky test timeouts.)
-                // A sibling that starts and fails INSTANTLY cancels the group token while this
-                // loop is still running, which transitions the not-yet-started cold tasks to
-                // Canceled -- and Start() on a completed task throws. Such a task behaves
-                // exactly like a child canceled mid-run, so skip it; the catch guards the
-                // unavoidable window between the status check and Start.
-                foreach (var task in tasks)
+                if (task.Status != TaskStatus.Created)
                 {
-                    if (task.Status != TaskStatus.Created)
-                    {
-                        continue;
-                    }
-                    try
-                    {
-                        task.Start(TaskScheduler.Default);
-                    }
-                    catch (InvalidOperationException)
-                    {
-                        // Canceled between the check and Start: equivalent to the skip above.
-                    }
+                    continue;
                 }
-                completion = Task.WhenAll(tasks.Select(async t => await await t));
+                try
+                {
+                    task.Start(TaskScheduler.Default);
+                }
+                catch (InvalidOperationException)
+                {
+                    // Canceled between the check and Start: equivalent to the skip above.
+                }
             }
+            completion = Task.WhenAll(tasks.Select(async t => await await t));
 
             await completion;
             HandleSubscriptions();
@@ -78,8 +76,8 @@ public abstract class StructuredJobBase<T>
             {
                 // Ignored: surfaced via completion.Exception below.
             }
-            // The parallel children fault `completion`; anything else (AddConcurrentWork, the
-            // mutex, HandleSubscriptions) only surfaces as bodyException.
+            // The parallel children fault `completion`; anything else (AddConcurrentWork,
+            // HandleSubscriptions) only surfaces as bodyException.
             jobException = ExceptionDispatchInfo.Capture(completion.Exception ?? bodyException);
         }
 
