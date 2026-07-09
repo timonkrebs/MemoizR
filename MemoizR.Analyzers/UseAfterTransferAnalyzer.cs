@@ -82,18 +82,45 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                 // the replacement, which is exactly a use after transfer).
                 var rhsUse = assignment.Value.DescendantsAndSelf()
                     .FirstOrDefault(operation => SymbolEqualityComparer.Default.Equals(ReferencedVariable(operation), variable));
-                if (rhsUse is null)
+                if (rhsUse is not null)
+                {
+                    Report(context, rhsUse, variable);
+                    return;
+                }
+
+                // ...and only if it DEFINITELY executes: a reassignment inside a branch the
+                // transfer is not part of (`if (reset) list = new();`) leaves the other path
+                // still using the transferred value, so the scan continues past it (without
+                // flagging the write target itself).
+                if (IsOnTheTransfersConditionalLevel(assignment, transferPosition))
                 {
                     return;
                 }
 
-                Report(context, rhsUse, variable);
-                return;
+                continue;
             }
 
             Report(context, reference, variable);
             return; // one report per transfer keeps the noise proportional
         }
+    }
+
+    // True when no branching construct separates the reassignment from the transfer: every
+    // conditional/loop/switch/try ancestor of the assignment must also span the transfer, so
+    // both sit on the same conditional level and source order implies execution order.
+    private static bool IsOnTheTransfersConditionalLevel(IOperation assignment, int transferPosition)
+    {
+        for (var parent = assignment.Parent; parent is not null; parent = parent.Parent)
+        {
+            var branches = parent is IConditionalOperation or ISwitchOperation or ISwitchExpressionOperation
+                or ILoopOperation or ITryOperation or IConditionalAccessOperation;
+            if (branches && !parent.Syntax.Span.Contains(transferPosition))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private static void Report(OperationBlockAnalysisContext context, IOperation reference, ISymbol variable)

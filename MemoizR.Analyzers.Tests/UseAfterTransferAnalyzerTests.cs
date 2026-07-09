@@ -61,6 +61,36 @@ public class UseAfterTransferAnalyzerTests
     }
 
     [Fact]
+    public async Task ConditionalReassignment_DoesNotSilenceTheLaterUse()
+    {
+        // On the `reset == false` path the later Add still touches the transferred list: only a
+        // reassignment that definitely executes may end the tracking.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public Sending<List<int>> M(bool reset)
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(list);
+                    if (reset)
+                    {
+                        list = new List<int>();
+                    }
+
+                    list.Add(2);
+                    return sending;
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+    }
+
+    [Fact]
     public async Task UsesBeforeTransfer_AndReassignedVariables_AreNotFlagged()
     {
         var diagnostics = await AnalyzeAsync("""
