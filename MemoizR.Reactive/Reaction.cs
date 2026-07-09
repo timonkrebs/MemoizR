@@ -21,9 +21,9 @@ public sealed class Reaction : ReactionBase
 
     protected override bool ResumeOnDetachedScope => true;
 
-    protected override async Task Execute()
+    protected override Task Execute()
     {
-        await action();
+        return action();
     }
 }
 

@@ -49,16 +49,20 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
         isPaused = false;
         if (ResumeOnDetachedScope)
         {
-            await Task.Run(RunResumeUpdateOnDetachedScope);
+            // Plain Reaction keeps dependency evaluation off the caller's thread even for
+            // Resume(): the action may marshal through the builder's SynchronizationContext,
+            // but the graph is evaluated on a fresh worker-owned scope -- mirroring the
+            // debounced update path.
+            await Task.Run(() => RunResumeUpdate(detachedScope: true));
             return;
         }
 
-        await RunResumeUpdateOnCurrentScope();
+        await RunResumeUpdate(detachedScope: false);
     }
 
     protected virtual bool ResumeOnDetachedScope => false;
 
-    private async Task RunResumeUpdateOnCurrentScope()
+    private async Task RunResumeUpdate(bool detachedScope)
     {
         // Serialize like the debounced update path: the node mutex ensures only one update of
         // this reaction runs at a time (Resume vs concurrent debounced updates -- without it, a
@@ -68,12 +72,24 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
         // correctness comes from the CacheStateCell generation guard plus the whole-array swaps
         // behind the IMemoHandlR setters (see ADR 0001/0002). Like the debounced path, the
         // reaction body must not call Signal.Set on its own flow (exclusive-inside-upgradeable
-        // is rejected by the lock). Only clean up the flow scope if we created it -- Resume can
-        // be called from inside an active evaluation whose scope must survive this call.
-        var createdScope = Context.CreateNewScopeIfNeeded();
-        // Strong root for the weakly-registered scope: keeps the held lock's identity stable for
-        // the whole update (a collected scope would resurrect with a fresh, free ContextLock).
-        var scope = Context.ReactionScope;
+        // is rejected by the lock). Only clean up the flow scope if this call owns it -- an
+        // attached Resume can run inside an active evaluation whose scope must survive; a
+        // detached Resume always owns its forced scope. The local is a strong root for the
+        // weakly-registered scope: it keeps the held lock's identity stable for the whole
+        // update (a collected scope would resurrect with a fresh, free ContextLock).
+        ReactionScope scope;
+        bool createdScope;
+        if (detachedScope)
+        {
+            scope = Context.ForceNewScope();
+            createdScope = true;
+        }
+        else
+        {
+            createdScope = Context.CreateNewScopeIfNeeded();
+            scope = Context.ReactionScope;
+        }
+
         try
         {
             using (await mutex.LockAsync())
@@ -96,35 +112,6 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
             {
                 Context.CleanScope();
             }
-            GC.KeepAlive(scope);
-        }
-    }
-
-    private async Task RunResumeUpdateOnDetachedScope()
-    {
-        // Plain Reaction keeps dependency evaluation off the caller's thread even for Resume().
-        // This mirrors the debounced update path: the action may marshal through the builder's
-        // SynchronizationContext, but the graph is evaluated on a fresh worker-owned scope.
-        var scope = Context.ForceNewScope();
-        try
-        {
-            using (await mutex.LockAsync())
-            using (await scope.ContextLock.UpgradeableLockAsync())
-            {
-                Context.EnterEvaluationScope();
-                try
-                {
-                    await UpdateIfNecessary();
-                }
-                finally
-                {
-                    Context.ExitEvaluationScope();
-                }
-            }
-        }
-        finally
-        {
-            Context.CleanScope();
             GC.KeepAlive(scope);
         }
     }
@@ -192,22 +179,13 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
 
         /* Evaluate the reactive function body, dynamically capturing any other reactives used.
            Resolve the scope once -- it is stable for the whole evaluation (same flow), and the
-           local additionally keeps the weakly-held scope strongly referenced until restored. */
+           local additionally keeps the weakly-held scope strongly referenced until restored.
+           The frame installs this reaction as the capturing reaction and opens its
+           stamp-capture bucket: tracked reads inside Execute record the source stamps they
+           observed, keyed by this node. A reaction has no value box, so on success the joined
+           stamp is published through the inherited PublishCapturedStamps. */
         var scope = Context.ReactionScope;
-        var prevReaction = scope.CurrentReaction;
-        var prevGets = scope.CurrentGets;
-        var prevIndex = scope.CurrentGetsIndex;
-
-        scope.CurrentReaction = this;
-        scope.CurrentGets = [];
-        scope.CurrentGetsIndex = 0;
-        var prevAmbientContext = LockEngineFlow.EvaluatingContext.Value;
-        LockEngineFlow.EvaluatingContext.Value = Context;
-
-        // Open the stamp-capture bucket: tracked reads inside Execute record the source stamps
-        // they observed, keyed by this node. A reaction has no value box, so on success the
-        // joined stamp is published through the inherited PublishCapturedStamps.
-        Context.BeginStampCapture(this);
+        var frame = CaptureFrame.Install(Context, scope, this);
 
         // Mark Evaluating and snapshot the generation so a Stale during Execute escalates past
         // Evaluating (bumping the generation) and blocks the commit below.
@@ -248,13 +226,7 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
         }
         finally
         {
-            // Drop a capture left open by the paused/throwing paths (the reaction keeps its
-            // previous stamp); a no-op after a successful publish.
-            Context.TakeStampCapture(this);
-            scope.CurrentGets = prevGets;
-            scope.CurrentReaction = prevReaction;
-            scope.CurrentGetsIndex = prevIndex;
-            LockEngineFlow.EvaluatingContext.Value = prevAmbientContext;
+            frame.Restore();
         }
 
         // We've rerun with the latest values from all of our Sources, so we no longer need to
@@ -263,71 +235,14 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
         stateCell.TryCommitClean(token);
     }
 
-    // Run Execute on the configured executor if one was supplied (marshalling the
-    // result/exception back through a TaskCompletionSource), otherwise run it inline. Only
+    // Run Execute on the configured executor if one was supplied, otherwise inline. Only
     // AdvancedReaction supplies an executor here -- its opaque body cannot be split, so it runs
     // on the executor as a whole. Reaction marshals at action granularity inside its composed
     // body instead (ReactionBuilder.InvokeActionAsync), keeping dependency evaluation off the
-    // executor. The executor only decides WHERE Execute runs (SE-0392 analog); completion and
-    // exception semantics live here, once, so an IExecutor implementation cannot get them wrong.
-    private async Task InvokeExecute()
+    // executor. The hop protocol itself lives in ExecutorInvoke, shared with the builder.
+    private Task InvokeExecute()
     {
-        if (executor != null)
-        {
-            // RunContinuationsAsynchronously: completing the TCS must not run the rest of the
-            // update pipeline (link rewiring, state commit, lock releases) inline inside the
-            // executor's slot -- that work belongs to the update's own flow, and running it on
-            // e.g. a UI thread inside the enqueued callback both blocks that thread and exposes
-            // the pipeline to whatever exception handling wraps the executor's callbacks.
-            var tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-
-            async void ExecuteOnExecutor()
-            {
-                // Complete the TCS exactly once: SetResult after SetException would throw
-                // InvalidOperationException out of this async void and crash the process via the
-                // executor instead of faulting the awaited task. This wrapper is also what makes
-                // the IExecutor contract hold ("the enqueued delegate never throws").
-                try
-                {
-                    await Execute();
-                    tcs.SetResult();
-                }
-                catch (Exception e)
-                {
-                    tcs.SetException(e);
-                }
-            }
-
-            // Carry the reaction's Context scope across the executor hop. The scope lives in an
-            // AsyncLocal, which flows only through ExecutionContext; an executor that runs the
-            // callback on its own thread without flowing it (e.g. DedicatedThreadExecutor) would
-            // otherwise drop the scope, so an AdvancedReaction's dependency reads -- its whole
-            // body runs here -- would see no current reaction, capture nothing, and never wire
-            // sources to re-trigger on. Capturing here makes this independent of whether a given
-            // IExecutor flows ExecutionContext itself.
-            var executionContext = ExecutionContext.Capture();
-            Action callback = executionContext is null
-                ? ExecuteOnExecutor
-                : () => ExecutionContext.Run(executionContext, static state => ((Action)state!)(), (Action)ExecuteOnExecutor);
-
-            try
-            {
-                executor.Enqueue(callback);
-            }
-            catch (Exception e)
-            {
-                // A custom IExecutor may reject scheduling (e.g. disposed): fault the awaited
-                // task so the failure flows through the update pipeline rather than throwing
-                // synchronously past the TCS.
-                tcs.TrySetException(e);
-            }
-
-            await tcs.Task;
-        }
-        else
-        {
-            await Execute();
-        }
+        return executor == null ? Execute() : ExecutorInvoke.RunAsync(executor, Execute);
     }
 
     // The IMemoizR fan-in (a parent scanning this reaction) reaches the locked update through the
