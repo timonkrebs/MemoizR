@@ -22,7 +22,9 @@ internal static class DiagnosticDescriptors
         isEnabledByDefault: true,
         description: "MemoizR publishes a node's value reference tear-free across concurrent flows, but only " +
                      "an immutable or internally synchronized type makes the object behind the reference safe " +
-                     "to share. This is the build-time mirror of MemoFactoryOptions.StrictSendableChecks.",
+                     "to share. This is the build-time mirror of the default-on runtime Sendable checks; " +
+                     "creations on a factory that visibly opts out via MemoFactoryOptions.DisableSendableChecks " +
+                     "are exempt, mirroring the runtime escape hatch.",
         helpLinkUri: HelpUri);
 
     public static readonly DiagnosticDescriptor CapturedMutation = new(

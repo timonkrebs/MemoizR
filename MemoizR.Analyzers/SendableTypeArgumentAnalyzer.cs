@@ -40,6 +40,14 @@ public sealed class SendableTypeArgumentAnalyzer : DiagnosticAnalyzer
             return;
         }
 
+        // The runtime accepts a per-factory opt-out (DisableSendableChecks); with an Error
+        // default the build must accept the same escape hatch, or migration would need a
+        // project-wide suppression on top of the documented option.
+        if (FactoryOptOut.DisablesSendableChecks(invocation))
+        {
+            return;
+        }
+
         foreach (var typeArgument in method.TypeArguments)
         {
             var reason = classifier.GetNotSendableReason(typeArgument);

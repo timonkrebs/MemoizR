@@ -10,7 +10,8 @@ namespace MemoizR.Analyzers;
 // documented limitation, which Swift closes by requiring Sendable classes to be final. Info
 // severity by design: non-sealed records are idiomatic and the hole only bites when an actual
 // mutable subclass exists; the runtime counterpart is MemoFactoryOptions.ValidateWrittenValues,
-// which checks each written instance's runtime type.
+// which checks each written instance's runtime type -- the instance's OWN type only, so the
+// hint suggests it solely where it can fire (top-level signal values, not nested contents).
 [DiagnosticAnalyzer(LanguageNames.CSharp)]
 public sealed class SubclassSmugglingAnalyzer : DiagnosticAnalyzer
 {
@@ -33,18 +34,19 @@ public sealed class SubclassSmugglingAnalyzer : DiagnosticAnalyzer
             return;
         }
 
-        // The runtime-guard suggestion only holds where the guard exists: ValidateWrittenValues
-        // checks SIGNAL writes (values user code hands in); memo outputs publish unchecked.
-        var mitigation = IsSignalCreation(method)
-            ? ", or enable MemoFactoryOptions.ValidateWrittenValues to check written instances at runtime"
-            : " (memo outputs publish unchecked: ValidateWrittenValues covers signal writes only)";
+        // Smuggling is a hole in the Sendable checks; a factory that visibly opted out of them
+        // (DisableSendableChecks) has nothing to smuggle past, so the hint would be pure noise.
+        if (FactoryOptOut.DisablesSendableChecks(invocation))
+        {
+            return;
+        }
 
         foreach (var typeArgument in method.TypeArguments)
         {
             // Smuggling hides inside Sendable CONTAINERS too (ImmutableArray<OpenBase>,
             // Task<OpenBase>): the container passes the green-lists, but the non-sealed element
             // type is the smuggle surface -- unfold nested type arguments.
-            foreach (var named in NamedTypesIn(typeArgument, depth: 0))
+            foreach (var (named, depth) in NamedTypesIn(typeArgument, depth: 0))
             {
                 if (IsSmuggleSurface(named))
                 {
@@ -52,20 +54,37 @@ public sealed class SubclassSmugglingAnalyzer : DiagnosticAnalyzer
                         DiagnosticDescriptors.NonSealedValueType,
                         ComputationLambdas.NameLocation(invocation),
                         SendableSymbolClassifier.Display(named),
-                        mitigation));
+                        Mitigation(method, depth)));
                 }
             }
         }
     }
 
-    private static System.Collections.Generic.IEnumerable<INamedTypeSymbol> NamedTypesIn(ITypeSymbol type, int depth)
+    // The runtime-guard suggestion only holds where the guard can actually fire:
+    // ValidateWrittenValues checks the WRITTEN INSTANCE's runtime type on SIGNAL writes. Memo
+    // outputs publish unchecked, and a surface nested inside a container
+    // (ImmutableArray<OpenBase>) is invisible to it -- the check sees the written container's
+    // type, never the contents behind it.
+    private static string Mitigation(IMethodSymbol method, int depth)
+    {
+        if (!IsSignalCreation(method))
+        {
+            return " (memo outputs publish unchecked: ValidateWrittenValues covers signal writes only)";
+        }
+
+        return depth == 0
+            ? ", or enable MemoFactoryOptions.ValidateWrittenValues to check written instances at runtime"
+            : " (ValidateWrittenValues cannot see it: the runtime check covers the written instance's own type, not contents nested inside it)";
+    }
+
+    private static System.Collections.Generic.IEnumerable<(INamedTypeSymbol Named, int Depth)> NamedTypesIn(ITypeSymbol type, int depth)
     {
         if (depth > 4 || type is not INamedTypeSymbol named)
         {
             yield break;
         }
 
-        yield return named;
+        yield return (named, depth);
         foreach (var argument in named.TypeArguments)
         {
             foreach (var nested in NamedTypesIn(argument, depth + 1))

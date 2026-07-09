@@ -32,6 +32,9 @@ public class SubclassSmugglingAnalyzerTests
         Assert.Equal("MZR006", diagnostic.Id);
         Assert.Equal(DiagnosticSeverity.Info, diagnostic.Severity);
         Assert.Contains("OpenPerson", diagnostic.GetMessage());
+        // The value's own runtime type IS what ValidateWrittenValues checks, so here (and only
+        // here) the hint may suggest it.
+        Assert.Contains("enable MemoFactoryOptions.ValidateWrittenValues", diagnostic.GetMessage());
     }
 
     [Fact]
@@ -58,6 +61,33 @@ public class SubclassSmugglingAnalyzerTests
         var diagnostic = Assert.Single(diagnostics);
         Assert.Equal("MZR006", diagnostic.Id);
         Assert.Contains("OpenPerson", diagnostic.GetMessage());
+        // The signal-write guard checks the written ARRAY's runtime type only; suggesting it
+        // for the nested element would promise a check that can never see it.
+        Assert.DoesNotContain("enable MemoFactoryOptions.ValidateWrittenValues", diagnostic.GetMessage());
+        Assert.Contains("not contents nested inside it", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task DisabledChecksFactory_GetsNoSmugglingHint()
+    {
+        // Smuggling is a hole in the Sendable checks; a factory that visibly opted out of them
+        // has nothing to smuggle past, so the hint would be pure noise.
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public record OpenPerson(string Name);
+
+            public class C
+            {
+                public void M()
+                {
+                    var lax = new MemoFactory(options: MemoFactoryOptions.DisableSendableChecks);
+                    lax.CreateSignal(new OpenPerson("a"));
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
     }
 
     [Fact]

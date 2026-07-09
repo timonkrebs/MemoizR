@@ -87,7 +87,9 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
   strict mode, single-consumption `Receive()`, MZR005 flags sender-side use-after-transfer);
   MZR006 (Info) hints at non-sealed classes at creation sites (subclass smuggling), and
   `MemoFactoryOptions.ValidateWrittenValues` validates each written instance's runtime type on
-  `Set` as the runtime counterpart.
+  `Set` as the runtime counterpart (signal writes, and the instance's OWN type only — the
+  MZR006 hint suggests the option solely where that guard can fire, and says so for surfaces
+  nested inside Sendable containers).
 
 ### Changed (BREAKING)
 - Swift-6-parity default-on (issue #145 part A4): `MemoFactory` now applies the Sendable
@@ -95,9 +97,12 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
   type throws unless `MemoFactoryOptions.DisableSendableChecks` (the migration escape hatch) is
   set; `StrictSendableChecks` remains as an explicit statement of intent. The MZR001–003
   analyzers escalate from Warning to Error by default (downgrade per project via
-  `.editorconfig` during migration). Known friction: memos composed over `ConcurrentMap`
-  results are typed `IEnumerable<T>` (an interface, rejected by principle) — compose over an
-  immutable type or opt out per factory.
+  `.editorconfig` during migration), and MZR001/MZR006 honor the same escape hatch the runtime
+  does: creations on a factory whose construction visibly carries `DisableSendableChecks` (an
+  inline receiver or a same-file local/field/property initializer) are exempt, so the
+  per-factory opt-out works at build time without a project-wide suppression. Known friction:
+  memos composed over `ConcurrentMap` results are typed `IEnumerable<T>` (an interface,
+  rejected by principle) — compose over an immutable type or opt out per factory.
 
 ### Changed
 - Reactions now evaluate their separate-parameter dependencies in parallel on the thread pool; with an executor registered (e.g. via `AddSynchronizationContext`/`AddWpfDispatcher`/`AddExecutor`), only the action (with the already-evaluated values) is marshalled to it, and `CreateAdvancedReaction` keeps running its whole body on the executor (#13)

@@ -562,6 +562,64 @@ public class SendableTypeArgumentAnalyzerTests
     }
 
     [Fact]
+    public async Task DisableSendableChecks_Factory_IsExemptWhereverItsConstructionIsVisible()
+    {
+        // The runtime accepts this exact per-factory escape hatch; under the Error default the
+        // build must accept it too. Positive evidence counts through every documented shape:
+        // an inline receiver, a local initializer (including flag combinations), and a
+        // same-file static field initializer -- for instance methods and the structured
+        // extension methods alike.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using System.Threading.Tasks;
+            using MemoizR;
+
+            public class C
+            {
+                private static readonly MemoFactory Lax = new(options: MemoFactoryOptions.DisableSendableChecks);
+
+                public void M()
+                {
+                    new MemoFactory(options: MemoFactoryOptions.DisableSendableChecks).CreateSignal(new List<int>());
+
+                    var lax = new MemoFactory(options: MemoFactoryOptions.StrictSendableChecks | MemoFactoryOptions.DisableSendableChecks);
+                    lax.CreateSignal(new List<int>());
+                    lax.CreateConcurrentMap<List<int>>(async _ => new List<int>()); // extension-method receiver
+
+                    Lax.CreateSignal(new List<int>());
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task OtherOptions_AndUnresolvableReceivers_StayChecked()
+    {
+        // Conservative direction: only POSITIVE evidence of DisableSendableChecks exempts a
+        // creation. Other flags do not, and a factory the analyzer cannot see behind (here a
+        // parameter) keeps the checks on even if its construction elsewhere opted out.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M(MemoFactory fromElsewhere)
+                {
+                    var strict = new MemoFactory(options: MemoFactoryOptions.ValidateWrittenValues);
+                    strict.CreateSignal(new List<int>());
+                    fromElsewhere.CreateSignal(new List<int>());
+                }
+            }
+            """);
+
+        Assert.Equal(2, diagnostics.Length);
+        Assert.All(diagnostics, d => Assert.Equal("MZR001", d.Id));
+    }
+
+    [Fact]
     public async Task ConcurrentMap_ElementType_IsChecked()
     {
         var diagnostics = await AnalyzeAsync("""

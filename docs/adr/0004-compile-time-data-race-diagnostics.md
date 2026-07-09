@@ -34,6 +34,20 @@ classified by a symbol-based port of `SendableChecker`. Checking the method's `T
 uniformly covers `ConcurrentRace`'s resolver result `R` — handed to every racing child in
 parallel — for free.
 
+**The escape hatch is honored at build time too.** The runtime accepts a per-factory opt-out
+(`MemoFactoryOptions.DisableSendableChecks`); with an Error default, a creation on such a
+factory must not fail the build on the very checks its runtime disabled, or migration would
+need a project-wide suppression on top of the documented option. Receiver resolution is
+best-effort and conservative in the safe direction (`FactoryOptOut`): the factory's
+construction must be *in sight* — an inline `new MemoFactory(options: …DisableSendableChecks)`
+receiver, or a local/field/property whose initializer in the *same file* is one (analyzers may
+not call `Compilation.GetSemanticModel`, which keeps cross-file initializers out of reach).
+Anything unresolvable — a factory parameter, a reassigned local, options computed elsewhere —
+keeps the checks on: a missed opt-out costs one suppression, a wrong opt-out would silently
+drop the rule. MZR006 honors the same opt-out (smuggling is a hole in checks that factory
+disabled); MZR002/003 do not, because they diagnose races and deterministic runtime throws
+that exist regardless of Sendable checking.
+
 **The lockstep contract.** `SendableSymbolClassifier` (symbols) and `SendableChecker`
 (reflection) implement the same classification and must be edited together; a type one accepts
 and the other throws on erodes trust in both. Two deliberate divergences exist, both forced by
@@ -170,7 +184,11 @@ runtime counterpart is `MemoFactoryOptions.ValidateWrittenValues`, which validat
 instance's runtime type on `Set` — SIGNAL writes only (memo outputs are the computation's own
 doing and publish unchecked), which is why the MZR006 hint only suggests the option at signal
 creation sites. The nested type arguments of Sendable containers (`ImmutableArray<OpenBase>`)
-are unfolded: the container passes the green-lists, the element type is the smuggle surface.
+are unfolded: the container passes the green-lists, the element type is the smuggle surface —
+and since `ValidateWrittenValues` sees only the written instance's OWN runtime type, the hint
+for a nested surface says the runtime guard cannot reach it instead of suggesting the option.
+Creations on a factory that visibly opts out (`DisableSendableChecks`, see MZR001) get no hint
+at all: smuggling is a hole in checks that factory disabled.
 
 ### Testing strategy
 
@@ -224,5 +242,7 @@ Costs / accepted limitations:
 - **Flagging reads of captured mutable state** (full SE-0412 strictness). Rejected for v1: the
   false-positive rate on idiomatic code would push users to disable MZR002 wholesale, which is
   worse than the narrower write-only rule that survives contact with real codebases.
-- **Error severity by default.** Rejected: this layer is the Swift-5.x-style migration step;
-  projects opt into `error` per rule via `.editorconfig` when ready (the Swift 6 posture).
+- **Error severity by default.** Rejected at v1 as the Swift-5.x-style migration step, then
+  adopted for MZR001–003 by issue #145 part A4 alongside the runtime default-on switch (the
+  Swift 6 posture); `.editorconfig` downgrades and the `DisableSendableChecks` factory opt-out
+  (honored by the analyzers where the construction is visible) are the migration path.

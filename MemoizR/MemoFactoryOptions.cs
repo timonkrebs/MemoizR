@@ -45,6 +45,9 @@ public enum MemoFactoryOptions
     /// shared across flows unchecked, exactly as before the Swift-6-parity step. Takes
     /// precedence over <see cref="StrictSendableChecks"/> and
     /// <see cref="ValidateWrittenValues"/>: opting out switches off ALL Sendable validation.
+    /// The analyzers honor a VISIBLE opt-out too: MZR001/MZR006 skip creations on a factory
+    /// constructed with this flag in sight (an inline receiver, or a local/field/property
+    /// initializer in the same file); factories the build cannot see behind stay checked.
     /// </summary>
     DisableSendableChecks = 1 << 3,
 }
