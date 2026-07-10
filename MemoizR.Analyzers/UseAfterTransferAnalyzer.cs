@@ -105,16 +105,25 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         }
     }
 
-    // True when no branching construct separates the reassignment from the transfer: every
-    // conditional/loop/switch/try ancestor of the assignment must also span the transfer, so
-    // both sit on the same conditional level and source order implies execution order.
+    // True when the reassignment DEFINITELY executes on the path that transferred: walking up
+    // from the assignment, every branching ancestor (if/switch/loop/try/?.) must be entered
+    // through the ARM that also contains the transfer. An ancestor merely spanning the
+    // transfer is not enough -- `try { Transfer(list); } catch { list = new(); }` spans it,
+    // but the catch arm may never run. Checking the path-CHILD's span covers both cases at
+    // once (a child containing the transfer implies its parent does too); the one arm exempted
+    // is a finally block, which always executes.
     private static bool IsOnTheTransfersConditionalLevel(IOperation assignment, int transferPosition)
     {
-        for (var parent = assignment.Parent; parent is not null; parent = parent.Parent)
+        for (IOperation child = assignment; child.Parent is { } parent; child = parent)
         {
             var branches = parent is IConditionalOperation or ISwitchOperation or ISwitchExpressionOperation
                 or ILoopOperation or ITryOperation or IConditionalAccessOperation;
-            if (branches && !parent.Syntax.Span.Contains(transferPosition))
+            if (!branches || (parent is ITryOperation tryOperation && ReferenceEquals(child, tryOperation.Finally)))
+            {
+                continue;
+            }
+
+            if (!child.Syntax.Span.Contains(transferPosition))
             {
                 return false;
             }

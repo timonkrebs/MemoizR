@@ -98,9 +98,11 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
   set; `StrictSendableChecks` remains as an explicit statement of intent. The MZR001–003
   analyzers escalate from Warning to Error by default (downgrade per project via
   `.editorconfig` during migration), and MZR001/MZR006 honor the same escape hatch the runtime
-  does: creations on a factory whose construction visibly carries `DisableSendableChecks` (an
-  inline receiver or a same-file local/field/property initializer) are exempt, so the
-  per-factory opt-out works at build time without a project-wide suppression. Known friction:
+  does: creations on a factory whose construction visibly and definitely carries
+  `DisableSendableChecks` (an inline receiver, or the same-file initializer of a local/readonly
+  field/get-only property that is never reassigned, with a compile-time-constant options
+  argument) are exempt, so the per-factory opt-out works at build time without a project-wide
+  suppression. Known friction:
   memos composed over `ConcurrentMap` results are typed `IEnumerable<T>` (an interface,
   rejected by principle) — compose over an immutable type or opt out per factory.
 

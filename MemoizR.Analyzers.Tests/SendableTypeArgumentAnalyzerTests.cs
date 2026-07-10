@@ -595,6 +595,53 @@ public class SendableTypeArgumentAnalyzerTests
     }
 
     [Fact]
+    public async Task ReassignedFactoryLocal_DoesNotInheritTheInitializerOptOut()
+    {
+        // The initializer opted out, but the local was since repointed at a strict factory:
+        // the runtime WILL throw on this creation, so the build must keep saying so.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory(options: MemoFactoryOptions.DisableSendableChecks);
+                    f = new MemoFactory();
+                    f.CreateSignal(new List<int>());
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR001", diagnostic.Id);
+    }
+
+    [Fact]
+    public async Task ConditionallyLaxOptions_AreNotADefiniteOptOut()
+    {
+        // On the false path the factory is strict and the creation throws at runtime: a mere
+        // MENTION of the flag in a non-constant options expression is not definite evidence.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M(bool useLax)
+                {
+                    new MemoFactory(options: useLax ? MemoFactoryOptions.DisableSendableChecks : MemoFactoryOptions.None)
+                        .CreateSignal(new List<int>());
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR001", diagnostic.Id);
+    }
+
+    [Fact]
     public async Task OtherOptions_AndUnresolvableReceivers_StayChecked()
     {
         // Conservative direction: only POSITIVE evidence of DisableSendableChecks exempts a

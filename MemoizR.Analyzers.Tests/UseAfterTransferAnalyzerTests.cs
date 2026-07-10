@@ -91,6 +91,75 @@ public class UseAfterTransferAnalyzerTests
     }
 
     [Fact]
+    public async Task ReassignmentInACatchHandler_DoesNotSilenceTheLaterUse()
+    {
+        // The try spans the transfer, but the catch is a SIBLING ARM of it: on the
+        // no-exception path the reassignment never ran and the later Add still touches the
+        // transferred list.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public Sending<List<int>>? M()
+                {
+                    var list = new List<int> { 1 };
+                    Sending<List<int>>? sending = null;
+                    try
+                    {
+                        sending = Sending.Transfer(list);
+                    }
+                    catch
+                    {
+                        list = new List<int>();
+                    }
+
+                    list.Add(1);
+                    return sending;
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task ReassignmentInAFinally_IsDefinite_AndEndsTracking()
+    {
+        // A finally arm ALWAYS executes: unlike a catch, its reassignment is as definite as
+        // straight-line code, so the later use touches the fresh value.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public Sending<List<int>>? M()
+                {
+                    var list = new List<int> { 1 };
+                    Sending<List<int>>? sending = null;
+                    try
+                    {
+                        sending = Sending.Transfer(list);
+                    }
+                    finally
+                    {
+                        list = new List<int>();
+                    }
+
+                    list.Add(1);
+                    return sending;
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
     public async Task UsesBeforeTransfer_AndReassignedVariables_AreNotFlagged()
     {
         var diagnostics = await AnalyzeAsync("""

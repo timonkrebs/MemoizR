@@ -38,13 +38,18 @@ parallel — for free.
 (`MemoFactoryOptions.DisableSendableChecks`); with an Error default, a creation on such a
 factory must not fail the build on the very checks its runtime disabled, or migration would
 need a project-wide suppression on top of the documented option. Receiver resolution is
-best-effort and conservative in the safe direction (`FactoryOptOut`): the factory's
-construction must be *in sight* — an inline `new MemoFactory(options: …DisableSendableChecks)`
-receiver, or a local/field/property whose initializer in the *same file* is one (analyzers may
-not call `Compilation.GetSemanticModel`, which keeps cross-file initializers out of reach).
-Anything unresolvable — a factory parameter, a reassigned local, options computed elsewhere —
-keeps the checks on: a missed opt-out costs one suppression, a wrong opt-out would silently
-drop the rule. MZR006 honors the same opt-out (smuggling is a hole in checks that factory
+best-effort and conservative in the safe direction (`FactoryOptOut`), demanding *definite*
+evidence on three axes: the factory's construction must be in sight — an inline
+`new MemoFactory(options: …DisableSendableChecks)` receiver, or a local / readonly field /
+get-only property whose initializer in the *same file* is one (analyzers may not call
+`Compilation.GetSemanticModel`, which keeps cross-file initializers out of reach; settable
+slots could be repointed from anywhere) — the options argument must *fold to a constant*
+carrying the flag (a conditional `useLax ? DisableSendableChecks : None` still runs strict on
+one path), and any write to the receiver symbol elsewhere in the file revokes the
+initializer's authority (the local may have been repointed at a strict factory before the
+creation). Anything short of that — a factory parameter, options computed at runtime — keeps
+the checks on: a missed opt-out costs one suppression, a wrong opt-out would silently drop
+the rule. MZR006 honors the same opt-out (smuggling is a hole in checks that factory
 disabled); MZR002/003 do not, because they diagnose races and deterministic runtime throws
 that exist regardless of Sendable checking.
 

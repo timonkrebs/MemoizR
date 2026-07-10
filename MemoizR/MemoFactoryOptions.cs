@@ -46,8 +46,9 @@ public enum MemoFactoryOptions
     /// precedence over <see cref="StrictSendableChecks"/> and
     /// <see cref="ValidateWrittenValues"/>: opting out switches off ALL Sendable validation.
     /// The analyzers honor a VISIBLE opt-out too: MZR001/MZR006 skip creations on a factory
-    /// constructed with this flag in sight (an inline receiver, or a local/field/property
-    /// initializer in the same file); factories the build cannot see behind stay checked.
+    /// constructed with this flag in a compile-time-constant options argument in sight (an
+    /// inline receiver, or the same-file initializer of a local/readonly field/get-only
+    /// property that is never reassigned); factories the build cannot see behind stay checked.
     /// </summary>
     DisableSendableChecks = 1 << 3,
 }
