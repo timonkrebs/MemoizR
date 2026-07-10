@@ -619,6 +619,31 @@ public class SendableTypeArgumentAnalyzerTests
     }
 
     [Fact]
+    public async Task RefAliasedFactoryLocal_DoesNotKeepTheInitializerOptOut()
+    {
+        // `ref var r = ref f` lets any later write repoint the local without naming it, so a
+        // ref escape revokes the initializer's authority like a direct reassignment.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory(options: MemoFactoryOptions.DisableSendableChecks);
+                    ref var r = ref f;
+                    r = new MemoFactory();
+                    f.CreateSignal(new List<int>());
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR001", diagnostic.Id);
+    }
+
+    [Fact]
     public async Task ConditionallyLaxOptions_AreNotADefiniteOptOut()
     {
         // On the false path the factory is strict and the creation throws at runtime: a mere

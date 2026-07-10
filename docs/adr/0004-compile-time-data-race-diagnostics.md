@@ -166,8 +166,11 @@ type**. Flagged: non-readonly static fields, settable static properties, static 
 slots), and readonly/get-only statics whose TYPE is not Sendable (one shared mutable object
 graph). Not flagged: consts, Sendable readonly statics — and MemoizR's own nodes, factories and
 executors, which are `[Sendable]` by design, so the rule's own fix suggestion ("lift it into a
-Signal") passes the rule. The whole analyzer stays silent in compilations that do not reference
-the real MemoizR assembly.
+Signal") passes the rule. A static whose type is an unbound type parameter is flagged as
+unverifiable: MZR001's benefit of the doubt relies on the closed instantiation being checked at
+its own creation site, and a static has no such site — every closed `C<T>` mints a fresh
+process-wide slot no rule ever sees again. The whole analyzer stays silent in compilations that
+do not reference the real MemoizR assembly.
 
 ### MZR005 — use after transfer (the SE-0430 analog)
 

@@ -103,7 +103,10 @@ internal static class FactoryOptOut
     }
 
     // Whether the identifier is the target of any assignment kind (simple/compound/coalesce,
-    // including through a member access or a deconstruction tuple) or escapes by ref/out.
+    // including through a member access or a deconstruction tuple) or escapes by reference --
+    // a ref/out argument, or `ref x` in a ref-local declaration / ref reassignment / ref
+    // return (RefExpressionSyntax), through which any later write repoints the symbol without
+    // naming it.
     private static bool IsWriteContext(IdentifierNameSyntax identifier)
     {
         SyntaxNode current = identifier;
@@ -121,6 +124,7 @@ internal static class FactoryOptOut
         {
             AssignmentExpressionSyntax assignment => ReferenceEquals(assignment.Left, current),
             ArgumentSyntax argument => argument.RefOrOutKeyword.RawKind != 0,
+            RefExpressionSyntax => true,
             _ => false,
         };
     }

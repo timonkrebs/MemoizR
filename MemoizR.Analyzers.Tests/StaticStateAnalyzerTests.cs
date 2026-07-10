@@ -97,6 +97,34 @@ public class StaticStateAnalyzerTests
     }
 
     [Fact]
+    public async Task TypeParameterStatics_AreUnverifiable_AndFlagged()
+    {
+        // MZR001 trusts unbound type parameters because the closed instantiation is checked at
+        // its own creation site; a static has no such site -- every closed C<T> mints a fresh
+        // process-wide slot (C<List<int>>.Cache is a shared mutable object graph) no rule ever
+        // sees again -- so here T is unverifiable, not trusted.
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public class C<T> where T : new()
+            {
+                private static readonly T Cache = new();
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    _ = Cache;
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR004", diagnostic.Id);
+        Assert.Contains("'Cache'", diagnostic.GetMessage());
+        Assert.Contains("type parameter", diagnostic.GetMessage());
+    }
+
+    [Fact]
     public async Task GlobalUsings_PutEveryFileInScope()
     {
         // Centralized `global using MemoizR;` (a separate GlobalUsings.cs) puts MemoizR in

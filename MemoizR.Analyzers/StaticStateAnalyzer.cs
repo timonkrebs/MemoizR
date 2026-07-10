@@ -101,7 +101,7 @@ public sealed class StaticStateAnalyzer : DiagnosticAnalyzer
             return "a mutable slot";
         }
 
-        var reason = classifier.GetNotSendableReason(field.Type);
+        var reason = NotSendableReason(field.Type, classifier);
         return reason is null ? null : $"readonly, but of non-Sendable type {SendableSymbolClassifier.Display(field.Type)} ({reason})";
     }
 
@@ -117,8 +117,22 @@ public sealed class StaticStateAnalyzer : DiagnosticAnalyzer
             return "a settable slot";
         }
 
-        var reason = classifier.GetNotSendableReason(property.Type);
+        var reason = NotSendableReason(property.Type, classifier);
         return reason is null ? null : $"get-only, but of non-Sendable type {SendableSymbolClassifier.Display(property.Type)} ({reason})";
+    }
+
+    // MZR001 gives unbound type parameters the benefit of the doubt because the closed
+    // instantiation is checked at its own creation site. A static has NO later site: every
+    // closed C<T> mints a fresh process-wide slot no rule ever sees again, so here a type
+    // parameter is unverifiable rather than trusted.
+    private static string? NotSendableReason(ITypeSymbol type, SendableSymbolClassifier classifier)
+    {
+        if (type is ITypeParameterSymbol)
+        {
+            return "a type parameter is unverifiable in a static: unlike a creation site, no closed instantiation is ever checked";
+        }
+
+        return classifier.GetNotSendableReason(type);
     }
 
     // The mandate boundary: the static's FILE must use MemoizR. Using directives sit at the
