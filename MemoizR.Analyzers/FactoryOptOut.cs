@@ -31,7 +31,10 @@ internal static class FactoryOptOut
             ILocalReferenceOperation local => SymbolOptsOut(local.Local, invocation),
             IFieldReferenceOperation { Field.IsReadOnly: true } field
                 => ContainingTypeFullyInSight(field.Field, invocation) && SymbolOptsOut(field.Field, invocation),
-            IPropertyReferenceOperation { Property.SetMethod: null } property
+            // Overridable getters dispatch dynamically: a derived override can hand back a
+            // strict factory the base initializer never saw, so only a getter that cannot
+            // dispatch elsewhere may vouch for its initializer.
+            IPropertyReferenceOperation { Property: { SetMethod: null, IsVirtual: false, IsAbstract: false, IsOverride: false } } property
                 => ContainingTypeFullyInSight(property.Property, invocation) && SymbolOptsOut(property.Property, invocation),
             _ => false,
         };
@@ -219,11 +222,36 @@ internal static class FactoryOptOut
 
     private static IOperation? Unwrap(IOperation? operation)
     {
-        while (operation is IConversionOperation conversion)
+        while (true)
         {
-            operation = conversion.Operand;
+            switch (operation)
+            {
+                case IConversionOperation conversion:
+                    operation = conversion.Operand;
+                    continue;
+                // `lax?.CreateSignal(...)`: the invocation's receiver is the conditional-access
+                // PLACEHOLDER; the factory is the enclosing conditional access's Operation
+                // (`lax`). At runtime the creation either does not run or runs on that factory
+                // -- either way the opt-out evidence lives there.
+                case IConditionalAccessInstanceOperation placeholder:
+                    operation = EnclosingConditionalAccess(placeholder)?.Operation;
+                    continue;
+                default:
+                    return operation;
+            }
+        }
+    }
+
+    private static IConditionalAccessOperation? EnclosingConditionalAccess(IOperation placeholder)
+    {
+        for (var parent = placeholder.Parent; parent is not null; parent = parent.Parent)
+        {
+            if (parent is IConditionalAccessOperation conditional)
+            {
+                return conditional;
+            }
         }
 
-        return operation;
+        return null;
     }
 }

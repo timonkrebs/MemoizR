@@ -725,6 +725,52 @@ public class SendableTypeArgumentAnalyzerTests
     }
 
     [Fact]
+    public async Task VirtualFactoryProperty_IsNotTrusted_DispatchMayLandElsewhere()
+    {
+        // A derived override can hand back a strict factory the base initializer never saw:
+        // only a getter that cannot dispatch elsewhere may vouch for its initializer.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class Base
+            {
+                public virtual MemoFactory Lax { get; } = new(options: MemoFactoryOptions.DisableSendableChecks);
+
+                public void M()
+                {
+                    Lax.CreateSignal(new List<int>());
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR001", diagnostic.Id);
+    }
+
+    [Fact]
+    public async Task ConditionalAccessReceiver_KeepsTheOptOut()
+    {
+        // `lax?.CreateSignal(...)` either does not run or runs on the lax factory -- the
+        // conditional-access placeholder must resolve to the visible initializer either way.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    MemoFactory? lax = new(options: MemoFactoryOptions.DisableSendableChecks);
+                    lax?.CreateSignal(new List<int>());
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
     public async Task NullForgivingFactoryReceiver_KeepsTheOptOut()
     {
         // `lax!.CreateSignal(...)` is the same lax factory; the null-forgiving operator must
