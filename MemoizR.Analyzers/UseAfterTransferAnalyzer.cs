@@ -62,8 +62,36 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                 continue;
             }
 
-            yield return (variable, operation.Syntax.Span.End, EnclosingFunctionBody(operation, block));
+            var scope = EnclosingFunctionBody(operation, block);
+            if (EscapesTheScope(operation, scope))
+            {
+                continue;
+            }
+
+            yield return (variable, operation.Syntax.Span.End, scope);
         }
+    }
+
+    // A transfer the flow immediately leaves behind (`return Sending.Transfer(list);` /
+    // `throw`) has no sender-side continuation in its scope: every later reference is
+    // unreachable on the path that transferred. (break/continue are NOT exits: control
+    // resumes after the loop, where later uses remain reachable.)
+    private static bool EscapesTheScope(IOperation transfer, IOperation scope)
+    {
+        for (var parent = transfer.Parent; parent is not null && !ReferenceEquals(parent, scope); parent = parent.Parent)
+        {
+            if (parent is IReturnOperation or IThrowOperation)
+            {
+                return true;
+            }
+
+            if (parent is IAnonymousFunctionOperation or ILocalFunctionOperation)
+            {
+                break;
+            }
+        }
+
+        return false;
     }
 
     // Transfer(list = new(...)): after the statement the variable ALIASES the transferred
@@ -152,16 +180,27 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
 
     // The use is in an arm of an if/switch/?. whose SIBLING arm holds the transfer: the arms
     // are mutually exclusive, so no execution path runs the use after the transfer. A use in a
-    // branch the transfer merely precedes stays reportable (some path runs it after).
+    // branch the transfer merely precedes stays reportable (some path runs it after) -- and so
+    // does a use in ANY arm when the transfer sits in the construct's always-executed part
+    // (`if (Sending.Transfer(list) != null) { list.Add(1); }`: the condition dominates both
+    // arms, so the arm runs after the handoff).
     private static bool IsInASiblingArmOfTheTransfer(IOperation use, int transferPosition)
     {
         for (IOperation child = use; child.Parent is { } parent; child = parent)
         {
-            var mutuallyExclusiveArms = parent is IConditionalOperation or ISwitchOperation
-                or ISwitchExpressionOperation or IConditionalAccessOperation;
-            if (mutuallyExclusiveArms
+            var dominatingPart = parent switch
+            {
+                IConditionalOperation conditional => conditional.Condition,
+                ISwitchOperation @switch => @switch.Value,
+                ISwitchExpressionOperation switchExpression => switchExpression.Value,
+                IConditionalAccessOperation conditionalAccess => conditionalAccess.Operation,
+                _ => null,
+            };
+
+            if (dominatingPart is not null
                 && parent.Syntax.Span.Contains(transferPosition)
-                && !child.Syntax.Span.Contains(transferPosition))
+                && !child.Syntax.Span.Contains(transferPosition)
+                && !dominatingPart.Syntax.Span.Contains(transferPosition))
             {
                 return true;
             }

@@ -490,6 +490,60 @@ public class UseAfterTransferAnalyzerTests
     }
 
     [Fact]
+    public async Task TransferInTheCondition_DominatesBothArms()
+    {
+        // The condition runs BEFORE either arm: the then-arm's Add executes after the handoff
+        // on every path that reaches it, so it is not a sibling-arm exclusion.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    if (Sending.Transfer(list) != null)
+                    {
+                        list.Add(1);
+                    }
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+    }
+
+    [Fact]
+    public async Task TransferThatExitsTheFlow_HasNoSenderSideContinuation()
+    {
+        // `return Sending.Transfer(list);` never falls through: the fallthrough path never
+        // transferred, so the later Add is unreachable on the path that did.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public Sending<List<int>>? M(bool move)
+                {
+                    var list = new List<int> { 1 };
+                    if (move)
+                    {
+                        return Sending.Transfer(list);
+                    }
+
+                    list.Add(1);
+                    return null;
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
     public async Task InlineAssignmentTransfer_IsTracked()
     {
         // Transfer(list = new(...)): after the statement the variable aliases the transferred

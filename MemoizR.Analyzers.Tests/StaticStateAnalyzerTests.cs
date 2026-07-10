@@ -156,6 +156,38 @@ public class StaticStateAnalyzerTests
     }
 
     [Fact]
+    public async Task OuterGenericParameters_InNestedMemberTypes_AreUnverifiable()
+    {
+        // A nested type carries the OUTER T on its members, not in its own argument list:
+        // C<List<int>>.Cache is still a process-wide object graph over a mutable list, so the
+        // member walk must find the T the shared classifier would exempt.
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public class C<T>
+            {
+                private sealed class Holder
+                {
+                    public T? Value { get; init; }
+                }
+
+                private static readonly Holder Cache = new();
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    _ = Cache;
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR004", diagnostic.Id);
+        Assert.Contains("'Cache'", diagnostic.GetMessage());
+        Assert.Contains("type parameter", diagnostic.GetMessage());
+    }
+
+    [Fact]
     public async Task TypeParameters_BuriedArbitrarilyDeep_AreStillFound()
     {
         // The walk has no depth cliff: a declared type reference is a finite tree, so the

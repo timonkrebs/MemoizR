@@ -187,20 +187,54 @@ public sealed class StaticStateAnalyzer : DiagnosticAnalyzer
         return classifier.GetNotSendableReason(type);
     }
 
-    // No depth cap: a declared type reference is a finite tree (each type argument is a
-    // strictly smaller reference), so the recursion terminates on its own -- and a cap would
-    // have to choose between failing open (a parameter buried one level past it silently
-    // trusted) and misreporting deep concrete types as parameters.
+    // No depth cap: the type graph is finite and the visited set breaks cycles, so the
+    // recursion terminates on its own -- and a cap would have to choose between failing open
+    // (a parameter buried one level past it silently trusted) and misreporting deep concrete
+    // types as parameters. Besides type arguments, MEMBER types of source-declared types are
+    // walked: a nested `sealed class Holder { public T Value ... }` carries the OUTER type
+    // parameter on its members, not in its own argument list, and the shared classifier's
+    // member walk would accept that T through the exemption this rule exists to remove.
     private static bool HasUnshieldedTypeParameter(ITypeSymbol type)
     {
-        return type switch
+        return HasUnshieldedTypeParameter(type, new System.Collections.Generic.HashSet<ITypeSymbol>(SymbolEqualityComparer.Default));
+    }
+
+    private static bool HasUnshieldedTypeParameter(ITypeSymbol type, System.Collections.Generic.HashSet<ITypeSymbol> visited)
+    {
+        switch (type)
         {
-            ITypeParameterSymbol => true,
-            IArrayTypeSymbol array => HasUnshieldedTypeParameter(array.ElementType),
-            INamedTypeSymbol named when !SendableSymbolClassifier.HasSendableAttribute(named) =>
-                named.TypeArguments.Any(HasUnshieldedTypeParameter),
-            _ => false,
-        };
+            case ITypeParameterSymbol:
+                return true;
+            case IArrayTypeSymbol array:
+                return HasUnshieldedTypeParameter(array.ElementType, visited);
+            case INamedTypeSymbol named
+                when visited.Add(named) && !SendableSymbolClassifier.HasSendableAttribute(named):
+                return named.TypeArguments.Any(argument => HasUnshieldedTypeParameter(argument, visited))
+                    || MemberTypesOf(named).Any(memberType => HasUnshieldedTypeParameter(memberType, visited));
+            default:
+                return false;
+        }
+    }
+
+    private static System.Collections.Generic.IEnumerable<ITypeSymbol> MemberTypesOf(INamedTypeSymbol named)
+    {
+        if (!named.Locations.Any(location => location.IsInSource))
+        {
+            yield break; // metadata members are import-limited; framework internals carry no user T
+        }
+
+        foreach (var member in named.GetMembers())
+        {
+            switch (member)
+            {
+                case IFieldSymbol { IsStatic: false, IsImplicitlyDeclared: false } field:
+                    yield return field.Type;
+                    break;
+                case IPropertySymbol { IsStatic: false, GetMethod: not null } property:
+                    yield return property.Type;
+                    break;
+            }
+        }
     }
 
     // The mandate boundary: the static's FILE must use MemoizR. Using directives sit at the
