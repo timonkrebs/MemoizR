@@ -7,7 +7,10 @@ public sealed class ConcurrentMap<T> : MemoBase<IEnumerable<T>>
 
     internal ConcurrentMap(IReadOnlyCollection<Func<IStructuredResourceGroup, Task<T>>> fns, Context context) : base(context)
     {
-        this.fns = fns;
+        // Snapshot: the params array arrives caller-owned, and [Sendable] promises internal
+        // synchronization -- a caller swapping elements must not change the computation set a
+        // recompute is enumerating.
+        this.fns = fns.ToArray();
     }
 
     public void Cancel()

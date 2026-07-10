@@ -233,7 +233,10 @@ internal sealed class SendableSymbolClassifier
             or "System.Private.Uri" or "System.Runtime.Numerics" or "System.Numerics";
     }
 
-    private static bool HasSendableAttribute(INamedTypeSymbol named)
+    // Internal because MZR004's type-parameter walk uses [Sendable] trust as its descent
+    // boundary: an attributed type's thread-safety assertion does not rest on its type
+    // arguments (MemoizR's own nodes are internally synchronized for any T).
+    internal static bool HasSendableAttribute(INamedTypeSymbol named)
     {
         foreach (var attribute in named.OriginalDefinition.GetAttributes())
         {

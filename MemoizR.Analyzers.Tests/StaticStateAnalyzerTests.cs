@@ -125,6 +125,37 @@ public class StaticStateAnalyzerTests
     }
 
     [Fact]
+    public async Task NestedTypeParameterStatics_AreUnverifiable_TrustedNodesAreTheShield()
+    {
+        // The classifier accepts type parameters recursively (right for MZR001), so
+        // ImmutableArray<T> would pass while C<List<int>>.Cache is a process-wide immutable
+        // wrapper over a mutable graph with no later check. A [Sendable]-trusted node is the
+        // one shield: Signal<T> is internally synchronized for any T, and the closed T IS
+        // checked later, at the CreateSignal call that built the instance.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Immutable;
+            using MemoizR;
+
+            public class C<T>
+            {
+                private static readonly ImmutableArray<T> Cache = ImmutableArray<T>.Empty;
+                private static readonly Signal<T>? Node = null;
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    _ = Cache.Length + (Node is null ? 0 : 1);
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR004", diagnostic.Id);
+        Assert.Contains("'Cache'", diagnostic.GetMessage());
+        Assert.Contains("type parameter", diagnostic.GetMessage());
+    }
+
+    [Fact]
     public async Task GlobalUsings_PutEveryFileInScope()
     {
         // Centralized `global using MemoizR;` (a separate GlobalUsings.cs) puts MemoizR in

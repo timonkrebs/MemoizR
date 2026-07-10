@@ -123,16 +123,32 @@ public sealed class StaticStateAnalyzer : DiagnosticAnalyzer
 
     // MZR001 gives unbound type parameters the benefit of the doubt because the closed
     // instantiation is checked at its own creation site. A static has NO later site: every
-    // closed C<T> mints a fresh process-wide slot no rule ever sees again, so here a type
-    // parameter is unverifiable rather than trusted.
+    // closed C<T> mints a fresh process-wide slot no rule ever sees again, so a type parameter
+    // ANYWHERE in the slot's type (T itself, ImmutableArray<T>, Holder<T>) is unverifiable
+    // rather than trusted. [Sendable]-attributed types are the one shield: their thread-safety
+    // assertion does not rest on the type arguments -- MemoizR's own nodes are internally
+    // synchronized for any T, and a Signal<T> static's closed T IS checked later, at the
+    // CreateSignal call that built the instance.
     private static string? NotSendableReason(ITypeSymbol type, SendableSymbolClassifier classifier)
     {
-        if (type is ITypeParameterSymbol)
+        if (HasUnshieldedTypeParameter(type, depth: 0))
         {
             return "a type parameter is unverifiable in a static: unlike a creation site, no closed instantiation is ever checked";
         }
 
         return classifier.GetNotSendableReason(type);
+    }
+
+    private static bool HasUnshieldedTypeParameter(ITypeSymbol type, int depth)
+    {
+        return depth <= 4 && type switch
+        {
+            ITypeParameterSymbol => true,
+            IArrayTypeSymbol array => HasUnshieldedTypeParameter(array.ElementType, depth + 1),
+            INamedTypeSymbol named when !SendableSymbolClassifier.HasSendableAttribute(named) =>
+                named.TypeArguments.Any(argument => HasUnshieldedTypeParameter(argument, depth + 1)),
+            _ => false,
+        };
     }
 
     // The mandate boundary: the static's FILE must use MemoizR. Using directives sit at the

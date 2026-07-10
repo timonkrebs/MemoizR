@@ -619,6 +619,73 @@ public class SendableTypeArgumentAnalyzerTests
     }
 
     [Fact]
+    public async Task FluentlyConfiguredOptOutFactory_IsStillExempt()
+    {
+        // AddExecutor/AddTimeProvider mutate and return the SAME factory, so the opt-out
+        // evidence sits one hop up the fluent chain -- the runtime uses the opted-out factory
+        // and accepts the value, and the build must agree.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using System.Collections.Generic;
+            using System.Threading;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    new MemoFactory(options: MemoFactoryOptions.DisableSendableChecks)
+                        .AddExecutor(new SynchronizationContextExecutor(new SynchronizationContext()))
+                        .CreateSignal(new List<int>());
+
+                    var lax = new MemoFactory(options: MemoFactoryOptions.DisableSendableChecks);
+                    lax.AddTimeProvider(TimeProvider.System).CreateSignal(new List<int>());
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task PartialTypeFactoryField_IsNotTrusted_TheOtherFileMayReassignIt()
+    {
+        // A readonly field's initializer can be overwritten by a static constructor, and a
+        // partial type can keep that constructor in ANOTHER file: members of types split
+        // across files are not trusted, whatever the visible initializer says.
+        var diagnostics = await AnalyzerTestHarness.AnalyzeAsync(
+            [
+                """
+                using System.Collections.Generic;
+                using MemoizR;
+
+                public partial class C
+                {
+                    private static readonly MemoFactory Lax = new(options: MemoFactoryOptions.DisableSendableChecks);
+
+                    public void M()
+                    {
+                        Lax.CreateSignal(new List<int>());
+                    }
+                }
+                """,
+                """
+                public partial class C
+                {
+                    static C()
+                    {
+                        Lax = new MemoizR.MemoFactory(); // strict: the initializer never survives
+                    }
+                }
+                """,
+            ],
+            new SendableTypeArgumentAnalyzer());
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR001", diagnostic.Id);
+    }
+
+    [Fact]
     public async Task RefAliasedFactoryLocal_DoesNotKeepTheInitializerOptOut()
     {
         // `ref var r = ref f` lets any later write repoint the local without naming it, so a

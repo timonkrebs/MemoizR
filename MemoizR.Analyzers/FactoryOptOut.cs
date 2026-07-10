@@ -24,21 +24,61 @@ internal static class FactoryOptOut
 {
     public static bool DisablesSendableChecks(IInvocationOperation invocation)
     {
-        // Instance creations carry the factory in Instance; the structured-concurrency
-        // creations are extension methods, whose receiver arrives as the first argument.
-        var receiver = invocation.Instance
-            ?? (invocation.TargetMethod.IsExtensionMethod
-                ? invocation.Arguments.FirstOrDefault(argument => argument.Parameter?.Ordinal == 0)?.Value
-                : null);
+        var receiver = Unwrap(ReceiverOf(invocation));
 
-        return Unwrap(receiver) switch
+        // Fluent configuration (AddExecutor/AddTimeProvider/...) mutates and returns the SAME
+        // factory, so the opt-out evidence sits one hop (or several) up the chain: follow
+        // library-declared MemoFactory-returning calls to their own receiver.
+        while (receiver is IInvocationOperation chained && ReturnsTheLibraryFactory(chained.TargetMethod))
+        {
+            receiver = Unwrap(ReceiverOf(chained));
+        }
+
+        return receiver switch
         {
             IObjectCreationOperation creation => OptsOut(creation),
             ILocalReferenceOperation local => SymbolOptsOut(local.Local, invocation),
-            IFieldReferenceOperation { Field.IsReadOnly: true } field => SymbolOptsOut(field.Field, invocation),
-            IPropertyReferenceOperation { Property.SetMethod: null } property => SymbolOptsOut(property.Property, invocation),
+            IFieldReferenceOperation { Field.IsReadOnly: true } field
+                => ContainingTypeFullyInSight(field.Field, invocation) && SymbolOptsOut(field.Field, invocation),
+            IPropertyReferenceOperation { Property.SetMethod: null } property
+                => ContainingTypeFullyInSight(property.Property, invocation) && SymbolOptsOut(property.Property, invocation),
             _ => false,
         };
+    }
+
+    // Instance creations carry the factory in Instance; the structured-concurrency creations
+    // and the fluent configuration methods are extension methods, whose receiver arrives as
+    // the first argument.
+    private static IOperation? ReceiverOf(IInvocationOperation invocation)
+    {
+        return invocation.Instance
+            ?? (invocation.TargetMethod.IsExtensionMethod
+                ? invocation.Arguments.FirstOrDefault(argument => argument.Parameter?.Ordinal == 0)?.Value
+                : null);
+    }
+
+    // A LIBRARY method that returns MemoFactory is the fluent-configuration contract (it
+    // mutates and returns its receiver); a source-declared lookalike could return any factory
+    // it likes and is not followed.
+    private static bool ReturnsTheLibraryFactory(IMethodSymbol method)
+    {
+        return method.ReturnType is INamedTypeSymbol { Name: "MemoFactory" } factoryType
+            && factoryType.ContainingNamespace?.ToDisplayString() == "MemoizR"
+            && FactoryMethods.IsLibraryType(factoryType)
+            && method.ContainingType is { } containingType
+            && FactoryMethods.IsLibraryType(containingType);
+    }
+
+    // A readonly field's (or get-only auto-property's) initializer can still be overwritten by
+    // a constructor, and a partial type can keep that constructor in ANOTHER file, outside the
+    // reassignment scan's reach: only members of types declared entirely in the invocation's
+    // file are trusted.
+    private static bool ContainingTypeFullyInSight(ISymbol symbol, IInvocationOperation invocation)
+    {
+        var tree = invocation.SemanticModel?.SyntaxTree;
+        return tree is not null
+            && symbol.ContainingType is { } containingType
+            && containingType.DeclaringSyntaxReferences.All(reference => reference.SyntaxTree == tree);
     }
 
     private static bool SymbolOptsOut(ISymbol symbol, IInvocationOperation invocation)

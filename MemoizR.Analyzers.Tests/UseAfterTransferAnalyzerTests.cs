@@ -91,6 +91,32 @@ public class UseAfterTransferAnalyzerTests
     }
 
     [Fact]
+    public async Task NullForgivingTransfer_IsStillATransfer()
+    {
+        // `Sending.Transfer(list!)` hands off the same variable; the null-forgiving operator
+        // must not hide the transfer from the rule.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public Sending<List<int>> M()
+                {
+                    List<int>? list = new List<int> { 1 };
+                    var sending = Sending.Transfer(list!);
+                    list.Add(2);
+                    return sending;
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
     public async Task ReassignmentInACatchHandler_DoesNotSilenceTheLaterUse()
     {
         // The try spans the transfer, but the catch is a SIBLING ARM of it: on the

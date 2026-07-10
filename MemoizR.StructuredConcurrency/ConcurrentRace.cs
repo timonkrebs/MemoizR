@@ -22,7 +22,9 @@ public sealed class ConcurrentRace<T, I> : MemoHandlR<T>, IMemoizR, IStampedGetR
         Context context) : base(context)
     {
         this.action = action;
-        this.fns = fns;
+        // Snapshot: see ConcurrentMap -- the caller keeps the params array and must not be able
+        // to swap the racing set out from under a recompute.
+        this.fns = fns.ToArray();
     }
 
     public void Cancel()
