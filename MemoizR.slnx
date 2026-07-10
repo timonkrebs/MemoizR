@@ -14,6 +14,7 @@
   <Project Path="MemoizR.Analyzers/MemoizR.Analyzers.csproj" />
   <Project Path="MemoizR.Blazor.Tests/MemoizR.Blazor.Tests.csproj" />
   <Project Path="MemoizR.Blazor/MemoizR.Blazor.csproj" />
+  <Project Path="MemoizR.Distributed/MemoizR.Distributed.csproj" />
   <Project Path="MemoizR.Reactive/MemoizR.Reactive.csproj" />
   <Project Path="MemoizR.StructuredAsyncLock/MemoizR.StructuredAsyncLock.csproj" />
   <Project Path="MemoizR.StructuredConcurrency/MemoizR.StructuredConcurrency.csproj" />

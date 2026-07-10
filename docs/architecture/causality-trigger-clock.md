@@ -210,7 +210,10 @@ reads — and the node stays dirty, so the next `Get` replaces both.
   single graph produces — but a consumer-side stamp joining sources replicated from several
   peers spans several incarnations. The planned evolution is an epoch *table* keyed by id-range
   (slices are contiguous, so the table stays one entry per peer), arriving as wire-format v3
-  together with the bridge layer.
+  (issue #148). Until then the bridge layer's first cut — the `MemoizR.Distributed` package —
+  keeps foreign evidence *beside* the consumer's graph and checks it explicitly at the barrier,
+  and orders one node's deliveries by a per-publication sequence (the per-node total order
+  stamps deliberately do not provide).
 - **Public surface** (frozen alongside the wire format): `IStampedGetR<T>.GetWithEvidence()` —
   the `(value, evidence)` pair of one publication, carrying verifiability so an interface-typed
   consumer can never mistake a poisoned publication for an honest no-dependency value — on

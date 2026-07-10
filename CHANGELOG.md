@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 ## [Unreleased]
 
 ### Added
+- `MemoizR.Distributed` (new package, issue #148): the bridge layer over the causality
+  stamps. `Export` pushes stale advertisements on value changes and answers pulls with the
+  untorn (value, evidence, sequence) triple of one publication (plus an optional heartbeat
+  for evidence-only transitions); `RemoteSignal<T>` adopts deliveries under a protocol that
+  makes reordered, at-least-once transports harmless — per-publication sequences totally
+  order deliveries (including the dependency-oscillation shapes stamps cannot order),
+  incarnation epochs detect host restarts (held evidence is discarded, never merged, and an
+  `OnPeerReset` hook resubscribes), and abandoned epochs drop late traffic from dead
+  incarnations; `DistributedBarrier` renders only consistent, verified snapshots and re-pulls
+  the lagging mirror itself. The sample migrated to the package.
+- Per-node publication sequence in the core value box: strictly increasing per publication,
+  carried by distributed payloads as the per-node total order that causality stamps
+  deliberately do not provide.
 - `MemoFactoryOptions.DisableCausalityStamps`: opt a context out of causality-stamp tracking
   entirely (issue #39). Signals stop bumping triggers, evaluations never open a capture, and
   every node publishes the honest no-claim (unverifiable) evidence; values and glitch freedom

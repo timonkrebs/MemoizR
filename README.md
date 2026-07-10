@@ -189,8 +189,16 @@ var payload = stamp.Serialize();              // compact, deterministic wire for
 Stamps are space-efficient (uniform regions collapse, ITC-style), reset-resilient (a restarted
 graph's stamps are never confused with their pre-restart incarnation), and documented in
 [docs/architecture/causality-trigger-clock.md](docs/architecture/causality-trigger-clock.md).
-A runnable two-peer bridge — stale/pull protocol, glitch barrier, late-delivery dropping and
-reset detection — lives in [samples/DistributedGraphSample](samples/DistributedGraphSample).
+
+The **MemoizR.Distributed** package builds the bridge layer on top: `Export` a node on the
+host (value changes push tiny stale advertisements; consumers pull lazily),
+`CreateRemoteSignal` on the consumer (an adoption protocol with per-publication sequences,
+incarnation epochs and abandoned-epoch tracking makes reordered, at-least-once transports
+harmless), and `DistributedBarrier` (renders only consistent, verified snapshots and re-pulls
+the lagging mirror itself). A runnable two-peer demo lives in
+[samples/DistributedGraphSample](samples/DistributedGraphSample); the roadmap (multi-peer
+epoch table, wire v3, evidence splicing) is
+[#148](https://github.com/timonkrebs/MemoizR/issues/148).
 
 Purely-local graphs that will never be synchronized can opt out of the stamp bookkeeping
 entirely with `new MemoFactory(options: MemoFactoryOptions.DisableCausalityStamps)` — same
