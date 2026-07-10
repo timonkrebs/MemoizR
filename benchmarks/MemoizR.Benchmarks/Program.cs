@@ -8,7 +8,22 @@ using MemoizR;
 // allocation-free?
 class Bench
 {
+    // Main and the scenario groups are split because SonarSource cognitive complexity (S3776)
+    // attributes every measurement lambda's loop to the containing method.
     static async Task Main()
+    {
+        await MeasureCorePaths();
+
+        // The stamps-disabled variants quantify what MemoFactoryOptions.DisableCausalityStamps
+        // saves. Resolved at runtime so this harness still compiles against builds that predate
+        // the flag (they simply skip these rows).
+        if (Enum.TryParse<MemoFactoryOptions>("DisableCausalityStamps", out var noStamps))
+        {
+            await MeasureStampsDisabledPaths(noStamps);
+        }
+    }
+
+    static async Task MeasureCorePaths()
     {
         await Measure("signal.Set (distinct values)", 1_000_000, async n =>
         {
@@ -52,15 +67,10 @@ class Bench
             var c = f.CreateMemoizR(async () => await a.Get() + await b.Get());
             for (var i = 1; i <= n; i++) { await s.Set(i); await c.Get(); }
         });
+    }
 
-        // The stamps-disabled variants quantify what MemoFactoryOptions.DisableCausalityStamps
-        // saves. Resolved at runtime so this harness still compiles against builds that predate
-        // the flag (they simply skip these rows).
-        if (!Enum.TryParse<MemoFactoryOptions>("DisableCausalityStamps", out var noStamps))
-        {
-            return;
-        }
-
+    static async Task MeasureStampsDisabledPaths(MemoFactoryOptions noStamps)
+    {
         await Measure("signal.Set (distinct, stamps disabled)", 1_000_000, async n =>
         {
             var f = new MemoFactory(options: noStamps);

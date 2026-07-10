@@ -68,6 +68,7 @@ jobs:
         coyote rewrite MemoizR.dll
         coyote rewrite MemoizR.Reactive.dll
         coyote rewrite MemoizR.StructuredConcurrency.dll
+        coyote rewrite MemoizR.Distributed.dll
         coyote rewrite MemoizR.Tests.dll
     # Only the systematic concurrency test runs against the rewritten assemblies, where
     # Coyote can fully control scheduling.

@@ -107,6 +107,13 @@ public sealed class RemoteSignal<T>
         {
             throw new ArgumentException("A value payload must carry the host's nonzero incarnation epoch.", nameof(payload));
         }
+        // A non-empty stamp carries its own epoch; it must be the incarnation the header claims,
+        // or the ordering (header epoch) and the evidence the barrier compares (stamp epoch)
+        // would describe different incarnations. Empty stamps are epoch-agnostic by design.
+        if (incoming.Epoch != 0 && incoming.Epoch != payload.Epoch)
+        {
+            throw new ArgumentException("The payload's stamp belongs to a different incarnation epoch than the payload header claims.", nameof(payload));
+        }
 
         await adoptionGate.WaitAsync();
         try

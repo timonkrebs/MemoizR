@@ -254,6 +254,12 @@ public class DistributedPackageTests
             () => mirror.OnValueAsync(new ValuePayload<int>(1, 1, 1, 1, [0xFF, 0xFF], false)));
         await Assert.ThrowsAsync<ArgumentException>(
             () => mirror.OnValueAsync(new ValuePayload<int>(1, 0, 1, 1, CausalityStamp.Empty.Serialize(), false)));
+
+        // A non-empty stamp whose epoch differs from the header's is a protocol violation: the
+        // ordering and the evidence would describe different incarnations.
+        var mismatched = CausalityStamp.ForSignal(1, 1, epoch: 7).Serialize();
+        await Assert.ThrowsAsync<ArgumentException>(
+            () => mirror.OnValueAsync(new ValuePayload<int>(1, 5, 1, 1, mismatched, false)));
     }
 
     // ── the glitch barrier ───────────────────────────────────────────────────────────────

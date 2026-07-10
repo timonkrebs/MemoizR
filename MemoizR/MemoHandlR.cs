@@ -448,12 +448,16 @@ public abstract class MemoHandlR<T> : SignalHandlR
         }
     }
 
-    // Every publication funnels through here: one box swap, carrying the next sequence.
-    // Interlocked because the writers hold DIFFERENT locks per node type (a signal's monitor,
-    // a recomputing node's mutex), so no single monitor orders all increments.
+    // Every publication funnels through here: one box swap, carrying the next sequence. A
+    // PLAIN increment on purpose: a node's publications are already mutually exclusive under
+    // its own write serialization -- a signal only publishes inside its monitor, a recomputing
+    // node only under its mutex, and a node is never both -- and the volatile box store
+    // releases the incremented value to readers. (An Interlocked here would also be a Coyote
+    // interception point inside the signal monitor's critical section, which the systematic
+    // tests cannot control -- see TestChainLostUpdateWithCoyote on the uncontrolled Lock.)
     private void Publish(T value, StampEvidence evidence)
     {
-        valueBox = new ValueBox(value, evidence, Interlocked.Increment(ref publicationSequence));
+        valueBox = new ValueBox(value, evidence, ++publicationSequence);
     }
 
     // The signal write path: publishes the value with its own single-entry stamp (a signal has
