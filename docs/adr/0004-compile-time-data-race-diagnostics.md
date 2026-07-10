@@ -185,9 +185,15 @@ MemoizR assembly.
 `Sending<T>` hands a non-Sendable value across flows by TRANSFER: the wrapper is `[Sendable]`
 (strict mode accepts `Sending<List<int>>`), `Receive()` enforces single consumption at runtime,
 and MZR005 flags method-local uses of the transferred variable after the transfer, in source
-order, stopping at a reassignment. Deliberately a heuristic — Swift proves this with
-region-based isolation in the type system; source order approximates execution order, and
-aliases or loop back-edges can evade the rule. The receiver-side runtime check is the backstop.
+order, stopping at a reassignment. The scan is path-aware within its heuristic: uses in a
+mutually exclusive sibling arm of the transfer's construct are unreachable and not flagged,
+uses dominated by a conditional reinitialization (inside its arm, after it) are clean, `out`
+arguments reinitialize like assignments (after their sibling arguments — which are evaluated
+first — were checked for reads), reinitializations inside deferred callbacks don't count for
+the outer flow (mirroring transfers being scoped to their own callback body), and a `finally`
+arm counts as definite. Still deliberately a heuristic — Swift proves this with region-based
+isolation in the type system; source order approximates execution order, and aliases or loop
+back-edges can evade the rule. The receiver-side runtime check is the backstop.
 
 ### MZR006 — subclass smuggling (Info)
 
@@ -195,8 +201,11 @@ Sendable verdicts are computed from the DECLARED type, so a mutable subclass beh
 passes creation-time checks — ADR 0003's documented limitation, which Swift closes by requiring
 Sendable classes to be `final`. MZR006 hints (Info severity: non-sealed records are idiomatic,
 and the hole needs an actual mutable subclass to bite) at non-sealed, non-abstract class type
-arguments at creation sites; green-listed framework types (`Uri` is not sealed) are exempt. The
-runtime counterpart is `MemoFactoryOptions.ValidateWrittenValues`, which validates each written
+arguments at creation sites; green-listed framework types (`Uri` is not sealed) are exempt.
+Abstract classes and interfaces are normally MZR001's (Error) territory — except when a
+`[Sendable]` assertion lets them pass: the attribute is deliberately not inherited, so the
+assertion binds the declaring author and not every subclass or implementer, and MZR006 hints
+exactly there. The runtime counterpart is `MemoFactoryOptions.ValidateWrittenValues`, which validates each written
 instance's runtime type on `Set` — SIGNAL writes only (memo outputs are the computation's own
 doing and publish unchecked), which is why the MZR006 hint only suggests the option at signal
 creation sites. The nested type arguments of Sendable containers (`ImmutableArray<OpenBase>`)

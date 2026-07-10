@@ -85,21 +85,37 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
 
     private static void ReportUsesAfter(OperationBlockAnalysisContext context, IOperation scope, ISymbol variable, int transferPosition)
     {
-        // Source-ordered walk of every later reference: a reference that is the TARGET of a
-        // simple assignment re-initializes the variable, so it and everything after it is a new
-        // value -- stop there.
+        // Source-ordered walk of every later reference. References in a MUTUALLY EXCLUSIVE
+        // sibling arm of the construct holding the transfer are excluded upfront: in
+        // `if (move) Transfer(list); else list.Add(1);` no path runs the else after the
+        // transfer. (Try constructs are not excluded -- an exception after the transfer
+        // reaches the handlers and finally.)
         var laterReferences = scope.DescendantsAndSelf()
             .Where(operation => SymbolEqualityComparer.Default.Equals(ReferencedVariable(operation), variable)
-                && operation.Syntax.SpanStart >= transferPosition)
+                && operation.Syntax.SpanStart >= transferPosition
+                && !IsInASiblingArmOfTheTransfer(operation, transferPosition))
             .OrderBy(operation => operation.Syntax.SpanStart);
+
+        // Regions where a SKIPPED conditional reinitialization dominates: inside its own arm,
+        // after it, the variable is fresh on every path that reaches the reference
+        // (`if (reset) { list = new(); list.Add(1); }` -- the Add never sees the transferred
+        // list), so such references are clean while the scan continues past the arm.
+        List<(Microsoft.CodeAnalysis.Text.TextSpan Region, int Position)>? dominated = null;
 
         foreach (var reference in laterReferences)
         {
-            switch (Classify(reference, variable, transferPosition, out var rhsUse))
+            if (IsDominatedByASkippedReinitialization(dominated, reference))
+            {
+                continue;
+            }
+
+            switch (Classify(reference, variable, transferPosition, scope, out var rhsUse))
             {
                 case ReferenceRole.FreshValueFromHere:
                     return; // a definite reinitialization: everything after is a new value
                 case ReferenceRole.ConditionalReinitialization:
+                    (dominated ??= new List<(Microsoft.CodeAnalysis.Text.TextSpan, int)>())
+                        .Add((DominatingRegion(reference.Parent!).Syntax.Span, reference.Syntax.Span.End));
                     continue; // may not have run on the path that transferred: keep scanning
                 default:
                     Report(context, rhsUse ?? reference, variable);
@@ -108,14 +124,74 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         }
     }
 
+    private static bool IsDominatedByASkippedReinitialization(List<(Microsoft.CodeAnalysis.Text.TextSpan Region, int Position)>? dominated, IOperation reference)
+    {
+        if (dominated is null)
+        {
+            return false;
+        }
+
+        var start = reference.Syntax.SpanStart;
+        foreach (var (region, position) in dominated)
+        {
+            if (start >= position && region.Contains(start))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    // The use is in an arm of an if/switch/?. whose SIBLING arm holds the transfer: the arms
+    // are mutually exclusive, so no execution path runs the use after the transfer. A use in a
+    // branch the transfer merely precedes stays reportable (some path runs it after).
+    private static bool IsInASiblingArmOfTheTransfer(IOperation use, int transferPosition)
+    {
+        for (IOperation child = use; child.Parent is { } parent; child = parent)
+        {
+            var mutuallyExclusiveArms = parent is IConditionalOperation or ISwitchOperation
+                or ISwitchExpressionOperation or IConditionalAccessOperation;
+            if (mutuallyExclusiveArms
+                && parent.Syntax.Span.Contains(transferPosition)
+                && !child.Syntax.Span.Contains(transferPosition))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    // The region a skipped conditional reinitialization dominates: its nearest enclosing arm
+    // (or callback body -- a deferred reinitialization dominates only inside its own callback,
+    // where source order applies again).
+    private static IOperation DominatingRegion(IOperation reinitialization)
+    {
+        for (IOperation child = reinitialization; child.Parent is { } parent; child = parent)
+        {
+            if (parent is IConditionalOperation or ISwitchOperation or ISwitchExpressionOperation
+                or ILoopOperation or ITryOperation or IConditionalAccessOperation
+                or IAnonymousFunctionOperation or ILocalFunctionOperation)
+            {
+                return child;
+            }
+        }
+
+        return reinitialization;
+    }
+
     private enum ReferenceRole { Use, FreshValueFromHere, ConditionalReinitialization }
 
     // A reference that REINITIALIZES the variable ends tracking when it definitely executes
     // and is skipped when conditional (sibling arms may not run on the path that transferred).
     // Reinitializations are a simple-assignment target -- unless its RHS itself READS the
     // transferred value (`list = Clone(list)` builds the replacement from it: that read is the
-    // use to report) -- and an `out` argument, which the callee must assign and cannot read.
-    private static ReferenceRole Classify(IOperation reference, ISymbol variable, int transferPosition, out IOperation? rhsUse)
+    // use to report) -- and an `out` argument, which the callee must assign and cannot read;
+    // the out-assignment happens only when the callee RUNS, after every sibling argument was
+    // evaluated, so a sibling argument reading the variable is still a use of the transferred
+    // value.
+    private static ReferenceRole Classify(IOperation reference, ISymbol variable, int transferPosition, IOperation scope, out IOperation? rhsUse)
     {
         rhsUse = null;
 
@@ -123,19 +199,42 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         {
             rhsUse = assignment.Value.DescendantsAndSelf()
                 .FirstOrDefault(operation => SymbolEqualityComparer.Default.Equals(ReferencedVariable(operation), variable));
-            return rhsUse is not null ? ReferenceRole.Use : ReinitializationRole(assignment, transferPosition);
+            return rhsUse is not null ? ReferenceRole.Use : ReinitializationRole(assignment, transferPosition, scope);
         }
 
         if (reference.Parent is IArgumentOperation { Parameter.RefKind: RefKind.Out } outArgument)
         {
-            return ReinitializationRole(outArgument, transferPosition);
+            rhsUse = SiblingArgumentRead(outArgument, variable);
+            return rhsUse is not null ? ReferenceRole.Use : ReinitializationRole(outArgument, transferPosition, scope);
         }
 
         return ReferenceRole.Use;
     }
 
-    private static ReferenceRole ReinitializationRole(IOperation reinitialization, int transferPosition)
+    private static IOperation? SiblingArgumentRead(IArgumentOperation outArgument, ISymbol variable)
     {
+        var arguments = outArgument.Parent switch
+        {
+            IInvocationOperation invocation => invocation.Arguments,
+            IObjectCreationOperation creation => creation.Arguments,
+            _ => ImmutableArray<IArgumentOperation>.Empty,
+        };
+
+        return arguments.Where(argument => !ReferenceEquals(argument, outArgument))
+            .SelectMany(argument => argument.Value.DescendantsAndSelf())
+            .FirstOrDefault(operation => SymbolEqualityComparer.Default.Equals(ReferencedVariable(operation), variable));
+    }
+
+    private static ReferenceRole ReinitializationRole(IOperation reinitialization, int transferPosition, IOperation scope)
+    {
+        // A reinitialization inside a nested callback is DEFERRED: the outer flow cannot count
+        // on it having run (the mirror of scoping transfers to their own body). It still
+        // dominates within its own callback, where source order applies again.
+        if (!ReferenceEquals(EnclosingFunctionBody(reinitialization, scope), scope))
+        {
+            return ReferenceRole.ConditionalReinitialization;
+        }
+
         return IsOnTheTransfersConditionalLevel(reinitialization, transferPosition)
             ? ReferenceRole.FreshValueFromHere
             : ReferenceRole.ConditionalReinitialization;

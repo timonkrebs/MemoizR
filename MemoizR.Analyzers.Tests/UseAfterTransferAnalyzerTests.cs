@@ -305,6 +305,191 @@ public class UseAfterTransferAnalyzerTests
     }
 
     [Fact]
+    public async Task TransferInOneArm_SiblingArmUses_AreUnreachable()
+    {
+        // The arms are mutually exclusive: no execution path runs the else's Add after the
+        // then's transfer, so there is nothing to flag.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public Sending<List<int>>? M(bool move)
+                {
+                    var list = new List<int> { 1 };
+                    Sending<List<int>>? sending = null;
+                    if (move)
+                    {
+                        sending = Sending.Transfer(list);
+                    }
+                    else
+                    {
+                        list.Add(1);
+                    }
+
+                    return sending;
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task ConditionalUse_OnAReachablePath_IsStillFlagged()
+    {
+        // Unlike a sibling arm, a branch the transfer precedes entirely IS reachable after it:
+        // the log==true path runs the Add on the transferred list.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public Sending<List<int>> M(bool log)
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(list);
+                    if (log)
+                    {
+                        list.Add(1);
+                    }
+
+                    return sending;
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+    }
+
+    [Fact]
+    public async Task UsesDominatedByAConditionalReinitialization_AreClean()
+    {
+        // Inside the arm, after the reassignment, every path that reaches the Add sees the
+        // fresh list (reset == false never enters the arm): nothing touches the transferred
+        // value.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public Sending<List<int>> M(bool reset)
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(list);
+                    if (reset)
+                    {
+                        list = new List<int>();
+                        list.Add(1);
+                    }
+
+                    return sending;
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task UsesAfterTheDominatingArm_AreStillFlagged()
+    {
+        // The domination ends with the arm: past the if, the reset == false path still hands
+        // the transferred list to the Add.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public Sending<List<int>> M(bool reset)
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(list);
+                    if (reset)
+                    {
+                        list = new List<int>();
+                        list.Add(1);
+                    }
+
+                    list.Add(2);
+                    return sending;
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+    }
+
+    [Fact]
+    public async Task OutArgument_WithASiblingArgumentReadingTheVariable_IsFlagged()
+    {
+        // The out-assignment happens only when the callee runs, AFTER every argument was
+        // evaluated: the second argument still reads the transferred list.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public Sending<List<int>> M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(list);
+                    Reset(out list, list);
+                    return sending;
+                }
+
+                private static void Reset(out List<int> value, List<int> seed)
+                {
+                    value = new List<int>(seed);
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+    }
+
+    [Fact]
+    public async Task CallbackReassignment_IsDeferred_TheOuterUseIsStillFlagged()
+    {
+        // The callback may never run before the outer Add, so its reassignment cannot end the
+        // outer tracking -- while within the callback's own body it dominates as usual.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public Sending<List<int>> M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(list);
+                    Action later = () =>
+                    {
+                        list = new List<int>();
+                        list.Add(1);
+                    };
+
+                    list.Add(2);
+                    _ = later;
+                    return sending;
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+    }
+
+    [Fact]
     public async Task UsesBeforeTransfer_AndReassignedVariables_AreNotFlagged()
     {
         var diagnostics = await AnalyzeAsync("""

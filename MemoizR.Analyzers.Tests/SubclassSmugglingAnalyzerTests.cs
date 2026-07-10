@@ -165,6 +165,39 @@ public class SubclassSmugglingAnalyzerTests
     }
 
     [Fact]
+    public async Task SendableAbstractBase_IsStillASmuggleSurface()
+    {
+        // [Sendable] lets an abstract base PASS MZR001 (Error), but the attribute is
+        // deliberately not inherited -- the assertion binds the base author, not every
+        // subclass -- so the smuggle hole reopens exactly where the Error rule went quiet.
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            [Sendable]
+            public abstract class Base
+            {
+            }
+
+            public sealed class Child : Base
+            {
+            }
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    f.CreateSignal<Base>(new Child());
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR006", diagnostic.Id);
+        Assert.Contains("Base", diagnostic.GetMessage());
+    }
+
+    [Fact]
     public async Task SealedValueAndGreenListedTypes_AreQuiet()
     {
         var diagnostics = await AnalyzeAsync("""

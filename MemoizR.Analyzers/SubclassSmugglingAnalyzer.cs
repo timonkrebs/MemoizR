@@ -105,16 +105,27 @@ public sealed class SubclassSmugglingAnalyzer : DiagnosticAnalyzer
         }
     }
 
-    // Interfaces, abstract classes and object are MZR001's (Warning) territory already;
-    // green-listed framework types (Uri is not sealed!) are not plausibly subclassed by
-    // accident, and value types cannot be subclassed at all.
+    // Non-sealed concrete classes smuggle via ordinary upcasts. Abstract classes and
+    // interfaces are normally MZR001's (Error) territory -- EXCEPT when a [Sendable] assertion
+    // lets them pass: the attribute is deliberately not inherited (each type must make the
+    // promise for itself), so the assertion binds the declaring author and NOT every subclass
+    // or implementer -- the smuggle hole reopens exactly where the Error rule went quiet.
+    // Green-listed framework types (Uri is not sealed!) are not plausibly subclassed by
+    // accident, object stays MZR001's, and value types cannot be subclassed at all.
     private static bool IsSmuggleSurface(INamedTypeSymbol named)
     {
-        return named.TypeKind == TypeKind.Class
-            && !named.IsSealed
-            && !named.IsAbstract
-            && named.SpecialType != SpecialType.System_Object
-            && !SendableSymbolClassifier.IsFrameworkGreenListed(named);
+        if (named.SpecialType == SpecialType.System_Object || SendableSymbolClassifier.IsFrameworkGreenListed(named))
+        {
+            return false;
+        }
+
+        return named.TypeKind switch
+        {
+            TypeKind.Class when !named.IsAbstract => !named.IsSealed,
+            TypeKind.Class => SendableSymbolClassifier.HasSendableAttribute(named),
+            TypeKind.Interface => SendableSymbolClassifier.HasSendableAttribute(named),
+            _ => false,
+        };
     }
 
     private static bool IsSignalCreation(IMethodSymbol method)
