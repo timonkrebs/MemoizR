@@ -22,7 +22,7 @@ namespace MemoizR.Analyzers;
 public sealed class StaticStateAnalyzer : DiagnosticAnalyzer
 {
     public override ImmutableArray<DiagnosticDescriptor> SupportedDiagnostics { get; } =
-        ImmutableArray.Create(DiagnosticDescriptors.MutableStaticState);
+        ImmutableArray.Create(DiagnosticDescriptors.MutableStaticState, DiagnosticDescriptors.NonSealedValueType);
 
     public override void Initialize(AnalysisContext context)
     {
@@ -78,6 +78,7 @@ public sealed class StaticStateAnalyzer : DiagnosticAnalyzer
 
         if (finding is null)
         {
+            ReportSmuggleSurfacesIn(context, symbol);
             return;
         }
 
@@ -87,6 +88,37 @@ public sealed class StaticStateAnalyzer : DiagnosticAnalyzer
             kind,
             symbol.Name,
             finding));
+    }
+
+    // A static that PASSED the slot rule can still smuggle: a readonly static of a non-sealed
+    // (or [Sendable]-asserted abstract) Sendable type stores whatever subclass got upcast in,
+    // with no creation site where MZR006 would hint and no runtime write validation ever
+    // seeing the slot. Same Info-severity calculus as the creation-site hint.
+    private static void ReportSmuggleSurfacesIn(SymbolAnalysisContext context, ISymbol symbol)
+    {
+        var slotType = symbol switch
+        {
+            IFieldSymbol { IsConst: false } field => field.Type,
+            IPropertySymbol property when HasBackingSlot(property) => property.Type,
+            _ => null,
+        };
+
+        if (slotType is null)
+        {
+            return;
+        }
+
+        foreach (var (named, _) in SubclassSmugglingAnalyzer.NamedTypesIn(slotType, depth: 0))
+        {
+            if (SubclassSmugglingAnalyzer.IsSmuggleSurface(named))
+            {
+                context.ReportDiagnostic(Diagnostic.Create(
+                    DiagnosticDescriptors.NonSealedValueType,
+                    symbol.Locations.FirstOrDefault() ?? Location.None,
+                    SendableSymbolClassifier.Display(named),
+                    " (a static slot publishes unchecked: ValidateWrittenValues covers signal writes only)"));
+            }
+        }
     }
 
     private static string? ClassifyField(IFieldSymbol field, SendableSymbolClassifier classifier)
@@ -117,8 +149,24 @@ public sealed class StaticStateAnalyzer : DiagnosticAnalyzer
             return "a settable slot";
         }
 
+        if (!HasBackingSlot(property))
+        {
+            // A computed getter owns no static slot: a fresh value per call shares nothing,
+            // and a getter handing out OTHER static state is flagged at that state's own
+            // declaration.
+            return null;
+        }
+
         var reason = NotSendableReason(property.Type, classifier);
         return reason is null ? null : $"get-only, but of non-Sendable type {SendableSymbolClassifier.Display(property.Type)} ({reason})";
+    }
+
+    // Only auto-properties own a backing slot; the compiler ties it to the property via
+    // AssociatedSymbol.
+    private static bool HasBackingSlot(IPropertySymbol property)
+    {
+        return property.ContainingType.GetMembers().OfType<IFieldSymbol>()
+            .Any(field => SymbolEqualityComparer.Default.Equals(field.AssociatedSymbol, property));
     }
 
     // MZR001 gives unbound type parameters the benefit of the doubt because the closed

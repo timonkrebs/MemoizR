@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using System.Linq;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.Diagnostics;
 using Microsoft.CodeAnalysis.Operations;
@@ -77,20 +78,26 @@ public sealed class SubclassSmugglingAnalyzer : DiagnosticAnalyzer
             : " (ValidateWrittenValues cannot see it: the runtime check covers the written instance's own type, not contents nested inside it)";
     }
 
-    private static System.Collections.Generic.IEnumerable<(INamedTypeSymbol Named, int Depth)> NamedTypesIn(ITypeSymbol type, int depth)
+    internal static System.Collections.Generic.IEnumerable<(INamedTypeSymbol Named, int Depth)> NamedTypesIn(ITypeSymbol type, int depth)
     {
-        if (type is not INamedTypeSymbol named)
+        return NamedTypesIn(type, depth, new System.Collections.Generic.HashSet<ITypeSymbol>(SymbolEqualityComparer.Default));
+    }
+
+    private static System.Collections.Generic.IEnumerable<(INamedTypeSymbol Named, int Depth)> NamedTypesIn(
+        ITypeSymbol type, int depth, System.Collections.Generic.HashSet<ITypeSymbol> visited)
+    {
+        if (type is not INamedTypeSymbol named || !visited.Add(type))
         {
             yield break;
         }
 
         yield return (named, depth);
 
-        // [Sendable]-attributed types shield their arguments: the thread-safety assertion does
-        // not rest on them -- Sending<T> DELIBERATELY wraps a non-Sendable payload for
-        // transfer, and a user-asserted container accounts for its contents. No depth cap
-        // otherwise: the declared type tree is finite, so the walk terminates on its own, and
-        // a cap would silently drop the hint for deeply nested surfaces.
+        // [Sendable]-attributed types shield their arguments and members: the thread-safety
+        // assertion does not rest on them -- Sending<T> DELIBERATELY wraps a non-Sendable
+        // payload for transfer, and a user-asserted container accounts for its contents. No
+        // depth cap otherwise: the type graph is finite and the visited set breaks cycles
+        // (self-referential records), so the walk terminates on its own.
         if (SendableSymbolClassifier.HasSendableAttribute(named))
         {
             yield break;
@@ -98,7 +105,37 @@ public sealed class SubclassSmugglingAnalyzer : DiagnosticAnalyzer
 
         foreach (var argument in named.TypeArguments)
         {
-            foreach (var nested in NamedTypesIn(argument, depth + 1))
+            foreach (var nested in NamedTypesIn(argument, depth + 1, visited))
+            {
+                yield return nested;
+            }
+        }
+
+        // A sealed Sendable DTO hides the same hole in a MEMBER type (sealed record
+        // Box(OpenBase Value)): the classifier trusted OpenBase's declared structure, so the
+        // walk must visit the member types it trusted. Source-declared types only -- metadata
+        // members are import-limited, and framework internals are not the user's smuggle
+        // surface (green-listed containers already expose their payload via type arguments).
+        if (!named.Locations.Any(location => location.IsInSource))
+        {
+            yield break;
+        }
+
+        foreach (var member in named.GetMembers())
+        {
+            var memberType = member switch
+            {
+                IFieldSymbol { IsStatic: false, IsImplicitlyDeclared: false } field => field.Type,
+                IPropertySymbol { IsStatic: false, GetMethod: not null } property => property.Type,
+                _ => null,
+            };
+
+            if (memberType is null)
+            {
+                continue;
+            }
+
+            foreach (var nested in NamedTypesIn(memberType, depth + 1, visited))
             {
                 yield return nested;
             }
@@ -112,7 +149,7 @@ public sealed class SubclassSmugglingAnalyzer : DiagnosticAnalyzer
     // or implementer -- the smuggle hole reopens exactly where the Error rule went quiet.
     // Green-listed framework types (Uri is not sealed!) are not plausibly subclassed by
     // accident, object stays MZR001's, and value types cannot be subclassed at all.
-    private static bool IsSmuggleSurface(INamedTypeSymbol named)
+    internal static bool IsSmuggleSurface(INamedTypeSymbol named)
     {
         if (named.SpecialType == SpecialType.System_Object || SendableSymbolClassifier.IsFrameworkGreenListed(named))
         {

@@ -490,6 +490,82 @@ public class UseAfterTransferAnalyzerTests
     }
 
     [Fact]
+    public async Task InlineAssignmentTransfer_IsTracked()
+    {
+        // Transfer(list = new(...)): after the statement the variable aliases the transferred
+        // value, so the later Add is a use-after-transfer like any other.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public Sending<List<int>> M()
+                {
+                    List<int> list;
+                    var sending = Sending.Transfer(list = new List<int> { 1 });
+                    list.Add(1);
+                    return sending;
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task DeconstructionTarget_Reinitializes_AndEndsTracking()
+    {
+        // A deconstruction target is definitely assigned like a simple-assignment target: the
+        // later use touches the fresh value.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public Sending<List<int>> M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(list);
+                    (list, _) = (new List<int>(), 0);
+                    list.Add(1);
+                    return sending;
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task DeconstructionRhsReadingTheTransferredValue_IsFlagged()
+    {
+        // Same caveat as `list = Clone(list)`: the deconstruction's RHS reads the transferred
+        // value to build the replacement -- exactly a use after transfer.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public Sending<List<int>> M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(list);
+                    (list, _) = (new List<int>(list), 0);
+                    return sending;
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+    }
+
+    [Fact]
     public async Task UsesBeforeTransfer_AndReassignedVariables_AreNotFlagged()
     {
         var diagnostics = await AnalyzeAsync("""

@@ -57,13 +57,20 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                 _ => (false, null),
             };
 
-            if (!isTransfer || ReferencedVariable(argument) is not { } variable)
+            if (!isTransfer || ReferencedVariable(TransferTarget(argument)) is not { } variable)
             {
                 continue;
             }
 
             yield return (variable, operation.Syntax.Span.End, EnclosingFunctionBody(operation, block));
         }
+    }
+
+    // Transfer(list = new(...)): after the statement the variable ALIASES the transferred
+    // value -- the assignment's target is what the sender keeps holding.
+    private static IOperation? TransferTarget(IOperation? argument)
+    {
+        return argument is ISimpleAssignmentOperation assignment ? assignment.Target : argument;
     }
 
     // A transfer inside a nested callback only concerns the callback's own body: the outer
@@ -208,7 +215,32 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             return rhsUse is not null ? ReferenceRole.Use : ReinitializationRole(outArgument, transferPosition, scope);
         }
 
+        // (list, _) = (...): a deconstruction target is definitely assigned like a
+        // simple-assignment target, with the same RHS-read caveat.
+        if (DeconstructionOf(reference) is { } deconstruction)
+        {
+            rhsUse = deconstruction.Value.DescendantsAndSelf()
+                .FirstOrDefault(operation => SymbolEqualityComparer.Default.Equals(ReferencedVariable(operation), variable));
+            return rhsUse is not null ? ReferenceRole.Use : ReinitializationRole(deconstruction, transferPosition, scope);
+        }
+
         return ReferenceRole.Use;
+    }
+
+    // The reference must be a tuple ELEMENT on the deconstruction's target side; a read nested
+    // inside an element expression (arr[list.Count]) is an ordinary use.
+    private static IDeconstructionAssignmentOperation? DeconstructionOf(IOperation reference)
+    {
+        var current = reference;
+        while (current.Parent is ITupleOperation or IConversionOperation)
+        {
+            current = current.Parent;
+        }
+
+        return current.Parent is IDeconstructionAssignmentOperation deconstruction
+            && ReferenceEquals(deconstruction.Target, current)
+            ? deconstruction
+            : null;
     }
 
     private static IOperation? SiblingArgumentRead(IArgumentOperation outArgument, ISymbol variable)

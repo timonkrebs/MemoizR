@@ -216,6 +216,59 @@ public class StaticStateAnalyzerTests
     }
 
     [Fact]
+    public async Task ComputedStaticGetters_AreNotState()
+    {
+        // An expression-bodied getter owns no static slot: each call returns a fresh value,
+        // and a getter handing out OTHER static state is flagged at that state's declaration.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public static List<int> NewList => new();
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    _ = NewList;
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task ReadonlyStaticOfANonSealedSendableType_GetsTheSmugglingHint()
+    {
+        // The declared type passes the slot rule, but a mutable subclass behind the upcast is
+        // process-wide state with no creation site where MZR006 would otherwise hint and no
+        // runtime write validation ever seeing the slot: the Info hint fires at the static.
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public record OpenPerson(string Name);
+
+            public class C
+            {
+                private static readonly OpenPerson Cache = new("a");
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    _ = Cache;
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR006", diagnostic.Id);
+        Assert.Contains("OpenPerson", diagnostic.GetMessage());
+        Assert.Contains("static slot publishes unchecked", diagnostic.GetMessage());
+    }
+
+    [Fact]
     public async Task FilesWithoutMemoizRUsing_AreOutOfScope()
     {
         var diagnostics = await AnalyzeAsync("""

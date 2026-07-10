@@ -169,9 +169,14 @@ isolation domain. The analog: in files that use MemoizR (a `using` directive for
 namespaces — the rule's mandate boundary), a static must be an **immutable slot of a Sendable
 type**. Flagged: non-readonly static fields, settable static properties, static events (mutable
 slots), and readonly/get-only statics whose TYPE is not Sendable (one shared mutable object
-graph). Not flagged: consts, Sendable readonly statics — and MemoizR's own nodes, factories and
-executors, which are `[Sendable]` by design, so the rule's own fix suggestion ("lift it into a
-Signal") passes the rule. A static whose type contains an unbound type parameter — `T` itself,
+graph). Not flagged: consts, computed static getters (an expression-bodied getter owns no slot
+— fresh values share nothing, and a getter handing out other static state is flagged at that
+state's own declaration), Sendable readonly statics — and MemoizR's own nodes, factories and
+executors, which are `[Sendable]` by design (and all sealed), so the rule's own fix suggestion
+("lift it into a Signal") passes the rule. A static slot that PASSES the rule but whose type
+contains a smuggle surface (`static readonly OpenBase Cache` can store a mutable subclass, with
+no creation site where MZR006 would hint and no runtime write validation ever seeing the slot)
+gets the MZR006 Info hint at the static, with the same noise calculus as creation sites. A static whose type contains an unbound type parameter — `T` itself,
 or nested as in `ImmutableArray<T>` — is flagged as unverifiable: MZR001's benefit of the doubt
 relies on the closed instantiation being checked at its own creation site, and a static has no
 such site — every closed `C<T>` mints a fresh process-wide slot no rule ever sees again.
@@ -214,10 +219,13 @@ and since `ValidateWrittenValues` sees only the written instance's OWN runtime t
 for a nested surface says the runtime guard cannot reach it instead of suggesting the option.
 Creations on a factory that visibly opts out (`DisableSendableChecks`, see MZR001) get no hint
 at all: smuggling is a hole in checks that factory disabled. `[Sendable]`-attributed types
-shield their type arguments from the walk — `Sending<T>` deliberately wraps a non-Sendable
-payload for transfer, so hinting about the payload would misread the escape hatch — and the
-walk has no depth cap (the declared type tree is finite; a cap would silently drop the hint
-exactly for the deep compositions MZR001 accepts).
+shield their type arguments and members from the walk — `Sending<T>` deliberately wraps a
+non-Sendable payload for transfer, so hinting about the payload would misread the escape hatch
+— and the walk has no depth cap (the type graph is finite and a visited set breaks
+self-referential cycles; a cap would silently drop the hint exactly for the deep compositions
+MZR001 accepts). Besides generic type arguments, the walk visits the MEMBER types of
+source-declared types: a sealed Sendable DTO (`sealed record Box(OpenBase Value)`) hides the
+same hole one member deep, where `ValidateWrittenValues` sees only the runtime type `Box`.
 
 ### Testing strategy
 

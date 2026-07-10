@@ -165,6 +165,35 @@ public class SubclassSmugglingAnalyzerTests
     }
 
     [Fact]
+    public async Task MemberTypes_OfSealedSendableDtos_AreSmuggleSurfaces()
+    {
+        // Box is sealed and structurally Sendable, but its member type carries the hole:
+        // new Box(new MutableChild()) passes MZR001, and ValidateWrittenValues only sees the
+        // runtime type Box -- the member walk must surface OpenPerson with the nested wording.
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public record OpenPerson(string Name);
+
+            public sealed record Box(OpenPerson Value);
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    f.CreateSignal(new Box(new OpenPerson("a")));
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR006", diagnostic.Id);
+        Assert.Contains("OpenPerson", diagnostic.GetMessage());
+        Assert.DoesNotContain("enable MemoFactoryOptions.ValidateWrittenValues", diagnostic.GetMessage());
+    }
+
+    [Fact]
     public async Task SendableAbstractBase_IsStillASmuggleSurface()
     {
         // [Sendable] lets an abstract base PASS MZR001 (Error), but the attribute is
