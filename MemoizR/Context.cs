@@ -120,13 +120,22 @@ public class Context
     * loser reading after the winner already published and closed the bucket). */
     private readonly Dictionary<IMemoHandlR, StampCapture> stampCaptures = new();
 
-    internal Context(int idRangeStart = 1, int idRangeEnd = int.MaxValue)
+    // Whether this context captures causality stamps at all (issue #39). Context-wide, not
+    // per-factory: captures are keyed on the context and signals stamp with its epoch, so a
+    // keyed context shared by factories with conflicting settings would be incoherent --
+    // MemoFactory rejects the rebind. When disabled, every stamp entry point below no-ops and
+    // publications carry StampEvidence.UnverifiableEvidence: the honest "no claim can be made"
+    // (None would falsely assert "depends on no tracked signals" to a consistency check).
+    internal bool StampsEnabled { get; }
+
+    internal Context(int idRangeStart = 1, int idRangeEnd = int.MaxValue, bool stampsEnabled = true)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(idRangeStart);
         ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(idRangeEnd, idRangeStart);
         IdRangeStart = idRangeStart;
         IdRangeEnd = idRangeEnd;
         nextNodeId = idRangeStart - 1;
+        StampsEnabled = stampsEnabled;
     }
 
     internal int NextNodeId()
@@ -143,6 +152,11 @@ public class Context
 
     internal void BeginStampCapture(IMemoHandlR node, bool branchAware = false)
     {
+        if (!StampsEnabled)
+        {
+            return;
+        }
+
         lock (Lock)
         {
             stampCaptures[node] = new(branchAware);
@@ -155,7 +169,7 @@ public class Context
     // faulted source would hide a real control-flow dependency).
     internal void MarkStampCaptureUnverifiable(IMemoHandlR? evaluatingNode)
     {
-        if (evaluatingNode == null)
+        if (evaluatingNode == null || !StampsEnabled)
         {
             return;
         }
@@ -172,7 +186,7 @@ public class Context
 
     internal void RecordSourceStamp(IMemoHandlR? evaluatingNode, int sourceId, CausalityStamp stamp)
     {
-        if (evaluatingNode == null)
+        if (evaluatingNode == null || !StampsEnabled)
         {
             return;
         }
@@ -216,6 +230,11 @@ public class Context
         {
             CheckDependenciesCore(scope, source);
             var pair = source.ValueAndEvidence;
+            if (!StampsEnabled)
+            {
+                return pair;
+            }
+
             if (pair.Evidence.Unverifiable)
             {
                 if (scope.CurrentReaction is { } reaction && stampCaptures.TryGetValue(reaction, out var capture))
@@ -235,6 +254,11 @@ public class Context
     // paths call this too, discarding the result -- the node then keeps its previous stamp.
     internal StampCapture TakeStampCapture(IMemoHandlR node)
     {
+        if (!StampsEnabled)
+        {
+            return StampCapture.Empty;
+        }
+
         lock (Lock)
         {
             return stampCaptures.Remove(node, out var capture) ? capture : StampCapture.Empty;
@@ -574,20 +598,27 @@ internal sealed class StampCapture
     // Returned by TakeStampCapture when no capture is open; never registered, so never mutated.
     internal static readonly StampCapture Empty = new(false);
 
+    // Handed out by Seal for captures that recorded nothing; FromCapture never wraps a
+    // zero-entry result (it publishes None/Unverifiable instead), so this is never mutated.
+    private static readonly Dictionary<int, CausalityStamp> NoStamps = new();
+
     private readonly bool branchAware;
-    private readonly Dictionary<(int Source, int Branch), CausalityStamp> entries = new();
-    private readonly HashSet<int> poisonedBranches = new();
+    // Allocated on first use: a capture is opened for EVERY evaluation, but evaluations with no
+    // tracked reads (and unpoisoned ones -- almost all) should not pay for the collections.
+    private Dictionary<(int Source, int Branch), CausalityStamp>? entries;
+    private HashSet<int>? poisonedBranches;
 
     public StampCapture(bool branchAware)
     {
         this.branchAware = branchAware;
     }
 
-    public void Poison(int branch) => poisonedBranches.Add(branchAware ? branch : 0);
+    public void Poison(int branch) => (poisonedBranches ??= new()).Add(branchAware ? branch : 0);
 
     public void Record(int sourceId, CausalityStamp stamp, int branch)
     {
         var key = (sourceId, branchAware ? branch : 0);
+        entries ??= new();
         if (entries.TryGetValue(key, out var existing))
         {
             if (!existing.Equals(stamp))
@@ -607,12 +638,16 @@ internal sealed class StampCapture
     // one source is the same mixed-publication situation as a poisoned re-read.
     public (bool Poisoned, Dictionary<int, CausalityStamp> Stamps) Seal(int winningBranch)
     {
-        var stamps = new Dictionary<int, CausalityStamp>();
-        if (poisonedBranches.Contains(0) || poisonedBranches.Contains(winningBranch))
+        if (poisonedBranches != null && (poisonedBranches.Contains(0) || poisonedBranches.Contains(winningBranch)))
         {
-            return (true, stamps);
+            return (true, NoStamps);
+        }
+        if (entries == null)
+        {
+            return (false, NoStamps);
         }
 
+        var stamps = new Dictionary<int, CausalityStamp>();
         foreach (var ((source, branch), stamp) in entries)
         {
             if (branch != 0 && branch != winningBranch)

@@ -11,7 +11,14 @@ public sealed class Signal<T> : MemoHandlR<T>, IStampedGetR<T?>
 
     internal Signal(T value, Context context) : base(context)
     {
-        SetValueAndStamp(value, CausalityStamp.ForSignal(Id, 0, context.Epoch));
+        if (context.StampsEnabled)
+        {
+            SetValueAndStamp(value, CausalityStamp.ForSignal(Id, 0, context.Epoch));
+        }
+        else
+        {
+            SetValueUnstamped(value);
+        }
     }
 
     public async Task Set(T value)
@@ -44,8 +51,16 @@ public sealed class Signal<T> : MemoHandlR<T>, IStampedGetR<T?>
                     }
 
                     // Publish the bumped trigger atomically with the value: the stamp rides in
-                    // the same box swap, so readers can never pair them inconsistently.
-                    SetValueAndStamp(value, CausalityStamp.ForSignal(Id, ++trigger, Context.Epoch));
+                    // the same box swap, so readers can never pair them inconsistently. A
+                    // stamps-disabled context builds no stamp at all.
+                    if (Context.StampsEnabled)
+                    {
+                        SetValueAndStamp(value, CausalityStamp.ForSignal(Id, ++trigger, Context.Epoch));
+                    }
+                    else
+                    {
+                        SetValueUnstamped(value);
+                    }
                 }
 
                 await PropagateStaleToObserversAsync(CacheState.CacheDirty);
