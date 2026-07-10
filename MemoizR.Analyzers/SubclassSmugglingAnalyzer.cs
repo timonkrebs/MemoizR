@@ -79,12 +79,23 @@ public sealed class SubclassSmugglingAnalyzer : DiagnosticAnalyzer
 
     private static System.Collections.Generic.IEnumerable<(INamedTypeSymbol Named, int Depth)> NamedTypesIn(ITypeSymbol type, int depth)
     {
-        if (depth > 4 || type is not INamedTypeSymbol named)
+        if (type is not INamedTypeSymbol named)
         {
             yield break;
         }
 
         yield return (named, depth);
+
+        // [Sendable]-attributed types shield their arguments: the thread-safety assertion does
+        // not rest on them -- Sending<T> DELIBERATELY wraps a non-Sendable payload for
+        // transfer, and a user-asserted container accounts for its contents. No depth cap
+        // otherwise: the declared type tree is finite, so the walk terminates on its own, and
+        // a cap would silently drop the hint for deeply nested surfaces.
+        if (SendableSymbolClassifier.HasSendableAttribute(named))
+        {
+            yield break;
+        }
+
         foreach (var argument in named.TypeArguments)
         {
             foreach (var nested in NamedTypesIn(argument, depth + 1))

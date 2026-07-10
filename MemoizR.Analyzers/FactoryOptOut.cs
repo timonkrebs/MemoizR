@@ -25,17 +25,7 @@ internal static class FactoryOptOut
 {
     public static bool DisablesSendableChecks(IInvocationOperation invocation)
     {
-        var receiver = Unwrap(ReceiverOf(invocation));
-
-        // Fluent configuration (AddExecutor/AddTimeProvider/...) mutates and returns the SAME
-        // factory, so the opt-out evidence sits one hop (or several) up the chain: follow
-        // library-declared fluent calls to their own receiver.
-        while (receiver is IInvocationOperation chained && ReturnsItsOwnFluentReceiver(chained.TargetMethod))
-        {
-            receiver = Unwrap(ReceiverOf(chained));
-        }
-
-        return receiver switch
+        return PeelFluentCalls(ReceiverOf(invocation)) switch
         {
             IObjectCreationOperation creation => OptsOut(creation),
             ILocalReferenceOperation local => SymbolOptsOut(local.Local, invocation),
@@ -45,6 +35,22 @@ internal static class FactoryOptOut
                 => ContainingTypeFullyInSight(property.Property, invocation) && SymbolOptsOut(property.Property, invocation),
             _ => false,
         };
+    }
+
+    // Fluent configuration (AddExecutor/AddTimeProvider/...) mutates and returns the SAME
+    // factory, so the opt-out evidence sits one hop (or several) up the chain: follow
+    // library-declared fluent calls to their own receiver. Applied to direct receivers AND to
+    // initializer values (`var lax = new MemoFactory(…).AddExecutor(…);` stores the fluent
+    // call's result, which IS the factory the initializer created).
+    private static IOperation? PeelFluentCalls(IOperation? operation)
+    {
+        var current = Unwrap(operation);
+        while (current is IInvocationOperation chained && ReturnsItsOwnFluentReceiver(chained.TargetMethod))
+        {
+            current = Unwrap(ReceiverOf(chained));
+        }
+
+        return current;
     }
 
     // Instance creations carry the factory in Instance; the structured-concurrency creations
@@ -65,7 +71,7 @@ internal static class FactoryOptOut
     // MemoFactory-returning) are the belt; a source-declared lookalike is not followed either.
     private static bool ReturnsItsOwnFluentReceiver(IMethodSymbol method)
     {
-        return method.Name is "AddExecutor" or "AddSynchronizationContext" or "AddTimeProvider"
+        return method.Name is "AddExecutor" or "AddSynchronizationContext" or "AddTimeProvider" or "AddWpfDispatcher"
             && method.Arity == 0
             && method.ReturnType is INamedTypeSymbol { Name: "MemoFactory" } factoryType
             && factoryType.ContainingNamespace?.ToDisplayString() == "MemoizR"
@@ -114,7 +120,7 @@ internal static class FactoryOptOut
                 _ => null,
             };
 
-            if (initializer is not null && Unwrap(model.GetOperation(initializer)) is IObjectCreationOperation creation)
+            if (initializer is not null && PeelFluentCalls(model.GetOperation(initializer)) is IObjectCreationOperation creation)
             {
                 return creation;
             }

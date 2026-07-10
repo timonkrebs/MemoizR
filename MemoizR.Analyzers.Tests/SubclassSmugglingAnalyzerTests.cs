@@ -68,6 +68,55 @@ public class SubclassSmugglingAnalyzerTests
     }
 
     [Fact]
+    public async Task SendingTransfers_AreNotSmugglingSurfaces()
+    {
+        // Sending<T> DELIBERATELY wraps a non-Sendable payload for transfer (the SE-0430
+        // analog); hinting about the payload's sealedness would misread the escape hatch as
+        // shared Sendable state.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    f.CreateSignal(Sending.Transfer(new List<int>()));
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task SmuggleSurfaces_BuriedArbitrarilyDeep_AreStillHinted()
+    {
+        // No depth cliff: the declared type tree is finite, so the walk terminates on its own
+        // -- a cap would silently drop the hint exactly for the compositions MZR001 accepts.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Immutable;
+            using MemoizR;
+
+            public record OpenPerson(string Name);
+
+            public class C
+            {
+                public void M(ImmutableArray<ImmutableArray<ImmutableArray<ImmutableArray<ImmutableArray<OpenPerson>>>>> value)
+                {
+                    var f = new MemoFactory();
+                    f.CreateSignal(value);
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR006", diagnostic.Id);
+        Assert.Contains("OpenPerson", diagnostic.GetMessage());
+    }
+
+    [Fact]
     public async Task DisabledChecksFactory_GetsNoSmugglingHint()
     {
         // Smuggling is a hole in the Sendable checks; a factory that visibly opted out of them

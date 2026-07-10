@@ -648,6 +648,31 @@ public class SendableTypeArgumentAnalyzerTests
     }
 
     [Fact]
+    public async Task FluentlyConfiguredFactory_StoredInALocal_KeepsTheOptOut()
+    {
+        // The initializer's value is the fluent call's result -- which IS the factory the
+        // initializer created (AddTimeProvider returns its receiver) -- so the peeling applies
+        // to initializers exactly like direct receivers.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var lax = new MemoFactory(options: MemoFactoryOptions.DisableSendableChecks)
+                        .AddTimeProvider(TimeProvider.System);
+                    lax.CreateSignal(new List<int>());
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
     public async Task GenericPassthroughsReturningAFactory_AreNotFollowed()
     {
         // Untrack<T> returns its DELEGATE's result -- here a strict factory -- so following it

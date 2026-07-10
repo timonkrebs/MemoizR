@@ -41,9 +41,11 @@ need a project-wide suppression on top of the documented option. Receiver resolu
 best-effort and conservative in the safe direction (`FactoryOptOut`), demanding *definite*
 evidence on three axes: the factory's construction must be in sight — an inline
 `new MemoFactory(options: …DisableSendableChecks)` receiver (followed through the library's
-fluent configuration chain: `AddExecutor`/`AddTimeProvider` mutate and return the same
-factory), or a local / readonly field / get-only property whose initializer in the *same file*
-is one (analyzers may not call `Compilation.GetSemanticModel`, which keeps cross-file
+fluent configuration chain — the named whitelist `AddExecutor`/`AddSynchronizationContext`/
+`AddTimeProvider`/`AddWpfDispatcher` mutates and returns the same factory, applied to direct
+receivers and initializer values alike; generic passthroughs like `Untrack<T>` return their
+delegate's result and are not followed), or a local / readonly field / get-only property whose
+initializer in the *same file* is one (analyzers may not call `Compilation.GetSemanticModel`, which keeps cross-file
 initializers out of reach; settable slots could be repointed from anywhere, and a member of a
 partial type split across files is not trusted either, since another file's constructor can
 overwrite the visible initializer) — the options argument must *fold to a constant*
@@ -202,7 +204,11 @@ are unfolded: the container passes the green-lists, the element type is the smug
 and since `ValidateWrittenValues` sees only the written instance's OWN runtime type, the hint
 for a nested surface says the runtime guard cannot reach it instead of suggesting the option.
 Creations on a factory that visibly opts out (`DisableSendableChecks`, see MZR001) get no hint
-at all: smuggling is a hole in checks that factory disabled.
+at all: smuggling is a hole in checks that factory disabled. `[Sendable]`-attributed types
+shield their type arguments from the walk — `Sending<T>` deliberately wraps a non-Sendable
+payload for transfer, so hinting about the payload would misread the escape hatch — and the
+walk has no depth cap (the declared type tree is finite; a cap would silently drop the hint
+exactly for the deep compositions MZR001 accepts).
 
 ### Testing strategy
 
