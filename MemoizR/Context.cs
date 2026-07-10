@@ -200,22 +200,33 @@ public class Context
         }
     }
 
-    // The tracked leaf-signal read, fused: dependency registration, the single box read, and the
-    // stamp record run under ONE Lock acquisition -- the register and the record each took their
-    // own before, doubling context-wide lock traffic on the hottest tracked path. The
-    // register-then-read order is preserved: the eager observer subscription must be in place
-    // before the value is read, or a Set landing in between would notify nobody. The scope is the
-    // caller's already-resolved (and strongly rooted) instance, so no registry probe here.
-    internal (T Value, StampEvidence Evidence) TrackedSignalRead<T>(MemoHandlR<T> source, ReactionScope scope)
+    // The tracked read of an up-to-date node, fused: dependency registration, the single box
+    // read, and the stamp record run under ONE Lock acquisition -- the register and the record
+    // each took their own before, doubling context-wide lock traffic on the hottest tracked
+    // path. The register-then-read order is preserved: the eager observer subscription must be
+    // in place before the value is read, or a Set landing in between would notify nobody. The
+    // scope is the caller's already-resolved (and strongly rooted) instance, so no registry
+    // probe here. A leaf signal's own evidence is never unverifiable (ForOwnStamp); a clean
+    // memo's can be (contagion from a poisoned source), and unverifiability must poison the
+    // caller's capture instead of contributing a stamp (see MemoBase.ReadWithEvidence).
+    internal (T Value, StampEvidence Evidence) TrackedRead<T>(MemoHandlR<T> source, ReactionScope scope)
     {
         var branch = RaceBranchFlow.Current.Value;
         lock (Lock)
         {
             CheckDependenciesCore(scope, source);
             var pair = source.ValueAndEvidence;
-            // A signal's own evidence is never unverifiable (ForOwnStamp), so this records
-            // unconditionally.
-            RecordSourceStampCore(scope.CurrentReaction, source.Id, pair.Evidence.Stamp, branch);
+            if (pair.Evidence.Unverifiable)
+            {
+                if (scope.CurrentReaction is { } reaction && stampCaptures.TryGetValue(reaction, out var capture))
+                {
+                    capture.Poison(branch);
+                }
+            }
+            else
+            {
+                RecordSourceStampCore(scope.CurrentReaction, source.Id, pair.Evidence.Stamp, branch);
+            }
             return pair;
         }
     }

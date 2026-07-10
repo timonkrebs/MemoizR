@@ -384,8 +384,8 @@ public abstract class MemoHandlR<T> : SignalHandlR
         using (await scope.ContextLock.UpgradeableLockAsync())
         {
             // Registration, box read and stamp record fused under one Context.Lock acquisition
-            // (see Context.TrackedSignalRead).
-            pair = Context.TrackedSignalRead(this, scope);
+            // (see Context.TrackedRead).
+            pair = Context.TrackedRead(this, scope);
         }
         GC.KeepAlive(scope); // strong root: the lock identity must outlive the tracked read
         return pair;

@@ -87,6 +87,28 @@ public abstract class MemoBase<T> : MemoHandlR<T>, IMemoizR, IStampedGetR<T>
             return ValueAndEvidence;
         }
 
+        // A clean TRACKED read takes the leaf-signal path: no node mutex (ADR 0002's rationale
+        // -- there is no recompute for it to guard), so concurrent capturing readers of a
+        // shared clean memo do not serialize on its mutex. The state is re-checked under the
+        // flow's ContextLock; a Stale landing after that check is the same race as one landing
+        // right after a mutex-held read returned: the eager subscription inside TrackedRead
+        // (before the box read, under Context.Lock) has already wired the caller to this node,
+        // so the invalidation cascade bumps the caller's generation and its commit is refused
+        // -- the older pair can never be cached over the write. Any non-clean state falls
+        // through to the serialized path below.
+        if (State == CacheState.CacheClean)
+        {
+            using (await scope.ContextLock.UpgradeableLockAsync())
+            {
+                if (State == CacheState.CacheClean)
+                {
+                    var pair = Context.TrackedRead(this, scope);
+                    GC.KeepAlive(scope);
+                    return pair;
+                }
+            }
+        }
+
         // Only one thread should evaluate the graph at a time. otherwise the context could get messed up.
         // This should lead to perf gains because memoization can be utilized more efficiently.
         try
