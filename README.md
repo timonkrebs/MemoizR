@@ -192,6 +192,11 @@ graph's stamps are never confused with their pre-restart incarnation), and docum
 A runnable two-peer bridge — stale/pull protocol, glitch barrier, late-delivery dropping and
 reset detection — lives in [samples/DistributedGraphSample](samples/DistributedGraphSample).
 
+Purely-local graphs that will never be synchronized can opt out of the stamp bookkeeping
+entirely with `new MemoFactory(options: MemoFactoryOptions.DisableCausalityStamps)` — same
+semantics, honest no-claim evidence, and the recompute paths measure below the pre-stamps
+baseline (reproducible via [benchmarks/MemoizR.Benchmarks](benchmarks/MemoizR.Benchmarks)).
+
 ### Data-race safety (strict mode)
 
 MemoizR publishes value *references* tear-free across concurrent flows, but only an immutable

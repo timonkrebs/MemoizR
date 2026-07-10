@@ -223,6 +223,26 @@ reads — and the node stays dirty, so the next `Get` replaces both.
   `Epoch`, `Triggers`, `TryGetTrigger`, `Join`, `IsConsistentWith`, `IsDominatedBy`, value
   equality, `Serialize`/`Deserialize`. Stamp *creation* stays internal.
 
+## 5b. Opting out: `MemoFactoryOptions.DisableCausalityStamps`
+
+Stamps are on by default and cost nothing on the read fast paths (clean `Get` is
+allocation-free either way), a small constant on `Set`, and ~2 KB of allocation per recompute
+(the capture bucket, the seal, the joined evidence). A purely-local graph that will never be
+bridged can turn all of it off: `new MemoFactory(options:
+MemoFactoryOptions.DisableCausalityStamps)`. On a disabled context, signals stop bumping
+triggers, evaluations never open a capture, `GetWithStamp` returns the empty stamp, and
+`GetWithEvidence` returns evidence flagged unverifiable — "no claim can be made" — so a
+consistency check can never mistake the missing capture for a verified value. Values,
+invalidation, glitch freedom and every other semantic are unchanged (they come from the
+evaluation protocol, not from stamps); with the flag the recompute paths measure *below* the
+pre-CTC baseline.
+
+The flag binds to the **context**, not the factory: factories sharing a keyed context must
+agree on it (a mismatch throws at construction), because a context where only some nodes record
+evidence would publish stamps silently omitting real dependencies — over-claiming, the one
+thing §2 forbids. And a disabled context must not be exported to peers: its advertisements
+would carry no ordering evidence at all.
+
 ## 6. The encoding (phase 2): a canonical event tree
 
 `CausalityStamp` stores the id→trigger map as an ITC-style **event tree** over the id space

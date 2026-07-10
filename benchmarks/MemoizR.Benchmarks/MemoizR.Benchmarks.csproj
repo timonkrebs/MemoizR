@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <!-- Workstation GC on purpose: the numbers compare the library's allocation and latency,
+         not GC throughput modes. -->
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+    <!-- Benchmark a DIFFERENT checkout of MemoizR with the SAME harness (e.g. a baseline
+         commit in a second worktree) by overriding the path:
+           dotnet run -c Release -p:MemoizRPath=/path/to/other/checkout -->
+    <MemoizRPath Condition="'$(MemoizRPath)' == ''">$(MSBuildThisFileDirectory)../..</MemoizRPath>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="$(MemoizRPath)/MemoizR/MemoizR.csproj" />
+  </ItemGroup>
+</Project>

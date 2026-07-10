@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 ## [Unreleased]
 
 ### Added
+- `MemoFactoryOptions.DisableCausalityStamps`: opt a context out of causality-stamp tracking
+  entirely (issue #39). Signals stop bumping triggers, evaluations never open a capture, and
+  every node publishes the honest no-claim (unverifiable) evidence; values and glitch freedom
+  are unchanged, and the recompute paths measure below the pre-stamps baseline. The flag binds
+  to the context: factories sharing a keyed context must agree on it (a mismatch throws), and
+  a disabled context cannot be exported to peers.
+- `benchmarks/MemoizR.Benchmarks`: the micro-harness behind the overhead numbers (hot-path
+  ns/op and B/op for sets, clean reads and recomputes), runnable against any checkout via
+  `-p:MemoizRPath=` for before/after comparisons.
 - First data-race safety layer for the user boundary (issue #36, see ADR 0003): a `[Sendable]`
   attribute, structural verification via `SendableChecker`, and an opt-in
   `MemoFactoryOptions.StrictSendableChecks` factory mode that rejects, at node creation,
