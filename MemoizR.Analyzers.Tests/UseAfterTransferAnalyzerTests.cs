@@ -186,6 +186,125 @@ public class UseAfterTransferAnalyzerTests
     }
 
     [Fact]
+    public async Task OutArgument_Reinitializes_AndEndsTracking()
+    {
+        // An out argument is definite assignment the callee cannot read: like `list = ...`, it
+        // gives the variable a fresh value, so the later use is not a use-after-transfer.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public Sending<List<int>> M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(list);
+                    Reset(out list);
+                    list.Add(1);
+                    return sending;
+                }
+
+                private static void Reset(out List<int> value)
+                {
+                    value = new List<int>();
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task ConditionalOutArgument_DoesNotSilenceTheLaterUse()
+    {
+        // Same sibling-arm rule as a conditional `list = ...`: on the false path the out-call
+        // never ran and the later use still touches the transferred list.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public Sending<List<int>> M(bool reset)
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(list);
+                    if (reset)
+                    {
+                        Reset(out list);
+                    }
+
+                    list.Add(1);
+                    return sending;
+                }
+
+                private static void Reset(out List<int> value)
+                {
+                    value = new List<int>();
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+    }
+
+    [Fact]
+    public async Task TransferInsideADeferredCallback_DoesNotPoisonTheOuterFlow()
+    {
+        // The callback may run later or never: outer statements are not sequenced after its
+        // transfer, so the outer Add is not a use-after-transfer.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public Action M()
+                {
+                    var list = new List<int> { 1 };
+                    Action later = () => { _ = Sending.Transfer(list); };
+                    list.Add(1);
+                    return later;
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task UseAfterTransfer_InsideTheSameCallback_IsStillFlagged()
+    {
+        // Within one callback body source order does imply execution order: the callback's own
+        // later use of its own transfer is the ordinary MZR005 case.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public Action M()
+                {
+                    var list = new List<int> { 1 };
+                    return () =>
+                    {
+                        var sending = Sending.Transfer(list);
+                        list.Add(1);
+                        _ = sending;
+                    };
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+    }
+
+    [Fact]
     public async Task UsesBeforeTransfer_AndReassignedVariables_AreNotFlagged()
     {
         var diagnostics = await AnalyzeAsync("""

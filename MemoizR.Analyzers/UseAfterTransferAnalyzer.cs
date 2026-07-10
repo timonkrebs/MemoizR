@@ -11,7 +11,9 @@ namespace MemoizR.Analyzers;
 // mutating it on another flow the moment the wrapper escapes, so the sender must stop using it.
 // The check is method-local and source-ordered: every reference to the transferred local/
 // parameter AFTER the transfer is flagged, until a reassignment gives the variable a fresh
-// value. Deliberately a heuristic (source order approximates execution order; loop back-edges
+// value. A transfer inside a nested callback is scoped to that callback's own body -- the
+// outer flow is not sequenced after code that may run later or never.
+// Deliberately a heuristic (source order approximates execution order; loop back-edges
 // and aliases can evade it) -- Swift proves this with region-based isolation in the type
 // system, which an analyzer cannot reproduce; the single-consumption check in Sending<T> is the
 // runtime backstop on the RECEIVER side.
@@ -32,16 +34,17 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     {
         foreach (var block in context.OperationBlocks)
         {
-            foreach (var (variable, transferPosition) in Transfers(block))
+            foreach (var (variable, transferPosition, scope) in Transfers(block))
             {
-                ReportUsesAfter(context, block, variable, transferPosition);
+                ReportUsesAfter(context, scope, variable, transferPosition);
             }
         }
     }
 
     // Every Sending<T> creation (constructor or Sending.Transfer) whose argument is a
-    // local/parameter reference, with the position the transfer happens at.
-    private static IEnumerable<(ISymbol Variable, int Position)> Transfers(IOperation block)
+    // local/parameter reference, with the position the transfer happens at and the scope its
+    // report walk covers.
+    private static IEnumerable<(ISymbol Variable, int Position, IOperation Scope)> Transfers(IOperation block)
     {
         foreach (var operation in block.DescendantsAndSelf())
         {
@@ -59,50 +62,83 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                 continue;
             }
 
-            yield return (variable, operation.Syntax.Span.End);
+            yield return (variable, operation.Syntax.Span.End, EnclosingFunctionBody(operation, block));
         }
     }
 
-    private static void ReportUsesAfter(OperationBlockAnalysisContext context, IOperation block, ISymbol variable, int transferPosition)
+    // A transfer inside a nested callback only concerns the callback's own body: the outer
+    // flow is not sequenced after it (the callback may run later or never), so its transfer
+    // must not poison outer references. A transfer in the OUTER body rightly covers uses
+    // inside callbacks defined after it -- if they run at all, they run after the transfer.
+    private static IOperation EnclosingFunctionBody(IOperation operation, IOperation block)
+    {
+        for (var parent = operation.Parent; parent is not null; parent = parent.Parent)
+        {
+            if (parent is IAnonymousFunctionOperation or ILocalFunctionOperation)
+            {
+                return parent;
+            }
+        }
+
+        return block;
+    }
+
+    private static void ReportUsesAfter(OperationBlockAnalysisContext context, IOperation scope, ISymbol variable, int transferPosition)
     {
         // Source-ordered walk of every later reference: a reference that is the TARGET of a
         // simple assignment re-initializes the variable, so it and everything after it is a new
         // value -- stop there.
-        var laterReferences = block.DescendantsAndSelf()
+        var laterReferences = scope.DescendantsAndSelf()
             .Where(operation => SymbolEqualityComparer.Default.Equals(ReferencedVariable(operation), variable)
                 && operation.Syntax.SpanStart >= transferPosition)
             .OrderBy(operation => operation.Syntax.SpanStart);
 
         foreach (var reference in laterReferences)
         {
-            if (reference.Parent is ISimpleAssignmentOperation assignment && ReferenceEquals(assignment.Target, reference))
+            switch (Classify(reference, variable, transferPosition, out var rhsUse))
             {
-                // A reassignment gives the variable a fresh value -- but only if its RHS does
-                // not itself READ the transferred one (`list = Clone(list)` uses it to build
-                // the replacement, which is exactly a use after transfer).
-                var rhsUse = assignment.Value.DescendantsAndSelf()
-                    .FirstOrDefault(operation => SymbolEqualityComparer.Default.Equals(ReferencedVariable(operation), variable));
-                if (rhsUse is not null)
-                {
-                    Report(context, rhsUse, variable);
-                    return;
-                }
-
-                // ...and only if it DEFINITELY executes: a reassignment inside a branch the
-                // transfer is not part of (`if (reset) list = new();`) leaves the other path
-                // still using the transferred value, so the scan continues past it (without
-                // flagging the write target itself).
-                if (IsOnTheTransfersConditionalLevel(assignment, transferPosition))
-                {
-                    return;
-                }
-
-                continue;
+                case ReferenceRole.FreshValueFromHere:
+                    return; // a definite reinitialization: everything after is a new value
+                case ReferenceRole.ConditionalReinitialization:
+                    continue; // may not have run on the path that transferred: keep scanning
+                default:
+                    Report(context, rhsUse ?? reference, variable);
+                    return; // one report per transfer keeps the noise proportional
             }
-
-            Report(context, reference, variable);
-            return; // one report per transfer keeps the noise proportional
         }
+    }
+
+    private enum ReferenceRole { Use, FreshValueFromHere, ConditionalReinitialization }
+
+    // A reference that REINITIALIZES the variable ends tracking when it definitely executes
+    // and is skipped when conditional (sibling arms may not run on the path that transferred).
+    // Reinitializations are a simple-assignment target -- unless its RHS itself READS the
+    // transferred value (`list = Clone(list)` builds the replacement from it: that read is the
+    // use to report) -- and an `out` argument, which the callee must assign and cannot read.
+    private static ReferenceRole Classify(IOperation reference, ISymbol variable, int transferPosition, out IOperation? rhsUse)
+    {
+        rhsUse = null;
+
+        if (reference.Parent is ISimpleAssignmentOperation assignment && ReferenceEquals(assignment.Target, reference))
+        {
+            rhsUse = assignment.Value.DescendantsAndSelf()
+                .FirstOrDefault(operation => SymbolEqualityComparer.Default.Equals(ReferencedVariable(operation), variable));
+            return rhsUse is not null ? ReferenceRole.Use : ReinitializationRole(assignment, transferPosition);
+        }
+
+        if (reference.Parent is IArgumentOperation { Parameter.RefKind: RefKind.Out } outArgument)
+        {
+            return ReinitializationRole(outArgument, transferPosition);
+        }
+
+        return ReferenceRole.Use;
+    }
+
+    private static ReferenceRole ReinitializationRole(IOperation reinitialization, int transferPosition)
+    {
+        return IsOnTheTransfersConditionalLevel(reinitialization, transferPosition)
+            ? ReferenceRole.FreshValueFromHere
+            : ReferenceRole.ConditionalReinitialization;
     }
 
     // True when the reassignment DEFINITELY executes on the path that transferred: walking up
@@ -112,9 +148,9 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     // but the catch arm may never run. Checking the path-CHILD's span covers both cases at
     // once (a child containing the transfer implies its parent does too); the one arm exempted
     // is a finally block, which always executes.
-    private static bool IsOnTheTransfersConditionalLevel(IOperation assignment, int transferPosition)
+    private static bool IsOnTheTransfersConditionalLevel(IOperation reinitialization, int transferPosition)
     {
-        for (IOperation child = assignment; child.Parent is { } parent; child = parent)
+        for (IOperation child = reinitialization; child.Parent is { } parent; child = parent)
         {
             var branches = parent is IConditionalOperation or ISwitchOperation or ISwitchExpressionOperation
                 or ILoopOperation or ITryOperation or IConditionalAccessOperation;

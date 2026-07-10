@@ -131,7 +131,7 @@ public sealed class StaticStateAnalyzer : DiagnosticAnalyzer
     // CreateSignal call that built the instance.
     private static string? NotSendableReason(ITypeSymbol type, SendableSymbolClassifier classifier)
     {
-        if (HasUnshieldedTypeParameter(type, depth: 0))
+        if (HasUnshieldedTypeParameter(type))
         {
             return "a type parameter is unverifiable in a static: unlike a creation site, no closed instantiation is ever checked";
         }
@@ -139,14 +139,18 @@ public sealed class StaticStateAnalyzer : DiagnosticAnalyzer
         return classifier.GetNotSendableReason(type);
     }
 
-    private static bool HasUnshieldedTypeParameter(ITypeSymbol type, int depth)
+    // No depth cap: a declared type reference is a finite tree (each type argument is a
+    // strictly smaller reference), so the recursion terminates on its own -- and a cap would
+    // have to choose between failing open (a parameter buried one level past it silently
+    // trusted) and misreporting deep concrete types as parameters.
+    private static bool HasUnshieldedTypeParameter(ITypeSymbol type)
     {
-        return depth <= 4 && type switch
+        return type switch
         {
             ITypeParameterSymbol => true,
-            IArrayTypeSymbol array => HasUnshieldedTypeParameter(array.ElementType, depth + 1),
+            IArrayTypeSymbol array => HasUnshieldedTypeParameter(array.ElementType),
             INamedTypeSymbol named when !SendableSymbolClassifier.HasSendableAttribute(named) =>
-                named.TypeArguments.Any(argument => HasUnshieldedTypeParameter(argument, depth + 1)),
+                named.TypeArguments.Any(HasUnshieldedTypeParameter),
             _ => false,
         };
     }

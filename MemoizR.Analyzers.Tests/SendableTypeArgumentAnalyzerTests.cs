@@ -648,6 +648,80 @@ public class SendableTypeArgumentAnalyzerTests
     }
 
     [Fact]
+    public async Task GenericPassthroughsReturningAFactory_AreNotFollowed()
+    {
+        // Untrack<T> returns its DELEGATE's result -- here a strict factory -- so following it
+        // back to the lax receiver would hide an error the runtime throws. Only the named
+        // fluent methods (which return their own receiver) are followed.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    new MemoFactory(options: MemoFactoryOptions.DisableSendableChecks)
+                        .Untrack(() => new MemoFactory())
+                        .CreateSignal(new List<int>());
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR001", diagnostic.Id);
+    }
+
+    [Fact]
+    public async Task InArguments_DoNotRevokeTheOptOut()
+    {
+        // `in` is a read-only pass: the callee cannot repoint the local, so the initializer
+        // still proves which factory runs the creation.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var lax = new MemoFactory(options: MemoFactoryOptions.DisableSendableChecks);
+                    Inspect(in lax);
+                    lax.CreateSignal(new List<int>());
+                }
+
+                private static void Inspect(in MemoFactory factory)
+                {
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task NullForgivingFactoryReceiver_KeepsTheOptOut()
+    {
+        // `lax!.CreateSignal(...)` is the same lax factory; the null-forgiving operator must
+        // not hide the receiver from the opt-out resolution.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    MemoFactory? lax = new(options: MemoFactoryOptions.DisableSendableChecks);
+                    lax!.CreateSignal(new List<int>());
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
     public async Task PartialTypeFactoryField_IsNotTrusted_TheOtherFileMayReassignIt()
     {
         // A readonly field's initializer can be overwritten by a static constructor, and a

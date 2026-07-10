@@ -156,6 +156,33 @@ public class StaticStateAnalyzerTests
     }
 
     [Fact]
+    public async Task TypeParameters_BuriedArbitrarilyDeep_AreStillFound()
+    {
+        // The walk has no depth cliff: a declared type reference is a finite tree, so the
+        // recursion terminates on its own -- a cap would have had to fail open (a parameter
+        // one level past it silently trusted) or misreport deep concrete types.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Immutable;
+            using MemoizR;
+
+            public class C<T>
+            {
+                private static readonly ImmutableArray<ImmutableArray<ImmutableArray<ImmutableArray<ImmutableArray<ImmutableArray<T>>>>>> Cache = default;
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    _ = Cache;
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR004", diagnostic.Id);
+        Assert.Contains("type parameter", diagnostic.GetMessage());
+    }
+
+    [Fact]
     public async Task GlobalUsings_PutEveryFileInScope()
     {
         // Centralized `global using MemoizR;` (a separate GlobalUsings.cs) puts MemoizR in

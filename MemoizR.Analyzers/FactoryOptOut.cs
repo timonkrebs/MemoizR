@@ -1,5 +1,6 @@
 using System.Linq;
 using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.Operations;
 
@@ -28,8 +29,8 @@ internal static class FactoryOptOut
 
         // Fluent configuration (AddExecutor/AddTimeProvider/...) mutates and returns the SAME
         // factory, so the opt-out evidence sits one hop (or several) up the chain: follow
-        // library-declared MemoFactory-returning calls to their own receiver.
-        while (receiver is IInvocationOperation chained && ReturnsTheLibraryFactory(chained.TargetMethod))
+        // library-declared fluent calls to their own receiver.
+        while (receiver is IInvocationOperation chained && ReturnsItsOwnFluentReceiver(chained.TargetMethod))
         {
             receiver = Unwrap(ReceiverOf(chained));
         }
@@ -57,12 +58,16 @@ internal static class FactoryOptOut
                 : null);
     }
 
-    // A LIBRARY method that returns MemoFactory is the fluent-configuration contract (it
-    // mutates and returns its receiver); a source-declared lookalike could return any factory
-    // it likes and is not followed.
-    private static bool ReturnsTheLibraryFactory(IMethodSymbol method)
+    // The fluent-configuration contract is a NAMED whitelist: these methods mutate and return
+    // their receiver. Return-type matching alone would also follow generic passthroughs --
+    // Untrack<T> returns its DELEGATE's result, which with T = MemoFactory can be any factory
+    // -- so the name set is the authority and the shape checks (non-generic, library-declared,
+    // MemoFactory-returning) are the belt; a source-declared lookalike is not followed either.
+    private static bool ReturnsItsOwnFluentReceiver(IMethodSymbol method)
     {
-        return method.ReturnType is INamedTypeSymbol { Name: "MemoFactory" } factoryType
+        return method.Name is "AddExecutor" or "AddSynchronizationContext" or "AddTimeProvider"
+            && method.Arity == 0
+            && method.ReturnType is INamedTypeSymbol { Name: "MemoFactory" } factoryType
             && factoryType.ContainingNamespace?.ToDisplayString() == "MemoizR"
             && FactoryMethods.IsLibraryType(factoryType)
             && method.ContainingType is { } containingType
@@ -163,7 +168,8 @@ internal static class FactoryOptOut
         return current.Parent switch
         {
             AssignmentExpressionSyntax assignment => ReferenceEquals(assignment.Left, current),
-            ArgumentSyntax argument => argument.RefOrOutKeyword.RawKind != 0,
+            // `in` stays a read: the callee cannot repoint the symbol through a read-only pass.
+            ArgumentSyntax argument => argument.RefOrOutKeyword.Kind() is SyntaxKind.RefKeyword or SyntaxKind.OutKeyword,
             RefExpressionSyntax => true,
             _ => false,
         };
