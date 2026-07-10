@@ -40,8 +40,18 @@ public sealed class CausalityStamp : IEquatable<CausalityStamp>
 {
     public static CausalityStamp Empty { get; } = new(EventTree.Zero, 0, 0);
 
-    private readonly EventTree root; // canonical (normal-form, trimmed) -- see MkNode/FromCanonicalTree
+    // Canonical (normal-form, trimmed) -- see MkNode/FromCanonicalTree. Null only for a LAZY
+    // singleton stamp (ForSignal), whose tree is materialized on first structural use: a
+    // signal's stamp is always the single entry { id: trigger }, and building its O(id-depth)
+    // tree on every Set charged write-heavy workloads for joins that mostly never happen (the
+    // single-entry fast paths below answer the common operations from the two fields alone).
+    private EventTree? root;
     private readonly int spanBits;   // root covers ids [0, 2^spanBits); 0 means just id 0
+
+    // The lazy singleton representation: the tracked id (-1 for tree-backed stamps) and its
+    // STORED value (trigger + 1, the tree encoding). Still valid after materialization.
+    private readonly int singletonId = -1;
+    private readonly long singletonValue;
 
     // The incarnation that produced this stamp's observations: random and nonzero per Context,
     // 0 only on the empty stamp. Triggers are only comparable within one epoch.
@@ -54,7 +64,20 @@ public sealed class CausalityStamp : IEquatable<CausalityStamp>
         Epoch = epoch;
     }
 
-    private bool IsEmpty => root.IsLeaf && root.N == 0;
+    private CausalityStamp(int singletonId, long singletonValue, int spanBits, long epoch)
+    {
+        this.singletonId = singletonId;
+        this.singletonValue = singletonValue;
+        this.spanBits = spanBits;
+        Epoch = epoch;
+    }
+
+    // Benign race: two threads materialize identical canonical trees and one reference wins.
+    private EventTree Root => root ??= EventTree.Singleton(singletonId, spanBits, singletonValue);
+
+    // A lazy singleton is never empty (its stored value is trigger + 1 >= 1); every other stamp
+    // carries its tree eagerly.
+    private bool IsEmpty => singletonId < 0 && root!.IsLeaf && root.N == 0;
 
     internal static CausalityStamp ForSignal(int signalId, long trigger, long epoch)
     {
@@ -67,7 +90,7 @@ public sealed class CausalityStamp : IEquatable<CausalityStamp>
         {
             bits++;
         }
-        return new(EventTree.Singleton(signalId, bits, trigger + 1), bits, epoch);
+        return new(signalId, trigger + 1, bits, epoch);
     }
 
     // A LAZY read-only view over the tree, in id order: lookups are O(tree depth), Count is
@@ -85,7 +108,17 @@ public sealed class CausalityStamp : IEquatable<CausalityStamp>
             return false;
         }
 
-        var value = root.ValueAt(signalId, spanBits);
+        if (singletonId >= 0)
+        {
+            if (signalId != singletonId)
+            {
+                return false;
+            }
+            trigger = singletonValue - 1;
+            return true;
+        }
+
+        var value = Root.ValueAt(signalId, spanBits);
         if (value == 0)
         {
             return false;
@@ -115,8 +148,15 @@ public sealed class CausalityStamp : IEquatable<CausalityStamp>
                 "Causality stamps from different incarnation epochs cannot be joined: one side observed a peer that has since reset. Discard the stale stamp instead of merging it.");
         }
 
+        // Same-signal singletons (the repeated re-read of one signal) join by max without ever
+        // materializing a tree.
+        if (singletonId >= 0 && singletonId == other.singletonId)
+        {
+            return singletonValue >= other.singletonValue ? this : other;
+        }
+
         var bits = Math.Max(spanBits, other.spanBits);
-        var joined = EventTree.Join(root.Grow(spanBits, bits), other.root.Grow(other.spanBits, bits));
+        var joined = EventTree.Join(Root.Grow(spanBits, bits), other.Root.Grow(other.spanBits, bits));
         return FromCanonicalTree(joined, bits, Epoch);
     }
 
@@ -145,8 +185,15 @@ public sealed class CausalityStamp : IEquatable<CausalityStamp>
             return false;
         }
 
+        // Two singletons agree on every shared signal exactly when they track different signals
+        // or the same one at the same trigger.
+        if (singletonId >= 0 && other.singletonId >= 0)
+        {
+            return singletonId != other.singletonId || singletonValue == other.singletonValue;
+        }
+
         var bits = Math.Max(spanBits, other.spanBits);
-        return EventTree.Consistent(root.Grow(spanBits, bits), 0, other.root.Grow(other.spanBits, bits), 0);
+        return EventTree.Consistent(Root.Grow(spanBits, bits), 0, other.Root.Grow(other.spanBits, bits), 0);
     }
 
     // Causal dominance, the lattice order under Join: does `other` reflect every signal version
@@ -168,8 +215,15 @@ public sealed class CausalityStamp : IEquatable<CausalityStamp>
             return false;
         }
 
+        // A singleton is dominated by another exactly when the other tracks the same signal at
+        // an at-least-as-new trigger (different signals dominate nothing of each other).
+        if (singletonId >= 0 && other.singletonId >= 0)
+        {
+            return singletonId == other.singletonId && singletonValue <= other.singletonValue;
+        }
+
         var bits = Math.Max(spanBits, other.spanBits);
-        return EventTree.Leq(root.Grow(spanBits, bits), 0, other.root.Grow(other.spanBits, bits), 0);
+        return EventTree.Leq(Root.Grow(spanBits, bits), 0, other.Root.Grow(other.spanBits, bits), 0);
     }
 
     public bool Equals(CausalityStamp? other)
@@ -178,13 +232,22 @@ public sealed class CausalityStamp : IEquatable<CausalityStamp>
         {
             return false;
         }
-        // Canonical form is unique per logical map, so structural equality decides.
-        return Epoch == other.Epoch && spanBits == other.spanBits && EventTree.StructurallyEqual(root, other.root);
+        if (Epoch != other.Epoch || spanBits != other.spanBits)
+        {
+            return false;
+        }
+        if (singletonId >= 0 && other.singletonId >= 0)
+        {
+            return singletonId == other.singletonId && singletonValue == other.singletonValue;
+        }
+        // Canonical form is unique per logical map, so structural equality decides; a mixed
+        // singleton/tree pair compares through the materialized tree.
+        return EventTree.StructurallyEqual(Root, other.Root);
     }
 
     public override bool Equals(object? obj) => Equals(obj as CausalityStamp);
 
-    public override int GetHashCode() => HashCode.Combine(Epoch, spanBits, root.ComputeHash());
+    public override int GetHashCode() => HashCode.Combine(Epoch, spanBits, Root.ComputeHash());
 
     public override string ToString()
     {
@@ -211,7 +274,7 @@ public sealed class CausalityStamp : IEquatable<CausalityStamp>
         var bytes = new List<byte> { FormatVersion };
         WriteVarint(bytes, (ulong)Epoch);
         bytes.Add((byte)spanBits);
-        root.WriteTo(bytes);
+        Root.WriteTo(bytes);
         return [.. bytes];
     }
 
@@ -591,7 +654,11 @@ public sealed class CausalityStamp : IEquatable<CausalityStamp>
         {
             get
             {
-                var count = stamp.root.CountTracked(stamp.spanBits, 0);
+                if (stamp.singletonId >= 0)
+                {
+                    return 1;
+                }
+                var count = stamp.Root.CountTracked(stamp.spanBits, 0);
                 return count > int.MaxValue ? int.MaxValue : (int)count;
             }
         }
@@ -601,7 +668,7 @@ public sealed class CausalityStamp : IEquatable<CausalityStamp>
         public bool TryGetValue(int key, out long value) => stamp.TryGetTrigger(key, out value);
 
         public IEnumerator<KeyValuePair<int, long>> GetEnumerator() =>
-            EventTree.EnumerateTracked(stamp.root, stamp.spanBits, 0, 0).GetEnumerator();
+            EventTree.EnumerateTracked(stamp.Root, stamp.spanBits, 0, 0).GetEnumerator();
 
         System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
     }
