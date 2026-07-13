@@ -1,5 +1,3 @@
-using MemoizR.Reactive;
-
 namespace MemoizR.Tests;
 
 // Phase 1 of the Causality Trigger Clock (issue #39): per-signal trigger counters, per-node
@@ -472,7 +470,7 @@ public class CausalityTriggerClockTests
         await winnerDone.Task;
         // Let the winning branch record its result and close the capture. A fixed delay is the
         // tool here because the assertion below is negative (the loser's read must NOT appear).
-        await Task.Delay(50);
+        await Task.Delay(50, TestContext.Current.CancellationToken);
 
         await lateRead.Set(101); // a write the winning value cannot reflect
         loserGate.SetResult();

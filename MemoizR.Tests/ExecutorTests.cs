@@ -47,7 +47,7 @@ public class ExecutorTests
         executor.Enqueue(async void () =>
         {
             var before = Environment.CurrentManagedThreadId;
-            await Task.Delay(20);
+            await Task.Delay(20, TestContext.Current.CancellationToken);
             tcs.SetResult((before, Environment.CurrentManagedThreadId, executor.IsCurrent));
         });
 
@@ -73,7 +73,7 @@ public class ExecutorTests
             }
 
             executor.Dispose(); // blocks until the queue drained
-        });
+        }, TestContext.Current.CancellationToken);
 
         Assert.Equal(20, Volatile.Read(ref executed));
     }
@@ -82,7 +82,7 @@ public class ExecutorTests
     public async Task DedicatedThreadExecutor_EnqueueAfterDispose_RunsOnThreadPool_NotIsolated()
     {
         var executor = new DedicatedThreadExecutor();
-        await Task.Run(executor.Dispose);
+        await Task.Run(executor.Dispose, TestContext.Current.CancellationToken);
 
         var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         executor.Enqueue(() => tcs.SetResult(executor.IsCurrent));

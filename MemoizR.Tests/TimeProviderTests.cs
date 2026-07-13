@@ -30,11 +30,11 @@ public class TimeProviderTests
 
         // Negative assertions: the fake clock is frozen (then advanced short of the window), so
         // the debounce cannot elapse -- the real-time windows only cover scheduling noise.
-        await Task.Delay(100);
+        await Task.Delay(100, TestContext.Current.CancellationToken);
         Assert.Equal(1, last);
 
         timeProvider.Advance(TimeSpan.FromMinutes(4));
-        await Task.Delay(100);
+        await Task.Delay(100, TestContext.Current.CancellationToken);
         Assert.Equal(1, last);
 
         timeProvider.Advance(TimeSpan.FromMinutes(1));
@@ -69,12 +69,12 @@ public class TimeProviderTests
             await v1.Set(i);
         }
 
-        await Task.Delay(100);
+        await Task.Delay(100, TestContext.Current.CancellationToken);
         Assert.Equal(0, last); // frozen clock: no debounce window may have elapsed
 
         timeProvider.Advance(TimeSpan.FromMinutes(1));
         await TestHelpers.WaitForConvergenceAsync(() => last == 10);
-        await Task.Delay(100); // no FURTHER invocation may follow the coalesced one
+        await Task.Delay(100, TestContext.Current.CancellationToken); // no FURTHER invocation may follow the coalesced one
         Assert.Equal(10, last);
         Assert.Equal(2, invocations);
         GC.KeepAlive(r);

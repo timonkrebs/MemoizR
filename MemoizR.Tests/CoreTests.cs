@@ -229,7 +229,7 @@ public class CoreTests
             {
                 await v1.Set(i);
             }
-        });
+        }, TestContext.Current.CancellationToken);
 
         var t2 = Task.Run(async () =>
         {
@@ -237,7 +237,7 @@ public class CoreTests
             {
                 await v1.Set(i);
             }
-        });
+        }, TestContext.Current.CancellationToken);
 
         await Task.WhenAll(t1, t2);
 
@@ -259,7 +259,7 @@ public class CoreTests
             {
                 await v1.Set(i => i + 1);
             }
-        });
+        }, TestContext.Current.CancellationToken);
 
         var t2 = Task.Run(async () =>
         {
@@ -267,7 +267,7 @@ public class CoreTests
             {
                 await v1.Set(i => i + 1);
             }
-        });
+        }, TestContext.Current.CancellationToken);
 
         await Task.WhenAll(t1, t2);
 
@@ -363,7 +363,7 @@ public class CoreTests
         var tasks = new List<Task>();
         for (var i = 0; i < 10000; i++)
         {
-            tasks.Add(Task.Run(async () => await v1.Set(x => x + 2)));
+            tasks.Add(Task.Run(async () => await v1.Set(x => x + 2), TestContext.Current.CancellationToken));
         }
 
         await Task.WhenAll(tasks);
@@ -520,7 +520,7 @@ public class CoreTests
                 {
                     await v1.Set(x => x + 1);
                 }
-            }));
+            }, TestContext.Current.CancellationToken));
         }
         // Readers race the writers, exercising the Get-path lock against the Set-path. m1 = v1 * 2
         // is even for every integer v1, so any odd snapshot would mean a torn read.
@@ -533,7 +533,7 @@ public class CoreTests
                     var snapshot = await m1.Get();
                     Assert.True(snapshot % 2 == 0, $"torn read: {snapshot} is not 2 * an integer");
                 }
-            }));
+            }, TestContext.Current.CancellationToken));
         }
         await Task.WhenAll(tasks);
 

@@ -493,7 +493,7 @@ public class ActorEngineTests
             }
             else
             {
-                await Task.Delay(10);
+                await Task.Delay(10, TestContext.Current.CancellationToken);
             }
         }
 
@@ -541,7 +541,7 @@ public class ActorEngineTests
             }
             else
             {
-                await Task.Delay(10);
+                await Task.Delay(10, TestContext.Current.CancellationToken);
             }
         }
 

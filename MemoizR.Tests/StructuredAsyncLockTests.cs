@@ -1,5 +1,5 @@
 using MemoizR.StructuredAsyncLock;
-using xRetry;
+using xRetry.v3;
 
 namespace MemoizR.Tests;
 
@@ -130,19 +130,19 @@ public class AsyncAsymmetricLockTests
         Assert.Equal(0, asyncLock.LockScope);
 
         var task1 = SimulateGet(asyncLock);
-        await Task.Delay(10);
+        await Task.Delay(10, TestContext.Current.CancellationToken);
         var task2 = SimulateReaction(asyncLock);
-        await Task.Delay(10);
+        await Task.Delay(10, TestContext.Current.CancellationToken);
         var task3 = SimulateGet(asyncLock);
-        await Task.Delay(10);
+        await Task.Delay(10, TestContext.Current.CancellationToken);
         var tasks = new List<Task>();
 
         for (int i = 0; i < 100; i++)
         {
-            tasks.Add(Task.Run(async () => await SimulateReaction(asyncLock)));
-            tasks.Add(Task.Run(async () => await SimulateGet(asyncLock)));
-            tasks.Add(Task.Run(async () => await SimulateReaction(asyncLock)));
-            tasks.Add(Task.Run(async () => await SimulateReaction(asyncLock)));
+            tasks.Add(Task.Run(async () => await SimulateReaction(asyncLock), TestContext.Current.CancellationToken));
+            tasks.Add(Task.Run(async () => await SimulateGet(asyncLock), TestContext.Current.CancellationToken));
+            tasks.Add(Task.Run(async () => await SimulateReaction(asyncLock), TestContext.Current.CancellationToken));
+            tasks.Add(Task.Run(async () => await SimulateReaction(asyncLock), TestContext.Current.CancellationToken));
         }
 
         await Task.WhenAll([task1, task2, task3, .. tasks]);
@@ -463,7 +463,7 @@ public class AsyncAsymmetricLockTests
                 holderHas.SetResult();
                 await holderReleased.Task;
             }
-        });
+        }, TestContext.Current.CancellationToken);
         await holderHas.Task;
 
         // The exclusive enqueues behind the holder.
@@ -472,8 +472,8 @@ public class AsyncAsymmetricLockTests
             using (await asyncLock.ExclusiveLockAsync())
             {
             }
-        });
-        await Task.Delay(50); // let it enqueue
+        }, TestContext.Current.CancellationToken);
+        await Task.Delay(50, TestContext.Current.CancellationToken); // let it enqueue
 
         // Four competing upgradeable streams from distinct flows keep the upgradeable queue busy
         // while the exclusive waits -- the adversarial mixed-handoff phase.
@@ -489,7 +489,7 @@ public class AsyncAsymmetricLockTests
         })).ToArray();
 
         holderReleased.SetResult();
-        await Task.Delay(500); // adversarial window: handoffs churn around the queued exclusive
+        await Task.Delay(500, TestContext.Current.CancellationToken); // adversarial window: handoffs churn around the queued exclusive
 
         trafficCts.Cancel();
         await Task.WhenAll(streams);
@@ -539,7 +539,7 @@ public class AsyncAsymmetricLockTests
                 releaseWaiter.TrySetResult();
                 reacquireOutcome.SetResult($"threw {e.GetType().Name}: {e.Message}");
             }
-        });
+        }, TestContext.Current.CancellationToken);
 
         await holderAcquired.Task;
 
@@ -553,7 +553,7 @@ public class AsyncAsymmetricLockTests
                 waiterAcquired.SetResult();
                 await releaseWaiter.Task;
             }
-        });
+        }, TestContext.Current.CancellationToken);
 
         Assert.Equal("ok", await reacquireOutcome.Task);
         await Task.WhenAll(holderTask, waiterTask);

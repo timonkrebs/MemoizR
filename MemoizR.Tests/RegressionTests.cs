@@ -1,5 +1,5 @@
 using System.Linq;
-using xRetry;
+using xRetry.v3;
 using MemoizR.StructuredAsyncLock;
 using MemoizR.StructuredConcurrency;
 
