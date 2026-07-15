@@ -235,6 +235,70 @@ public class TransitionTests
     }
 
     [Fact(Timeout = 5000)]
+    public async Task Transition_ParentFaultDuringCheck_FaultsSettled()
+    {
+        var f = new MemoFactory();
+        var v = f.CreateSignal(1);
+        var shouldThrow = false;
+        var m = f.CreateMemoizR(async () =>
+        {
+            var x = await v.Get();
+            if (Volatile.Read(ref shouldThrow))
+            {
+                throw new InvalidOperationException("parent boom");
+            }
+            return x;
+        });
+        var observed = 0;
+        var r = f.BuildReaction().CreateReaction(m, x => Volatile.Write(ref observed, x));
+        await TestHelpers.WaitForConvergenceAsync(() => Volatile.Read(ref observed) == 1);
+
+        // The write reaches the reaction only as CacheCheck; the parent scan then hits the
+        // faulting memo, no commit follows, and nothing reschedules -- the transition must
+        // hear the fault instead of hanging on a wavefront that already failed.
+        Volatile.Write(ref shouldThrow, true);
+        var t = f.BeginTransition();
+        await v.Set(5);
+        t.Dispose();
+
+        var aggregate = await Assert.ThrowsAsync<AggregateException>(() => t.Settled);
+        var inner = Assert.Single(aggregate.InnerExceptions);
+        Assert.Equal("parent boom", Assert.IsType<InvalidOperationException>(inner).Message);
+        Assert.False(t.IsPending);
+        Assert.Equal(1, Volatile.Read(ref observed)); // the effect never ran with a broken parent
+    }
+
+    [Fact(Timeout = 5000)]
+    public async Task Transition_FaultThatBeatsRegistration_IsRecovered()
+    {
+        var f = new MemoFactory();
+        var v = f.CreateSignal(1);
+        var r = f.BuildReaction().CreateAdvancedReaction(async () =>
+        {
+            if (await v.Get() == 5)
+            {
+                throw new InvalidOperationException("boom");
+            }
+        });
+        await TestHelpers.WaitForConvergenceAsync(() => !r.IsPendingSnapshot);
+
+        // Fault once with NO transition listening: only the (token, exception) record remains.
+        await v.Set(5);
+        await TestHelpers.WaitForConvergenceAsync(() => r.LastStabilizationFault != null);
+
+        // A registration whose threshold the recorded fault token satisfies must recover the
+        // fault instead of waiting for a commit that will never come -- the fault mirror of the
+        // LastCleanCommitToken recovery, driven directly through the internal registration.
+        var t = f.BeginTransition();
+        t.RegisterReached(r, r.LastStabilizationFault!.Token);
+        t.Dispose();
+
+        var aggregate = await Assert.ThrowsAsync<AggregateException>(() => t.Settled);
+        Assert.Contains(aggregate.InnerExceptions, e => e.Message == "boom");
+        Assert.False(t.IsPending);
+    }
+
+    [Fact(Timeout = 5000)]
     public async Task Transition_PendingSignal_DrivesOtherReactions()
     {
         var f = new MemoFactory();

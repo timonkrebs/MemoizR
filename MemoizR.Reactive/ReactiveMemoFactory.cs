@@ -71,6 +71,9 @@ public static class ReactiveMemoFactory
     /// </summary>
     public static ReactiveAction<TPayload> CreateAction<TPayload>(this MemoFactory memoFactory, Func<TPayload, OptimisticActionContext, Task> body, string label = "Action")
     {
+        // The payload crosses flows (Run captures it onto a detached body task), so strict mode
+        // holds it to the same Sendable bar as every other cross-flow value.
+        memoFactory.EnsureSendableIfStrict<TPayload>();
         return new(memoFactory.Context, body, label);
     }
 

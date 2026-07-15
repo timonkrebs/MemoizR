@@ -151,7 +151,7 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
         var token = stateCell.Generation;
 
         // If we are potentially dirty, check if a parent has actually changed value.
-        var parentFaulted = State == CacheState.CacheCheck && await ScanParentsForDirty();
+        var parentFault = State == CacheState.CacheCheck ? await ScanParentsForDirty() : null;
 
         // If we were already dirty or marked dirty by the step above, update.
         if (State == CacheState.CacheDirty)
@@ -161,9 +161,12 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
 
         // A parent that faulted never resolved this node's CacheCheck: committing Clean over it
         // would stop all future re-checks (nothing re-dirties us). Stay CacheCheck so the next
-        // trigger re-attempts the parent.
-        if (parentFaulted)
+        // trigger re-attempts the parent -- but tell the stabilization listeners: no commit will
+        // follow and nothing reschedules until the next invalidation, so a transition waiting on
+        // this reaction would otherwise hang on a wavefront that already failed (ADR 0007).
+        if (parentFault != null)
         {
+            RecordStabilizationFault(token, parentFault);
             return;
         }
 
@@ -229,7 +232,7 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
                 }
                 // No commit will follow and nothing reschedules until the next invalidation:
                 // waiters (transitions) must hear the fault instead of a commit (ADR 0007).
-                NotifyStabilizationFaulted(exception);
+                RecordStabilizationFault(token, exception);
                 throw;
             }
 
@@ -425,6 +428,24 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
 
     // Registration-vs-dispose race recovery for Transition.RegisterReached.
     internal bool IsDisposed => disposed;
+
+    // The last update fault, with the generation token that update ran against -- the fault
+    // mirror of CacheStateCell.LastCleanCommitToken (ADR 0007): a listener registered AFTER a
+    // fault already fired (the fault can beat the registration when the debounce is zero)
+    // recovers it by comparing the recorded token against its threshold. Recorded before
+    // NotifyStabilizationFaulted so a registrant sees either the record or the notification.
+    // Never cleared: generations only grow, so an old record can never satisfy a newer
+    // threshold.
+    internal sealed record StabilizationFaultRecord(int Token, Exception Exception);
+
+    private volatile StabilizationFaultRecord? lastStabilizationFault;
+    internal StabilizationFaultRecord? LastStabilizationFault => lastStabilizationFault;
+
+    private void RecordStabilizationFault(int token, Exception exception)
+    {
+        lastStabilizationFault = new(token, exception);
+        NotifyStabilizationFaulted(exception);
+    }
 
     // Eager-run contract: a reaction executes once on creation (SolidJS-style effect semantics),
     // scheduled through the same invalidation/debounce machinery as every other trigger.

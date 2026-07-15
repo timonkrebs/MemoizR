@@ -50,6 +50,10 @@ public sealed class ReactiveAction<TPayload>
             // and the rollback all register their effect wavefronts on this run's transition.
             // Local to this async flow; the caller's ambient tag is untouched.
             TransitionFlow.Current.Value = transition;
+            // The detached body also inherits the CALLER's lock-scope key: a Run issued from
+            // inside a graph evaluation would make the body's Sets recursive acquisitions of
+            // the caller's held ContextLock. A forced fresh scope gives the body its own.
+            var scope = context.ForceNewScope();
             try
             {
                 await body(payload, ctx).ConfigureAwait(false);
@@ -63,6 +67,8 @@ public sealed class ReactiveAction<TPayload>
                 // makes Settled mean "the UI reflects the final outcome, patches gone".
                 await ctx.DropPatchesAsync().ConfigureAwait(false);
                 transition.Dispose();
+                context.CleanScope();
+                GC.KeepAlive(scope);
                 if (Interlocked.Decrement(ref runningCount) == 0)
                 {
                     pendingPublisher.Publish();
@@ -112,7 +118,11 @@ public sealed class ActionRun
 public sealed class OptimisticActionContext
 {
     private readonly Lock gate = new();
-    private readonly List<Func<Task>> patchRemovals = new();
+    // One entry per touched optimistic state: the ids this run applied to it plus the
+    // type-erased batch remover. Grouped so the rollback drops all of a run's patches on one
+    // state in a single read-modify-write -- removing them one by one would expose frames in
+    // which a later patch applies without the earlier patch it builds on.
+    private readonly Dictionary<object, (Func<IReadOnlyCollection<long>, Task> RemoveBatch, List<long> Ids)> applied = new();
 
     internal OptimisticActionContext(CancellationToken token)
     {
@@ -130,24 +140,29 @@ public sealed class OptimisticActionContext
         var id = await state.ApplyPatchAsync(patch).ConfigureAwait(false);
         lock (gate)
         {
-            patchRemovals.Add(() => state.RemovePatchAsync(id));
+            if (!applied.TryGetValue(state, out var entry))
+            {
+                entry = (state.RemovePatchesAsync, new List<long>());
+                applied[state] = entry;
+            }
+            entry.Ids.Add(id);
         }
     }
 
     internal async Task DropPatchesAsync()
     {
-        Func<Task>[] removals;
+        (Func<IReadOnlyCollection<long>, Task> RemoveBatch, List<long> Ids)[] batches;
         lock (gate)
         {
-            removals = [.. patchRemovals];
-            patchRemovals.Clear();
+            batches = [.. applied.Values];
+            applied.Clear();
         }
 
-        foreach (var removal in removals)
+        foreach (var (removeBatch, ids) in batches)
         {
             try
             {
-                await removal().ConfigureAwait(false);
+                await removeBatch(ids).ConfigureAwait(false);
             }
             catch
             {

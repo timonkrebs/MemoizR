@@ -18,7 +18,8 @@ public sealed class ReactionBinder : IDisposable
     private readonly Action notifyChanged;
     private readonly Lock gate = new();
     private readonly List<IDisposable> reactions = new();
-    private bool disposed;
+    // Volatile: also read inside dispatched callbacks, which can be in flight when Dispose runs.
+    private volatile bool disposed;
 
     /// <param name="factory">The factory whose graph the bindings observe.</param>
     /// <param name="dispatch">Marshals work onto the UI surface -- pass the component's
@@ -44,6 +45,14 @@ public sealed class ReactionBinder : IDisposable
             .AddExecutor(executor)
             .CreateReaction(source, value =>
             {
+                // Disposing the underlying reaction cannot recall a callback that is already
+                // dispatched to the UI surface; re-checking here keeps the disposal contract
+                // (no apply/StateHasChanged after teardown). Both this callback and Dispose
+                // normally run on the renderer's context, so the check is race-free there.
+                if (disposed)
+                {
+                    return;
+                }
                 apply(value);
                 notifyChanged();
             });

@@ -138,6 +138,13 @@ public sealed class Transition : IDisposable, IAsyncDisposable, IStabilizationLi
             reaction.AddStabilizationListener(this);
         }
         OnStabilizedCore(reaction, reaction.stateCell.LastCleanCommitToken);
+        // A fault can beat the registration the same way a commit can (a zero-debounce update
+        // faulting before the listener is added); the recorded fault token recovers it.
+        var fault = reaction.LastStabilizationFault;
+        if (fault != null && fault.Token >= threshold)
+        {
+            OnFaultedCore(reaction, fault.Exception);
+        }
         if (reaction.IsDisposed)
         {
             OnStabilizedCore(reaction, int.MaxValue);
@@ -180,11 +187,14 @@ public sealed class Transition : IDisposable, IAsyncDisposable, IStabilizationLi
 
     void IStabilizationListener.OnStabilizationFaulted(SignalHandlR node, Exception exception)
     {
-        if (node is not ReactionBase reaction)
+        if (node is ReactionBase reaction)
         {
-            return;
+            OnFaultedCore(reaction, exception);
         }
+    }
 
+    private void OnFaultedCore(ReactionBase reaction, Exception exception)
+    {
         bool remove;
         var completed = false;
         lock (gate)

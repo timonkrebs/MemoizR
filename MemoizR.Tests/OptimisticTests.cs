@@ -119,7 +119,7 @@ public class OptimisticTests
         await Assert.ThrowsAsync<InvalidOperationException>(() => runA.Completion);
         await runA.Settled;
         Assert.Equal(new[] { "b" }, await optimistic.Get());
-        Assert.Empty(await items.Get() ?? []);
+        Assert.Empty(await items.Get());
 
         serverB.SetResult();
         await runB.Completion;
@@ -152,6 +152,81 @@ public class OptimisticTests
         await run.Completion;
         Assert.False(act.IsPendingSnapshot);
         await TestHelpers.WaitForConvergenceAsync(() => !act.IsPending.Get().Result);
+    }
+
+    [Fact(Timeout = 5000)]
+    public async Task Optimistic_IsTracked_InMultiParameterReactions()
+    {
+        var f = new MemoFactory();
+        var v = f.CreateSignal(10);
+        var optimistic = f.CreateOptimistic<int>(v);
+        var other = f.CreateSignal(1);
+        var sum = 0;
+        var r = f.BuildReaction().CreateReaction(optimistic, other, (a, b) => Volatile.Write(ref sum, a + b));
+        await TestHelpers.WaitForConvergenceAsync(() => Volatile.Read(ref sum) == 11);
+
+        // A patch on the optimistic view ALONE must re-run the two-parameter reaction: the
+        // builder unwraps the node-backed wrapper, so the reaction subscribes to the view.
+        var server = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var act = f.CreateAction<int>(async (delta, ctx) =>
+        {
+            await ctx.Apply(optimistic, x => x + delta);
+            await server.Task;
+        });
+        var run = act.Run(5);
+        await TestHelpers.WaitForConvergenceAsync(() => Volatile.Read(ref sum) == 16);
+        Assert.Equal(16, Volatile.Read(ref sum));
+
+        server.SetResult();
+        await run.Completion;
+        await run.Settled;
+        await TestHelpers.WaitForConvergenceAsync(() => Volatile.Read(ref sum) == 11); // rollback
+
+        // Source-of-truth changes flow through the wrapper too.
+        await v.Set(20);
+        await TestHelpers.WaitForConvergenceAsync(() => Volatile.Read(ref sum) == 21);
+    }
+
+    [Fact(Timeout = 5000)]
+    public async Task Optimistic_DependentPatches_RollBackAtomically()
+    {
+        var f = new MemoFactory();
+        var items = f.CreateSignal(ImmutableList<string>.Empty);
+        var optimistic = f.CreateOptimistic<ImmutableList<string>>(items);
+        var server = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var act = f.CreateAction<string>(async (item, ctx) =>
+        {
+            await ctx.Apply(optimistic, list => list.Add(item));
+            // Depends on the first patch's shape: the last element must exist. The rollback
+            // removes both in ONE overlay write, so no frame ever applies this patch alone.
+            await ctx.Apply(optimistic, list => list.SetItem(list.Count - 1, $"{list[^1]} (pending)"));
+            await server.Task;
+            throw new InvalidOperationException("rejected");
+        });
+
+        var run = act.Run("a");
+        await TestHelpers.WaitForConvergenceAsync(() => optimistic.Get().Result.Count == 1);
+        Assert.Equal(new[] { "a (pending)" }, await optimistic.Get());
+
+        server.SetResult();
+        await Assert.ThrowsAsync<InvalidOperationException>(() => run.Completion);
+        await run.Settled;
+        Assert.Empty(await optimistic.Get());
+        Assert.Empty(await items.Get());
+    }
+
+    [Fact]
+    public void CreateAction_StrictMode_HoldsThePayloadToTheSendableBar()
+    {
+        var f = new MemoFactory(null, MemoFactoryOptions.StrictSendableChecks);
+
+        // The payload is captured onto a detached body flow, so strict mode must reject a
+        // mutable reference type exactly as it would for a signal of that type.
+        Assert.Throws<InvalidOperationException>(
+            () => f.CreateAction<List<int>>((p, ctx) => Task.CompletedTask));
+
+        // Immutable payloads pass.
+        _ = f.CreateAction<string>((p, ctx) => Task.CompletedTask);
     }
 
     [Fact(Timeout = 5000)]

@@ -342,21 +342,25 @@ public abstract class SignalHandlR : IMemoHandlR
     // ReactionBase.UpdateIfNecessary: re-check each source that is itself a node, in order. A
     // source that recomputes to a CHANGED value marks THIS node dirty through the diamond
     // down-link, at which point we stop -- our computation may no longer use the remaining sources,
-    // so we must not update a source we used last time but now don't. Returns whether any parent's
-    // recompute FAULTED; the caller then stays un-committed so a later pass retries it. Faults are
-    // suppressed here (not thrown) so one bad parent does not abort the scan of the others. Only
-    // the scan is shared -- the commit that follows differs per node type, so it stays at the call
-    // site.
-    internal async Task<bool> ScanParentsForDirty()
+    // so we must not update a source we used last time but now don't. Returns the first parent
+    // fault (null when none); the caller then stays un-committed so a later pass retries it --
+    // and a reaction additionally reports the fault to its stabilization listeners, because no
+    // commit will follow (ADR 0007). Faults are suppressed here (not thrown) so one bad parent
+    // does not abort the scan of the others. Only the scan is shared -- the commit that follows
+    // differs per node type, so it stays at the call site.
+    internal async Task<Exception?> ScanParentsForDirty()
     {
-        var parentFaulted = false;
+        Exception? parentFault = null;
         foreach (var source in Sources)
         {
             if (source is IMemoizR memoizR)
             {
                 var update = memoizR.UpdateIfNecessary(); // UpdateIfNecessary can change our state
                 await update.ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
-                parentFaulted |= update.IsFaulted;
+                if (update.IsFaulted)
+                {
+                    parentFault ??= update.Exception!.InnerException ?? update.Exception;
+                }
             }
 
             if (stateCell.State == CacheState.CacheDirty)
@@ -364,7 +368,7 @@ public abstract class SignalHandlR : IMemoHandlR
                 break;
             }
         }
-        return parentFaulted;
+        return parentFault;
     }
 }
 

@@ -47,17 +47,33 @@ internal sealed class PendingPublisher(Context context, Func<bool> snapshot, str
             {
                 // The pump inherits the scheduling flow's ExecutionContext -- including any
                 // ambient transition tag, which must not re-register the signal's observers
-                // on the transition (it could never settle).
+                // on the transition (it could never settle)...
                 TransitionFlow.Suppress();
-                await prev.ConfigureAwait(false);
+                // ...and including the flow's lock-scope key: Publish is called from inside
+                // committing evaluations and invalidation cascades whose pinned scope still
+                // HOLDS its ContextLock, so an inherited key would make the Set below a
+                // recursive exclusive acquisition -- which the lock rejects, silently dropping
+                // the publish (the pending flag then misses a whole window; this hung the
+                // gated transition tests on windows-latest). A forced fresh scope gives the
+                // Set its own uncontended lock.
+                var scope = context.ForceNewScope();
                 try
                 {
-                    await signal!.Set(snapshot()).ConfigureAwait(false);
+                    await prev.ConfigureAwait(false);
+                    try
+                    {
+                        await signal!.Set(snapshot()).ConfigureAwait(false);
+                    }
+                    catch
+                    {
+                        // A failed publish must not break the chain; the next state change
+                        // schedules another link that converges the signal.
+                    }
                 }
-                catch
+                finally
                 {
-                    // A failed publish must not break the chain; the next state change
-                    // schedules another link that converges the signal.
+                    context.CleanScope();
+                    GC.KeepAlive(scope);
                 }
             });
         }

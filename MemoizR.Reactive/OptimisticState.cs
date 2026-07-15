@@ -2,6 +2,16 @@ using System.Collections.Immutable;
 
 namespace MemoizR.Reactive;
 
+// A value source that DELEGATES to a real graph node (OptimisticState wraps its composed view
+// memo). ReactionBuilder unwraps this so the multi-parameter CreateReaction overloads register
+// the dependency and record its stamps against the backing node -- a plain IStateGetR wrapper
+// would be skipped by RegisterDependencies and read untracked on the isolated scope, so the
+// reaction would never re-run when the wrapped state changes.
+internal interface INodeBackedGetR
+{
+    SignalHandlR Node { get; }
+}
+
 /// <summary>
 /// An optimistic view over a source of truth (ADR 0007): reads return the source value with
 /// every in-flight optimistic patch applied on top, so a user action can instantly project its
@@ -12,8 +22,10 @@ namespace MemoizR.Reactive;
 /// ordinary graph nodes; propagation, memoization, laziness and causality evidence all apply
 /// unchanged. Patch functions run inside the view's computation and must be pure.
 /// </summary>
-public sealed class OptimisticState<T> : IStateGetR<T>
+public sealed class OptimisticState<T> : IStateGetR<T>, INodeBackedGetR
 {
+    SignalHandlR INodeBackedGetR.Node => view;
+
     // The overlay is an EagerRelativeSignal so patch add/remove is an atomic read-modify-write
     // under the signal's own lock. Constructed through the internal ctor on purpose: the strict
     // Sendable check would reject the delegate-carrying tuples, but the list is immutable and
@@ -48,8 +60,12 @@ public sealed class OptimisticState<T> : IStateGetR<T>
         return id;
     }
 
-    internal Task RemovePatchAsync(long id)
+    // A run's patches on this state are removed in ONE read-modify-write: dropping them
+    // individually would expose intermediate frames in which a later patch applies without the
+    // earlier patch it builds on (a patch assuming the shape its predecessor produced could
+    // then throw, or project an impossible value to a concurrent Get).
+    internal Task RemovePatchesAsync(IReadOnlyCollection<long> ids)
     {
-        return overlay.Set(list => list.RemoveAll(p => p.Id == id));
+        return overlay.Set(list => list.RemoveAll(p => ids.Contains(p.Id)));
     }
 }

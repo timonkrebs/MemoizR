@@ -167,7 +167,7 @@ public abstract class MemoBase<T> : MemoHandlR<T>, IMemoizR, IStampedGetR<T>
         var token = stateCell.Generation;
 
         // If we are potentially dirty, see if a parent has actually changed value.
-        var parentFaulted = State == CacheState.CacheCheck && await ScanParentsForDirty();
+        var parentFault = State == CacheState.CacheCheck ? await ScanParentsForDirty() : null;
 
         // If we were already dirty or marked dirty by the step above, update.
         if (State == CacheState.CacheDirty)
@@ -181,7 +181,7 @@ public abstract class MemoBase<T> : MemoHandlR<T>, IMemoizR, IStampedGetR<T>
         // stop all future re-checks (this Get serves the last good value, but nothing would ever
         // re-dirty us, so the failed parent would never be retried). Stay CacheCheck so every
         // later Get re-attempts the parent until it recovers.
-        if (parentFaulted)
+        if (parentFault != null)
         {
             return;
         }
