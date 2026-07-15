@@ -189,18 +189,23 @@ public class DistributedPackageTests
         var stamp1 = CausalityStamp.ForSignal(1000, 5, epoch1).Serialize();
         var stamp2 = CausalityStamp.ForSignal(1000, 1, epoch2).Serialize();
 
+        // The host's current truth, as the mirror's verification pull will see it.
+        var hostPayload = new ValuePayload<int>(1000, epoch1, 9, 111, stamp1, false);
+
         var resets = 0;
         var consumer = new MemoFactory();
         var mirror = consumer.CreateRemoteSignal<int>("mirror", 0,
-            () => throw new InvalidOperationException("no pull in this test"),
+            () => Task.FromResult(hostPayload),
             onPeerReset: () => { Interlocked.Increment(ref resets); return Task.CompletedTask; });
 
-        await mirror.OnValueAsync(new ValuePayload<int>(1000, epoch1, 9, 111, stamp1, false));
+        await mirror.OnValueAsync(hostPayload);
         Assert.Equal(111, await mirror.Local.Get());
 
         // The restarted peer's sequence starts over BELOW the old one: the epoch change, not
-        // the sequence, is what admits it.
-        await mirror.OnValueAsync(new ValuePayload<int>(1000, epoch2, 1, 222, stamp2, false));
+        // the sequence, is what admits it -- committed through the verification pull that
+        // answers the unsolicited epoch-mismatch delivery.
+        hostPayload = new ValuePayload<int>(1000, epoch2, 1, 222, stamp2, false);
+        await mirror.OnValueAsync(hostPayload);
         Assert.Equal(222, await mirror.Local.Get());
         Assert.Equal(1, Volatile.Read(ref resets));
         Assert.Equal(epoch2, mirror.RemoteStamp.Epoch);
@@ -349,14 +354,14 @@ public class DistributedPackageTests
         // duplicate -- wedging the mirror on the old value until an unrelated new publication.
         var epoch1 = 11L;
         var epoch2 = 22L;
+        var resetPayload = new ValuePayload<int>(1000, epoch2, 1, 222, CausalityStamp.ForSignal(1000, 1, epoch2).Serialize(), false);
         var consumer = new MemoFactory();
         var mirror = consumer.CreateRemoteSignal<int>("mirror", 0,
-            () => throw new InvalidOperationException("no pull in this test"),
+            () => Task.FromResult(resetPayload),
             onPeerReset: () => throw new InvalidOperationException("resubscribe transport down"));
 
         await mirror.OnValueAsync(new ValuePayload<int>(1000, epoch1, 5, 111, CausalityStamp.ForSignal(1000, 5, epoch1).Serialize(), false));
 
-        var resetPayload = new ValuePayload<int>(1000, epoch2, 1, 222, CausalityStamp.ForSignal(1000, 1, epoch2).Serialize(), false);
         await Assert.ThrowsAsync<InvalidOperationException>(() => mirror.OnValueAsync(resetPayload));
 
         // The reset payload WAS adopted; only the resubscription failed.
@@ -393,6 +398,85 @@ public class DistributedPackageTests
             .WaitAsync(TimeSpan.FromSeconds(10));
 
         Assert.Equal(999, await mirror.Local.Get());
+    }
+
+    [Fact]
+    public async Task RemoteSignal_DelayedPayloadFromASkippedIncarnation_CannotAbandonTheLiveEpoch()
+    {
+        // The host restarted twice and the mirror never saw the middle incarnation, so that
+        // epoch is not in the abandoned set -- and with unordered random epochs, a delayed
+        // payload from it is indistinguishable by inspection from a live restart. Adopting it
+        // directly would abandon the LIVE epoch and drop all of its future traffic, wedging
+        // the mirror on a dead incarnation. Epoch changes therefore commit only through the
+        // mirror's own latest pull, which answers with the live incarnation's truth.
+        var deadEpoch = 22L;
+        var liveEpoch = 33L;
+        var hostSequence = 2L;
+        var hostValue = 999;
+
+        var pulls = 0;
+        var consumer = new MemoFactory();
+        var mirror = consumer.CreateRemoteSignal("mirror", 0, () =>
+        {
+            Interlocked.Increment(ref pulls);
+            return Task.FromResult(new ValuePayload<int>(
+                1000, liveEpoch, hostSequence, hostValue, CausalityStamp.ForSignal(1000, hostSequence, liveEpoch).Serialize(), false));
+        });
+
+        await mirror.OnValueAsync(new ValuePayload<int>(1000, liveEpoch, 1, 300, CausalityStamp.ForSignal(1000, 1, liveEpoch).Serialize(), false));
+        Assert.Equal(300, await mirror.Local.Get());
+
+        // The delayed dead-incarnation payload: discarded, answered by one verification pull.
+        await mirror.OnValueAsync(new ValuePayload<int>(1000, deadEpoch, 7, 200, CausalityStamp.ForSignal(1000, 7, deadEpoch).Serialize(), false));
+        Assert.Equal(1, Volatile.Read(ref pulls));
+        Assert.Equal(999, await mirror.Local.Get()); // the pull's answer, never the dead value
+        Assert.Equal(liveEpoch, mirror.Publication!.Epoch);
+
+        // The live epoch keeps flowing -- the mirror is not wedged.
+        hostSequence = 3;
+        hostValue = 1000;
+        await mirror.OnStaleAsync(new StaleNotification(1000, liveEpoch, 3, CausalityStamp.Empty.Serialize()));
+        Assert.Equal(1000, await mirror.Local.Get());
+    }
+
+    [Fact]
+    public async Task RemoteSignal_RejectsPayloadsRoutedToTheWrongMirror()
+    {
+        // On a multiplexed bridge, a payload routed to the wrong mirror must not adopt: it
+        // would replace this mirror's value with a sibling export's and advance the sequence
+        // order with the sibling's counter, so the intended node's next payloads would drop as
+        // old news.
+        var epoch = 5L;
+        var consumer = new MemoFactory();
+
+        var pulls = 0;
+        var bound = consumer.CreateRemoteSignal("bound", 0,
+            () =>
+            {
+                Interlocked.Increment(ref pulls);
+                return Task.FromResult(new ValuePayload<int>(1000, epoch, 9, 9, CausalityStamp.ForSignal(1000, 9, epoch).Serialize(), false));
+            },
+            nodeId: 1000);
+
+        await Assert.ThrowsAsync<ArgumentException>(
+            () => bound.OnValueAsync(new ValuePayload<int>(2000, epoch, 1, 5, CausalityStamp.ForSignal(2000, 1, epoch).Serialize(), false)));
+        Assert.False(bound.HasEvidence);
+
+        await bound.OnValueAsync(new ValuePayload<int>(1000, epoch, 1, 10, CausalityStamp.ForSignal(1000, 1, epoch).Serialize(), false));
+        Assert.Equal(10, await bound.Local.Get());
+
+        // A foreign advertisement on a broadcast bus is ignored, not treated as an error --
+        // and it must not trigger a pull.
+        await bound.OnStaleAsync(new StaleNotification(2000, epoch, 50, CausalityStamp.Empty.Serialize()));
+        Assert.Equal(0, Volatile.Read(ref pulls));
+
+        // Without an explicit id, the first delivered payload pins the binding.
+        var pinned = consumer.CreateRemoteSignal<int>("pinned", 0,
+            () => throw new InvalidOperationException("no pull in this test"));
+        await pinned.OnValueAsync(new ValuePayload<int>(1000, epoch, 1, 10, CausalityStamp.ForSignal(1000, 1, epoch).Serialize(), false));
+        await Assert.ThrowsAsync<ArgumentException>(
+            () => pinned.OnValueAsync(new ValuePayload<int>(2000, epoch, 2, 20, CausalityStamp.ForSignal(2000, 2, epoch).Serialize(), false)));
+        Assert.Equal(10, await pinned.Local.Get());
     }
 
     [Fact]

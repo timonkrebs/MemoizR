@@ -12,17 +12,28 @@ namespace MemoizR.Distributed;
 public sealed record AdoptedPublication<T>(T Value, long Epoch, CausalityStamp Stamp, bool Unverifiable);
 
 /// <summary>
-/// The consumer side of one exported node: a local <see cref="EagerRelativeSignal{T}"/> (so the
-/// consumer's graph reacts through the ordinary machinery -- eager on purpose, because an
-/// adoption can change the EVIDENCE while the numeric value stays identical, and the barrier
-/// must re-run to observe it) plus the foreign evidence the current value arrived with, plus
-/// the adoption protocol that makes reordered, at-least-once transports harmless:
+/// The consumer side of one exported node: a local eager signal (readable through
+/// <see cref="Local"/> -- eager on purpose, because an adoption can change the EVIDENCE while
+/// the numeric value stays identical, and the barrier must re-run to observe it) plus the
+/// foreign evidence the current value arrived with, plus the adoption protocol that makes
+/// reordered, at-least-once transports harmless:
 ///
+///  - a payload for a different node than this mirror is bound to is a routing violation and
+///    is rejected (the binding comes from the creation-time node id, or is pinned by the
+///    first delivered payload) -- adopting it would replace the value with a sibling export's
+///    and advance the sequence order with a foreign counter;
 ///  - late traffic from an incarnation this mirror already left is dropped (epochs are random
 ///    identifiers, not ordered -- the mirror remembers what it abandoned instead of trusting a
 ///    mismatch to mean "newer");
-///  - a different, non-abandoned epoch is a peer RESET: held evidence is discarded, never
-///    merged, and <see cref="OnPeerReset"/> runs so the bridge can resubscribe;
+///  - a different, non-abandoned epoch signals a peer RESET, but it is committed only by a
+///    payload answering this mirror's own LATEST pull: with unordered epochs, a delayed
+///    payload from a skipped dead incarnation is indistinguishable by inspection from a live
+///    restart, and adopting it would abandon the LIVE epoch and wedge the mirror. An
+///    unsolicited epoch-mismatch payload is therefore discarded and answered with a
+///    verification pull (the response reflects the incarnation that is actually alive), and
+///    committing any epoch change invalidates all in-flight pulls. On a committed reset, held
+///    evidence is discarded, never merged, and <see cref="OnPeerReset"/> runs so the bridge
+///    can resubscribe;
 ///  - within an epoch, the publication SEQUENCE totally orders deliveries: anything at or
 ///    below the last adopted sequence is a late or duplicated delivery and is dropped --
 ///    including the dependency-oscillation shapes causality stamps cannot order, and equally
@@ -40,16 +51,27 @@ public sealed class RemoteSignal<T>
     private readonly SemaphoreSlim adoptionGate = new(1, 1);
     private readonly Func<Task<ValuePayload<T>>> pull;
     private readonly HashSet<long> abandonedEpochs = [];
+    private readonly EagerRelativeSignal<T> local;
+    private int expectedNodeId;
+    private bool nodeIdPinned;
     private long currentEpoch;
     private long lastSequence;
+    // Incremented when a pull is issued AND when any epoch change commits: an epoch-changing
+    // payload may only commit if it answers the latest generation, so a delayed response from
+    // a pull issued before the mirror learned the current incarnation can never abandon it.
+    private long pullGeneration;
     private volatile AdoptedPublication<T>? publication;
 
+    private enum AdoptionVerdict { Drop, Adopt, AdoptReset, VerifyByPull }
+
     /// <summary>
-    /// The local signal carrying the mirrored value: wire reactions and memos to this. Its own
-    /// causality stamp is LOCAL (peer B's incarnation); the foreign evidence lives in
-    /// <see cref="Publication"/> until wire-format v3 lets it splice.
+    /// The local signal carrying the mirrored value: wire reactions and memos to this. It is
+    /// deliberately the READ-ONLY surface -- only the adoption protocol writes the mirror; a
+    /// consumer-side Set would desynchronize the graph value from the publication evidence and
+    /// the sequence order. Its own causality stamp is LOCAL (peer B's incarnation); the
+    /// foreign evidence lives in <see cref="Publication"/> until wire-format v3 lets it splice.
     /// </summary>
-    public EagerRelativeSignal<T> Local { get; }
+    public IStampedGetR<T> Local => local;
 
     /// <summary>
     /// The last adopted publication -- value and evidence as ONE atomic snapshot (null until a
@@ -69,7 +91,7 @@ public sealed class RemoteSignal<T>
     public bool HasEvidence => publication != null;
 
     /// <summary>
-    /// Runs (awaited by the delivering call) when a payload reveals a peer RESET -- the hook
+    /// Runs (awaited by the delivering call) when a payload commits a peer RESET -- the hook
     /// for resubscribing on a real transport. It is invoked AFTER the reset adoption committed
     /// and the adoption gate is released: the hook may freely pull or feed this same mirror
     /// (re-entering the adoption path), and if it throws, the failure surfaces to the
@@ -81,19 +103,30 @@ public sealed class RemoteSignal<T>
     /// </summary>
     public Func<Task>? OnPeerReset { get; init; }
 
-    internal RemoteSignal(EagerRelativeSignal<T> local, Func<Task<ValuePayload<T>>> pull)
+    internal RemoteSignal(EagerRelativeSignal<T> local, Func<Task<ValuePayload<T>>> pull, int? nodeId)
     {
-        Local = local;
+        this.local = local;
         this.pull = pull;
+        if (nodeId is { } id)
+        {
+            expectedNodeId = id;
+            nodeIdPinned = true;
+        }
     }
 
     /// <summary>Pull the host's current truth and adopt it (subject to the ordering rules).</summary>
-    public async Task PullAsync() => await OnValueAsync(await pull());
+    public async Task PullAsync()
+    {
+        var generation = Interlocked.Increment(ref pullGeneration);
+        await AdoptAsync(await pull(), generation);
+    }
 
     /// <summary>
     /// Handle a stale advertisement: pull when it is not provably old news -- an unknown or
-    /// different epoch (a reset is discovered on the payload), a sequence above the last
-    /// adopted one, or any advertisement at all while the mirror is unverifiable.
+    /// different epoch (a reset is discovered on the pulled payload), a sequence above the
+    /// last adopted one, or any advertisement at all while the mirror is unverifiable. An
+    /// advertisement for a different node than this mirror is bound to is ignored (a fan-out
+    /// bus may broadcast advertisements; only value adoption treats misrouting as an error).
     /// </summary>
     public async Task OnStaleAsync(StaleNotification notification)
     {
@@ -102,9 +135,10 @@ public sealed class RemoteSignal<T>
         await adoptionGate.WaitAsync();
         try
         {
-            shouldPull = (publication?.Unverifiable ?? false)
-                || (!abandonedEpochs.Contains(notification.Epoch)
-                    && (notification.Epoch != currentEpoch || notification.Sequence > lastSequence));
+            shouldPull = (!nodeIdPinned || notification.NodeId == expectedNodeId)
+                && ((publication?.Unverifiable ?? false)
+                    || (!abandonedEpochs.Contains(notification.Epoch)
+                        && (notification.Epoch != currentEpoch || notification.Sequence > lastSequence)));
         }
         finally
         {
@@ -117,13 +151,56 @@ public sealed class RemoteSignal<T>
         }
     }
 
-    /// <summary>Adopt one delivered publication (or drop it, per the ordering rules above).</summary>
-    public async Task OnValueAsync(ValuePayload<T> payload)
+    /// <summary>
+    /// Adopt one delivered publication (or drop it, per the ordering rules above). A payload
+    /// revealing an epoch change is not adopted directly: it is discarded and the mirror
+    /// issues a verification pull, whose answer commits whatever incarnation is actually
+    /// alive.
+    /// </summary>
+    public Task OnValueAsync(ValuePayload<T> payload) => AdoptAsync(payload, pulledAtGeneration: null);
+
+    private async Task AdoptAsync(ValuePayload<T> payload, long? pulledAtGeneration)
     {
         ArgumentNullException.ThrowIfNull(payload);
-        // Validate the hostile parts up front, outside the gate: the stamp deserializer rejects
-        // malformed input, and a zero epoch on a VALUE payload is a protocol violation (hosts
-        // always have a nonzero incarnation; only stamps can be honestly epoch-agnostic).
+        var incoming = ValidateProtocol(payload);
+
+        AdoptionVerdict verdict;
+        await adoptionGate.WaitAsync();
+        try
+        {
+            verdict = Classify(payload, pulledAtGeneration);
+            if (verdict is AdoptionVerdict.Adopt or AdoptionVerdict.AdoptReset)
+            {
+                CommitOrdering(payload, incoming, verdict == AdoptionVerdict.AdoptReset);
+                await local.Set(_ => payload.Value);
+            }
+        }
+        finally
+        {
+            adoptionGate.Release();
+        }
+
+        if (verdict == AdoptionVerdict.VerifyByPull)
+        {
+            await PullAsync();
+            return;
+        }
+
+        // The resubscription hook runs with the adoption fully committed and the gate free: a
+        // hook that pulls or feeds this same mirror re-enters cleanly instead of deadlocking on
+        // the gate, and a hook that throws cannot leave the ordering state claiming a value the
+        // local signal never published.
+        if (verdict == AdoptionVerdict.AdoptReset && OnPeerReset != null)
+        {
+            await OnPeerReset();
+        }
+    }
+
+    // Rejects the hostile parts up front, outside the gate: the stamp deserializer rejects
+    // malformed input, and a zero epoch on a VALUE payload is a protocol violation (hosts
+    // always have a nonzero incarnation; only stamps can be honestly epoch-agnostic).
+    private static CausalityStamp ValidateProtocol(ValuePayload<T> payload)
+    {
         var incoming = CausalityStamp.Deserialize(payload.Stamp);
         if (payload.Epoch == 0)
         {
@@ -136,54 +213,73 @@ public sealed class RemoteSignal<T>
         {
             throw new ArgumentException("The payload's stamp belongs to a different incarnation epoch than the payload header claims.", nameof(payload));
         }
+        return incoming;
+    }
 
-        var isReset = false;
-        await adoptionGate.WaitAsync();
-        try
+    // Must be called under the adoption gate.
+    private AdoptionVerdict Classify(ValuePayload<T> payload, long? pulledAtGeneration)
+    {
+        if (nodeIdPinned && payload.NodeId != expectedNodeId)
         {
-            if (abandonedEpochs.Contains(payload.Epoch))
-            {
-                return; // late traffic from a dead incarnation
-            }
-
-            CausalityStamp heldVerifiedStamp;
-            isReset = currentEpoch != 0 && payload.Epoch != currentEpoch;
-            if (isReset)
-            {
-                abandonedEpochs.Add(currentEpoch);
-                heldVerifiedStamp = CausalityStamp.Empty; // never merged across incarnations
-            }
-            else
-            {
-                if (currentEpoch != 0 && payload.Sequence <= lastSequence)
-                {
-                    return; // late or duplicated delivery: the sequence totally orders publications within an epoch
-                }
-                heldVerifiedStamp = publication?.Stamp ?? CausalityStamp.Empty;
-            }
-
-            currentEpoch = payload.Epoch;
-            lastSequence = payload.Sequence;
-            publication = new AdoptedPublication<T>(
-                payload.Value,
-                payload.Epoch,
-                payload.Unverifiable ? heldVerifiedStamp : incoming,
-                payload.Unverifiable);
-
-            await Local.Set(_ => payload.Value);
+            throw new ArgumentException($"The value payload describes node {payload.NodeId}, but this mirror is bound to node {expectedNodeId}.", nameof(payload));
         }
-        finally
+        nodeIdPinned = true;
+        expectedNodeId = payload.NodeId;
+
+        if (abandonedEpochs.Contains(payload.Epoch))
         {
-            adoptionGate.Release();
+            return AdoptionVerdict.Drop; // late traffic from a dead incarnation
+        }
+        if (currentEpoch == 0)
+        {
+            return AdoptionVerdict.Adopt; // first contact pins the incarnation
+        }
+        if (payload.Epoch == currentEpoch)
+        {
+            // The sequence totally orders publications within an epoch; at or below the last
+            // adopted one is a late or duplicated delivery.
+            return payload.Sequence > lastSequence ? AdoptionVerdict.Adopt : AdoptionVerdict.Drop;
         }
 
-        // The resubscription hook runs with the adoption fully committed and the gate free: a
-        // hook that pulls or feeds this same mirror re-enters cleanly instead of deadlocking on
-        // the gate, and a hook that throws cannot leave the ordering state claiming a value the
-        // local signal never published.
-        if (isReset && OnPeerReset != null)
+        // An epoch change: only the answer to the LATEST pull may commit it. An unsolicited
+        // payload gets a verification pull instead; a stale pull answer (a newer pull or an
+        // epoch change happened since it was issued) is just dropped -- the newer pull brings
+        // the live incarnation's truth.
+        if (pulledAtGeneration == Volatile.Read(ref pullGeneration))
         {
-            await OnPeerReset();
+            return AdoptionVerdict.AdoptReset;
         }
+        return pulledAtGeneration is null ? AdoptionVerdict.VerifyByPull : AdoptionVerdict.Drop;
+    }
+
+    // Must be called under the adoption gate.
+    private void CommitOrdering(ValuePayload<T> payload, CausalityStamp incoming, bool isReset)
+    {
+        CausalityStamp heldVerifiedStamp;
+        if (isReset)
+        {
+            abandonedEpochs.Add(currentEpoch);
+            heldVerifiedStamp = CausalityStamp.Empty; // never merged across incarnations
+        }
+        else
+        {
+            heldVerifiedStamp = publication?.Stamp ?? CausalityStamp.Empty;
+        }
+
+        if (payload.Epoch != currentEpoch)
+        {
+            // Any committed epoch change (a reset or the first-contact pin) invalidates every
+            // in-flight pull: their answers describe a world from before the mirror learned
+            // this incarnation, and must not be able to commit another epoch change.
+            Interlocked.Increment(ref pullGeneration);
+        }
+
+        currentEpoch = payload.Epoch;
+        lastSequence = payload.Sequence;
+        publication = new AdoptedPublication<T>(
+            payload.Value,
+            payload.Epoch,
+            payload.Unverifiable ? heldVerifiedStamp : incoming,
+            payload.Unverifiable);
     }
 }

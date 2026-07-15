@@ -62,17 +62,21 @@ public static class DistributedMemoFactoryExtensions
     /// the adoption protocol (see <see cref="RemoteSignal{T}"/>), pulling the host's truth via
     /// <paramref name="pull"/> (your transport's request path). Feed transport deliveries to
     /// <see cref="RemoteSignal{T}.OnStaleAsync"/> / <see cref="RemoteSignal{T}.OnValueAsync"/>.
+    /// Pass <paramref name="nodeId"/> (the exported node's id) on multiplexed bridges so a
+    /// misrouted payload is rejected up front; without it, the first delivered payload pins
+    /// the binding.
     /// </summary>
     public static RemoteSignal<T> CreateRemoteSignal<T>(
         this MemoFactory factory,
         string label,
         T initialValue,
         Func<Task<ValuePayload<T>>> pull,
-        Func<Task>? onPeerReset = null)
+        Func<Task>? onPeerReset = null,
+        int? nodeId = null)
     {
         ArgumentNullException.ThrowIfNull(factory);
         ArgumentNullException.ThrowIfNull(pull);
-        return new RemoteSignal<T>(factory.CreateEagerRelativeSignal(label, initialValue), pull)
+        return new RemoteSignal<T>(factory.CreateEagerRelativeSignal(label, initialValue), pull, nodeId)
         {
             OnPeerReset = onPeerReset,
         };

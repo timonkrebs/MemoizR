@@ -48,8 +48,12 @@ using var heatExport = peerA.Export(heatIndex, wire.PublishAsync);
 var peerB = new MemoFactory("sample-peer-b", idRangeStart: 2_000, idRangeEnd: 3_000);
 
 // Each mirror's pull delegate is the host's answer path for that node: recompute lazily,
-// answer with the untorn (value, evidence, sequence) triple of one publication.
-var dewMirror = peerB.CreateRemoteSignal("dewMirror", 0.0, dewExport.PullAsync,
+// answer with the untorn (value, evidence, sequence) triple of one publication. It models the
+// node's transport ADDRESS -- whoever is live behind it answers -- which matters in step 4:
+// epoch changes commit only through the mirror's own pull, so after a host restart the same
+// address must reach the new incarnation (as it does on a real bridge).
+var dewHost = dewExport;
+var dewMirror = peerB.CreateRemoteSignal("dewMirror", 0.0, () => dewHost.PullAsync(),
     onPeerReset: () => { Console.WriteLine("   [B] dewMirror: peer RESET detected (epoch changed) -> discarding evidence, resubscribing"); return Task.CompletedTask; });
 var heatMirror = peerB.CreateRemoteSignal("heatMirror", 0.0, heatExport.PullAsync);
 
@@ -100,6 +104,11 @@ var humidity2 = restartedA.CreateSignal("humidity", 0.55);
 var dewPoint2 = restartedA.CreateMemoizR("dewPoint", async () =>
     await temperature2.Get() - (1 - await humidity2.Get()) * 5);
 using var dewExport2 = restartedA.Export(dewPoint2, wire.PublishAsync);
+dewHost = dewExport2; // the address now reaches the restarted incarnation
+// The delivered payload reveals an unknown epoch. The mirror does NOT trust it directly --
+// with unordered epochs it could equally be a delayed payload from a dead incarnation the
+// mirror skipped -- so it discards it and verifies with its own pull; the answer (from
+// whoever is actually alive) commits the reset and runs the resubscription hook.
 await dewMirror.OnValueAsync(await dewExport2.PullAsync());
 Console.WriteLine($"   [B] dewMirror adopted the new incarnation's value: {await dewMirror.Local.Get():F2}");
 

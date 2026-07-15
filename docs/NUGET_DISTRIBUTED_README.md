@@ -6,10 +6,11 @@ with every value).
 
 - **`Export`** a node on the host: value changes push a tiny stale advertisement; consumers
   pull lazily, so MemoizR's laziness survives the network.
-- **`CreateRemoteSignal`** on the consumer: a local signal fed by an adoption protocol that
-  makes reordered, at-least-once transports harmless — per-publication sequences totally order
-  deliveries, incarnation epochs detect host restarts (held evidence is discarded, never
-  merged), and abandoned epochs drop late traffic from dead incarnations.
+- **`CreateRemoteSignal`** on the consumer: a local read-only signal fed by an adoption
+  protocol that makes reordered, at-least-once transports harmless — per-publication sequences
+  totally order deliveries, incarnation epochs detect host restarts (committed only through
+  the mirror's own pull; held evidence is discarded, never merged), abandoned epochs drop late
+  traffic from dead incarnations, and misrouted payloads for a different node are rejected.
 - **`DistributedBarrier`** combines mirrored inputs only on a consistent, verified snapshot of
   the host's write history — a transient glitch (one mirror fresh, one stale, straddling the
   same write) is detected via the causality stamps and healed by re-pulling the lagging side.

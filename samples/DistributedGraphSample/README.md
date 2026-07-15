@@ -29,8 +29,11 @@ delivering, delaying and duplicating messages deliberately — so every mechanis
    settles the orderings causality stamps deliberately cannot: a dependency set oscillating
    through empty re-publishes an earlier stamp on a newer value); reordered and at-least-once
    transports are harmless.
-4. **A peer restart** — the fresh incarnation epoch is detected on the first payload; held
-   evidence is discarded (never merged) and the `OnPeerReset` resubscription hook runs.
+4. **A peer restart** — the fresh incarnation epoch is detected on the first payload, but not
+   trusted from an unsolicited delivery (with unordered epochs it could equally be a delayed
+   payload from a dead incarnation the mirror skipped): the mirror verifies with its own pull,
+   whose answer commits the reset — held evidence is discarded (never merged) and the
+   `OnPeerReset` resubscription hook runs.
 5. **Late traffic from the pre-reset incarnation** — dropped: epochs are random identifiers,
    not ordered, so the mirror remembers the epochs it abandoned instead of trusting a
    mismatch to mean "newer".
