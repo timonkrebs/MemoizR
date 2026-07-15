@@ -440,6 +440,36 @@ public class DistributedPackageTests
     }
 
     [Fact]
+    public async Task RemoteSignal_FailedNewerPull_DoesNotStrandAnOlderPullsLiveAnswer()
+    {
+        // Two verification pulls overlap and the newer one faults. The older pull's answer
+        // still carries the live incarnation's truth, and no epoch change committed since it
+        // was issued, so it must commit -- invalidating older pulls optimistically at issue
+        // time would defer this recovery to an unrelated heartbeat or advertisement.
+        var epoch1 = 11L;
+        var epoch2 = 22L;
+        var firstAnswer = new TaskCompletionSource<ValuePayload<int>>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var pulls = 0;
+        var consumer = new MemoFactory();
+        var mirror = consumer.CreateRemoteSignal("mirror", 0, () =>
+            Interlocked.Increment(ref pulls) == 1
+                ? firstAnswer.Task
+                : throw new InvalidOperationException("transport blip"));
+
+        await mirror.OnValueAsync(new ValuePayload<int>(1000, epoch1, 5, 111, CausalityStamp.ForSignal(1000, 5, epoch1).Serialize(), false));
+
+        var olderPull = mirror.PullAsync();
+        await Assert.ThrowsAsync<InvalidOperationException>(() => mirror.PullAsync());
+
+        // The host restarted; the older pull's answer reflects the live incarnation.
+        firstAnswer.SetResult(new ValuePayload<int>(1000, epoch2, 1, 222, CausalityStamp.ForSignal(1000, 1, epoch2).Serialize(), false));
+        await olderPull.WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.Equal(222, await mirror.Local.Get());
+        Assert.Equal(epoch2, mirror.Publication!.Epoch);
+    }
+
+    [Fact]
     public async Task RemoteSignal_RejectsPayloadsRoutedToTheWrongMirror()
     {
         // On a multiplexed bridge, a payload routed to the wrong mirror must not adopt: it

@@ -26,14 +26,14 @@ public sealed record AdoptedPublication<T>(T Value, long Epoch, CausalityStamp S
 ///    identifiers, not ordered -- the mirror remembers what it abandoned instead of trusting a
 ///    mismatch to mean "newer");
 ///  - a different, non-abandoned epoch signals a peer RESET, but it is committed only by a
-///    payload answering this mirror's own LATEST pull: with unordered epochs, a delayed
-///    payload from a skipped dead incarnation is indistinguishable by inspection from a live
-///    restart, and adopting it would abandon the LIVE epoch and wedge the mirror. An
-///    unsolicited epoch-mismatch payload is therefore discarded and answered with a
-///    verification pull (the response reflects the incarnation that is actually alive), and
-///    committing any epoch change invalidates all in-flight pulls. On a committed reset, held
-///    evidence is discarded, never merged, and <see cref="OnPeerReset"/> runs so the bridge
-///    can resubscribe;
+///    payload answering a pull this mirror issued after its last committed epoch change: with
+///    unordered epochs, a delayed payload from a skipped dead incarnation is indistinguishable
+///    by inspection from a live restart, and adopting it would abandon the LIVE epoch and
+///    wedge the mirror. An unsolicited epoch-mismatch payload is therefore discarded and
+///    answered with a verification pull (the response reflects the incarnation that is
+///    actually alive), and committing an epoch change invalidates the answers of all pulls
+///    still in flight. On a committed reset, held evidence is discarded, never merged, and
+///    <see cref="OnPeerReset"/> runs so the bridge can resubscribe;
 ///  - within an epoch, the publication SEQUENCE totally orders deliveries: anything at or
 ///    below the last adopted sequence is a late or duplicated delivery and is dropped --
 ///    including the dependency-oscillation shapes causality stamps cannot order, and equally
@@ -56,10 +56,14 @@ public sealed class RemoteSignal<T>
     private bool nodeIdPinned;
     private long currentEpoch;
     private long lastSequence;
-    // Incremented when a pull is issued AND when any epoch change commits: an epoch-changing
-    // payload may only commit if it answers the latest generation, so a delayed response from
-    // a pull issued before the mirror learned the current incarnation can never abandon it.
-    private long pullGeneration;
+    // Incremented when any epoch change commits (a reset or the first-contact pin). A pull
+    // captures the generation at issue, and its answer may commit an epoch change only if the
+    // generation is unchanged -- i.e. no epoch change committed since the pull was issued, so
+    // a delayed response from a pull issued before the mirror learned the current incarnation
+    // can never abandon it. Deliberately NOT bumped at pull issue: overlapping verification
+    // pulls must not invalidate each other optimistically, or a failed newer pull would strand
+    // an older pull's perfectly live answer until a heartbeat retries.
+    private long epochGeneration;
     private volatile AdoptedPublication<T>? publication;
 
     private enum AdoptionVerdict { Drop, Adopt, AdoptReset, VerifyByPull }
@@ -117,7 +121,7 @@ public sealed class RemoteSignal<T>
     /// <summary>Pull the host's current truth and adopt it (subject to the ordering rules).</summary>
     public async Task PullAsync()
     {
-        var generation = Interlocked.Increment(ref pullGeneration);
+        var generation = Volatile.Read(ref epochGeneration);
         await AdoptAsync(await pull(), generation);
     }
 
@@ -241,11 +245,11 @@ public sealed class RemoteSignal<T>
             return payload.Sequence > lastSequence ? AdoptionVerdict.Adopt : AdoptionVerdict.Drop;
         }
 
-        // An epoch change: only the answer to the LATEST pull may commit it. An unsolicited
-        // payload gets a verification pull instead; a stale pull answer (a newer pull or an
-        // epoch change happened since it was issued) is just dropped -- the newer pull brings
-        // the live incarnation's truth.
-        if (pulledAtGeneration == Volatile.Read(ref pullGeneration))
+        // An epoch change: only a pull issued after the last committed epoch change may commit
+        // it. An unsolicited payload gets a verification pull instead; a superseded pull answer
+        // (an epoch change committed since it was issued) is just dropped -- whatever committed
+        // is newer knowledge, and the live incarnation keeps advertising.
+        if (pulledAtGeneration == Volatile.Read(ref epochGeneration))
         {
             return AdoptionVerdict.AdoptReset;
         }
@@ -271,7 +275,7 @@ public sealed class RemoteSignal<T>
             // Any committed epoch change (a reset or the first-contact pin) invalidates every
             // in-flight pull: their answers describe a world from before the mirror learned
             // this incarnation, and must not be able to commit another epoch change.
-            Interlocked.Increment(ref pullGeneration);
+            Interlocked.Increment(ref epochGeneration);
         }
 
         currentEpoch = payload.Epoch;
