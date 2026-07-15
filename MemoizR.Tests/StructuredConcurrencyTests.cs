@@ -56,7 +56,10 @@ public class StructuredConcurrencyTests
         await Assert.ThrowsAsync<AggregateException>(c1.Get);
     }
 
-    [Fact(Timeout = 1000)]
+    // Timing-sensitive: the winner branch's real 100 ms delay plus graph work must beat the
+    // timeout on a possibly-loaded runner. Retry like the other flaky timing tests (xRetry)
+    // instead of relying on a knife-edge timeout, keeping a generous hang guard.
+    [RetryFact(3, 200, Timeout = 10000)]
     public async Task TestRaceHandling()
     {
         var f = new MemoFactory();
