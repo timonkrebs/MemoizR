@@ -59,6 +59,10 @@ public static class ReactiveMemoFactory
     /// </summary>
     public static OptimisticState<T> CreateOptimistic<T>(this MemoFactory memoFactory, IStateGetR<T> source, string label = "Optimistic")
     {
+        // The composed view's CreateMemoizR checks T too; the explicit gate here makes the
+        // strict contract visible at the API boundary (and survives view-construction
+        // refactors) -- the source need not come from a strict MemoizR creation at all.
+        memoFactory.EnsureSendableIfStrict<T>();
         return new(memoFactory, source, label);
     }
 

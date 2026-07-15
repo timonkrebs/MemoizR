@@ -248,8 +248,18 @@ public class OptimisticTests
         Assert.Throws<InvalidOperationException>(
             () => f.CreateAction<List<int>>((p, ctx) => Task.CompletedTask));
 
+        // The optimistic view publishes T across flows, even when the source is not a strict
+        // MemoizR creation.
+        Assert.Throws<InvalidOperationException>(
+            () => f.CreateOptimistic<List<int>>(new ExternalListSource()));
+
         // Immutable payloads pass.
         _ = f.CreateAction<string>((p, ctx) => Task.CompletedTask);
+    }
+
+    private sealed class ExternalListSource : IStateGetR<List<int>>
+    {
+        public Task<List<int>> Get() => Task.FromResult(new List<int>());
     }
 
     [Fact(Timeout = 5000)]
