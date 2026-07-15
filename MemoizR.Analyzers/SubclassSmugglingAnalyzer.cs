@@ -80,11 +80,16 @@ public sealed class SubclassSmugglingAnalyzer : DiagnosticAnalyzer
 
     internal static System.Collections.Generic.IEnumerable<(INamedTypeSymbol Named, int Depth)> NamedTypesIn(ITypeSymbol type, int depth)
     {
-        return NamedTypesIn(type, depth, new System.Collections.Generic.HashSet<ITypeSymbol>(SymbolEqualityComparer.Default));
+        return NamedTypesIn(
+            type,
+            depth,
+            new System.Collections.Generic.HashSet<ITypeSymbol>(SymbolEqualityComparer.Default),
+            new System.Collections.Generic.HashSet<INamedTypeSymbol>(SymbolEqualityComparer.Default));
     }
 
     private static System.Collections.Generic.IEnumerable<(INamedTypeSymbol Named, int Depth)> NamedTypesIn(
-        ITypeSymbol type, int depth, System.Collections.Generic.HashSet<ITypeSymbol> visited)
+        ITypeSymbol type, int depth, System.Collections.Generic.HashSet<ITypeSymbol> visited,
+        System.Collections.Generic.HashSet<INamedTypeSymbol> walkedDefinitions)
     {
         if (type is not INamedTypeSymbol named || !visited.Add(type))
         {
@@ -103,9 +108,16 @@ public sealed class SubclassSmugglingAnalyzer : DiagnosticAnalyzer
             yield break;
         }
 
-        foreach (var inner in named.TypeArguments.Concat(StoredMemberTypesOf(named)))
+        // Member re-instantiation can construct fresh symbols forever (Box<T> exposing
+        // Box<List<T>>), so the member walk runs once per DECLARATION: deeper
+        // re-instantiations substitute the same members with arguments already walked.
+        var memberTypes = walkedDefinitions.Add((INamedTypeSymbol)named.OriginalDefinition)
+            ? StoredMemberTypesOf(named)
+            : System.Linq.Enumerable.Empty<ITypeSymbol>();
+
+        foreach (var inner in named.TypeArguments.Concat(memberTypes))
         {
-            foreach (var nested in NamedTypesIn(inner, depth + 1, visited))
+            foreach (var nested in NamedTypesIn(inner, depth + 1, visited, walkedDefinitions))
             {
                 yield return nested;
             }

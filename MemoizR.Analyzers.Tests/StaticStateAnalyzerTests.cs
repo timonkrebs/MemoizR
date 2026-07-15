@@ -251,6 +251,37 @@ public class StaticStateAnalyzerTests
     }
 
     [Fact]
+    public async Task PolymorphicRecursion_Terminates_AndTheClosedSlotIsAccepted()
+    {
+        // Box<T> exposing Box<List<T>> constructs a FRESH closed symbol per level: the member
+        // walk (once per declaration) and the classifier's same-definition path cap must both
+        // terminate. The closed Box<int> stores only Boxes -- all readonly, no mutable leaf --
+        // so MZR004 accepts the slot.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public sealed class Box<T>
+            {
+                public Box<List<T>>? Next { get; init; }
+            }
+
+            public class C
+            {
+                private static readonly Box<int> Cache = new();
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    _ = Cache;
+                }
+            }
+            """);
+
+        Assert.DoesNotContain(diagnostics, d => d.Id == "MZR004");
+    }
+
+    [Fact]
     public async Task TypeParameters_BuriedArbitrarilyDeep_AreStillFound()
     {
         // The walk has no depth cliff: a declared type reference is a finite tree, so the

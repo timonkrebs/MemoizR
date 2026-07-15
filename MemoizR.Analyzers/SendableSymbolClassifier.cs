@@ -293,6 +293,20 @@ internal sealed class SendableSymbolClassifier
             return null;
         }
 
+        // POLYMORPHIC recursion constructs a FRESH closed symbol per level (Box<T> exposing a
+        // Box<List<T>> member), which the re-entry check above can never catch: the same
+        // DEFINITION re-entering the path more than a handful of times is treated as the same
+        // cycle -- deeper re-instantiations substitute the same declared members, and
+        // realistic nesting of one generic within itself stays far below the bound. Kept in
+        // lockstep with the runtime checker's identical cap.
+        if (named.IsGenericType
+            && inProgress.Count(entry => entry is INamedTypeSymbol { IsGenericType: true } other
+                && SymbolEqualityComparer.Default.Equals(other.OriginalDefinition, named.OriginalDefinition)) > 4)
+        {
+            inProgress.Remove(named);
+            return null;
+        }
+
         try
         {
             for (var current = named; current != null && !IsRootType(current); current = current.BaseType)

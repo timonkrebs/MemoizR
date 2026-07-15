@@ -211,6 +211,18 @@ public static class SendableChecker
             return null;
         }
 
+        // POLYMORPHIC recursion constructs a FRESH closed type per level (Box<T> exposing a
+        // Box<List<T>> member), which the re-entry check above can never catch: the same
+        // DEFINITION re-entering the path more than a handful of times is treated as the same
+        // cycle -- deeper re-instantiations substitute the same declared members, and realistic
+        // nesting of one generic within itself stays far below the bound.
+        if (DefinitionOf(type) is { } definition
+            && inProgress.Count(entry => DefinitionOf(entry) == definition) > 4)
+        {
+            inProgress.Remove(type);
+            return null;
+        }
+
         try
         {
             for (var t = type; t != null && t != typeof(object) && t != typeof(ValueType); t = t.BaseType)
@@ -228,6 +240,11 @@ public static class SendableChecker
         {
             inProgress.Remove(type);
         }
+    }
+
+    private static Type? DefinitionOf(Type type)
+    {
+        return type.IsGenericType ? type.GetGenericTypeDefinition() : null;
     }
 
     private static string? CheckDeclaredMembers(Type type, Type declaringLevel, HashSet<Type> inProgress)

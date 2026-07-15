@@ -268,6 +268,17 @@ public class SendingTransferTests
 
 public class StrictSendableModeTests
 {
+    [Fact(Timeout = 10000)]
+    public async Task PolymorphicRecursion_TerminatesTheStructuralWalk()
+    {
+        // RecursiveBox<T> exposes RecursiveBox<List<T>>: every level is a FRESH closed type,
+        // so the per-instance cycle set never repeats -- the same-definition path cap must cut
+        // the walk. The closed type stores only readonly boxes, so strict mode accepts it.
+        var f = new MemoFactory();
+        var signal = f.CreateSignal(new RecursiveBox<int>());
+        Assert.NotNull(await signal.Get());
+    }
+
     [Fact]
     public void DefaultFactory_Checks_AndDisableIsTheEscapeHatch()
     {
@@ -339,6 +350,14 @@ internal sealed record SendablePerson(string Name, int Age);
 internal record SendableOpenRecord(string Name, int Age);
 
 // Immutable, deliberately NON-sealed: the declared type passes creation-time checks...
+// Polymorphic recursion: the member re-instantiates the declaration with a GROWING argument,
+// so a naive per-closed-type cycle set never terminates (see the same-definition path cap in
+// SendableChecker/SendableSymbolClassifier).
+internal sealed class RecursiveBox<T>
+{
+    public RecursiveBox<List<T>>? Next { get; init; }
+}
+
 internal class OpenBase
 {
     public string Name { get; init; } = "";

@@ -214,13 +214,31 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             if (dominatingPart is not null
                 && parent.Syntax.Span.Contains(transferPosition)
                 && !child.Syntax.Span.Contains(transferPosition)
-                && !dominatingPart.Syntax.Span.Contains(transferPosition))
+                && !dominatingPart.Syntax.Span.Contains(transferPosition)
+                && !IsInACaseGuard(parent, transferPosition))
             {
                 return true;
             }
         }
 
         return false;
+    }
+
+    // A `when` guard is arm-SELECTION machinery, not an arm: a failing guard falls through to
+    // later cases, so a transfer inside one has already run when a later arm executes --
+    // `case 0 when Sending.Transfer(list) is null:` followed by `default: list.Add(1);` is a
+    // real use after transfer.
+    private static bool IsInACaseGuard(IOperation construct, int transferPosition)
+    {
+        var guards = construct switch
+        {
+            ISwitchOperation @switch => @switch.Cases.SelectMany(c => c.Clauses)
+                .Select(clause => (clause as IPatternCaseClauseOperation)?.Guard),
+            ISwitchExpressionOperation switchExpression => switchExpression.Arms.Select(arm => arm.Guard),
+            _ => System.Linq.Enumerable.Empty<IOperation?>(),
+        };
+
+        return guards.Any(guard => guard is not null && guard.Syntax.Span.Contains(transferPosition));
     }
 
     // The region a skipped conditional reinitialization dominates: its nearest enclosing arm

@@ -544,6 +544,36 @@ public class UseAfterTransferAnalyzerTests
     }
 
     [Fact]
+    public async Task SwitchGuardTransfers_AreVisibleToLaterArms()
+    {
+        // A failing `when` guard falls through to later cases with the transfer already done:
+        // the default arm's Add is a real use after transfer, not a sibling-arm exclusion.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M(int n)
+                {
+                    var list = new List<int> { 1 };
+                    switch (n)
+                    {
+                        case 0 when Sending.Transfer(list) is null:
+                            break;
+                        default:
+                            list.Add(1);
+                            break;
+                    }
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+    }
+
+    [Fact]
     public async Task FinallyBlocks_RunAfterAReturnTransfer_AndAreStillScanned()
     {
         // `return Sending.Transfer(list)` exits the method -- but the enclosing finally runs

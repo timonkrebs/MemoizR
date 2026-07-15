@@ -188,21 +188,33 @@ public sealed class StaticStateAnalyzer : DiagnosticAnalyzer
     // member walk would accept that T through the exemption this rule exists to remove.
     private static bool HasUnshieldedTypeParameter(ITypeSymbol type)
     {
-        return HasUnshieldedTypeParameter(type, new System.Collections.Generic.HashSet<ITypeSymbol>(SymbolEqualityComparer.Default));
+        return HasUnshieldedTypeParameter(
+            type,
+            new System.Collections.Generic.HashSet<ITypeSymbol>(SymbolEqualityComparer.Default),
+            new System.Collections.Generic.HashSet<INamedTypeSymbol>(SymbolEqualityComparer.Default));
     }
 
-    private static bool HasUnshieldedTypeParameter(ITypeSymbol type, System.Collections.Generic.HashSet<ITypeSymbol> visited)
+    private static bool HasUnshieldedTypeParameter(
+        ITypeSymbol type,
+        System.Collections.Generic.HashSet<ITypeSymbol> visited,
+        System.Collections.Generic.HashSet<INamedTypeSymbol> walkedDefinitions)
     {
         switch (type)
         {
             case ITypeParameterSymbol:
                 return true;
             case IArrayTypeSymbol array:
-                return HasUnshieldedTypeParameter(array.ElementType, visited);
+                return HasUnshieldedTypeParameter(array.ElementType, visited, walkedDefinitions);
             case INamedTypeSymbol named
                 when visited.Add(named) && !SendableSymbolClassifier.HasSendableAttribute(named):
-                return named.TypeArguments.Any(argument => HasUnshieldedTypeParameter(argument, visited))
-                    || MemberTypesOf(named).Any(memberType => HasUnshieldedTypeParameter(memberType, visited));
+                // Member re-instantiation can construct fresh symbols forever (Box<T> exposing
+                // Box<List<T>>), so the member walk runs once per DECLARATION: deeper
+                // re-instantiations substitute the same members with arguments already walked.
+                var memberTypes = walkedDefinitions.Add((INamedTypeSymbol)named.OriginalDefinition)
+                    ? MemberTypesOf(named)
+                    : System.Linq.Enumerable.Empty<ITypeSymbol>();
+                return named.TypeArguments.Any(argument => HasUnshieldedTypeParameter(argument, visited, walkedDefinitions))
+                    || memberTypes.Any(memberType => HasUnshieldedTypeParameter(memberType, visited, walkedDefinitions));
             default:
                 return false;
         }
