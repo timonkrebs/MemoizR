@@ -214,15 +214,14 @@ public class Context
         }
     }
 
-    // The tracked read of an up-to-date node, fused: dependency registration, the single box
-    // read, and the stamp record run under ONE Lock acquisition -- the register and the record
-    // each took their own before, doubling context-wide lock traffic on the hottest tracked
-    // path. The register-then-read order is preserved: the eager observer subscription must be
-    // in place before the value is read, or a Set landing in between would notify nobody. The
-    // scope is the caller's already-resolved (and strongly rooted) instance, so no registry
-    // probe here. A leaf signal's own evidence is never unverifiable (ForOwnStamp); a clean
-    // memo's can be (contagion from a poisoned source), and unverifiability must poison the
-    // caller's capture instead of contributing a stamp (see MemoBase.ReadWithEvidence).
+    // The tracked read of a leaf signal, fused: dependency registration, the single box read,
+    // and the stamp record run under ONE Lock acquisition -- the register and the record each
+    // took their own before, doubling context-wide lock traffic on the hottest tracked path.
+    // The register-then-read order is what makes this safe WITHOUT a staleness verdict: a
+    // signal's box is always current (its Set publishes before it sweeps observers), so a sweep
+    // completing before our registration necessarily published the value we are about to read.
+    // The scope is the caller's already-resolved (and strongly rooted) instance, so no registry
+    // probe here.
     internal (T Value, StampEvidence Evidence) TrackedRead<T>(MemoHandlR<T> source, ReactionScope scope)
     {
         var branch = RaceBranchFlow.Current.Value;
@@ -230,23 +229,62 @@ public class Context
         {
             CheckDependenciesCore(scope, source);
             var pair = source.ValueAndEvidence;
-            if (!StampsEnabled)
+            RecordReadEvidence(scope, source.Id, pair.Evidence, branch);
+            return pair;
+        }
+    }
+
+    // The tracked read of a CLEAN MEMO: registration first, then the staleness verdict, then
+    // the box read -- all under one Lock acquisition. A memo's box LAGS its invalidation (the
+    // recompute is pull-driven), and an invalidation sweeps the observer list exactly once, so
+    // a sweep that completed before the registration could never have notified the reader --
+    // "clean" must be (re)proven AFTER registering, and the invalidation's generation bump is
+    // the only trace such a sweep leaves. The snapshot was taken by the caller while it
+    // observed CacheClean: unchanged generation + still-Clean here proves no invalidation (and
+    // so no republish) happened since, making the pair current; an invalidation landing after
+    // this validation sweeps a list that already contains the reader -- the same benign race as
+    // one landing right after a mutex-held read returned. On a failed verdict nothing is read
+    // or recorded; the caller falls back to its serialized path, already wired (its dependency
+    // registration must not run twice).
+    internal bool TryTrackedCleanRead<T>(MemoHandlR<T> source, ReactionScope scope, int generationSnapshot, out (T Value, StampEvidence Evidence) pair)
+    {
+        var branch = RaceBranchFlow.Current.Value;
+        lock (Lock)
+        {
+            CheckDependenciesCore(scope, source);
+            if (source.stateCell.State != CacheState.CacheClean || source.stateCell.Generation != generationSnapshot)
             {
-                return pair;
+                pair = default!;
+                return false;
             }
 
-            if (pair.Evidence.Unverifiable)
+            pair = source.ValueAndEvidence;
+            RecordReadEvidence(scope, source.Id, pair.Evidence, branch);
+            return true;
+        }
+    }
+
+    // Must be called under Lock. A leaf signal's own evidence is never unverifiable
+    // (ForOwnStamp); a clean memo's can be (contagion from a poisoned source), and
+    // unverifiability must poison the caller's capture instead of contributing a stamp (see
+    // MemoBase.ReadWithEvidence).
+    private void RecordReadEvidence(ReactionScope scope, int sourceId, StampEvidence evidence, int branch)
+    {
+        if (!StampsEnabled)
+        {
+            return;
+        }
+
+        if (evidence.Unverifiable)
+        {
+            if (scope.CurrentReaction is { } reaction && stampCaptures.TryGetValue(reaction, out var capture))
             {
-                if (scope.CurrentReaction is { } reaction && stampCaptures.TryGetValue(reaction, out var capture))
-                {
-                    capture.Poison(branch);
-                }
+                capture.Poison(branch);
             }
-            else
-            {
-                RecordSourceStampCore(scope.CurrentReaction, source.Id, pair.Evidence.Stamp, branch);
-            }
-            return pair;
+        }
+        else
+        {
+            RecordSourceStampCore(scope.CurrentReaction, sourceId, evidence.Stamp, branch);
         }
     }
 
