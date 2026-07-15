@@ -123,6 +123,7 @@ public sealed class OptimisticActionContext
     // state in a single read-modify-write -- removing them one by one would expose frames in
     // which a later patch applies without the earlier patch it builds on.
     private readonly Dictionary<object, (Func<IReadOnlyCollection<long>, Task> RemoveBatch, List<long> Ids)> applied = new();
+    private bool closed;
 
     internal OptimisticActionContext(CancellationToken token)
     {
@@ -133,19 +134,51 @@ public sealed class OptimisticActionContext
 
     /// <summary>
     /// Instantly projects the expected future state onto the optimistic view; the patch stays
-    /// applied until this run ends (confirmed or rolled back).
+    /// applied until this run ends (confirmed or rolled back). Only valid while the run's body
+    /// executes: a context leaked to fire-and-forget work throws here after the run ended --
+    /// its patch would be owned by no drop and stay applied forever.
     /// </summary>
     public async Task Apply<T>(OptimisticState<T> state, Func<T, T> patch)
     {
-        var id = await state.ApplyPatchAsync(patch).ConfigureAwait(false);
         lock (gate)
         {
-            if (!applied.TryGetValue(state, out var entry))
+            ThrowIfClosed();
+        }
+
+        var id = await state.ApplyPatchAsync(patch).ConfigureAwait(false);
+        var closedMidApply = false;
+        lock (gate)
+        {
+            if (closed)
             {
-                entry = (state.RemovePatchesAsync, new List<long>());
-                applied[state] = entry;
+                // The run's drop swept between the overlay write above and this recording: the
+                // patch is orphaned unless removed here, on this flow.
+                closedMidApply = true;
             }
-            entry.Ids.Add(id);
+            else
+            {
+                if (!applied.TryGetValue(state, out var entry))
+                {
+                    entry = (state.RemovePatchesAsync, new List<long>());
+                    applied[state] = entry;
+                }
+                entry.Ids.Add(id);
+            }
+        }
+
+        if (closedMidApply)
+        {
+            await state.RemovePatchesAsync([id]).ConfigureAwait(false);
+            ThrowIfClosed();
+        }
+    }
+
+    private void ThrowIfClosed()
+    {
+        if (closed)
+        {
+            throw new InvalidOperationException(
+                "This action run has completed; optimistic patches can only be applied while the run's body executes.");
         }
     }
 
@@ -154,6 +187,7 @@ public sealed class OptimisticActionContext
         (Func<IReadOnlyCollection<long>, Task> RemoveBatch, List<long> Ids)[] batches;
         lock (gate)
         {
+            closed = true;
             batches = [.. applied.Values];
             applied.Clear();
         }

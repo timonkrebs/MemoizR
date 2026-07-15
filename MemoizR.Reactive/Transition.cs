@@ -42,6 +42,13 @@ public sealed class Transition : IDisposable, IAsyncDisposable, IStabilizationLi
     // threshold (see IStabilizationListener).
     private readonly Dictionary<ReactionBase, int> outstanding = new();
     private readonly Dictionary<ReactionBase, Exception> faults = new();
+    // Every reaction this transition ever subscribed to. Listeners live until SETTLEMENT, not
+    // until per-reaction completion: removing on completion raced a re-registration of the same
+    // reaction by a later write in this still-open scope -- the stale removal could strip the
+    // listener the re-registration just added, leaving an outstanding entry nobody notifies.
+    // A completed-but-still-subscribed reaction only costs no-op callbacks.
+    private readonly HashSet<ReactionBase> subscribed = new();
+    private bool listenersCleaned;
     private readonly TaskCompletionSource settled = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly PendingPublisher pendingPublisher;
     private volatile bool isPending;
@@ -134,8 +141,8 @@ public sealed class Transition : IDisposable, IAsyncDisposable, IStabilizationLi
             else
             {
                 outstanding[reaction] = threshold;
-                subscribe = true;
             }
+            subscribe = subscribed.Add(reaction);
             isPending = true;
         }
 
@@ -183,7 +190,6 @@ public sealed class Transition : IDisposable, IAsyncDisposable, IStabilizationLi
         }
         if (remove)
         {
-            reaction.RemoveStabilizationListener(this);
             SchedulePendingPublish();
         }
         if (completed)
@@ -220,7 +226,6 @@ public sealed class Transition : IDisposable, IAsyncDisposable, IStabilizationLi
         }
         if (remove)
         {
-            reaction.RemoveStabilizationListener(this);
             SchedulePendingPublish();
         }
         if (completed)
@@ -232,9 +237,20 @@ public sealed class Transition : IDisposable, IAsyncDisposable, IStabilizationLi
     private void CompleteSettled()
     {
         Exception[] recorded;
+        ReactionBase[] toUnsubscribe;
         lock (gate)
         {
             recorded = [.. faults.Values];
+            // Listener cleanup happens exactly once, at settlement (see `subscribed`); a
+            // settled transition ignores every further registration, so nothing re-subscribes.
+            toUnsubscribe = listenersCleaned ? [] : [.. subscribed];
+            listenersCleaned = true;
+            subscribed.Clear();
+        }
+
+        foreach (var reaction in toUnsubscribe)
+        {
+            reaction.RemoveStabilizationListener(this);
         }
 
         if (recorded.Length > 0)

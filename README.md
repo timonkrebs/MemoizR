@@ -151,14 +151,14 @@ and rolls back *structurally* — a failed action just drops its patch, the sour
 never touched, so overlapping actions can never clobber each other:
 
 ```cs
-var todos      = f.CreateSignal(ImmutableList.Create("existing"));
+var todos      = f.CreateEagerRelativeSignal(ImmutableList.Create("existing"));
 var optimistic = f.CreateOptimistic<ImmutableList<string>>(todos);
 
 var addTodo = f.CreateAction<string>(async (todo, ctx) =>
 {
     await ctx.Apply(optimistic, list => list.Add($"{todo} (pending)")); // instant projection
     var confirmed = await api.SaveAsync(todo, ctx.Token);               // the process step
-    await todos.Set((await todos.Get()).Add(confirmed));                // confirm the source
+    await todos.Set(list => list.Add(confirmed));  // confirm atomically: overlapping runs compose
 });                                        // fault/cancel => patch dropped => automatic rollback
 
 var run = addTodo.Run("write docs");

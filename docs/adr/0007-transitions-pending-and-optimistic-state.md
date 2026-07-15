@@ -139,8 +139,8 @@ overlay) instead of *compensating* (write the old value back) — a compensating
 concurrent writers and can resurrect stale state; removing an overlay cannot.
 
 ```csharp
-// base: the confirmed truth — a Signal<T>, or a memo over a fetch
-var todos     = f.CreateSignal(ImmutableList<Todo>.Empty);
+// base: the confirmed truth — an atomically updatable source, or a memo over a fetch
+var todos     = f.CreateEagerRelativeSignal(ImmutableList<Todo>.Empty);
 
 // optimistic view = base + pending patches, in one node
 var optimistic = f.CreateOptimistic<ImmutableList<Todo>>(todos);
@@ -149,7 +149,7 @@ var addTodo = f.CreateAction<Todo>(async (todo, ctx) =>
 {
     await ctx.Apply(optimistic, list => list.Add(todo with { Pending = true })); // instant projection
     var confirmed = await api.SaveAsync(todo, ctx.Token);                        // the process step
-    await todos.Set((await todos.Get()).Add(confirmed));                         // confirm the source
+    await todos.Set(list => list.Add(confirmed));  // confirm atomically: overlapping runs compose
 });                       // run end drops the patches: on fault/cancel that IS the rollback
 
 var run = addTodo.Run(newTodo);  // detached; run.Completion is the body, run.Settled the effects

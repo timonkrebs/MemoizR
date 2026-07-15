@@ -300,6 +300,52 @@ public class TransitionTests
     }
 
     [Fact(Timeout = 5000)]
+    public async Task Transition_ParentFaultWithSuccessfulRerun_SettlesClean_WithoutAFaultRecord()
+    {
+        var f = new MemoFactory();
+        var va = f.CreateSignal(1);
+        var vb = f.CreateSignal(1);
+        var faultA = false;
+        var mA = f.CreateMemoizR(async () =>
+        {
+            var x = await va.Get();
+            if (Volatile.Read(ref faultA))
+            {
+                throw new InvalidOperationException("A boom");
+            }
+            return x;
+        });
+        var mB = f.CreateMemoizR(async () => await vb.Get() * 2);
+        var observed = 0;
+        var r = f.BuildReaction().CreateAdvancedReaction(async () =>
+        {
+            try
+            {
+                await mA.Get();
+            }
+            catch
+            {
+                // Tolerated: the body falls back to B alone.
+            }
+            Volatile.Write(ref observed, await mB.Get());
+        });
+        await TestHelpers.WaitForConvergenceAsync(() => Volatile.Read(ref observed) == 2);
+
+        // Inside the transition, parent A's recompute faults during the scan but parent B's
+        // change dirties the reaction and its rerun commits: the wavefront stabilized, so the
+        // transition settles clean and the scan fault must NOT be recorded over the commit.
+        Volatile.Write(ref faultA, true);
+        var t = f.BeginTransition();
+        await va.Set(2);
+        await vb.Set(5);
+        t.Dispose();
+
+        await t.Settled;
+        Assert.Equal(10, Volatile.Read(ref observed));
+        Assert.Null(r.LastStabilizationFault);
+    }
+
+    [Fact(Timeout = 5000)]
     public async Task Transition_FaultThatBeatsRegistration_IsRecovered()
     {
         var f = new MemoFactory();

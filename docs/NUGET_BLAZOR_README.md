@@ -23,13 +23,13 @@ public partial class TodoList : MemoizRComponentBase
 
     protected override void OnInitialized()
     {
-        var source = MemoFactory.CreateSignal(ImmutableList<string>.Empty);
+        var source = MemoFactory.CreateEagerRelativeSignal(ImmutableList<string>.Empty);
         optimistic = MemoFactory.CreateOptimistic<ImmutableList<string>>(source);
         addTodo = MemoFactory.CreateAction<string>(async (todo, ctx) =>
         {
             await ctx.Apply(optimistic, list => list.Add($"{todo} (pending)")); // instant
             var confirmed = await Api.SaveAsync(todo, ctx.Token);               // the process
-            await source.Set((await source.Get()).Add(confirmed));              // confirm
+            await source.Set(list => list.Add(confirmed));                      // confirm atomically
         }); // fault/cancel => automatic rollback
 
         Bind(optimistic, value => todos = value); // dependency eval on the thread pool,

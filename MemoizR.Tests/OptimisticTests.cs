@@ -215,6 +215,29 @@ public class OptimisticTests
         Assert.Empty(await items.Get());
     }
 
+    [Fact(Timeout = 5000)]
+    public async Task Apply_AfterTheRunEnded_IsRejected_AndOrphansNoPatch()
+    {
+        var f = new MemoFactory();
+        var value = f.CreateSignal(10);
+        var optimistic = f.CreateOptimistic<int>(value);
+
+        // A body that leaks its context to later fire-and-forget work.
+        OptimisticActionContext leaked = null!;
+        var act = f.CreateAction<int>((x, ctx) =>
+        {
+            leaked = ctx;
+            return Task.CompletedTask;
+        });
+        var run = act.Run(1);
+        await run.Completion;
+        await run.Settled;
+
+        // A late Apply must throw instead of adding a patch no drop will ever own.
+        await Assert.ThrowsAsync<InvalidOperationException>(() => leaked.Apply(optimistic, x => x + 5));
+        Assert.Equal(10, await optimistic.Get());
+    }
+
     [Fact]
     public void CreateAction_StrictMode_HoldsThePayloadToTheSendableBar()
     {
