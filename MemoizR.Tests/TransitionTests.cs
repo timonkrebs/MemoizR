@@ -300,6 +300,54 @@ public class TransitionTests
     }
 
     [Fact(Timeout = 5000)]
+    public async Task Transition_InitialReactionRun_DoesNotJoinTheWavefront()
+    {
+        var f = new MemoFactory();
+        var v = f.CreateSignal(1);
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        // A reaction BUILT inside the scope, with a parked initial run: creation is not a
+        // write, so the transition (which performed no Sets) settles at the seal instead of
+        // waiting on the eager first run.
+        var t = f.BeginTransition();
+        var r = f.BuildReaction().CreateAdvancedReaction(async () =>
+        {
+            await v.Get();
+            await gate.Task;
+        });
+        t.Dispose();
+        Assert.False(t.IsPending);
+        await t.Settled;
+
+        gate.SetResult();
+        await TestHelpers.WaitForConvergenceAsync(() => !r.IsPendingSnapshot);
+    }
+
+    [Fact(Timeout = 5000)]
+    public async Task Transition_RedundantDispose_DoesNotClobberANewerAmbientScope()
+    {
+        var f = new MemoFactory();
+        var v = f.CreateSignal(1);
+        var observed = 0;
+        var r = f.BuildReaction().CreateReaction(v, x => Volatile.Write(ref observed, x));
+        await TestHelpers.WaitForConvergenceAsync(() => Volatile.Read(ref observed) == 1);
+
+        var t1 = f.BeginTransition();
+        t1.Dispose();
+
+        // A second scope is now ambient; a redundant second Dispose of the OLD scope must not
+        // restore its stale prior over the active one -- t2 would silently stop tracking.
+        var t2 = f.BeginTransition();
+        t1.Dispose();
+        Assert.Same(t2, TransitionFlow.Current);
+
+        await v.Set(5);
+        t2.Dispose();
+        await t2.Settled;
+        Assert.Equal(5, Volatile.Read(ref observed));
+    }
+
+    [Fact(Timeout = 5000)]
     public async Task Transition_WritesAfterSeal_DoNotExtendTheWavefront()
     {
         var f = new MemoFactory();

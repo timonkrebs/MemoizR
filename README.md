@@ -145,7 +145,7 @@ await t.Settled;          // the onSettled analog; reaction faults aggregate her
 // or in one step — seal at the block end AND await settlement:
 await using (f.BeginTransition()) { await v1.Set(5); }
 
-r1.IsPending;             // per-reaction reactive "an update is scheduled or running" flag
+_ = r1.IsPending;         // per-reaction reactive "an update is scheduled or running" flag
 ```
 
 **Optimistic state** instantly projects an expected future value while the real process runs,
@@ -164,8 +164,8 @@ var addTodo = f.CreateAction<string>(async (todo, ctx) =>
 });                                        // fault/cancel => patch dropped => automatic rollback
 
 var run = addTodo.Run("write docs");
-addTodo.IsPending;    // reactive: disable the submit button with a reaction on it
-await run.Settled;    // the UI reflects the final outcome (patch gone, value confirmed)
+_ = addTodo.IsPending; // reactive: disable the submit button with a reaction on it
+await run.Settled;     // the UI reflects the final outcome (patch gone, value confirmed)
 ```
 
 Memos stay lazy — a write that reaches no reaction has nothing in flight — and refreshing

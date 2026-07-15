@@ -88,7 +88,10 @@ public sealed class Transition : IDisposable, IAsyncDisposable, IStabilizationLi
     /// <summary>Seals the wavefront and restores the prior ambient transition tag.</summary>
     public void Dispose()
     {
-        if (taggedAmbientFlow)
+        // Restore only when THIS scope is still the ambient one: a second Dispose, or a
+        // Dispose running on a Task.Run copy of the ExecutionContext, must not clobber
+        // whatever transition is active on that flow with a stale prior.
+        if (taggedAmbientFlow && ReferenceEquals(TransitionFlow.Current, this))
         {
             TransitionFlow.Current = prior;
         }

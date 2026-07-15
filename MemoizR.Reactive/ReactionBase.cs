@@ -485,6 +485,20 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
     // observe the unassigned default.
     internal void ScheduleInitialRun()
     {
-        Stale(CacheState.CacheDirty, TimeSpan.Zero);
+        // Creation is not a write: a reaction built inside a transition scope must not join
+        // that transition's wavefront (ADR 0007 tracks "the reactions invalidated by the Sets
+        // performed inside the scope" -- a slow or failing initial run would otherwise pend or
+        // fault a transition that never wrote anything reaching this reaction). Suppress the
+        // ambient tag for just this schedule, synchronously on this flow, and restore it.
+        var ambient = TransitionFlow.Current;
+        TransitionFlow.Current = null;
+        try
+        {
+            Stale(CacheState.CacheDirty, TimeSpan.Zero);
+        }
+        finally
+        {
+            TransitionFlow.Current = ambient;
+        }
     }
 }
