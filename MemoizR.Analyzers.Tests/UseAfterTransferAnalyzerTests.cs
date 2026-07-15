@@ -650,6 +650,72 @@ public class UseAfterTransferAnalyzerTests
     }
 
     [Fact]
+    public async Task BreaksBetweenTransferAndReassignment_KeepTracking()
+    {
+        // The break exits the loop past the reassignment: on the skip path the code after the
+        // loop still holds the transferred list.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M(bool cond, bool skip)
+                {
+                    var list = new List<int> { 1 };
+                    while (cond)
+                    {
+                        _ = Sending.Transfer(list);
+                        if (skip)
+                        {
+                            break;
+                        }
+
+                        list = new List<int>();
+                    }
+
+                    list.Add(1);
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+    }
+
+    [Fact]
+    public async Task BreaksThatExitBeforeTheReassignment_SkipNothing()
+    {
+        // The switch closes before the reassignment: its break cannot jump past it, so the
+        // reassignment stays definite and the later use is clean.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M(int n)
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(list);
+                    switch (n)
+                    {
+                        case 1:
+                            n++;
+                            break;
+                    }
+
+                    list = new List<int>();
+                    list.Add(1);
+                    _ = sending;
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
     public async Task CatchHandlers_ObserveAThrownTransfer()
     {
         // A thrown transfer lands in the try's handlers: the catch runs after the throw

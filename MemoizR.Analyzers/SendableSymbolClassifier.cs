@@ -438,13 +438,16 @@ internal sealed class SendableSymbolClassifier
     }
 
     // The number of type nodes in the constructed reference: Box<List<int>> is 3. Finite
-    // nesting shrinks this at every recursive step; polymorphic recursion grows it.
-    private static int TypeSize(ITypeSymbol type)
+    // nesting shrinks this at every recursive step; polymorphic recursion grows it. CONTAINING
+    // type arguments count too: a nested Outer<T>.Holder substitutes through them (the runtime
+    // Type flattens outer arguments into GetGenericArguments, so this stays in lockstep).
+    internal static int TypeSize(ITypeSymbol type)
     {
         return type switch
         {
             IArrayTypeSymbol array => 1 + TypeSize(array.ElementType),
-            INamedTypeSymbol named => 1 + named.TypeArguments.Sum(TypeSize),
+            INamedTypeSymbol named => 1 + named.TypeArguments.Sum(TypeSize)
+                + (named.ContainingType is { } containing ? TypeSize(containing) - 1 : 0),
             _ => 1,
         };
     }

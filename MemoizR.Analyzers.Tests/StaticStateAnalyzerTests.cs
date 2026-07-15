@@ -282,6 +282,85 @@ public class StaticStateAnalyzerTests
     }
 
     [Fact]
+    public async Task UnmanagedTypeParameters_AreSendableForEveryInstantiation()
+    {
+        // `where T : unmanaged` guarantees a no-reference value type however the generic is
+        // closed: reads hand out copies that can alias nothing, so the slot needs no
+        // creation-site check. A plain `struct` constraint gives no such guarantee -- a struct
+        // can carry references to mutable objects.
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public class UnmanagedCache<T> where T : unmanaged
+            {
+                private static readonly T Zero = default;
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    _ = Zero;
+                }
+            }
+
+            public class StructCache<T> where T : struct
+            {
+                private static readonly T Zero = default;
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    _ = Zero;
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR004", diagnostic.Id);
+        Assert.Contains("type parameter", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task NestedTypes_ResubstitutedThroughContainingArguments_AreStillWalked()
+    {
+        // Outer<int>.Holder and Outer<T>.Holder share a DECLARATION but differ through the
+        // containing type's arguments: after walking the first, the second must still be
+        // inspected, or the outer T (a List<int> in C<List<int>>) hides on Holder.Value.
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public class Outer<U>
+            {
+                public sealed class Holder
+                {
+                    public U? Value { get; init; }
+                }
+            }
+
+            public class C<T>
+            {
+                private sealed class Pair
+                {
+                    public Outer<int>.Holder? A { get; init; }
+
+                    public Outer<T>.Holder? B { get; init; }
+                }
+
+                private static readonly Pair Cache = new();
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    _ = Cache;
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR004", diagnostic.Id);
+        Assert.Contains("type parameter", diagnostic.GetMessage());
+    }
+
+    [Fact]
     public async Task PolymorphicRecursion_WithAStoredParameter_IsRejectedNotAssumed()
     {
         // The divergent chain's SECOND level substitutes Value to List<int>: the classifier

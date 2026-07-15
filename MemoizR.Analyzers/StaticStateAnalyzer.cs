@@ -188,33 +188,40 @@ public sealed class StaticStateAnalyzer : DiagnosticAnalyzer
     // member walk would accept that T through the exemption this rule exists to remove.
     private static bool HasUnshieldedTypeParameter(ITypeSymbol type)
     {
-        return HasUnshieldedTypeParameter(
-            type,
-            new System.Collections.Generic.HashSet<ITypeSymbol>(SymbolEqualityComparer.Default),
-            new System.Collections.Generic.HashSet<INamedTypeSymbol>(SymbolEqualityComparer.Default));
+        return HasUnshieldedTypeParameter(type, new System.Collections.Generic.HashSet<ITypeSymbol>(SymbolEqualityComparer.Default));
     }
 
-    private static bool HasUnshieldedTypeParameter(
-        ITypeSymbol type,
-        System.Collections.Generic.HashSet<ITypeSymbol> visited,
-        System.Collections.Generic.HashSet<INamedTypeSymbol> walkedDefinitions)
+    private static bool HasUnshieldedTypeParameter(ITypeSymbol type, System.Collections.Generic.HashSet<ITypeSymbol> visited)
     {
         switch (type)
         {
-            case ITypeParameterSymbol:
-                return true;
+            case ITypeParameterSymbol parameter:
+                // `where T : unmanaged` guarantees a no-reference value type for EVERY closed
+                // instantiation: reads hand out copies that can alias nothing, so the slot is
+                // safe without any creation-site check. (A plain `struct` constraint is NOT
+                // enough -- a struct can carry references to mutable objects.)
+                return !parameter.HasUnmanagedTypeConstraint;
             case IArrayTypeSymbol array:
-                return HasUnshieldedTypeParameter(array.ElementType, visited, walkedDefinitions);
+                return HasUnshieldedTypeParameter(array.ElementType, visited);
             case INamedTypeSymbol named
                 when visited.Add(named) && !SendableSymbolClassifier.HasSendableAttribute(named):
                 // Member re-instantiation can construct fresh symbols forever (Box<T> exposing
-                // Box<List<T>>), so the member walk runs once per DECLARATION: deeper
-                // re-instantiations substitute the same members with arguments already walked.
-                var memberTypes = walkedDefinitions.Add((INamedTypeSymbol)named.OriginalDefinition)
+                // Box<List<T>>), so the member walk needs a divergence bound -- but a
+                // once-per-DECLARATION gate is too coarse: the same nested declaration can
+                // return with DIFFERENT substitutions through its containing type
+                // (Outer<int>.Holder, then Outer<T>.Holder). The bound mirrors the
+                // classifier's: walk members while fewer than two same-definition types of
+                // non-greater size were already visited.
+                var definition = (INamedTypeSymbol)named.OriginalDefinition;
+                var priorNonShrinking = visited.Count(entry => entry is INamedTypeSymbol { } other
+                    && !SymbolEqualityComparer.Default.Equals(other, named)
+                    && SymbolEqualityComparer.Default.Equals(other.OriginalDefinition, definition)
+                    && SendableSymbolClassifier.TypeSize(other) <= SendableSymbolClassifier.TypeSize(named));
+                var memberTypes = priorNonShrinking < 2
                     ? MemberTypesOf(named)
                     : System.Linq.Enumerable.Empty<ITypeSymbol>();
-                return named.TypeArguments.Any(argument => HasUnshieldedTypeParameter(argument, visited, walkedDefinitions))
-                    || memberTypes.Any(memberType => HasUnshieldedTypeParameter(memberType, visited, walkedDefinitions));
+                return named.TypeArguments.Any(argument => HasUnshieldedTypeParameter(argument, visited))
+                    || memberTypes.Any(memberType => HasUnshieldedTypeParameter(memberType, visited));
             default:
                 return false;
         }

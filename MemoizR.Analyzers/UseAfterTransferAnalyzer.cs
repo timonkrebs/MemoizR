@@ -384,8 +384,44 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         }
 
         return IsOnTheTransfersConditionalLevel(reinitialization, transferPosition)
+                && !ABranchCanSkip(reinitialization, transferPosition, scope)
             ? ReferenceRole.FreshValueFromHere
             : ReferenceRole.ConditionalReinitialization;
+    }
+
+    // `while (c) { Transfer(list); if (skip) break; list = new(); }`: the break exits the loop
+    // PAST the reassignment, so the transferred value survives into the code after the loop. A
+    // reinitialization is not definite when a break/continue/goto sits between the transfer
+    // and it and jumps out of a construct that also contains it -- a break leaving a switch
+    // that closes BEFORE the reinitialization skips nothing.
+    private static bool ABranchCanSkip(IOperation reinitialization, int transferPosition, IOperation scope)
+    {
+        var reinitPosition = reinitialization.Syntax.SpanStart;
+        return scope.DescendantsAndSelf().OfType<IBranchOperation>().Any(branch =>
+            branch.Syntax.SpanStart >= transferPosition
+            && branch.Syntax.Span.End <= reinitPosition
+            && CanSkipPast(branch, reinitPosition));
+    }
+
+    private static bool CanSkipPast(IBranchOperation branch, int reinitPosition)
+    {
+        if (branch.BranchKind == BranchKind.GoTo)
+        {
+            return true; // an arbitrary target is assumed able to skip the reinitialization
+        }
+
+        for (var parent = branch.Parent; parent is not null; parent = parent.Parent)
+        {
+            var exits = branch.BranchKind == BranchKind.Break
+                ? parent is ILoopOperation or ISwitchOperation
+                : parent is ILoopOperation;
+            if (exits)
+            {
+                return parent.Syntax.Span.Contains(reinitPosition);
+            }
+        }
+
+        return false;
     }
 
     // True when the reassignment DEFINITELY executes on the path that transferred: walking up

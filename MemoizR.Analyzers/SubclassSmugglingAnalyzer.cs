@@ -80,16 +80,11 @@ public sealed class SubclassSmugglingAnalyzer : DiagnosticAnalyzer
 
     internal static System.Collections.Generic.IEnumerable<(INamedTypeSymbol Named, int Depth)> NamedTypesIn(ITypeSymbol type, int depth)
     {
-        return NamedTypesIn(
-            type,
-            depth,
-            new System.Collections.Generic.HashSet<ITypeSymbol>(SymbolEqualityComparer.Default),
-            new System.Collections.Generic.HashSet<INamedTypeSymbol>(SymbolEqualityComparer.Default));
+        return NamedTypesIn(type, depth, new System.Collections.Generic.HashSet<ITypeSymbol>(SymbolEqualityComparer.Default));
     }
 
     private static System.Collections.Generic.IEnumerable<(INamedTypeSymbol Named, int Depth)> NamedTypesIn(
-        ITypeSymbol type, int depth, System.Collections.Generic.HashSet<ITypeSymbol> visited,
-        System.Collections.Generic.HashSet<INamedTypeSymbol> walkedDefinitions)
+        ITypeSymbol type, int depth, System.Collections.Generic.HashSet<ITypeSymbol> visited)
     {
         if (type is not INamedTypeSymbol named || !visited.Add(type))
         {
@@ -109,15 +104,23 @@ public sealed class SubclassSmugglingAnalyzer : DiagnosticAnalyzer
         }
 
         // Member re-instantiation can construct fresh symbols forever (Box<T> exposing
-        // Box<List<T>>), so the member walk runs once per DECLARATION: deeper
-        // re-instantiations substitute the same members with arguments already walked.
-        var memberTypes = walkedDefinitions.Add((INamedTypeSymbol)named.OriginalDefinition)
+        // Box<List<T>>), so the member walk needs a divergence bound -- but a
+        // once-per-DECLARATION gate is too coarse: the same nested declaration can return with
+        // DIFFERENT substitutions through its containing type (Outer<int>.Holder, then
+        // Outer<T>.Holder). The bound mirrors the classifier's: walk members while fewer than
+        // two same-definition types of non-greater size were already visited.
+        var definition = (INamedTypeSymbol)named.OriginalDefinition;
+        var priorNonShrinking = visited.Count(entry => entry is INamedTypeSymbol { } other
+            && !SymbolEqualityComparer.Default.Equals(other, named)
+            && SymbolEqualityComparer.Default.Equals(other.OriginalDefinition, definition)
+            && SendableSymbolClassifier.TypeSize(other) <= SendableSymbolClassifier.TypeSize(named));
+        var memberTypes = priorNonShrinking < 2
             ? StoredMemberTypesOf(named)
             : System.Linq.Enumerable.Empty<ITypeSymbol>();
 
         foreach (var inner in named.TypeArguments.Concat(memberTypes))
         {
-            foreach (var nested in NamedTypesIn(inner, depth + 1, visited, walkedDefinitions))
+            foreach (var nested in NamedTypesIn(inner, depth + 1, visited))
             {
                 yield return nested;
             }
