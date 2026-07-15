@@ -1,6 +1,17 @@
 namespace MemoizR.Distributed;
 
 /// <summary>
+/// One adopted publication as the barrier must observe it: the mirrored value and the evidence
+/// it arrived with, bound in a single immutable snapshot (swapped atomically, so a reader can
+/// never pair one publication's value with another's evidence). <see cref="Epoch"/> is the
+/// header epoch of the adopted payload -- carried beside the stamp because an honestly-empty
+/// stamp is epoch-agnostic, and incarnation identity must survive empty publications.
+/// <see cref="Stamp"/> is the stamp of the last VERIFIED adoption (an unverifiable adoption
+/// carries the held verified stamp forward, with <see cref="Unverifiable"/> set).
+/// </summary>
+public sealed record AdoptedPublication<T>(T Value, long Epoch, CausalityStamp Stamp, bool Unverifiable);
+
+/// <summary>
 /// The consumer side of one exported node: a local <see cref="EagerRelativeSignal{T}"/> (so the
 /// consumer's graph reacts through the ordinary machinery -- eager on purpose, because an
 /// adoption can change the EVIDENCE while the numeric value stays identical, and the barrier
@@ -31,31 +42,42 @@ public sealed class RemoteSignal<T>
     private readonly HashSet<long> abandonedEpochs = [];
     private long currentEpoch;
     private long lastSequence;
-    private volatile CausalityStamp remoteStamp = CausalityStamp.Empty;
-    private volatile bool unverifiable;
-    private volatile bool hasEvidence;
+    private volatile AdoptedPublication<T>? publication;
 
     /// <summary>
     /// The local signal carrying the mirrored value: wire reactions and memos to this. Its own
     /// causality stamp is LOCAL (peer B's incarnation); the foreign evidence lives in
-    /// <see cref="RemoteStamp"/> until wire-format v3 lets it splice.
+    /// <see cref="Publication"/> until wire-format v3 lets it splice.
     /// </summary>
     public EagerRelativeSignal<T> Local { get; }
 
+    /// <summary>
+    /// The last adopted publication -- value and evidence as ONE atomic snapshot (null until a
+    /// payload is adopted). The barrier renders from this, never from the graph value plus a
+    /// separately-read stamp: those two reads could straddle an adoption and pair a value with
+    /// evidence it never published under.
+    /// </summary>
+    public AdoptedPublication<T>? Publication => publication;
+
     /// <summary>The stamp of the last VERIFIED adopted publication (empty until one arrives).</summary>
-    public CausalityStamp RemoteStamp => remoteStamp;
+    public CausalityStamp RemoteStamp => publication?.Stamp ?? CausalityStamp.Empty;
 
     /// <summary>Whether the host's current publication is one nobody can vouch for.</summary>
-    public bool Unverifiable => unverifiable;
+    public bool Unverifiable => publication?.Unverifiable ?? false;
 
     /// <summary>Whether any payload was adopted at all (an honestly-empty stamp is real evidence).</summary>
-    public bool HasEvidence => hasEvidence;
+    public bool HasEvidence => publication != null;
 
     /// <summary>
-    /// Runs (awaited, inside the adoption) when a payload reveals a peer RESET -- the hook for
-    /// resubscribing on a real transport. The abandoned-epoch set stays bounded by the number
-    /// of restarts this mirror lived through; a resubscribing bridge can recreate the mirror
-    /// instead if it wants a clean slate.
+    /// Runs (awaited by the delivering call) when a payload reveals a peer RESET -- the hook
+    /// for resubscribing on a real transport. It is invoked AFTER the reset adoption committed
+    /// and the adoption gate is released: the hook may freely pull or feed this same mirror
+    /// (re-entering the adoption path), and if it throws, the failure surfaces to the
+    /// delivering caller while the value stays adopted -- redeliveries drop as duplicates and
+    /// only the resubscription itself needs retrying. Back-to-back resets can overlap hook
+    /// runs; a resubscribing bridge must tolerate that (or recreate the mirror for a clean
+    /// slate). The abandoned-epoch set stays bounded by the number of restarts this mirror
+    /// lived through.
     /// </summary>
     public Func<Task>? OnPeerReset { get; init; }
 
@@ -80,7 +102,7 @@ public sealed class RemoteSignal<T>
         await adoptionGate.WaitAsync();
         try
         {
-            shouldPull = unverifiable
+            shouldPull = (publication?.Unverifiable ?? false)
                 || (!abandonedEpochs.Contains(notification.Epoch)
                     && (notification.Epoch != currentEpoch || notification.Sequence > lastSequence));
         }
@@ -115,6 +137,7 @@ public sealed class RemoteSignal<T>
             throw new ArgumentException("The payload's stamp belongs to a different incarnation epoch than the payload header claims.", nameof(payload));
         }
 
+        var isReset = false;
         await adoptionGate.WaitAsync();
         try
         {
@@ -123,38 +146,44 @@ public sealed class RemoteSignal<T>
                 return; // late traffic from a dead incarnation
             }
 
-            var isReset = currentEpoch != 0 && payload.Epoch != currentEpoch;
+            CausalityStamp heldVerifiedStamp;
+            isReset = currentEpoch != 0 && payload.Epoch != currentEpoch;
             if (isReset)
             {
                 abandonedEpochs.Add(currentEpoch);
-                currentEpoch = 0;
-                lastSequence = 0;
-                remoteStamp = CausalityStamp.Empty; // never merged across incarnations
+                heldVerifiedStamp = CausalityStamp.Empty; // never merged across incarnations
             }
-            else if (currentEpoch != 0 && payload.Sequence <= lastSequence)
+            else
             {
-                return; // late or duplicated delivery: the sequence totally orders publications within an epoch
+                if (currentEpoch != 0 && payload.Sequence <= lastSequence)
+                {
+                    return; // late or duplicated delivery: the sequence totally orders publications within an epoch
+                }
+                heldVerifiedStamp = publication?.Stamp ?? CausalityStamp.Empty;
             }
 
             currentEpoch = payload.Epoch;
             lastSequence = payload.Sequence;
-            hasEvidence = true;
-            unverifiable = payload.Unverifiable;
-            if (!payload.Unverifiable)
-            {
-                remoteStamp = incoming;
-            }
-
-            if (isReset && OnPeerReset != null)
-            {
-                await OnPeerReset();
-            }
+            publication = new AdoptedPublication<T>(
+                payload.Value,
+                payload.Epoch,
+                payload.Unverifiable ? heldVerifiedStamp : incoming,
+                payload.Unverifiable);
 
             await Local.Set(_ => payload.Value);
         }
         finally
         {
             adoptionGate.Release();
+        }
+
+        // The resubscription hook runs with the adoption fully committed and the gate free: a
+        // hook that pulls or feeds this same mirror re-enters cleanly instead of deadlocking on
+        // the gate, and a hook that throws cannot leave the ordering state claiming a value the
+        // local signal never published.
+        if (isReset && OnPeerReset != null)
+        {
+            await OnPeerReset();
         }
     }
 }

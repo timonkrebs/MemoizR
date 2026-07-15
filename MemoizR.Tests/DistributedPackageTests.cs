@@ -309,6 +309,172 @@ public class DistributedPackageTests
     }
 
     [Fact]
+    public async Task RemoteSignal_Publication_BindsValueAndEvidenceAtomically()
+    {
+        // The barrier's contract: one adopted publication is ONE snapshot -- value, header
+        // epoch and stamp never observable in a torn combination.
+        var epoch = 5L;
+        var verified = CausalityStamp.ForSignal(1000, 1, epoch);
+        var consumer = new MemoFactory();
+        var mirror = consumer.CreateRemoteSignal<int>("mirror", 0,
+            () => throw new InvalidOperationException("no pull in this test"));
+
+        Assert.Null(mirror.Publication);
+
+        await mirror.OnValueAsync(new ValuePayload<int>(1000, epoch, 1, 10, verified.Serialize(), false));
+        var publication = mirror.Publication;
+        Assert.NotNull(publication);
+        Assert.Equal(10, publication.Value);
+        Assert.Equal(epoch, publication.Epoch);
+        Assert.Equal(verified, publication.Stamp);
+        Assert.False(publication.Unverifiable);
+
+        // An unverifiable adoption publishes the NEW value with the HELD verified stamp, still
+        // as one snapshot.
+        await mirror.OnValueAsync(new ValuePayload<int>(1000, epoch, 2, 11, CausalityStamp.Empty.Serialize(), true));
+        publication = mirror.Publication;
+        Assert.NotNull(publication);
+        Assert.Equal(11, publication.Value);
+        Assert.Equal(epoch, publication.Epoch);
+        Assert.Equal(verified, publication.Stamp);
+        Assert.True(publication.Unverifiable);
+    }
+
+    [Fact]
+    public async Task RemoteSignal_ThrowingResetHook_LeavesTheValueAdopted_NotWedged()
+    {
+        // A resubscription hook failure surfaces to the delivering caller, but the adoption
+        // itself must have committed: otherwise the ordering state would claim the sequence
+        // while the local signal never published, and every redelivery would be dropped as a
+        // duplicate -- wedging the mirror on the old value until an unrelated new publication.
+        var epoch1 = 11L;
+        var epoch2 = 22L;
+        var consumer = new MemoFactory();
+        var mirror = consumer.CreateRemoteSignal<int>("mirror", 0,
+            () => throw new InvalidOperationException("no pull in this test"),
+            onPeerReset: () => throw new InvalidOperationException("resubscribe transport down"));
+
+        await mirror.OnValueAsync(new ValuePayload<int>(1000, epoch1, 5, 111, CausalityStamp.ForSignal(1000, 5, epoch1).Serialize(), false));
+
+        var resetPayload = new ValuePayload<int>(1000, epoch2, 1, 222, CausalityStamp.ForSignal(1000, 1, epoch2).Serialize(), false);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => mirror.OnValueAsync(resetPayload));
+
+        // The reset payload WAS adopted; only the resubscription failed.
+        Assert.Equal(222, await mirror.Local.Get());
+        Assert.Equal(epoch2, mirror.RemoteStamp.Epoch);
+
+        // Its redelivery is an ordinary duplicate (no reset, no hook, no throw) ...
+        await mirror.OnValueAsync(resetPayload);
+        Assert.Equal(222, await mirror.Local.Get());
+
+        // ... and newer publications keep flowing.
+        await mirror.OnValueAsync(new ValuePayload<int>(1000, epoch2, 2, 333, CausalityStamp.ForSignal(1000, 2, epoch2).Serialize(), false));
+        Assert.Equal(333, await mirror.Local.Get());
+    }
+
+    [Fact]
+    public async Task RemoteSignal_ResetHook_MayPullTheSameMirror()
+    {
+        // The documented resubscribe path: a bridge answering a reset by pulling the mirror's
+        // current truth. The hook runs outside the adoption gate, so the nested pull re-enters
+        // the adoption path instead of deadlocking on the gate.
+        var epoch1 = 11L;
+        var epoch2 = 22L;
+        RemoteSignal<int>? mirror = null;
+        var consumer = new MemoFactory();
+        mirror = consumer.CreateRemoteSignal("mirror", 0,
+            () => Task.FromResult(new ValuePayload<int>(1000, epoch2, 2, 999, CausalityStamp.ForSignal(1000, 2, epoch2).Serialize(), false)),
+            onPeerReset: () => mirror!.PullAsync());
+
+        await mirror.OnValueAsync(new ValuePayload<int>(1000, epoch1, 5, 111, CausalityStamp.ForSignal(1000, 5, epoch1).Serialize(), false));
+
+        // A deadlock here must fail the test, not hang the suite.
+        await mirror.OnValueAsync(new ValuePayload<int>(1000, epoch2, 1, 222, CausalityStamp.ForSignal(1000, 1, epoch2).Serialize(), false))
+            .WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.Equal(999, await mirror.Local.Get());
+    }
+
+    [Fact]
+    public async Task Barrier_HostRestartWithEmptyStamp_NeverRendersAcrossIncarnations()
+    {
+        // A restarted host's first publication can carry an honestly-EMPTY stamp, and empty
+        // stamps are vacuously consistent with anything -- the barrier must still refuse to
+        // combine it with the other mirror's pre-restart state (the header epoch, not the
+        // stamp, carries the incarnation identity), and must re-pull BOTH sides to converge.
+        var epoch1 = 11L;
+        var epoch2 = 22L;
+        var consumer = new MemoFactory();
+        var a = consumer.CreateRemoteSignal("a", 0,
+            () => Task.FromResult(new ValuePayload<int>(1000, epoch2, 1, 10, CausalityStamp.Empty.Serialize(), false)));
+        var b = consumer.CreateRemoteSignal("b", 0,
+            () => Task.FromResult(new ValuePayload<int>(1001, epoch2, 1, 20, CausalityStamp.ForSignal(1001, 1, epoch2).Serialize(), false)));
+
+        var renders = new List<(int A, int B)>();
+        var reaction = DistributedBarrier.CreateConsistentReaction(
+            consumer, a, b, (va, vb) => { lock (renders) { renders.Add((va, vb)); } });
+
+        // Pre-restart snapshot: disjoint verified stamps of the same incarnation.
+        await a.OnValueAsync(new ValuePayload<int>(1000, epoch1, 1, 1, CausalityStamp.ForSignal(1000, 1, epoch1).Serialize(), false));
+        await b.OnValueAsync(new ValuePayload<int>(1001, epoch1, 1, 2, CausalityStamp.ForSignal(1001, 1, epoch1).Serialize(), false));
+        await TestHelpers.WaitForConvergenceAsync(() => { lock (renders) { return renders.Contains((1, 2)); } });
+
+        // The restart: only mirror a receives the new incarnation's (empty-stamped) truth.
+        await a.OnValueAsync(new ValuePayload<int>(1000, epoch2, 1, 10, CausalityStamp.Empty.Serialize(), false));
+
+        // The barrier re-pulls both sides itself and renders the post-restart snapshot.
+        await TestHelpers.WaitForConvergenceAsync(() => { lock (renders) { return renders.Contains((10, 20)); } });
+
+        // Cross-incarnation mixes must never have rendered.
+        lock (renders)
+        {
+            Assert.DoesNotContain((10, 2), renders);
+            Assert.DoesNotContain((1, 20), renders);
+        }
+        GC.KeepAlive(reaction);
+    }
+
+    [Fact]
+    public async Task Barrier_ThrowingGlitchCallback_StillHeals()
+    {
+        // onGlitch is diagnostics only: a throwing sink (a logger that is itself down) must
+        // not abort the reaction before the re-pull is scheduled. The failure is reported to
+        // onRepullError and the barrier heals regardless.
+        var host = new MemoFactory();
+        var temperature = host.CreateSignal(20.0);
+        var dew = host.CreateMemoizR("dew", async () => await temperature.Get() - 5);
+        var heat = host.CreateMemoizR("heat", async () => await temperature.Get() + 5);
+        using var dewExport = host.Export(dew, _ => Task.CompletedTask);
+        using var heatExport = host.Export(heat, _ => Task.CompletedTask);
+
+        var consumer = new MemoFactory();
+        var dewMirror = consumer.CreateRemoteSignal("dew", 0.0, dewExport.PullAsync);
+        var heatMirror = consumer.CreateRemoteSignal("heat", 0.0, heatExport.PullAsync);
+
+        var renders = new List<(double Dew, double Heat)>();
+        var reported = new List<Exception>();
+        var reaction = DistributedBarrier.CreateConsistentReaction(
+            consumer, dewMirror, heatMirror,
+            (d, h) => { lock (renders) { renders.Add((d, h)); } },
+            onRepullError: ex => { lock (reported) { reported.Add(ex); } },
+            onGlitch: (_, _) => throw new InvalidOperationException("glitch sink down"));
+
+        await dewMirror.PullAsync();
+        await heatMirror.PullAsync();
+        await TestHelpers.WaitForConvergenceAsync(() => { lock (renders) { return renders.Contains((15.0, 25.0)); } });
+
+        await temperature.Set(30.0);
+        await dewMirror.OnValueAsync(await dewExport.PullAsync());
+
+        await TestHelpers.WaitForConvergenceAsync(() => { lock (renders) { return renders.Contains((25.0, 35.0)); } });
+        lock (reported)
+        {
+            Assert.Contains(reported, ex => ex is InvalidOperationException { Message: "glitch sink down" });
+        }
+        GC.KeepAlive(reaction);
+    }
+
+    [Fact]
     public async Task Barrier_SkipsRendering_WhileAMirrorIsUnverifiable()
     {
         var epoch = 5L;
