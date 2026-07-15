@@ -120,13 +120,22 @@ public class Context
     * loser reading after the winner already published and closed the bucket). */
     private readonly Dictionary<IMemoHandlR, StampCapture> stampCaptures = new();
 
-    internal Context(int idRangeStart = 1, int idRangeEnd = int.MaxValue)
+    // Whether this context captures causality stamps at all (issue #39). Context-wide, not
+    // per-factory: captures are keyed on the context and signals stamp with its epoch, so a
+    // keyed context shared by factories with conflicting settings would be incoherent --
+    // MemoFactory rejects the rebind. When disabled, every stamp entry point below no-ops and
+    // publications carry StampEvidence.UnverifiableEvidence: the honest "no claim can be made"
+    // (None would falsely assert "depends on no tracked signals" to a consistency check).
+    internal bool StampsEnabled { get; }
+
+    internal Context(int idRangeStart = 1, int idRangeEnd = int.MaxValue, bool stampsEnabled = true)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(idRangeStart);
         ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(idRangeEnd, idRangeStart);
         IdRangeStart = idRangeStart;
         IdRangeEnd = idRangeEnd;
         nextNodeId = idRangeStart - 1;
+        StampsEnabled = stampsEnabled;
     }
 
     internal int NextNodeId()
@@ -143,6 +152,11 @@ public class Context
 
     internal void BeginStampCapture(IMemoHandlR node, bool branchAware = false)
     {
+        if (!StampsEnabled)
+        {
+            return;
+        }
+
         lock (Lock)
         {
             stampCaptures[node] = new(branchAware);
@@ -155,7 +169,7 @@ public class Context
     // faulted source would hide a real control-flow dependency).
     internal void MarkStampCaptureUnverifiable(IMemoHandlR? evaluatingNode)
     {
-        if (evaluatingNode == null)
+        if (evaluatingNode == null || !StampsEnabled)
         {
             return;
         }
@@ -172,7 +186,7 @@ public class Context
 
     internal void RecordSourceStamp(IMemoHandlR? evaluatingNode, int sourceId, CausalityStamp stamp)
     {
-        if (evaluatingNode == null)
+        if (evaluatingNode == null || !StampsEnabled)
         {
             return;
         }
@@ -200,23 +214,77 @@ public class Context
         }
     }
 
-    // The tracked leaf-signal read, fused: dependency registration, the single box read, and the
-    // stamp record run under ONE Lock acquisition -- the register and the record each took their
-    // own before, doubling context-wide lock traffic on the hottest tracked path. The
-    // register-then-read order is preserved: the eager observer subscription must be in place
-    // before the value is read, or a Set landing in between would notify nobody. The scope is the
-    // caller's already-resolved (and strongly rooted) instance, so no registry probe here.
-    internal (T Value, StampEvidence Evidence) TrackedSignalRead<T>(MemoHandlR<T> source, ReactionScope scope)
+    // The tracked read of a leaf signal, fused: dependency registration, the single box read,
+    // and the stamp record run under ONE Lock acquisition -- the register and the record each
+    // took their own before, doubling context-wide lock traffic on the hottest tracked path.
+    // The register-then-read order is what makes this safe WITHOUT a staleness verdict: a
+    // signal's box is always current (its Set publishes before it sweeps observers), so a sweep
+    // completing before our registration necessarily published the value we are about to read.
+    // The scope is the caller's already-resolved (and strongly rooted) instance, so no registry
+    // probe here.
+    internal (T Value, StampEvidence Evidence) TrackedRead<T>(MemoHandlR<T> source, ReactionScope scope)
     {
         var branch = RaceBranchFlow.Current.Value;
         lock (Lock)
         {
             CheckDependenciesCore(scope, source);
             var pair = source.ValueAndEvidence;
-            // A signal's own evidence is never unverifiable (ForOwnStamp), so this records
-            // unconditionally.
-            RecordSourceStampCore(scope.CurrentReaction, source.Id, pair.Evidence.Stamp, branch);
+            RecordReadEvidence(scope, source.Id, pair.Evidence, branch);
             return pair;
+        }
+    }
+
+    // The tracked read of a CLEAN MEMO: registration first, then the staleness verdict, then
+    // the box read -- all under one Lock acquisition. A memo's box LAGS its invalidation (the
+    // recompute is pull-driven), and an invalidation sweeps the observer list exactly once, so
+    // a sweep that completed before the registration could never have notified the reader --
+    // "clean" must be (re)proven AFTER registering, and the invalidation's generation bump is
+    // the only trace such a sweep leaves. The snapshot was taken by the caller while it
+    // observed CacheClean: unchanged generation + still-Clean here proves no invalidation (and
+    // so no republish) happened since, making the pair current; an invalidation landing after
+    // this validation sweeps a list that already contains the reader -- the same benign race as
+    // one landing right after a mutex-held read returned. On a failed verdict nothing is read
+    // or recorded; the caller falls back to its serialized path, already wired (its dependency
+    // registration must not run twice).
+    internal bool TryTrackedCleanRead<T>(MemoHandlR<T> source, ReactionScope scope, int generationSnapshot, out (T Value, StampEvidence Evidence) pair)
+    {
+        var branch = RaceBranchFlow.Current.Value;
+        lock (Lock)
+        {
+            CheckDependenciesCore(scope, source);
+            if (source.stateCell.State != CacheState.CacheClean || source.stateCell.Generation != generationSnapshot)
+            {
+                pair = default!;
+                return false;
+            }
+
+            pair = source.ValueAndEvidence;
+            RecordReadEvidence(scope, source.Id, pair.Evidence, branch);
+            return true;
+        }
+    }
+
+    // Must be called under Lock. A leaf signal's own evidence is never unverifiable
+    // (ForOwnStamp); a clean memo's can be (contagion from a poisoned source), and
+    // unverifiability must poison the caller's capture instead of contributing a stamp (see
+    // MemoBase.ReadWithEvidence).
+    private void RecordReadEvidence(ReactionScope scope, int sourceId, StampEvidence evidence, int branch)
+    {
+        if (!StampsEnabled)
+        {
+            return;
+        }
+
+        if (evidence.Unverifiable)
+        {
+            if (scope.CurrentReaction is { } reaction && stampCaptures.TryGetValue(reaction, out var capture))
+            {
+                capture.Poison(branch);
+            }
+        }
+        else
+        {
+            RecordSourceStampCore(scope.CurrentReaction, sourceId, evidence.Stamp, branch);
         }
     }
 
@@ -224,6 +292,11 @@ public class Context
     // paths call this too, discarding the result -- the node then keeps its previous stamp.
     internal StampCapture TakeStampCapture(IMemoHandlR node)
     {
+        if (!StampsEnabled)
+        {
+            return StampCapture.Empty;
+        }
+
         lock (Lock)
         {
             return stampCaptures.Remove(node, out var capture) ? capture : StampCapture.Empty;
@@ -563,20 +636,27 @@ internal sealed class StampCapture
     // Returned by TakeStampCapture when no capture is open; never registered, so never mutated.
     internal static readonly StampCapture Empty = new(false);
 
+    // Handed out by Seal for captures that recorded nothing; FromCapture never wraps a
+    // zero-entry result (it publishes None/Unverifiable instead), so this is never mutated.
+    private static readonly Dictionary<int, CausalityStamp> NoStamps = new();
+
     private readonly bool branchAware;
-    private readonly Dictionary<(int Source, int Branch), CausalityStamp> entries = new();
-    private readonly HashSet<int> poisonedBranches = new();
+    // Allocated on first use: a capture is opened for EVERY evaluation, but evaluations with no
+    // tracked reads (and unpoisoned ones -- almost all) should not pay for the collections.
+    private Dictionary<(int Source, int Branch), CausalityStamp>? entries;
+    private HashSet<int>? poisonedBranches;
 
     public StampCapture(bool branchAware)
     {
         this.branchAware = branchAware;
     }
 
-    public void Poison(int branch) => poisonedBranches.Add(branchAware ? branch : 0);
+    public void Poison(int branch) => (poisonedBranches ??= new()).Add(branchAware ? branch : 0);
 
     public void Record(int sourceId, CausalityStamp stamp, int branch)
     {
         var key = (sourceId, branchAware ? branch : 0);
+        entries ??= new();
         if (entries.TryGetValue(key, out var existing))
         {
             if (!existing.Equals(stamp))
@@ -596,12 +676,16 @@ internal sealed class StampCapture
     // one source is the same mixed-publication situation as a poisoned re-read.
     public (bool Poisoned, Dictionary<int, CausalityStamp> Stamps) Seal(int winningBranch)
     {
-        var stamps = new Dictionary<int, CausalityStamp>();
-        if (poisonedBranches.Contains(0) || poisonedBranches.Contains(winningBranch))
+        if (poisonedBranches != null && (poisonedBranches.Contains(0) || poisonedBranches.Contains(winningBranch)))
         {
-            return (true, stamps);
+            return (true, NoStamps);
+        }
+        if (entries == null)
+        {
+            return (false, NoStamps);
         }
 
+        var stamps = new Dictionary<int, CausalityStamp>();
         foreach (var ((source, branch), stamp) in entries)
         {
             if (branch != 0 && branch != winningBranch)

@@ -74,7 +74,9 @@ public abstract class SignalHandlR : IMemoHandlR
     // puts the evidence in the value box.
     internal void PublishCapturedStamps()
     {
-        evidence = StampEvidence.FromCapture(Context.TakeStampCapture(this));
+        evidence = Context.StampsEnabled
+            ? StampEvidence.FromCapture(Context.TakeStampCapture(this))
+            : StampEvidence.UnverifiableEvidence;
     }
 
     public string Label { get; init; } = "Label";
@@ -334,6 +336,14 @@ public abstract class MemoHandlR<T> : SignalHandlR
         valueBox = new ValueBox(value, StampEvidence.ForOwnStamp(stamp));
     }
 
+    // The signal write path of a stamps-disabled context: no stamp is constructed at all, and
+    // the published evidence is the shared Unverifiable instance -- the honest "no claim can be
+    // made" (None would falsely assert "depends on no tracked signals" to a consistency check).
+    internal void SetValueUnstamped(T value)
+    {
+        valueBox = new ValueBox(value, StampEvidence.UnverifiableEvidence);
+    }
+
     // Publish a computed value together with the evidence captured during the evaluation that
     // produced it. Shared by MemoBase and ConcurrentRace; the race passes the capture it closed
     // at winner selection.
@@ -341,7 +351,12 @@ public abstract class MemoHandlR<T> : SignalHandlR
 
     internal void PublishValueWithStamps(T value, StampCapture capture, int winningBranch = 0)
     {
-        valueBox = new ValueBox(value, StampEvidence.FromCapture(capture, winningBranch));
+        // A stamps-disabled context publishes the shared Unverifiable evidence: the capture is
+        // always empty there, and sealing it would produce None -- an honest-looking "depends
+        // on nothing" claim no disabled context can actually make.
+        valueBox = new ValueBox(value, Context.StampsEnabled
+            ? StampEvidence.FromCapture(capture, winningBranch)
+            : StampEvidence.UnverifiableEvidence);
     }
 
     internal MemoHandlR(Context context) : base(context)
@@ -384,8 +399,8 @@ public abstract class MemoHandlR<T> : SignalHandlR
         using (await scope.ContextLock.UpgradeableLockAsync())
         {
             // Registration, box read and stamp record fused under one Context.Lock acquisition
-            // (see Context.TrackedSignalRead).
-            pair = Context.TrackedSignalRead(this, scope);
+            // (see Context.TrackedRead).
+            pair = Context.TrackedRead(this, scope);
         }
         GC.KeepAlive(scope); // strong root: the lock identity must outlive the tracked read
         return pair;

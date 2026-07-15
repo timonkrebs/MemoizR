@@ -87,6 +87,33 @@ public abstract class MemoBase<T> : MemoHandlR<T>, IMemoizR, IStampedGetR<T>
             return ValueAndEvidence;
         }
 
+        // A clean TRACKED read takes the leaf-signal path: no node mutex (ADR 0002's rationale
+        // -- there is no recompute for it to guard), so concurrent capturing readers of a
+        // shared clean memo do not serialize on its mutex. Correctness hangs on ORDER: an
+        // invalidation sweeps the observer list exactly once, so a Stale whose sweep completed
+        // BEFORE the caller registered could never notify it -- "clean" must be proven AFTER
+        // registration. TryTrackedCleanRead registers first and then validates the generation
+        // snapshot taken here (while Clean was observed) under the same Context.Lock as the box
+        // read: unchanged means no invalidation -- and so no republish -- happened since, so
+        // the pair is current; a Stale landing later sweeps a list that already contains the
+        // caller, the same benign race as one landing right after a mutex-held read returned.
+        // A failed verdict falls through to the serialized path, skipping its re-registration
+        // (the dependency edge is already wired).
+        var alreadyRegistered = false;
+        var cleanToken = stateCell.Generation;
+        if (State == CacheState.CacheClean)
+        {
+            using (await scope.ContextLock.UpgradeableLockAsync())
+            {
+                if (Context.TryTrackedCleanRead(this, scope, cleanToken, out var pair))
+                {
+                    GC.KeepAlive(scope);
+                    return pair;
+                }
+            }
+            alreadyRegistered = true;
+        }
+
         // Only one thread should evaluate the graph at a time. otherwise the context could get messed up.
         // This should lead to perf gains because memoization can be utilized more efficiently.
         try
@@ -97,7 +124,7 @@ public abstract class MemoBase<T> : MemoHandlR<T>, IMemoizR, IStampedGetR<T>
                 Context.EnterEvaluationScope();
                 try
                 {
-                    if (scope.CurrentReaction != null)
+                    if (!alreadyRegistered && scope.CurrentReaction != null)
                     {
                         Context.CheckDependenciesTheSame(this);
                     }

@@ -43,11 +43,12 @@ public sealed class MemoFactory
         ArgumentOutOfRangeException.ThrowIfNegative(idRangeStart);
         ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(idRangeEnd, idRangeStart);
         Options = options;
+        var stampsEnabled = !options.HasFlag(MemoFactoryOptions.DisableCausalityStamps);
 
         // Default context is mapped to empty string
         if (string.IsNullOrWhiteSpace(contextKey))
         {
-            Context = new(idRangeStart, idRangeEnd);
+            Context = new(idRangeStart, idRangeEnd, stampsEnabled);
             return;
         }
 
@@ -57,31 +58,45 @@ public sealed class MemoFactory
             // stays bounded by the number of live keyed contexts (CleanUpContexts remains for
             // callers that want an explicit sweep).
             RemoveDeadContexts();
-
-            if (CONTEXTS.TryGetValue(contextKey, out var weakContext))
-            {
-                if (weakContext.TryGetTarget(out var context))
-                {
-                    if (context.IdRangeStart != idRangeStart || context.IdRangeEnd != idRangeEnd)
-                    {
-                        throw new ArgumentException(
-                            $"Context key '{contextKey}' is already bound to the node-id slice [{context.IdRangeStart}, {context.IdRangeEnd}) and cannot be rebound to [{idRangeStart}, {idRangeEnd}).",
-                            nameof(contextKey));
-                    }
-                    Context = context;
-                }
-                else
-                {
-                    Context = new(idRangeStart, idRangeEnd);
-                    weakContext.SetTarget(Context);
-                }
-            }
-            else
-            {
-                Context = new(idRangeStart, idRangeEnd);
-                CONTEXTS.Add(contextKey, new(Context));
-            }
+            Context = ResolveKeyedContext(contextKey, idRangeStart, idRangeEnd, stampsEnabled);
         }
+    }
+
+    // Must be called under contextsLock.
+    private static Context ResolveKeyedContext(string contextKey, int idRangeStart, int idRangeEnd, bool stampsEnabled)
+    {
+        if (!CONTEXTS.TryGetValue(contextKey, out var weakContext))
+        {
+            Context created = new(idRangeStart, idRangeEnd, stampsEnabled);
+            CONTEXTS.Add(contextKey, new(created));
+            return created;
+        }
+
+        if (!weakContext.TryGetTarget(out var context))
+        {
+            Context resurrected = new(idRangeStart, idRangeEnd, stampsEnabled);
+            weakContext.SetTarget(resurrected);
+            return resurrected;
+        }
+
+        if (context.IdRangeStart != idRangeStart || context.IdRangeEnd != idRangeEnd)
+        {
+            throw new ArgumentException(
+                $"Context key '{contextKey}' is already bound to the node-id slice [{context.IdRangeStart}, {context.IdRangeEnd}) and cannot be rebound to [{idRangeStart}, {idRangeEnd}).",
+                nameof(contextKey));
+        }
+
+        // Stamp capture is context-wide state (captures are keyed on the context, signals stamp
+        // with its epoch), so unlike the per-factory strictness a conflicting setting cannot be
+        // honored -- half-stamped evidence would be worse than either choice.
+        if (context.StampsEnabled != stampsEnabled)
+        {
+            throw new ArgumentException(
+                $"Context key '{contextKey}' is already bound with causality stamps {(context.StampsEnabled ? "enabled" : "disabled")} and cannot be rebound with them {(stampsEnabled ? "enabled" : "disabled")}.",
+                nameof(contextKey));
+        }
+
+        return context;
     }
 
     public static void CleanUpContexts()

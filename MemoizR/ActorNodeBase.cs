@@ -207,18 +207,7 @@ public abstract class ActorNodeBase
 
     internal void PropagateToObservers(CacheState newState)
     {
-        AssertOnActor();
-        for (var i = Observers.Count - 1; i >= 0; i--)
-        {
-            if (Observers[i].TryGetTarget(out var observer))
-            {
-                observer.Invalidate(newState);
-            }
-            else
-            {
-                Observers.RemoveAt(i);
-            }
-        }
+        SweepObservers(newState, fromParent: false);
     }
 
     // The diamond down-link: a parent that recomputed to a changed value marks its observers
@@ -256,16 +245,28 @@ public abstract class ActorNodeBase
 
     internal void MarkObserversDirtyFromParent()
     {
+        SweepObservers(CacheState.CacheDirty, fromParent: true);
+    }
+
+    // The one live-observer sweep behind both notifications above, so the dead-weak-reference
+    // pruning lives in a single loop. A flag rather than a delegate: sweeps run on every
+    // invalidation cascade, and a closure over newState would allocate per hop.
+    private void SweepObservers(CacheState newState, bool fromParent)
+    {
         AssertOnActor();
         for (var i = Observers.Count - 1; i >= 0; i--)
         {
-            if (Observers[i].TryGetTarget(out var observer))
+            if (!Observers[i].TryGetTarget(out var observer))
+            {
+                Observers.RemoveAt(i);
+            }
+            else if (fromParent)
             {
                 observer.MarkDirtyFromParent();
             }
             else
             {
-                Observers.RemoveAt(i);
+                observer.Invalidate(newState);
             }
         }
     }
