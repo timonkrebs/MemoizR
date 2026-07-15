@@ -37,6 +37,50 @@ public static class ReactiveMemoFactory
         return new(memoFactory, memoFactory.Executor, label);
     }
 
+    /// <summary>
+    /// Opens a transition scope (ADR 0007): Sets performed inside it are tagged, and the
+    /// returned <see cref="Transition"/> tracks every reaction the writes invalidate until all
+    /// of them have committed clean again -- observable via <see cref="Transition.IsPending"/> /
+    /// <see cref="Transition.Pending"/> and awaitable via <see cref="Transition.Settled"/>.
+    /// <c>using</c> seals the wavefront at scope end; <c>await using</c> additionally awaits
+    /// settlement. Scopes nest innermost-wins: writes inside an inner scope are tracked by the
+    /// inner transition only.
+    /// </summary>
+    public static Transition BeginTransition(this MemoFactory memoFactory)
+    {
+        return new(memoFactory.Context);
+    }
+
+    /// <summary>
+    /// Creates an optimistic view over <paramref name="source"/> (ADR 0007): reads return the
+    /// source value with every in-flight optimistic patch applied on top. Pair with
+    /// <see cref="CreateAction"/> -- patches are applied through an action run and dropped
+    /// automatically when it ends, giving instant projection with structural rollback.
+    /// </summary>
+    public static OptimisticState<T> CreateOptimistic<T>(this MemoFactory memoFactory, IStateGetR<T> source, string label = "Optimistic")
+    {
+        // The composed view's CreateMemoizR checks T too; the explicit gate here makes the
+        // strict contract visible at the API boundary (and survives view-construction
+        // refactors) -- the source need not come from a strict MemoizR creation at all.
+        memoFactory.EnsureSendableIfStrict<T>();
+        return new(memoFactory, source, label);
+    }
+
+    /// <summary>
+    /// Creates a reusable process-layer action (ADR 0007): the body projects optimistic
+    /// patches via the context, runs the real process on the context's token, and writes the
+    /// confirmed result to the source of truth. A faulted or cancelled run rolls back
+    /// automatically (its patches are dropped, the source was never touched); every run's
+    /// effect wavefront is tracked by its own <see cref="Transition"/>.
+    /// </summary>
+    public static ReactiveAction<TPayload> CreateAction<TPayload>(this MemoFactory memoFactory, Func<TPayload, OptimisticActionContext, Task> body, string label = "Action")
+    {
+        // The payload crosses flows (Run captures it onto a detached body task), so strict mode
+        // holds it to the same Sendable bar as every other cross-flow value.
+        memoFactory.EnsureSendableIfStrict<TPayload>();
+        return new(memoFactory.Context, body, label);
+    }
+
     // Factory-level sugar for the common case: identical to BuildReaction().CreateReaction(..)
     // with the default label and debounce -- use BuildReaction to configure either. The
     // threading contract is the builder's: dependencies are registered in parameter order, the

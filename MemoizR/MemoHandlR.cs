@@ -120,6 +120,98 @@ public abstract class SignalHandlR : IMemoHandlR
         }
     }
 
+    // Stabilization listeners (ADR 0007): notified after every successful Clean commit of this
+    // node, with the generation token the commit succeeded against. Whole-array swaps under
+    // Lock, like Observers; volatile because the commit-path read has no lock (ADR 0001 rule 2:
+    // the swap's release needs a pairing acquire, or a weakly-ordered CPU could enumerate a
+    // stale array indefinitely). The recovery protocol still matters for the REAL race -- a
+    // commit that read the array before a registration landed -- but with the volatile pairing
+    // that window is bounded by the registrant's subsequent LastCleanCommitToken read instead
+    // of being unbounded. Strong references on purpose (unlike the weak Observers): a
+    // listener's lifetime is owned by its registrant, which must unregister -- transitions are
+    // short-lived and do.
+    private volatile IStabilizationListener[] stabilizationListeners = [];
+
+    internal void AddStabilizationListener(IStabilizationListener listener)
+    {
+        lock (Lock)
+        {
+            foreach (var existing in stabilizationListeners)
+            {
+                if (ReferenceEquals(existing, listener))
+                {
+                    return;
+                }
+            }
+            stabilizationListeners = [.. stabilizationListeners, listener];
+        }
+    }
+
+    internal void RemoveStabilizationListener(IStabilizationListener listener)
+    {
+        lock (Lock)
+        {
+            stabilizationListeners = [.. stabilizationListeners.Where(x => !ReferenceEquals(x, listener))];
+        }
+    }
+
+    // The one Clean-commit gate every commit site goes through (MemoBase's early and CacheCheck
+    // commits, ReactionBase's update commits): commit against the token, then notify the
+    // stabilization listeners OUTSIDE the cell's gate. A newer invalidation can land between the
+    // commit and the callbacks, so a notification is only ever level information -- the token
+    // threshold on the listener side absorbs any reordering.
+    internal bool TryCommitCleanAndNotify(int token)
+    {
+        if (!stateCell.TryCommitClean(token))
+        {
+            return false;
+        }
+        NotifyStabilized(token);
+        return true;
+    }
+
+    private void NotifyStabilized(int token)
+    {
+        foreach (var listener in stabilizationListeners)
+        {
+            try
+            {
+                listener.OnStabilized(this, token);
+            }
+            catch
+            {
+                // Internal listeners must not throw (see IStabilizationListener); a fault
+                // escaping here would corrupt the committing evaluation's control flow
+                // (e.g. MemoBase.Update's catch would strip capture-time links for a value
+                // that WAS published). Swallowed like resource-disposal faults.
+            }
+        }
+    }
+
+    // Dispose-time release (ADR 0007): the node will never commit again, so waiters must be
+    // released regardless of their thresholds -- int.MaxValue satisfies them all by fiat.
+    internal void NotifyStabilizationReleased() => NotifyStabilized(int.MaxValue);
+
+    // An update faulted instead of committing (called by ReactionBase's fault paths; memo
+    // faults surface to the Get caller through the pull path instead). The token is the
+    // generation the faulted update ran against, so waiters can gate old in-flight faults
+    // exactly like old commits.
+    internal void NotifyStabilizationFaulted(int token, Exception exception)
+    {
+        foreach (var listener in stabilizationListeners)
+        {
+            try
+            {
+                listener.OnStabilizationFaulted(this, token, exception);
+            }
+            catch
+            {
+                // Same contract as NotifyStabilized: listener faults must not escape into the
+                // faulting evaluation's control flow.
+            }
+        }
+    }
+
     // Rewire our source up-links and the parents' observer down-links to match the sources
     // captured during the current evaluation (Context.ReactionScope.CurrentGets). Must only be
     // called by IMemoizR nodes, inside their ContextLock-serialized evaluation.
@@ -208,11 +300,14 @@ public abstract class SignalHandlR : IMemoHandlR
     // dirty (see CacheStateCell.Invalidate); propagation is skipped then because the observers
     // were already notified when this node first reached that state -- an observer that commits
     // Clean inside the race window is re-notified by CommitCleanOrRenotifyAsync instead.
+    // EXCEPT when a write-wavefront observer is active (ADR 0007): a pruned cascade would hide
+    // the tagged write from the downstream reactions' registrations, so it always propagates
+    // (see WavefrontFlow).
     // Non-async on purpose: the suppressed case is the common one under write storms and should
     // not pay for an async state machine.
     internal Task InvalidateAndPropagateAsync(CacheState state)
     {
-        if (!stateCell.Invalidate(state))
+        if (!stateCell.Invalidate(state) && !WavefrontFlow.IsActive)
         {
             return Task.CompletedTask;
         }
@@ -241,10 +336,11 @@ public abstract class SignalHandlR : IMemoHandlR
     // Non-async, with a lock-free pre-check: if the state is already Clean, either this very
     // token's early commit succeeded (every invalidation escalates the state away from Clean, so
     // Clean here implies an unchanged generation) or a newer evaluation committed -- in both
-    // cases there is nothing to do, and the common recompute path skips the gate entirely.
+    // cases there is nothing to do (whichever commit won already notified the stabilization
+    // listeners), and the common recompute path skips the gate entirely.
     internal Task CommitCleanOrRenotifyAsync(int token)
     {
-        if (stateCell.State == CacheState.CacheClean || stateCell.TryCommitClean(token))
+        if (stateCell.State == CacheState.CacheClean || TryCommitCleanAndNotify(token))
         {
             return Task.CompletedTask;
         }
@@ -256,21 +352,25 @@ public abstract class SignalHandlR : IMemoHandlR
     // ReactionBase.UpdateIfNecessary: re-check each source that is itself a node, in order. A
     // source that recomputes to a CHANGED value marks THIS node dirty through the diamond
     // down-link, at which point we stop -- our computation may no longer use the remaining sources,
-    // so we must not update a source we used last time but now don't. Returns whether any parent's
-    // recompute FAULTED; the caller then stays un-committed so a later pass retries it. Faults are
-    // suppressed here (not thrown) so one bad parent does not abort the scan of the others. Only
-    // the scan is shared -- the commit that follows differs per node type, so it stays at the call
-    // site.
-    internal async Task<bool> ScanParentsForDirty()
+    // so we must not update a source we used last time but now don't. Returns the first parent
+    // fault (null when none); the caller then stays un-committed so a later pass retries it --
+    // and a reaction additionally reports the fault to its stabilization listeners, because no
+    // commit will follow (ADR 0007). Faults are suppressed here (not thrown) so one bad parent
+    // does not abort the scan of the others. Only the scan is shared -- the commit that follows
+    // differs per node type, so it stays at the call site.
+    internal async Task<Exception?> ScanParentsForDirty()
     {
-        var parentFaulted = false;
+        Exception? parentFault = null;
         foreach (var source in Sources)
         {
             if (source is IMemoizR memoizR)
             {
                 var update = memoizR.UpdateIfNecessary(); // UpdateIfNecessary can change our state
                 await update.ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
-                parentFaulted |= update.IsFaulted;
+                if (update.IsFaulted)
+                {
+                    parentFault ??= update.Exception!.InnerException ?? update.Exception;
+                }
             }
 
             if (stateCell.State == CacheState.CacheDirty)
@@ -278,7 +378,7 @@ public abstract class SignalHandlR : IMemoHandlR
                 break;
             }
         }
-        return parentFaulted;
+        return parentFault;
     }
 }
 

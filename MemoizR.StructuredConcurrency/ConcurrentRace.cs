@@ -160,12 +160,15 @@ public sealed class ConcurrentRace<T, I> : MemoHandlR<T>, IMemoizR, IStampedGetR
 
     async Task IMemoizR.Stale(CacheState state)
     {
-        if (state <= State)
+        // Like SignalHandlR.InvalidateAndPropagateAsync, an active write-wavefront observer
+        // (ADR 0007) overrides the already-dirty pruning: the cascade must reach downstream
+        // reactions so the tagged write registers with them.
+        if (state <= State && !WavefrontFlow.IsActive)
         {
             return;
         }
 
-        State = state;
+        State = state > State ? state : State;
 
         await PropagateStaleToObserversAsync(CacheState.CacheDirty);
     }

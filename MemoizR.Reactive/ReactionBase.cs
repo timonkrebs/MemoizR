@@ -36,6 +36,7 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
     {
         this.executor = executor;
         this.timeProvider = timeProvider ?? TimeProvider.System;
+        pendingPublisher = new(context, () => IsPendingSnapshot, "Reaction.IsPending");
         stateCell.Force(CacheState.CacheDirty);
     }
 
@@ -63,6 +64,28 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
     protected virtual bool ResumeOnDetachedScope => false;
 
     private async Task RunResumeUpdate(bool detachedScope)
+    {
+        // A resume update is in-flight work like any debounced update: a paused reaction's
+        // invalidations already drained the counter (their updates parked out), so without
+        // this the arbitrary-length Execute below would run with IsPending reading false.
+        if (Interlocked.Increment(ref pendingCount) == 1)
+        {
+            SchedulePendingPublish();
+        }
+        try
+        {
+            await RunResumeUpdateCore(detachedScope);
+        }
+        finally
+        {
+            if (Interlocked.Decrement(ref pendingCount) == 0)
+            {
+                SchedulePendingPublish();
+            }
+        }
+    }
+
+    private async Task RunResumeUpdateCore(bool detachedScope)
     {
         // Serialize like the debounced update path: the node mutex ensures only one update of
         // this reaction runs at a time (Resume vs concurrent debounced updates -- without it, a
@@ -130,6 +153,9 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
         // re-acquires locks or re-runs the parent scan.
         pending.Cancel();
         RemoveParentObservers();
+        // A dead reaction will never commit: release waiters (transitions) instead of leaving
+        // them pending forever (ADR 0007).
+        NotifyStabilizationReleased();
     }
 
     protected abstract Task Execute();
@@ -147,7 +173,7 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
         var token = stateCell.Generation;
 
         // If we are potentially dirty, check if a parent has actually changed value.
-        var parentFaulted = State == CacheState.CacheCheck && await ScanParentsForDirty();
+        var parentFault = State == CacheState.CacheCheck ? await ScanParentsForDirty() : null;
 
         // If we were already dirty or marked dirty by the step above, update.
         if (State == CacheState.CacheDirty)
@@ -157,15 +183,30 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
 
         // A parent that faulted never resolved this node's CacheCheck: committing Clean over it
         // would stop all future re-checks (nothing re-dirties us). Stay CacheCheck so the next
-        // trigger re-attempts the parent.
-        if (parentFaulted)
+        // trigger re-attempts the parent -- but tell the stabilization listeners: no commit will
+        // follow and nothing reschedules until the next invalidation, so a transition waiting on
+        // this reaction would otherwise hang on a wavefront that already failed (ADR 0007).
+        // UNLESS the Update above committed anyway (another parent dirtied us and the body
+        // caught the faulting read or rewired away from it): the reaction stabilized, waiters
+        // were completed by the commit, and recording the scan fault over it would poison the
+        // fault record against later registrations.
+        if (parentFault != null)
         {
+            if (stateCell.State != CacheState.CacheClean)
+            {
+                RecordStabilizationFault(token, parentFault);
+            }
             return;
         }
 
         // By now, we're clean -- unless a Stale invalidated us along the way, in which case stay
-        // dirty so the debounced update scheduled by that Stale re-runs us.
-        stateCell.TryCommitClean(token);
+        // dirty so the debounced update scheduled by that Stale re-runs us. Already-Clean means
+        // Update's trailing commit won and already notified the stabilization listeners; skip
+        // the gate so one logical stabilization does not notify twice on the quiet path.
+        if (stateCell.State != CacheState.CacheClean)
+        {
+            TryCommitCleanAndNotify(token);
+        }
     }
 
     // Update the cached value by running the computation.
@@ -203,7 +244,7 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
             {
                 await InvokeExecute();
             }
-            catch
+            catch (Exception exception)
             {
                 stateCell.Force(CacheState.CacheDirty);
                 // A reaction has no pull path: if a FIRST run throws with no links wired, no
@@ -218,6 +259,9 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
                 {
                     UpdateSourceAndObserverLinks();
                 }
+                // No commit will follow and nothing reschedules until the next invalidation:
+                // waiters (transitions) must hear the fault instead of a commit (ADR 0007).
+                RecordStabilizationFault(token, exception);
                 throw;
             }
 
@@ -231,8 +275,11 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
 
         // We've rerun with the latest values from all of our Sources, so we no longer need to
         // update until a signal changes -- unless a Stale invalidated us mid-evaluation, in which
-        // case stay dirty so the debounced update scheduled by that Stale re-runs us.
-        stateCell.TryCommitClean(token);
+        // case stay dirty so the debounced update scheduled by that Stale re-runs us. A
+        // successful commit notifies the stabilization listeners (ADR 0007): for a reaction this
+        // is the "wavefront reached me and my side effects have applied" edge transitions
+        // complete on.
+        TryCommitCleanAndNotify(token);
     }
 
     // Run Execute on the configured executor if one was supplied, otherwise inline. Only
@@ -260,12 +307,27 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
             return Task.CompletedTask;
         }
 
+        // Resolved before the locked region: the tag rides the writing flow (the invalidation
+        // cascade runs synchronously inside the Set), and registration happens after the
+        // monitor exits -- the transition's recovery checks make that ordering free.
+        var transition = TransitionFlow.Current;
+        int invalidationGeneration;
+        bool pendingRose;
+
         CancellationTokenSource superseded;
         lock (staleLock)
         {
             // Escalate and bump the generation so an in-flight recompute can't commit Clean over
             // this invalidation; the debounce below still (re)schedules the update regardless.
-            stateCell.Invalidate(state);
+            // The post-bump generation is this invalidation's wavefront membership: a commit
+            // reflects it exactly when its token is >= this value (ADR 0007).
+            stateCell.Invalidate(state, out invalidationGeneration);
+
+            // Every Stale spawns exactly one debounced update, whose outermost finally
+            // decrements -- so the count is exactly "scheduled or running updates", and its
+            // zero-crossings drive IsPending.
+            pendingRose = Interlocked.Increment(ref pendingCount) == 1;
+
             superseded = cts;
             cts = new();
 
@@ -289,11 +351,24 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
         // inline on this stack, and that continuation takes other locks (ExitEvaluationScope).
         superseded.Cancel();
 
+        transition?.RegisterReached(this, invalidationGeneration);
+        if (pendingRose)
+        {
+            SchedulePendingPublish();
+        }
+
         return Task.CompletedTask;
     }
 
     private async Task RunDebouncedUpdateAsync(TimeSpan debounceTime, CancellationToken token)
     {
+        // This detached task inherits the triggering Set's ExecutionContext -- including any
+        // ambient transition tag. The update's incidental Stales (commit-refused renotifies,
+        // diamond marks) are machinery, not writes: left tagged they could re-arm the
+        // transition forever. Local to this method's flow (async methods are an
+        // ExecutionContext boundary), so the caller's tag is untouched.
+        TransitionFlow.Suppress();
+
         // Balances the EnterEvaluationScope performed by the Stale that spawned this task --
         // on the full-run path AND the superseded-early-return path.
         try
@@ -346,12 +421,59 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
         finally
         {
             Context.ExitEvaluationScope();
+            // Balances the Stale that spawned this run; the zero-crossing publishes
+            // IsPending == false ("nothing scheduled or running").
+            if (Interlocked.Decrement(ref pendingCount) == 0)
+            {
+                SchedulePendingPublish();
+            }
         }
     }
 
     Task IMemoizR.Stale(CacheState state)
     {
         return Stale(state, DebounceTime);
+    }
+
+    // "An update is scheduled or running" (ADR 0007): incremented by every Stale, decremented
+    // when its spawned update finishes (committed, superseded, paused-out, or faulted). Note
+    // the asymmetry with transitions: a PAUSED reaction reads not-pending here (nothing is in
+    // flight) while a transition it was reached by stays pending until a Resume commits.
+    private int pendingCount;
+    private readonly PendingPublisher pendingPublisher;
+
+    /// <summary>Snapshot of <see cref="IsPending"/>, sync-readable (e.g. from a render).</summary>
+    public bool IsPendingSnapshot => Volatile.Read(ref pendingCount) > 0;
+
+    /// <summary>
+    /// The reactive "an update of this reaction is in flight" flag (ADR 0007): true from an
+    /// invalidation scheduling an update until that update has run -- an ordinary graph node,
+    /// so a progress indicator is just another reaction on it. Published from a detached
+    /// runtime flow; it converges on <see cref="IsPendingSnapshot"/>, individual flips can lag.
+    /// </summary>
+    public IStateGetR<bool> IsPending => pendingPublisher.Signal;
+
+    private void SchedulePendingPublish() => pendingPublisher.Publish();
+
+    // Registration-vs-dispose race recovery for Transition.RegisterReached.
+    internal bool IsDisposed => disposed;
+
+    // The last update fault, with the generation token that update ran against -- the fault
+    // mirror of CacheStateCell.LastCleanCommitToken (ADR 0007): a listener registered AFTER a
+    // fault already fired (the fault can beat the registration when the debounce is zero)
+    // recovers it by comparing the recorded token against its threshold. Recorded before
+    // NotifyStabilizationFaulted so a registrant sees either the record or the notification.
+    // Never cleared: generations only grow, so an old record can never satisfy a newer
+    // threshold.
+    internal sealed record StabilizationFaultRecord(int Token, Exception Exception);
+
+    private volatile StabilizationFaultRecord? lastStabilizationFault;
+    internal StabilizationFaultRecord? LastStabilizationFault => lastStabilizationFault;
+
+    private void RecordStabilizationFault(int token, Exception exception)
+    {
+        lastStabilizationFault = new(token, exception);
+        NotifyStabilizationFaulted(token, exception);
     }
 
     // Eager-run contract: a reaction executes once on creation (SolidJS-style effect semantics),
@@ -363,6 +485,20 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
     // observe the unassigned default.
     internal void ScheduleInitialRun()
     {
-        Stale(CacheState.CacheDirty, TimeSpan.Zero);
+        // Creation is not a write: a reaction built inside a transition scope must not join
+        // that transition's wavefront (ADR 0007 tracks "the reactions invalidated by the Sets
+        // performed inside the scope" -- a slow or failing initial run would otherwise pend or
+        // fault a transition that never wrote anything reaching this reaction). Suppress the
+        // ambient tag for just this schedule, synchronously on this flow, and restore it.
+        var ambient = TransitionFlow.Current;
+        TransitionFlow.Current = null;
+        try
+        {
+            Stale(CacheState.CacheDirty, TimeSpan.Zero);
+        }
+        finally
+        {
+            TransitionFlow.Current = ambient;
+        }
     }
 }

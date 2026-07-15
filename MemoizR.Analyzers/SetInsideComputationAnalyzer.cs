@@ -47,7 +47,8 @@ public sealed class SetInsideComputationAnalyzer : DiagnosticAnalyzer
                     context.ReportDiagnostic(Diagnostic.Create(
                         DiagnosticDescriptors.SetInsideComputation,
                         ComputationLambdas.NameLocation(inner),
-                        SendableSymbolClassifier.Display(inner.TargetMethod.ContainingType)));
+                        SendableSymbolClassifier.Display(inner.TargetMethod.ContainingType),
+                        inner.TargetMethod.Name));
                 }
             }
         }
@@ -92,16 +93,13 @@ public sealed class SetInsideComputationAnalyzer : DiagnosticAnalyzer
             || !Equals(hostContext.ContextKey, targetContext.ContextKey);
     }
 
-    // A Set that throws in THIS host's engine: ActorSignal.Set inside an actor computation, or
-    // lock-engine Signal/EagerRelativeSignal.Set inside a lock-engine computation. A cross-engine
-    // Set takes no same-flow lock and does not throw, so it must not be flagged.
+    // A write API that throws in THIS host's engine: ActorSignal.Set inside an actor
+    // computation, or lock-engine Signal/EagerRelativeSignal.Set and MemoBase.Invalidate (the
+    // ADR 0007 refresh, which takes the same exclusive lock as Set) inside a lock-engine
+    // computation. A cross-engine write takes no same-flow lock and does not throw, so it must
+    // not be flagged.
     private static bool IsSameEngineSet(IMethodSymbol method, bool actorHost)
     {
-        if (method.Name != "Set")
-        {
-            return false;
-        }
-
         var type = method.ContainingType?.OriginalDefinition;
         if (type is not { Arity: 1 } || type.ContainingNamespace?.ToDisplayString() != "MemoizR"
             || !FactoryMethods.IsLibraryType(type))
@@ -112,8 +110,12 @@ public sealed class SetInsideComputationAnalyzer : DiagnosticAnalyzer
             return false;
         }
 
-        return actorHost
-            ? type.Name == "ActorSignal"
-            : type.Name is "Signal" or "EagerRelativeSignal";
+        if (actorHost)
+        {
+            return method.Name == "Set" && type.Name == "ActorSignal";
+        }
+
+        return (method.Name == "Set" && type.Name is "Signal" or "EagerRelativeSignal")
+            || (method.Name == "Invalidate" && type.Name == "MemoBase");
     }
 }

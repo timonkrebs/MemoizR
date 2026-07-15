@@ -128,6 +128,50 @@ var m2 = f.CreateMemoizR(async() => await v1.Get() * 2);
 var r1 = f.CreateReaction(m1, m2, (val1, val2) => val1 + val2);
 ```
 
+### Transitions, pending indicators, and optimistic state
+
+The Solid 2.0-style process layer ([ADR 0007](docs/adr/0007-transitions-pending-and-optimistic-state.md)),
+re-derived for a pull-based, multi-threaded graph. A **transition** tracks one write wavefront —
+every reaction the writes invalidate — until all its effects have applied:
+
+```cs
+var t = f.BeginTransition();
+await v1.Set(5);          // Sets inside the scope are tracked, transitively through memos
+_ = t.IsPending;          // snapshot: effects still in flight?
+_ = t.Pending;            // reactive IStateGetR<bool> — a spinner is just a reaction on it
+t.Dispose();              // seals the wavefront (writes after this are no longer tracked)
+await t.Settled;          // the onSettled analog; reaction faults aggregate here
+
+// or in one step — seal at the block end AND await settlement:
+await using (f.BeginTransition()) { await v1.Set(5); }
+
+_ = r1.IsPending;         // per-reaction reactive "an update is scheduled or running" flag
+```
+
+**Optimistic state** instantly projects an expected future value while the real process runs,
+and rolls back *structurally* — a failed action just drops its patch, the source of truth was
+never touched, so overlapping actions can never clobber each other:
+
+```cs
+var todos      = f.CreateEagerRelativeSignal(ImmutableList.Create("existing"));
+var optimistic = f.CreateOptimistic<ImmutableList<string>>(todos);
+
+var addTodo = f.CreateAction<string>(async (todo, ctx) =>
+{
+    await ctx.Apply(optimistic, list => list.Add($"{todo} (pending)")); // instant projection
+    var confirmed = await api.SaveAsync(todo, ctx.Token);               // the process step
+    await todos.Set(list => list.Add(confirmed));  // confirm atomically: overlapping runs compose
+});                                        // fault/cancel => patch dropped => automatic rollback
+
+var run = addTodo.Run("write docs");
+_ = addTodo.IsPending; // reactive: disable the submit button with a reaction on it
+await run.Settled;     // the UI reflects the final outcome (patch gone, value confirmed)
+```
+
+Memos stay lazy — a write that reaches no reaction has nothing in flight — and refreshing
+out-of-band state is first-class via `memo.Invalidate()`: recompute on next pull, with
+downstream effects re-running only if the value actually changed.
+
 ### Causality Stamps (preparation for distributed graphs)
 
 Every node carries a causality stamp recording exactly which signal versions its current value
@@ -219,6 +263,26 @@ See [ADR 0003](docs/adr/0003-sendable-checking-and-isolation-assertions.md) (run
 [ADR 0004](docs/adr/0004-compile-time-data-race-diagnostics.md) (analyzers),
 [ADR 0005](docs/adr/0005-custom-executors.md) (executors), and
 [ADR 0006](docs/adr/0006-actor-engine-prototype.md) (actor engine) for the design and its limits.
+
+### Blazor
+
+With the `MemoizR.Blazor` package the same threading contract reaches Blazor — Server and
+WebAssembly. `services.AddMemoizR()` registers one graph per circuit (circuits are genuinely
+multi-threaded, exactly what the cross-flow guarantees are for), and components inheriting
+`MemoizRComponentBase` project nodes into render-ready fields: dependency evaluation on the
+thread pool, only the field write plus `StateHasChanged` marshalled through the component's
+`InvokeAsync`:
+
+```cs
+protected override void OnInitialized()
+{
+    Bind(optimistic, value => todos = value);          // re-renders on every committed change
+    Bind(addTodo.IsPending, p => submitDisabled = p);  // pending indicator drives the button
+}
+```
+
+Reactions owned by services rather than components can target a renderer dispatcher directly
+with `f.AddBlazorDispatcher(dispatcher)`.
 
 ### WPF / UI threads
 

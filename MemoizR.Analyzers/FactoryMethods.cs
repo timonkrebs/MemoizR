@@ -17,7 +17,11 @@ internal static class FactoryMethods
     public static bool IsValueBearingCreation(IMethodSymbol method)
     {
         return IsMemoFactoryMethod(method, "CreateSignal", "CreateEagerRelativeSignal", "CreateMemoizR", "CreateActorSignal", "CreateActorMemoizR")
-            || IsStructuredFactoryMethod(method, "CreateConcurrentMap", "CreateConcurrentMapReduce", "CreateConcurrentRace");
+            || IsStructuredFactoryMethod(method, "CreateConcurrentMap", "CreateConcurrentMapReduce", "CreateConcurrentRace")
+            // ADR 0007's process layer: CreateAction's TPayload crosses to the detached run
+            // flow, CreateOptimistic's T is the value its composed view publishes -- both are
+            // runtime-checked in strict mode, so they get the same build-time mirror.
+            || IsReactiveMemoFactoryMethod(method, "CreateAction", "CreateOptimistic");
     }
 
     // Methods whose delegate arguments execute inside graph evaluations, possibly concurrently

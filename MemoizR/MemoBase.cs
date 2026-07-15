@@ -194,7 +194,7 @@ public abstract class MemoBase<T> : MemoHandlR<T>, IMemoizR, IStampedGetR<T>
         var token = stateCell.Generation;
 
         // If we are potentially dirty, see if a parent has actually changed value.
-        var parentFaulted = State == CacheState.CacheCheck && await ScanParentsForDirty();
+        var parentFault = State == CacheState.CacheCheck ? await ScanParentsForDirty() : null;
 
         // If we were already dirty or marked dirty by the step above, update.
         if (State == CacheState.CacheDirty)
@@ -208,7 +208,7 @@ public abstract class MemoBase<T> : MemoHandlR<T>, IMemoizR, IStampedGetR<T>
         // stop all future re-checks (this Get serves the last good value, but nothing would ever
         // re-dirty us, so the failed parent would never be retried). Stay CacheCheck so every
         // later Get re-attempts the parent until it recovers.
-        if (parentFaulted)
+        if (parentFault != null)
         {
             return;
         }
@@ -248,7 +248,7 @@ public abstract class MemoBase<T> : MemoHandlR<T>, IMemoizR, IStampedGetR<T>
             // early so lock-free fast-path readers can serve the new value while the links are
             // rewired; the trailing commit below re-confirms after the diamond propagation.
             PublishValueWithCapturedStamps(newValue);
-            stateCell.TryCommitClean(token);
+            TryCommitCleanAndNotify(token);
 
             if (RewireOwnLinks)
             {
@@ -297,6 +297,39 @@ public abstract class MemoBase<T> : MemoHandlR<T>, IMemoizR, IStampedGetR<T>
         // case the commit is dropped, the node stays dirty for the next Get, and observers that
         // raced us to Clean are re-notified.
         await CommitCleanOrRenotifyAsync(token);
+    }
+
+    /// <summary>
+    /// Forces this memo to recompute on its next evaluation, exactly as if a source signal had
+    /// changed: the refresh primitive (ADR 0007) for cache expiry, server-push invalidation, or
+    /// reconciling an optimistic projection with its source of truth. Observers are marked
+    /// CacheCheck, so downstream effects re-run only if the recomputed value actually changed.
+    /// An in-flight evaluation that started before this call can no longer commit (the
+    /// generation bump refuses it), so the next Get always recomputes. Like
+    /// <see cref="Signal{T}.Set"/>, it must not be called from inside a computation -- the
+    /// evaluation lock rejects that with <see cref="InvalidOperationException"/>.
+    /// </summary>
+    public async Task Invalidate()
+    {
+        // Resolve the scope once and keep it strongly rooted for the whole write, for the same
+        // reason as Signal.Set: repeated getter access can resolve different instances (weak
+        // registry + resurrection), which would hand the body a ContextLock other than the one
+        // held here.
+        var scope = Context.ReactionScope;
+        try
+        {
+            using (await scope.ContextLock.ExclusiveLockAsync())
+            {
+                // Self to Dirty (must recompute), observers to CacheCheck (they re-run only if
+                // the recompute changes the value) -- the same shape as a parent-driven Stale,
+                // including the always-bumped generation that refuses in-flight commits.
+                await InvalidateAndPropagateAsync(CacheState.CacheDirty);
+            }
+        }
+        finally
+        {
+            GC.KeepAlive(scope);
+        }
     }
 
     // The IMemoizR fan-in (a parent scanning this node, or a reaction flow where no root Get holds

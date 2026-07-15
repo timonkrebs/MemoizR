@@ -32,6 +32,35 @@ public class SetInsideComputationAnalyzerTests
         Assert.Contains("Signal<int>.Set", diagnostic.GetMessage());
     }
 
+    // Invalidate (the ADR 0007 refresh) takes the same exclusive lock as Set and throws
+    // identically inside a same-flow computation; the runtime contract is pinned by
+    // StabilizationAndInvalidateTests.Invalidate_InsideComputation_IsRejectedLikeSet.
+    [Fact]
+    public async Task InvalidateInsideMemoComputation_IsFlagged()
+    {
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var m1 = f.CreateMemoizR(async () => 1);
+                    f.CreateMemoizR(async () =>
+                    {
+                        await m1.Invalidate();
+                        return 2;
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR003", diagnostic.Id);
+        Assert.Contains(".Invalidate", diagnostic.GetMessage());
+    }
+
     [Fact]
     public async Task SetInsideReaction_IsFlagged()
     {

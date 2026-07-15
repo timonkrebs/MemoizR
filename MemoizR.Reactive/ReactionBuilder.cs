@@ -150,14 +150,16 @@ public sealed class ReactionBuilder
     // Performed for ALL parameters BEFORE the parallel evaluation starts, so a Set landing
     // mid-evaluation already sees this reaction as observer and refuses the stale commit, and a
     // faulting first run still leaves every parameter wired (the sequential composition only
-    // wired the prefix read before the fault). Non-graph IStateGetR implementations are skipped,
-    // exactly as their untracked Get would be. The params array costs one small allocation per
-    // update run, dwarfed by the detached evaluation tasks that follow.
+    // wired the prefix read before the fault). Node-backed wrappers (OptimisticState) register
+    // their backing node; other non-graph IStateGetR implementations are skipped, exactly as
+    // their untracked Get would be. The params array costs one small allocation per update run,
+    // dwarfed by the detached evaluation tasks that follow.
     private void RegisterDependencies(params object[] dependencies)
     {
         foreach (var dependency in dependencies)
         {
-            if (dependency is IMemoHandlR handler)
+            var unwrapped = dependency is INodeBackedGetR backed ? backed.Node : dependency;
+            if (unwrapped is IMemoHandlR handler)
             {
                 memoFactory.Context.CheckDependenciesTheSame(handler);
             }
@@ -193,6 +195,14 @@ public sealed class ReactionBuilder
             var scope = context.ForceNewScope();
             try
             {
+                // Node-backed wrappers (OptimisticState) delegate their Get to a real node;
+                // evaluate THAT node so the stamped-read branch below records its evidence --
+                // the wrapper itself matches neither pattern and would be read stampless.
+                if (memo is INodeBackedGetR backed && backed.Node is IStateGetR<T> backingNode)
+                {
+                    memo = backingNode;
+                }
+
                 // Matched via the INTERFACE, not MemoHandlR<T>: a value-type Signal<int> enters
                 // here as IStateGetR<int?> (T == int?), and the node is MemoHandlR<int> -- a
                 // class pattern on T would silently miss it and drop the signal's stamp.

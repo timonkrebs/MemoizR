@@ -42,8 +42,8 @@ internal static class DiagnosticDescriptors
 
     public static readonly DiagnosticDescriptor SetInsideComputation = new(
         id: "MZR003",
-        title: "Signal.Set inside a reactive computation throws at runtime",
-        messageFormat: "'{0}.Set' is called inside a reactive computation; the computation's flow already holds " +
+        title: "A graph write inside a reactive computation throws at runtime",
+        messageFormat: "'{0}.{1}' is called inside a reactive computation; the computation's flow already holds " +
                        "the evaluation lock in upgradeable mode, so this exclusive acquisition throws " +
                        "InvalidOperationException at runtime — return the value instead, or schedule the write " +
                        "outside the evaluation",

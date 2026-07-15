@@ -582,4 +582,56 @@ public class SendableTypeArgumentAnalyzerTests
         var diagnostic = Assert.Single(diagnostics);
         Assert.Equal("MZR001", diagnostic.Id);
     }
+
+    // ADR 0007's process layer: the action payload crosses to the detached run flow and the
+    // optimistic view publishes T across flows -- both are runtime-checked in strict mode, so
+    // the build-time mirror must cover them like every other value-bearing factory.
+    [Fact]
+    public async Task ProcessLayerFactories_MutableTypeArguments_AreFlagged()
+    {
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using System.Threading.Tasks;
+            using MemoizR;
+
+            public sealed class ListSource : IStateGetR<List<int>>
+            {
+                public Task<List<int>> Get() => Task.FromResult(new List<int>());
+            }
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    f.CreateAction<List<int>>((p, ctx) => Task.CompletedTask);
+                    f.CreateOptimistic<List<int>>(new ListSource());
+                }
+            }
+            """);
+
+        Assert.Equal(2, diagnostics.Length);
+        Assert.All(diagnostics, d => Assert.Equal("MZR001", d.Id));
+    }
+
+    [Fact]
+    public async Task ProcessLayerFactories_ImmutableTypeArguments_AreNotFlagged()
+    {
+        var diagnostics = await AnalyzeAsync("""
+            using System.Threading.Tasks;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    f.CreateAction<string>((p, ctx) => Task.CompletedTask);
+                    f.CreateOptimistic<int>(f.CreateSignal(1));
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
 }
