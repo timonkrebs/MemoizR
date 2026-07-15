@@ -11,6 +11,7 @@ capture a significant decision, its context, and its consequences.
 | [0004](0004-compile-time-data-race-diagnostics.md) | Compile-time data-race diagnostics: the MemoizR.Analyzers rule set | Accepted |
 | [0005](0005-custom-executors.md) | Custom executors for reactive side effects | Accepted |
 | [0006](0006-actor-engine-prototype.md) | The actor-engine prototype: GraphActor turns instead of locks | Accepted (experimental) |
+| [0007](0007-transitions-pending-and-optimistic-state.md) | Transitions, `IsPending`, and optimistic state with automatic rollback | Proposed |
 
 New ADRs are numbered sequentially (`NNNN-title.md`).
 
