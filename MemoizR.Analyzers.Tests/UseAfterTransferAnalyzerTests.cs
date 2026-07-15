@@ -879,6 +879,136 @@ public class UseAfterTransferAnalyzerTests
     }
 
     [Fact]
+    public async Task TupleElements_HandedToTransfer_AreTracked()
+    {
+        // Transfer((list, 0)): the tuple carries the same list reference to the receiver.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public Sending<(List<int>, int)> M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer((list, 0));
+                    list.Add(1);
+                    return sending;
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+    }
+
+    [Fact]
+    public async Task SwitchExpressionArms_HandedToTransfer_AreTracked()
+    {
+        // One arm hands off `list`: a may-transfer, tracked like a ternary operand.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public Sending<List<int>> M(bool flag)
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(flag switch { true => list, _ => new List<int>() });
+                    list.Add(1);
+                    return sending;
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+    }
+
+    [Fact]
+    public async Task NameOfMentions_AreNotRuntimeUses()
+    {
+        // nameof(list) is a compile-time constant: no runtime read of the transferred object
+        // occurs, so it must not block the handoff.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public Sending<List<int>> M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(list);
+                    _ = nameof(list);
+                    return sending;
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task UsingStatements_OverExistingLocals_DisposeAfterTheTransfer()
+    {
+        // `using (stream)` over an existing local emits the same scope-end Dispose as a
+        // using declaration: the sender destroys the object the receiver now owns.
+        var diagnostics = await AnalyzeAsync("""
+            using System.IO;
+            using MemoizR;
+
+            public class C
+            {
+                public Sending<MemoryStream> M(MemoryStream stream)
+                {
+                    using (stream)
+                    {
+                        return Sending.Transfer(stream);
+                    }
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+        Assert.Contains("'stream'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task LocalFunctionDeclarations_DoNotMakeCatchesReachable()
+    {
+        // The declaration after the transfer neither executes nor throws on the try path: the
+        // catch still cannot observe a completed handoff.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    try
+                    {
+                        _ = Sending.Transfer(list);
+                        void Helper()
+                        {
+                        }
+                    }
+                    catch
+                    {
+                        list.Add(1);
+                    }
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
     public async Task UsingLocals_AreDisposedBySenderAfterTheTransfer()
     {
         // The scope's compiler-generated Dispose runs after the handoff with no source

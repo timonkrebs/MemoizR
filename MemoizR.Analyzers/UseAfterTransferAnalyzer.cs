@@ -36,10 +36,11 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         {
             foreach (var (variable, transferPosition, scanRoots, escaped, transfer) in Transfers(block))
             {
-                // A using-declared local is Disposed by the SENDER at scope end -- after the
-                // handoff, with no source reference to scan for: destroying the object the
+                // A using-declared local -- or an existing local/parameter handed to a using
+                // STATEMENT as its resource -- is Disposed by the SENDER at scope end, after
+                // the handoff, with no source reference to scan for: destroying the object the
                 // receiver now owns is a guaranteed use-after-transfer.
-                if (variable is ILocalSymbol { IsUsing: true })
+                if (variable is ILocalSymbol { IsUsing: true } || IsDisposedByAnEnclosingUsing(transfer, variable))
                 {
                     Report(context, transfer, variable);
                     continue;
@@ -87,6 +88,26 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         }
     }
 
+    private static bool IsDisposedByAnEnclosingUsing(IOperation transfer, ISymbol variable)
+    {
+        for (var parent = transfer.Parent; parent is not null; parent = parent.Parent)
+        {
+            if (parent is IAnonymousFunctionOperation or ILocalFunctionOperation)
+            {
+                break; // a using outside the callback disposes on the OUTER flow's schedule
+            }
+
+            if (parent is IUsingOperation usingOperation
+                && usingOperation.Resources.DescendantsAndSelf().Any(operation =>
+                    SymbolEqualityComparer.Default.Equals(ReferencedVariable(operation), variable)))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     // The variables an argument expression can HAND OFF. An assignment transfers its target
     // (Transfer(list = new(...)) / Transfer(list ??= new(...)): the variable aliases the value
     // afterwards); a null-coalescing or conditional expression transfers whichever operand the
@@ -108,6 +129,28 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                 break;
             case IConditionalOperation { WhenFalse: { } whenFalse } conditional:
                 foreach (var source in TransferSources(conditional.WhenTrue).Concat(TransferSources(whenFalse)))
+                {
+                    yield return source;
+                }
+
+                break;
+            case ISwitchExpressionOperation switchExpression:
+                foreach (var source in switchExpression.Arms.SelectMany(arm => TransferSources(arm.Value)))
+                {
+                    yield return source;
+                }
+
+                break;
+            case ITupleOperation tuple:
+                // Transfer((list, 0)): the tuple carries the same reference to the receiver.
+                foreach (var source in tuple.Elements.SelectMany(TransferSources))
+                {
+                    yield return source;
+                }
+
+                break;
+            case IConversionOperation conversion:
+                foreach (var source in TransferSources(conversion.Operand))
                 {
                     yield return source;
                 }
@@ -209,6 +252,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             .SelectMany(root => root.DescendantsAndSelf())
             .Where(operation => SymbolEqualityComparer.Default.Equals(ReferencedVariable(operation), variable)
                 && operation.Syntax.SpanStart >= transferPosition
+                && !IsInsideNameOf(operation)
                 && !IsInASiblingArmOfTheTransfer(operation, transferPosition)
                 && (escaped || !IsInAnUnreachableCatch(operation, transferPosition)))
             .OrderBy(operation => operation.Syntax.SpanStart);
@@ -271,7 +315,38 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         {
             if (parent is ITryOperation { Body: { } body } && child is ICatchClauseOperation
                 && Covers(body, transferPosition)
-                && !body.Descendants().Any(operation => operation.Syntax.SpanStart >= transferPosition))
+                && !body.Descendants().Any(operation => operation.Syntax.SpanStart >= transferPosition
+                    && !IsWithinALocalFunction(operation, body)))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    // nameof(list) is a compile-time constant: the reference never reads the object at
+    // runtime, so it is neither a use nor read-evidence in the RHS/sibling-argument scans.
+    private static bool IsInsideNameOf(IOperation operation)
+    {
+        for (var parent = operation.Parent; parent is not null; parent = parent.Parent)
+        {
+            if (parent is INameOfOperation)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    // A local-function DECLARATION does not execute (or throw) on the enclosing path: neither
+    // it nor its body counts as code that could reach a handler after the transfer.
+    private static bool IsWithinALocalFunction(IOperation operation, IOperation boundary)
+    {
+        for (var current = operation; current is not null && !ReferenceEquals(current, boundary); current = current.Parent)
+        {
+            if (current is ILocalFunctionOperation)
             {
                 return true;
             }
@@ -373,7 +448,8 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         if (reference.Parent is ISimpleAssignmentOperation assignment && ReferenceEquals(assignment.Target, reference))
         {
             rhsUse = assignment.Value.DescendantsAndSelf()
-                .FirstOrDefault(operation => SymbolEqualityComparer.Default.Equals(ReferencedVariable(operation), variable));
+                .FirstOrDefault(operation => SymbolEqualityComparer.Default.Equals(ReferencedVariable(operation), variable)
+                    && !IsInsideNameOf(operation));
             return rhsUse is not null ? ReferenceRole.Use : ReinitializationRole(assignment, transferPosition, scope);
         }
 
@@ -388,7 +464,8 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         if (DeconstructionOf(reference) is { } deconstruction)
         {
             rhsUse = deconstruction.Value.DescendantsAndSelf()
-                .FirstOrDefault(operation => SymbolEqualityComparer.Default.Equals(ReferencedVariable(operation), variable));
+                .FirstOrDefault(operation => SymbolEqualityComparer.Default.Equals(ReferencedVariable(operation), variable)
+                    && !IsInsideNameOf(operation));
             return rhsUse is not null ? ReferenceRole.Use : ReinitializationRole(deconstruction, transferPosition, scope);
         }
 
@@ -422,7 +499,8 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
 
         return arguments.Where(argument => !ReferenceEquals(argument, outArgument))
             .SelectMany(argument => argument.Value.DescendantsAndSelf())
-            .FirstOrDefault(operation => SymbolEqualityComparer.Default.Equals(ReferencedVariable(operation), variable));
+            .FirstOrDefault(operation => SymbolEqualityComparer.Default.Equals(ReferencedVariable(operation), variable)
+                && !IsInsideNameOf(operation));
     }
 
     private static ReferenceRole ReinitializationRole(IOperation reinitialization, int transferPosition, IOperation scope)
