@@ -1009,6 +1009,159 @@ public class UseAfterTransferAnalyzerTests
     }
 
     [Fact]
+    public async Task TransferAndOutReinitialization_InOneCall_IsClean()
+    {
+        // The reference inside the transfer argument IS the handoff, not a post-transfer
+        // sibling read: the out assignment then hands the later Add a fresh list.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    Reset(Sending.Transfer(list), out list);
+                    list.Add(1);
+                }
+
+                private static void Reset(Sending<List<int>> sending, out List<int> value)
+                {
+                    value = new List<int>();
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task UsingResources_MerelyMentioningTheVariable_DoNotDisposeIt()
+    {
+        // The using disposes the Scope wrapper, not the transferred list: a resource that
+        // only MENTIONS the variable is no disposal of the handoff.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public sealed class Scope : IDisposable
+            {
+                public Scope(int size)
+                {
+                }
+
+                public void Dispose()
+                {
+                }
+            }
+
+            public class C
+            {
+                public Sending<List<int>> M()
+                {
+                    var list = new List<int> { 1 };
+                    using (new Scope(list.Count))
+                    {
+                        return Sending.Transfer(list);
+                    }
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task ThrowingReinitializers_KeepEnclosingCatchesAlive()
+    {
+        // Throwing() can throw AFTER the handoff and BEFORE the assignment completes: the
+        // catch still sees the transferred list on that path.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    try
+                    {
+                        var sent = Sending.Transfer(list);
+                        list = Throwing();
+                    }
+                    catch
+                    {
+                        list.Add(1);
+                    }
+                }
+
+                private static List<int> Throwing()
+                {
+                    return new List<int>();
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+    }
+
+    [Fact]
+    public async Task ForeachIteration_ReadsTheCollectionAfterATransferInsideTheLoop()
+    {
+        // The next MoveNext reads the transferred list -- a sender-side use with no source
+        // reference to scan for.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    foreach (var item in list)
+                    {
+                        _ = Sending.Transfer(list);
+                    }
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+    }
+
+    [Fact]
+    public async Task ForeachTransfer_FollowedByADefiniteBreak_IsClean()
+    {
+        // The break on the transfer's own conditional level leaves the loop before any
+        // further MoveNext: the handoff is the find-and-transfer pattern.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    foreach (var item in list)
+                    {
+                        _ = Sending.Transfer(list);
+                        break;
+                    }
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
     public async Task UsingLocals_AreDisposedBySenderAfterTheTransfer()
     {
         // The scope's compiler-generated Dispose runs after the handoff with no source

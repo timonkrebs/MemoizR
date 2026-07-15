@@ -40,7 +40,9 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                 // STATEMENT as its resource -- is Disposed by the SENDER at scope end, after
                 // the handoff, with no source reference to scan for: destroying the object the
                 // receiver now owns is a guaranteed use-after-transfer.
-                if (variable is ILocalSymbol { IsUsing: true } || IsDisposedByAnEnclosingUsing(transfer, variable))
+                if (variable is ILocalSymbol { IsUsing: true }
+                    || IsDisposedByAnEnclosingUsing(transfer, variable)
+                    || IsIteratedByAnEnclosingForeach(transfer, transferPosition, variable))
                 {
                     Report(context, transfer, variable);
                     continue;
@@ -97,15 +99,49 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                 break; // a using outside the callback disposes on the OUTER flow's schedule
             }
 
+            // Only a resource that IS the variable disposes the handoff: `using (stream)`.
+            // A resource merely mentioning it (`using (new Scope(list.Count))`) disposes the
+            // wrapper, not the transferred object.
             if (parent is IUsingOperation usingOperation
-                && usingOperation.Resources.DescendantsAndSelf().Any(operation =>
-                    SymbolEqualityComparer.Default.Equals(ReferencedVariable(operation), variable)))
+                && SymbolEqualityComparer.Default.Equals(ReferencedVariable(usingOperation.Resources), variable))
             {
                 return true;
             }
         }
 
         return false;
+    }
+
+    // An enclosing foreach KEEPS READING its collection after the body iteration that
+    // performed the handoff: the next MoveNext is a sender-side use with no source reference
+    // -- unless the transfer's continuation definitely leaves the loop (a break/return/throw
+    // on the transfer's own conditional level).
+    private static bool IsIteratedByAnEnclosingForeach(IOperation transfer, int transferPosition, ISymbol variable)
+    {
+        for (var parent = transfer.Parent; parent is not null; parent = parent.Parent)
+        {
+            if (parent is IAnonymousFunctionOperation or ILocalFunctionOperation)
+            {
+                break;
+            }
+
+            if (parent is IForEachLoopOperation foreachLoop
+                && SymbolEqualityComparer.Default.Equals(ReferencedVariable(foreachLoop.Collection), variable)
+                && !DefinitelyExitsAfter(foreachLoop, transferPosition))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool DefinitelyExitsAfter(IForEachLoopOperation loop, int transferPosition)
+    {
+        return loop.Body.DescendantsAndSelf().Any(operation =>
+            operation.Syntax.SpanStart >= transferPosition
+            && operation is IReturnOperation or IThrowOperation or IBranchOperation { BranchKind: BranchKind.Break }
+            && IsOnTheTransfersConditionalLevel(operation, transferPosition));
     }
 
     // The variables an argument expression can HAND OFF. An assignment transfers its target
@@ -273,6 +309,14 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             switch (Classify(reference, variable, transferPosition, scope, out var rhsUse))
             {
                 case ReferenceRole.FreshValueFromHere:
+                    // A throwing RHS/out-call can reach an enclosing catch AFTER the handoff
+                    // but BEFORE the reinitialization completed: the handler still sees the
+                    // transferred value on that path.
+                    if (CatchUseDuringReinitialization(reference.Parent!, variable, scope) is { } windowUse)
+                    {
+                        Report(context, windowUse, variable);
+                    }
+
                     return; // a definite reinitialization: everything after is a new value
                 case ReferenceRole.ConditionalReinitialization:
                     (dominated ??= new List<(Microsoft.CodeAnalysis.Text.TextSpan, int)>())
@@ -431,6 +475,42 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         return reinitialization;
     }
 
+    // The exception WINDOW between the transfer and a completed reinitialization: when the
+    // reinitializing expression can throw (an invocation, creation or await), an enclosing
+    // catch entered from the try BODY observes the still-transferred value.
+    private static IOperation? CatchUseDuringReinitialization(IOperation reinitialization, ISymbol variable, IOperation scope)
+    {
+        var reinitRoot = reinitialization is IArgumentOperation { Parent: { } call } ? call : reinitialization;
+        var canThrow = reinitRoot.DescendantsAndSelf()
+            .Any(operation => operation is IInvocationOperation or IObjectCreationOperation or IAwaitOperation);
+        if (!canThrow)
+        {
+            return null;
+        }
+
+        for (IOperation child = reinitRoot; child.Parent is { } parent && !ReferenceEquals(child, scope); child = parent)
+        {
+            if (parent is IAnonymousFunctionOperation or ILocalFunctionOperation)
+            {
+                break;
+            }
+
+            if (parent is ITryOperation tryOperation && ReferenceEquals(child, tryOperation.Body))
+            {
+                var use = tryOperation.Catches
+                    .SelectMany(catchClause => catchClause.DescendantsAndSelf())
+                    .FirstOrDefault(operation => SymbolEqualityComparer.Default.Equals(ReferencedVariable(operation), variable)
+                        && !IsInsideNameOf(operation));
+                if (use is not null)
+                {
+                    return use;
+                }
+            }
+        }
+
+        return null;
+    }
+
     private enum ReferenceRole { Use, FreshValueFromHere, ConditionalReinitialization }
 
     // A reference that REINITIALIZES the variable ends tracking when it definitely executes
@@ -455,7 +535,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
 
         if (reference.Parent is IArgumentOperation { Parameter.RefKind: RefKind.Out } outArgument)
         {
-            rhsUse = SiblingArgumentRead(outArgument, variable);
+            rhsUse = SiblingArgumentRead(outArgument, variable, transferPosition);
             return rhsUse is not null ? ReferenceRole.Use : ReinitializationRole(outArgument, transferPosition, scope);
         }
 
@@ -488,7 +568,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             : null;
     }
 
-    private static IOperation? SiblingArgumentRead(IArgumentOperation outArgument, ISymbol variable)
+    private static IOperation? SiblingArgumentRead(IArgumentOperation outArgument, ISymbol variable, int transferPosition)
     {
         var arguments = outArgument.Parent switch
         {
@@ -497,9 +577,13 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             _ => ImmutableArray<IArgumentOperation>.Empty,
         };
 
+        // Position-filtered: when the same invocation performs the handoff
+        // (Reset(Sending.Transfer(list), out list)), the reference inside the transfer
+        // argument itself is the handoff, not a post-transfer read.
         return arguments.Where(argument => !ReferenceEquals(argument, outArgument))
             .SelectMany(argument => argument.Value.DescendantsAndSelf())
             .FirstOrDefault(operation => SymbolEqualityComparer.Default.Equals(ReferencedVariable(operation), variable)
+                && operation.Syntax.SpanStart >= transferPosition
                 && !IsInsideNameOf(operation));
     }
 
