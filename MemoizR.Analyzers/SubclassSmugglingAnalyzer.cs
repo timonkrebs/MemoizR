@@ -80,11 +80,16 @@ public sealed class SubclassSmugglingAnalyzer : DiagnosticAnalyzer
 
     internal static System.Collections.Generic.IEnumerable<(INamedTypeSymbol Named, int Depth)> NamedTypesIn(ITypeSymbol type, int depth)
     {
-        return NamedTypesIn(type, depth, new System.Collections.Generic.HashSet<ITypeSymbol>(SymbolEqualityComparer.Default));
+        return NamedTypesIn(
+            type,
+            depth,
+            new System.Collections.Generic.HashSet<ITypeSymbol>(SymbolEqualityComparer.Default),
+            new System.Collections.Generic.List<INamedTypeSymbol>());
     }
 
     private static System.Collections.Generic.IEnumerable<(INamedTypeSymbol Named, int Depth)> NamedTypesIn(
-        ITypeSymbol type, int depth, System.Collections.Generic.HashSet<ITypeSymbol> visited)
+        ITypeSymbol type, int depth, System.Collections.Generic.HashSet<ITypeSymbol> visited,
+        System.Collections.Generic.List<INamedTypeSymbol> path)
     {
         if (type is not INamedTypeSymbol named || !visited.Add(type))
         {
@@ -103,27 +108,42 @@ public sealed class SubclassSmugglingAnalyzer : DiagnosticAnalyzer
             yield break;
         }
 
-        // Member re-instantiation can construct fresh symbols forever (Box<T> exposing
-        // Box<List<T>>), so the member walk needs a divergence bound -- but a
-        // once-per-DECLARATION gate is too coarse: the same nested declaration can return with
-        // DIFFERENT substitutions through its containing type (Outer<int>.Holder, then
-        // Outer<T>.Holder). The bound mirrors the classifier's: walk members while fewer than
-        // two same-definition types of non-greater size were already visited.
-        var definition = (INamedTypeSymbol)named.OriginalDefinition;
-        var priorNonShrinking = visited.Count(entry => entry is INamedTypeSymbol { } other
-            && !SymbolEqualityComparer.Default.Equals(other, named)
-            && SymbolEqualityComparer.Default.Equals(other.OriginalDefinition, definition)
-            && SendableSymbolClassifier.TypeSize(other) <= SendableSymbolClassifier.TypeSize(named));
-        var memberTypes = priorNonShrinking < 2
-            ? StoredMemberTypesOf(named)
-            : System.Linq.Enumerable.Empty<ITypeSymbol>();
-
-        foreach (var inner in named.TypeArguments.Concat(memberTypes))
+        foreach (var argument in named.TypeArguments)
         {
-            foreach (var nested in NamedTypesIn(inner, depth + 1, visited))
+            foreach (var nested in NamedTypesIn(argument, depth + 1, visited, path))
             {
                 yield return nested;
             }
+        }
+
+        // Member re-instantiation can construct fresh symbols forever (Box<T> exposing
+        // Box<List<T>>), so the member walk needs a divergence bound -- counted on the
+        // recursion PATH, not globally: sibling instantiations of one declaration are not
+        // recursion and must all be walked, while a divergent chain stacks same-definition
+        // ancestors.
+        var definition = (INamedTypeSymbol)named.OriginalDefinition;
+        var priorNonShrinking = path.Count(other =>
+            SymbolEqualityComparer.Default.Equals(other.OriginalDefinition, definition)
+            && SendableSymbolClassifier.TypeSize(other) <= SendableSymbolClassifier.TypeSize(named));
+        if (priorNonShrinking >= 2)
+        {
+            yield break;
+        }
+
+        path.Add(named);
+        try
+        {
+            foreach (var memberType in StoredMemberTypesOf(named))
+            {
+                foreach (var nested in NamedTypesIn(memberType, depth + 1, visited, path))
+                {
+                    yield return nested;
+                }
+            }
+        }
+        finally
+        {
+            path.RemoveAt(path.Count - 1);
         }
     }
 

@@ -373,6 +373,48 @@ public class StaticStateAnalyzerTests
     }
 
     [Fact]
+    public async Task SiblingInstantiations_DoNotExhaustTheMemberWalk()
+    {
+        // Two safe sibling instantiations of the same nested declaration are not recursion:
+        // the third, carrying the outer T through its containing type, must still be walked.
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public class Outer<U>
+            {
+                public sealed class Holder
+                {
+                    public U? Value { get; init; }
+                }
+            }
+
+            public class C<T>
+            {
+                private sealed class Triple
+                {
+                    public Outer<int>.Holder? A { get; init; }
+
+                    public Outer<string>.Holder? B { get; init; }
+
+                    public Outer<T>.Holder? C { get; init; }
+                }
+
+                private static readonly Triple Cache = new();
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    _ = Cache;
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR004", diagnostic.Id);
+        Assert.Contains("type parameter", diagnostic.GetMessage());
+    }
+
+    [Fact]
     public async Task PolymorphicRecursion_WithAStoredParameter_IsRejectedNotAssumed()
     {
         // The divergent chain's SECOND level substitutes Value to List<int>: the classifier

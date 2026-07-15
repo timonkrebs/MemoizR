@@ -1357,6 +1357,90 @@ public class UseAfterTransferAnalyzerTests
     }
 
     [Fact]
+    public async Task SwitchBreaks_DoNotEndTheForeachIteration()
+    {
+        // The break leaves the switch, not the foreach: the next MoveNext still reads the
+        // transferred collection.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M(int n)
+                {
+                    var list = new List<int> { 1 };
+                    foreach (var item in list)
+                    {
+                        switch (n)
+                        {
+                            case 0:
+                                _ = Sending.Transfer(list);
+                                break;
+                        }
+                    }
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+    }
+
+    [Fact]
+    public async Task LocalFunctionCalls_AfterTheTransfer_AreUses()
+    {
+        // The read inside Use sits source-BEFORE the transfer, but the CALL runs after it:
+        // the sender still touches the handed-off list.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public Sending<List<int>> M()
+                {
+                    var list = new List<int> { 1 };
+                    void Use() => list.Add(1);
+                    var sending = Sending.Transfer(list);
+                    Use();
+                    return sending;
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+    }
+
+    [Fact]
+    public async Task LockScopes_ExitOnTheTransferredObject()
+    {
+        // The compiler-generated Monitor.Exit touches the handed-off object at scope end:
+        // same shape as using disposal.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public Sending<List<int>> M()
+                {
+                    var gate = new List<int> { 1 };
+                    lock (gate)
+                    {
+                        return Sending.Transfer(gate);
+                    }
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+        Assert.Contains("'gate'", diagnostic.GetMessage());
+    }
+
+    [Fact]
     public async Task UsingLocals_AreDisposedBySenderAfterTheTransfer()
     {
         // The scope's compiler-generated Dispose runs after the handoff with no source

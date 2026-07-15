@@ -101,9 +101,18 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
 
             // Only a resource that IS the variable disposes the handoff: `using (stream)`.
             // A resource merely mentioning it (`using (new Scope(list.Count))`) disposes the
-            // wrapper, not the transferred object.
-            if (parent is IUsingOperation usingOperation
-                && SymbolEqualityComparer.Default.Equals(ReferencedVariable(usingOperation.Resources), variable))
+            // wrapper, not the transferred object. A `lock (gate)` around the transfer is the
+            // same shape: the compiler-generated Monitor.Exit touches the handed-off object
+            // at scope end.
+            var scopeExitTarget = parent switch
+            {
+                IUsingOperation usingOperation => usingOperation.Resources,
+                ILockOperation lockOperation => lockOperation.LockedValue,
+                _ => null,
+            };
+
+            if (scopeExitTarget is not null
+                && SymbolEqualityComparer.Default.Equals(ReferencedVariable(scopeExitTarget), variable))
             {
                 return true;
             }
@@ -140,9 +149,34 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     {
         return loop.Body.DescendantsAndSelf().Any(operation =>
             operation.Syntax.SpanStart >= transferPosition
-            && operation is IReturnOperation or IThrowOperation or IBranchOperation { BranchKind: BranchKind.Break }
             && !IsWithinANestedFunction(operation, loop.Body)
+            && ExitsTheLoop(operation, loop)
             && IsOnTheTransfersConditionalLevel(operation, transferPosition));
+    }
+
+    // A break only ends the ITERATION when it leaves THIS foreach: a break belonging to a
+    // nested switch or inner loop resumes inside the body, and the next MoveNext still runs.
+    private static bool ExitsTheLoop(IOperation operation, IForEachLoopOperation loop)
+    {
+        if (operation is IReturnOperation or IThrowOperation)
+        {
+            return true;
+        }
+
+        if (operation is not IBranchOperation { BranchKind: BranchKind.Break } branch)
+        {
+            return false;
+        }
+
+        for (var parent = branch.Parent; parent is not null; parent = parent.Parent)
+        {
+            if (parent is ILoopOperation or ISwitchOperation)
+            {
+                return ReferenceEquals(parent, loop);
+            }
+        }
+
+        return false;
     }
 
     // The variables an argument expression can HAND OFF. An assignment transfers its target
@@ -303,7 +337,23 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                 && !IsInsideNameOf(operation)
                 && !IsInASiblingArmOfTheTransfer(operation, transferPosition)
                 && (escaped || !IsInAnUnreachableCatch(operation, transferPosition)))
-            .OrderBy(operation => operation.Syntax.SpanStart);
+            .Select(operation => (Operation: operation, IsLocalFunctionCall: false));
+
+        // A call to a local function whose body reads the variable is a use AT THE CALL: the
+        // body's reference sits source-BEFORE the transfer when the function is declared
+        // earlier, so the position filter alone would hide it.
+        var localFunctionCalls = scanRoots
+            .SelectMany(root => root.DescendantsAndSelf())
+            .OfType<IInvocationOperation>()
+            .Where(invocation => invocation.TargetMethod.MethodKind == MethodKind.LocalFunction
+                && invocation.Syntax.SpanStart >= transferPosition
+                && !IsInASiblingArmOfTheTransfer(invocation, transferPosition)
+                && (escaped || !IsInAnUnreachableCatch(invocation, transferPosition))
+                && LocalFunctionReads(invocation.TargetMethod, variable, scope))
+            .Select(invocation => (Operation: (IOperation)invocation, IsLocalFunctionCall: true));
+
+        var orderedUses = laterReferences.Concat(localFunctionCalls)
+            .OrderBy(use => use.Operation.Syntax.SpanStart);
 
         // Regions where a SKIPPED conditional reinitialization dominates: inside its own arm,
         // after it, the variable is fresh on every path that reaches the reference
@@ -311,11 +361,17 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         // list), so such references are clean while the scan continues past the arm.
         List<(Microsoft.CodeAnalysis.Text.TextSpan Region, int Position)>? dominated = null;
 
-        foreach (var reference in laterReferences)
+        foreach (var (reference, isLocalFunctionCall) in orderedUses)
         {
             if (IsDominatedByASkippedReinitialization(dominated, reference))
             {
                 continue;
+            }
+
+            if (isLocalFunctionCall)
+            {
+                Report(context, reference, variable);
+                return;
             }
 
             switch (Classify(reference, variable, transferPosition, scope, out var rhsUse))
@@ -380,6 +436,17 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         }
 
         return false;
+    }
+
+    private static bool LocalFunctionReads(IMethodSymbol localFunction, ISymbol variable, IOperation scope)
+    {
+        var declaration = scope.DescendantsAndSelf().OfType<ILocalFunctionOperation>()
+            .FirstOrDefault(operation => SymbolEqualityComparer.Default.Equals(operation.Symbol, localFunction));
+
+        return declaration is not null
+            && declaration.DescendantsAndSelf().Any(operation =>
+                SymbolEqualityComparer.Default.Equals(ReferencedVariable(operation), variable)
+                && !IsInsideNameOf(operation));
     }
 
     // nameof(list) is a compile-time constant: the reference never reads the object at

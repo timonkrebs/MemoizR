@@ -188,10 +188,16 @@ public sealed class StaticStateAnalyzer : DiagnosticAnalyzer
     // member walk would accept that T through the exemption this rule exists to remove.
     private static bool HasUnshieldedTypeParameter(ITypeSymbol type)
     {
-        return HasUnshieldedTypeParameter(type, new System.Collections.Generic.HashSet<ITypeSymbol>(SymbolEqualityComparer.Default));
+        return HasUnshieldedTypeParameter(
+            type,
+            new System.Collections.Generic.HashSet<ITypeSymbol>(SymbolEqualityComparer.Default),
+            new System.Collections.Generic.List<INamedTypeSymbol>());
     }
 
-    private static bool HasUnshieldedTypeParameter(ITypeSymbol type, System.Collections.Generic.HashSet<ITypeSymbol> visited)
+    private static bool HasUnshieldedTypeParameter(
+        ITypeSymbol type,
+        System.Collections.Generic.HashSet<ITypeSymbol> visited,
+        System.Collections.Generic.List<INamedTypeSymbol> path)
     {
         switch (type)
         {
@@ -204,26 +210,38 @@ public sealed class StaticStateAnalyzer : DiagnosticAnalyzer
                 return !parameter.HasUnmanagedTypeConstraint
                     && !parameter.ConstraintTypes.Any(constraint => constraint.SpecialType == SpecialType.System_Enum);
             case IArrayTypeSymbol array:
-                return HasUnshieldedTypeParameter(array.ElementType, visited);
+                return HasUnshieldedTypeParameter(array.ElementType, visited, path);
             case INamedTypeSymbol named
                 when visited.Add(named) && !SendableSymbolClassifier.HasSendableAttribute(named):
+                if (named.TypeArguments.Any(argument => HasUnshieldedTypeParameter(argument, visited, path)))
+                {
+                    return true;
+                }
+
                 // Member re-instantiation can construct fresh symbols forever (Box<T> exposing
-                // Box<List<T>>), so the member walk needs a divergence bound -- but a
-                // once-per-DECLARATION gate is too coarse: the same nested declaration can
-                // return with DIFFERENT substitutions through its containing type
-                // (Outer<int>.Holder, then Outer<T>.Holder). The bound mirrors the
-                // classifier's: walk members while fewer than two same-definition types of
-                // non-greater size were already visited.
+                // Box<List<T>>), so the member walk needs a divergence bound -- counted on the
+                // recursion PATH, not globally: sibling instantiations (Outer<int>.Holder next
+                // to Outer<string>.Holder next to Outer<T>.Holder) are not recursion and must
+                // all be walked, while a divergent chain stacks same-definition ancestors.
                 var definition = (INamedTypeSymbol)named.OriginalDefinition;
-                var priorNonShrinking = visited.Count(entry => entry is INamedTypeSymbol { } other
-                    && !SymbolEqualityComparer.Default.Equals(other, named)
-                    && SymbolEqualityComparer.Default.Equals(other.OriginalDefinition, definition)
+                var priorNonShrinking = path.Count(other =>
+                    SymbolEqualityComparer.Default.Equals(other.OriginalDefinition, definition)
                     && SendableSymbolClassifier.TypeSize(other) <= SendableSymbolClassifier.TypeSize(named));
-                var memberTypes = priorNonShrinking < 2
-                    ? MemberTypesOf(named)
-                    : System.Linq.Enumerable.Empty<ITypeSymbol>();
-                return named.TypeArguments.Any(argument => HasUnshieldedTypeParameter(argument, visited))
-                    || memberTypes.Any(memberType => HasUnshieldedTypeParameter(memberType, visited));
+                if (priorNonShrinking >= 2)
+                {
+                    return false;
+                }
+
+                path.Add(named);
+                try
+                {
+                    return MemberTypesOf(named).Any(memberType => HasUnshieldedTypeParameter(memberType, visited, path));
+                }
+                finally
+                {
+                    path.RemoveAt(path.Count - 1);
+                }
+
             default:
                 return false;
         }
