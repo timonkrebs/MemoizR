@@ -33,7 +33,10 @@ public sealed record AdoptedPublication<T>(T Value, long Epoch, CausalityStamp S
 ///    answered with a verification pull (the response reflects the incarnation that is
 ///    actually alive), and committing an epoch change invalidates the answers of all pulls
 ///    still in flight. On a committed reset, held evidence is discarded, never merged, and
-///    <see cref="OnPeerReset"/> runs so the bridge can resubscribe;
+///    <see cref="OnPeerReset"/> runs so the bridge can resubscribe -- and while that
+///    resubscription is in flight, epoch-changing answers are refused entirely (they may have
+///    travelled the dead incarnation's channel), with pulls issued inside the window
+///    invalidated when it closes;
 ///  - within an epoch, the publication SEQUENCE totally orders deliveries: anything at or
 ///    below the last adopted sequence is a late or duplicated delivery and is dropped --
 ///    including the dependency-oscillation shapes causality stamps cannot order, and equally
@@ -56,14 +59,23 @@ public sealed class RemoteSignal<T>
     private bool nodeIdPinned;
     private long currentEpoch;
     private long lastSequence;
-    // Incremented when any epoch change commits (a reset or the first-contact pin). A pull
-    // captures the generation at issue, and its answer may commit an epoch change only if the
-    // generation is unchanged -- i.e. no epoch change committed since the pull was issued, so
-    // a delayed response from a pull issued before the mirror learned the current incarnation
-    // can never abandon it. Deliberately NOT bumped at pull issue: overlapping verification
-    // pulls must not invalidate each other optimistically, or a failed newer pull would strand
-    // an older pull's perfectly live answer until a heartbeat retries.
+    // Incremented when any epoch change commits (a reset or the first-contact pin), and again
+    // when a reset's resubscription window closes. A pull captures the generation at issue,
+    // and its answer may commit an epoch change only if the generation is unchanged -- i.e. no
+    // epoch change committed since the pull was issued, so a delayed response from a pull
+    // issued before the mirror learned the current incarnation can never abandon it.
+    // Deliberately NOT bumped at pull issue: overlapping verification pulls must not
+    // invalidate each other optimistically, or a failed newer pull would strand an older
+    // pull's perfectly live answer until a heartbeat retries.
     private long epochGeneration;
+
+    // Gate-guarded: true from a reset's commit until its OnPeerReset attempt finished. While a
+    // resubscription is in flight the pull channel may still point at the dead incarnation, so
+    // epoch-changing answers are refused outright; closing the window bumps the generation so
+    // pulls ISSUED inside it can never commit later either. Mirrors without a hook never open
+    // the window: declaring no resubscription means the channel is address-stable, and a fresh
+    // pull's answer always reflects whoever is actually alive.
+    private bool resettling;
     private volatile AdoptedPublication<T>? publication;
 
     private enum AdoptionVerdict { Drop, Adopt, AdoptReset, VerifyByPull }
@@ -213,7 +225,31 @@ public sealed class RemoteSignal<T>
         // local signal never published.
         if (verdict == AdoptionVerdict.AdoptReset && OnPeerReset != null)
         {
-            await OnPeerReset();
+            try
+            {
+                await OnPeerReset();
+            }
+            finally
+            {
+                await CloseResettlingWindowAsync();
+            }
+        }
+    }
+
+    // The resubscription attempt is over (success or failure -- either way the delivering
+    // caller knows): close the window and invalidate every pull issued inside it, whose
+    // answers may have travelled the dead incarnation's channel.
+    private async Task CloseResettlingWindowAsync()
+    {
+        await adoptionGate.WaitAsync();
+        try
+        {
+            resettling = false;
+            Interlocked.Increment(ref epochGeneration);
+        }
+        finally
+        {
+            adoptionGate.Release();
         }
     }
 
@@ -263,10 +299,12 @@ public sealed class RemoteSignal<T>
         }
 
         // An epoch change: only a pull issued after the last committed epoch change may commit
-        // it. An unsolicited payload gets a verification pull instead; a superseded pull answer
-        // (an epoch change committed since it was issued) is just dropped -- whatever committed
-        // is newer knowledge, and the live incarnation keeps advertising.
-        if (pulledAtGeneration == Volatile.Read(ref epochGeneration))
+        // it -- and never while a reset's resubscription is still in flight (the answer may
+        // have travelled the dead incarnation's channel). An unsolicited payload gets a
+        // verification pull instead; a superseded pull answer (an epoch change committed since
+        // it was issued) is just dropped -- whatever committed is newer knowledge, and the
+        // live incarnation keeps advertising.
+        if (!resettling && pulledAtGeneration == Volatile.Read(ref epochGeneration))
         {
             return AdoptionVerdict.AdoptReset;
         }
@@ -282,6 +320,7 @@ public sealed class RemoteSignal<T>
         {
             abandonedEpochs.Add(currentEpoch);
             heldVerifiedStamp = CausalityStamp.Empty; // never merged across incarnations
+            resettling = OnPeerReset != null;
         }
         else
         {

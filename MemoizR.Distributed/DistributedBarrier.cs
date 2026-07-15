@@ -194,16 +194,22 @@ public static class DistributedBarrier
             onRepullError?.Invoke(ex);
         }
 
+        // Content equality, not reference: a non-memoized export (a ConcurrentRace re-races on
+        // every pull) answers a re-pull with an EQUAL-content publication under a fresh
+        // sequence, and the mirror's adoption swaps the reference -- reference identity would
+        // refuse the affirmation every round and spin the heal loop forever. The publication
+        // record's value equality (value, epoch, stamp, verifiability) still counts every real
+        // change as a change.
         bool Unchanged() =>
-            ReferenceEquals(first.Publication, firstPublication)
-            && ReferenceEquals(second.Publication, secondPublication);
+            Equals(first.Publication, firstPublication)
+            && Equals(second.Publication, secondPublication);
     }
 
-    // The publication pair a full re-pull round affirmed, compared by REFERENCE: publications
-    // are immutable snapshots swapped only by adoptions, so reference identity means "no
-    // adoption happened on either mirror since the glitch was detected" -- any adoption
-    // naturally invalidates a stale affirmation. Volatile: written on the heal flow, read by
-    // the barrier reaction.
+    // The publication pair a full re-pull round affirmed, compared by CONTENT (the record's
+    // value equality): any adoption that actually changes value or evidence invalidates a
+    // stale affirmation, while an equal-content republication (a re-racing export) keeps the
+    // pair affirmed -- which is exactly what the round proved. Volatile: written on the heal
+    // flow, read by the barrier reaction.
     private sealed class AffirmationState<T1, T2>
     {
         private volatile Tuple<AdoptedPublication<T1>, AdoptedPublication<T2>>? pair;
@@ -215,8 +221,8 @@ public static class DistributedBarrier
         {
             var affirmed = pair;
             return affirmed != null
-                && ReferenceEquals(affirmed.Item1, first)
-                && ReferenceEquals(affirmed.Item2, second);
+                && Equals(affirmed.Item1, first)
+                && Equals(affirmed.Item2, second);
         }
     }
 }

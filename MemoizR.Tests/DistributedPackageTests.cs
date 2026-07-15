@@ -491,6 +491,61 @@ public class DistributedPackageTests
     }
 
     [Fact]
+    public async Task RemoteSignal_StaleEpochAnswer_DuringResubscription_CannotAbandonTheJustAdoptedEpoch()
+    {
+        // While a reset's OnPeerReset resubscription is in flight, the pull channel may still
+        // point at the dead incarnation. An epoch-changing answer from a pull issued inside
+        // that window must be refused: committing it would abandon the epoch the mirror JUST
+        // adopted and wedge it on a dead incarnation.
+        var epoch1 = 11L;
+        var epoch2 = 22L;
+        var deadEpoch = 33L;
+        var hookStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseHook = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var pulls = 0;
+        var consumer = new MemoFactory();
+        var mirror = consumer.CreateRemoteSignal("mirror", 0,
+            () =>
+            {
+                var n = Interlocked.Increment(ref pulls);
+                return Task.FromResult(n switch
+                {
+                    // The verification pull that commits the reset to epoch2.
+                    1 => new ValuePayload<int>(1000, epoch2, 1, 222, CausalityStamp.ForSignal(1000, 1, epoch2).Serialize(), false),
+                    // The not-yet-resubscribed channel answers a window-issued pull with a
+                    // dead incarnation's payload.
+                    2 => new ValuePayload<int>(1000, deadEpoch, 9, 999, CausalityStamp.ForSignal(1000, 9, deadEpoch).Serialize(), false),
+                    // The live truth, after the window closed.
+                    _ => new ValuePayload<int>(1000, epoch2, 3, 333, CausalityStamp.ForSignal(1000, 3, epoch2).Serialize(), false),
+                });
+            },
+            onPeerReset: async () =>
+            {
+                hookStarted.TrySetResult();
+                await releaseHook.Task;
+            });
+
+        await mirror.OnValueAsync(new ValuePayload<int>(1000, epoch1, 5, 111, CausalityStamp.ForSignal(1000, 5, epoch1).Serialize(), false));
+
+        // Unsolicited epoch change -> verification pull commits epoch2 -> the hook starts.
+        var delivery = mirror.OnValueAsync(new ValuePayload<int>(1000, epoch2, 1, 222, CausalityStamp.ForSignal(1000, 1, epoch2).Serialize(), false));
+        await hookStarted.Task.WaitAsync(TimeSpan.FromSeconds(10));
+
+        // A pull issued inside the resubscription window: its dead-incarnation answer is
+        // refused, and the just-adopted live epoch survives.
+        await mirror.PullAsync().WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.Equal(epoch2, mirror.Publication!.Epoch);
+        Assert.Equal(222, await mirror.Local.Get());
+
+        releaseHook.SetResult();
+        await delivery.WaitAsync(TimeSpan.FromSeconds(10));
+
+        // The mirror is not stuck: the live epoch keeps flowing after the window closes.
+        await mirror.OnStaleAsync(new StaleNotification(1000, epoch2, 3, CausalityStamp.Empty.Serialize()));
+        Assert.Equal(333, await mirror.Local.Get());
+    }
+
+    [Fact]
     public async Task RemoteSignal_DelayedPayloadFromASkippedIncarnation_CannotAbandonTheLiveEpoch()
     {
         // The host restarted twice and the mirror never saw the middle incarnation, so that
@@ -673,6 +728,42 @@ public class DistributedPackageTests
         // update: the barrier sees the spurious glitch, re-pulls, both hosts affirm, renders.
         await s.Set(5);
         await qMirror.PullAsync();
+        await TestHelpers.WaitForConvergenceAsync(() => { lock (renders) { return renders.Contains((5, 20)); } });
+        GC.KeepAlive(reaction);
+    }
+
+    [Fact]
+    public async Task Barrier_WithAReRacingExport_StillAffirmsAndRenders()
+    {
+        // A ConcurrentRace is non-memoized: every pull re-races and publishes an equal-content
+        // payload under a FRESH sequence. The heal round's "nothing changed" check must
+        // compare publication content, not references -- reference identity would refuse the
+        // affirmation every round and spin re-pulls forever instead of rendering.
+        var host = new MemoFactory();
+        var s = host.CreateSignal(4);
+        var race = host.CreateConcurrentRace(s.Get, async (_, r) => r);
+        var half = host.CreateMemoizR("half", async () => await s.Get() / 2);
+        var c = host.CreateMemoizR("c", async () => await half.Get() * 10);
+        using var raceExport = host.Export(race, _ => Task.CompletedTask);
+        using var cExport = host.Export(c, _ => Task.CompletedTask);
+
+        var consumer = new MemoFactory();
+        var raceMirror = consumer.CreateRemoteSignal("race", 0, raceExport.PullAsync);
+        var cMirror = consumer.CreateRemoteSignal("c", 0, cExport.PullAsync);
+
+        var renders = new List<(int Race, int C)>();
+        var reaction = DistributedBarrier.CreateConsistentReaction(
+            consumer, raceMirror, cMirror, (r, v) => { lock (renders) { renders.Add((r, v)); } });
+
+        await raceMirror.PullAsync();
+        await cMirror.PullAsync();
+        await TestHelpers.WaitForConvergenceAsync(() => { lock (renders) { return renders.Contains((4, 20)); } });
+
+        // s: 4 -> 5. The race re-evaluates to 5 with a fresh stamp; c's scan-skip keeps its
+        // old stamp. Deliver only the race's update: a spurious glitch whose every re-pull of
+        // the race answers equal content under a new sequence -- it must still affirm.
+        await s.Set(5);
+        await raceMirror.PullAsync();
         await TestHelpers.WaitForConvergenceAsync(() => { lock (renders) { return renders.Contains((5, 20)); } });
         GC.KeepAlive(reaction);
     }
