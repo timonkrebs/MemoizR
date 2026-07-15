@@ -29,24 +29,30 @@ internal static class TransitionFlow
 public sealed class Transition : IDisposable, IAsyncDisposable, IStabilizationListener
 {
     private readonly Lock gate = new();
-    private readonly Context context;
     private readonly Transition? prior;
+    private readonly bool taggedAmbientFlow;
     // Per reached reaction, the highest invalidation generation a tagged Stale registered: a
     // commit reflects the wavefront's writes to that reaction exactly when its token is >= this
     // threshold (see IStabilizationListener).
     private readonly Dictionary<ReactionBase, int> outstanding = new();
     private readonly Dictionary<ReactionBase, Exception> faults = new();
     private readonly TaskCompletionSource settled = new(TaskCreationOptions.RunContinuationsAsynchronously);
-    private Signal<bool>? pendingSignal;
-    private Task pendingPublishChain = Task.CompletedTask;
+    private readonly PendingPublisher pendingPublisher;
     private volatile bool isPending;
     private bool isSealed;
 
-    internal Transition(Context context)
+    // tagAmbientFlow: BeginTransition tags the caller's flow here; a ReactiveAction run passes
+    // false and tags its detached body flow itself, because the caller's flow never carries the
+    // writes.
+    internal Transition(Context context, bool tagAmbientFlow = true)
     {
-        this.context = context;
-        prior = TransitionFlow.Current.Value;
-        TransitionFlow.Current.Value = this;
+        pendingPublisher = new(context, () => isPending, "Transition.Pending");
+        taggedAmbientFlow = tagAmbientFlow;
+        if (tagAmbientFlow)
+        {
+            prior = TransitionFlow.Current.Value;
+            TransitionFlow.Current.Value = this;
+        }
     }
 
     /// <summary>Snapshot: is any reached reaction still awaiting its clean commit?</summary>
@@ -57,20 +63,7 @@ public sealed class Transition : IDisposable, IAsyncDisposable, IStabilizationLi
     /// spinners and disabled-states are just reactions on it. Published from a detached runtime
     /// flow; it converges on the snapshot but individual flips can lag it.
     /// </summary>
-    public IStateGetR<bool> Pending
-    {
-        get
-        {
-            if (pendingSignal is null)
-            {
-                LazyInitializer.EnsureInitialized(ref pendingSignal,
-                    () => new Signal<bool>(isPending, context) { Label = "Transition.Pending" });
-                // Fold any state change that raced the lazy creation into the signal.
-                SchedulePendingPublish();
-            }
-            return pendingSignal!;
-        }
-    }
+    public IStateGetR<bool> Pending => pendingPublisher.Signal;
 
     /// <summary>
     /// Completes when the scope has been disposed (sealing the wavefront) AND every reached
@@ -82,7 +75,10 @@ public sealed class Transition : IDisposable, IAsyncDisposable, IStabilizationLi
     /// <summary>Seals the wavefront and restores the prior ambient transition tag.</summary>
     public void Dispose()
     {
-        TransitionFlow.Current.Value = prior;
+        if (taggedAmbientFlow)
+        {
+            TransitionFlow.Current.Value = prior;
+        }
         bool completed;
         lock (gate)
         {
@@ -230,36 +226,5 @@ public sealed class Transition : IDisposable, IAsyncDisposable, IStabilizationLi
         }
     }
 
-    // Publish the current pending state into the reactive signal from a detached flow: the
-    // callers run inside committing evaluations (OnStabilized) or invalidation cascades
-    // (RegisterReached), where a Set would re-enter the graph. Publishes are chained so they
-    // apply in schedule order, and each link reads the CURRENT snapshot at Set time -- every
-    // state change schedules a link, so the last link always publishes the latest truth no
-    // matter how the flips raced.
-    private void SchedulePendingPublish()
-    {
-        if (pendingSignal is null)
-        {
-            return;
-        }
-
-        lock (gate)
-        {
-            var prev = pendingPublishChain;
-            pendingPublishChain = Task.Run(async () =>
-            {
-                TransitionFlow.Suppress();
-                await prev.ConfigureAwait(false);
-                try
-                {
-                    await pendingSignal!.Set(isPending).ConfigureAwait(false);
-                }
-                catch
-                {
-                    // A failed publish must not break the chain; the next state change
-                    // schedules another link that converges the signal.
-                }
-            });
-        }
-    }
+    private void SchedulePendingPublish() => pendingPublisher.Publish();
 }

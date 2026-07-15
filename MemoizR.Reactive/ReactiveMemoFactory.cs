@@ -51,6 +51,29 @@ public static class ReactiveMemoFactory
         return new(memoFactory.Context);
     }
 
+    /// <summary>
+    /// Creates an optimistic view over <paramref name="source"/> (ADR 0007): reads return the
+    /// source value with every in-flight optimistic patch applied on top. Pair with
+    /// <see cref="CreateAction"/> -- patches are applied through an action run and dropped
+    /// automatically when it ends, giving instant projection with structural rollback.
+    /// </summary>
+    public static OptimisticState<T> CreateOptimistic<T>(this MemoFactory memoFactory, IStateGetR<T> source, string label = "Optimistic")
+    {
+        return new(memoFactory, source, label);
+    }
+
+    /// <summary>
+    /// Creates a reusable process-layer action (ADR 0007): the body projects optimistic
+    /// patches via the context, runs the real process on the context's token, and writes the
+    /// confirmed result to the source of truth. A faulted or cancelled run rolls back
+    /// automatically (its patches are dropped, the source was never touched); every run's
+    /// effect wavefront is tracked by its own <see cref="Transition"/>.
+    /// </summary>
+    public static ReactiveAction<TPayload> CreateAction<TPayload>(this MemoFactory memoFactory, Func<TPayload, OptimisticActionContext, Task> body, string label = "Action")
+    {
+        return new(memoFactory.Context, body, label);
+    }
+
     // Factory-level sugar for the common case: identical to BuildReaction().CreateReaction(..)
     // with the default label and debounce -- use BuildReaction to configure either. The
     // threading contract is the builder's: dependencies are registered in parameter order, the

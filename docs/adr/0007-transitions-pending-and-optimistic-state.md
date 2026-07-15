@@ -1,6 +1,6 @@
 # ADR 0007 — Transitions, `IsPending`, and optimistic state with automatic rollback
 
-- Status: Proposed
+- Status: Proposed (phases 1–3 implemented on this branch; 4–5 open)
 - Date: 2026-07-15
 - Deciders: MemoizR maintainers
 - Inspiration: Solid 2.0's async architecture (deferred stabilization, `isPending`,
@@ -227,6 +227,27 @@ Suggested spike order inside phase 1: stabilization notification first — it is
 mechanism parts A, B, and a future `CreatePendingIndicator` all stand on, and the one with
 real concurrency risk (it must fire outside the locks it is called under, on the detached
 runtime flow, without reordering against a newer invalidation).
+
+### Implementation notes (phases 1–3, this branch)
+
+Where the landed code deliberately deviates from the sketches above:
+
+- The stabilization notification carries the committed generation token; consumers compare it
+  against the invalidation's post-bump generation (`Invalidate(state, out generationAfter)`),
+  with a `LastCleanCommitToken` recovery read that makes registration-vs-commit ordering free.
+  A faulted reaction update notifies `OnStabilizationFaulted`; a disposed reaction releases
+  its waiters (`int.MaxValue` satisfies every threshold).
+- The ambient tag (`TransitionFlow`) lives in `MemoizR.Reactive`, not core: both its writer
+  (`BeginTransition` / action runs) and its reader (`ReactionBase.Stale`) are in the Reactive
+  assembly. Detached runtime flows — debounced updates, pending-publish pumps — suppress the
+  inherited tag, otherwise a transition's own machinery Stales (renotifies, pending-signal
+  propagation) would re-arm it forever.
+- The action sketch's explicit `Confirm` step was dropped: a run's patches are removed
+  unconditionally when the body ends, so "confirm" is simply the body writing the source of
+  truth before returning — one less concept, same lifecycle table.
+- `CreateAction` uses a plain per-run `CancellationTokenSource` instead of depending on
+  `MemoizR.StructuredConcurrency`; an overload wrapping a structured resource group can be
+  layered in that assembly later without touching the Reactive types.
 
 ## Consequences
 

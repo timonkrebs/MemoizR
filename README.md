@@ -128,6 +128,48 @@ var m2 = f.CreateMemoizR(async() => await v1.Get() * 2);
 var r1 = f.CreateReaction(m1, m2, (val1, val2) => val1 + val2);
 ```
 
+### Transitions, pending indicators, and optimistic state
+
+The Solid 2.0-style process layer ([ADR 0007](docs/adr/0007-transitions-pending-and-optimistic-state.md)),
+re-derived for a pull-based, multi-threaded graph. A **transition** tracks one write wavefront —
+every reaction the writes invalidate — until all its effects have applied:
+
+```cs
+await using (var t = f.BeginTransition()) // seals on dispose; await using also awaits settlement
+{
+    await v1.Set(5);      // Sets inside the scope are tracked, transitively through memos
+    _ = t.IsPending;      // snapshot: effects still in flight?
+    _ = t.Pending;        // reactive IStateGetR<bool> — a spinner is just a reaction on it
+}
+await t.Settled;          // the onSettled analog; reaction faults aggregate here
+
+r1.IsPending;             // per-reaction reactive "an update is scheduled or running" flag
+```
+
+**Optimistic state** instantly projects an expected future value while the real process runs,
+and rolls back *structurally* — a failed action just drops its patch, the source of truth was
+never touched, so overlapping actions can never clobber each other:
+
+```cs
+var todos      = f.CreateSignal(ImmutableList.Create("existing"));
+var optimistic = f.CreateOptimistic<ImmutableList<string>>(todos);
+
+var addTodo = f.CreateAction<string>(async (todo, ctx) =>
+{
+    await ctx.Apply(optimistic, list => list.Add($"{todo} (pending)")); // instant projection
+    var confirmed = await api.SaveAsync(todo, ctx.Token);               // the process step
+    await todos.Set((await todos.Get()).Add(confirmed));                // confirm the source
+});                                        // fault/cancel => patch dropped => automatic rollback
+
+var run = addTodo.Run("write docs");
+addTodo.IsPending;    // reactive: disable the submit button with a reaction on it
+await run.Settled;    // the UI reflects the final outcome (patch gone, value confirmed)
+```
+
+Memos stay lazy — a write that reaches no reaction has nothing in flight — and refreshing
+out-of-band state is first-class via `memo.Invalidate()`: recompute on next pull, with
+downstream effects re-running only if the value actually changed.
+
 ### Causality Stamps (preparation for distributed graphs)
 
 Every node carries a causality stamp recording exactly which signal versions its current value

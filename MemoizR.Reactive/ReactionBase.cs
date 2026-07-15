@@ -36,6 +36,7 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
     {
         this.executor = executor;
         this.timeProvider = timeProvider ?? TimeProvider.System;
+        pendingPublisher = new(context, () => IsPendingSnapshot, "Reaction.IsPending");
         stateCell.Force(CacheState.CacheDirty);
     }
 
@@ -407,9 +408,7 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
     // the asymmetry with transitions: a PAUSED reaction reads not-pending here (nothing is in
     // flight) while a transition it was reached by stays pending until a Resume commits.
     private int pendingCount;
-    private Signal<bool>? isPendingSignal;
-    private Task pendingPublishChain = Task.CompletedTask;
-    private readonly Lock pendingPublishLock = new();
+    private readonly PendingPublisher pendingPublisher;
 
     /// <summary>Snapshot of <see cref="IsPending"/>, sync-readable (e.g. from a render).</summary>
     public bool IsPendingSnapshot => Volatile.Read(ref pendingCount) > 0;
@@ -420,51 +419,9 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
     /// so a progress indicator is just another reaction on it. Published from a detached
     /// runtime flow; it converges on <see cref="IsPendingSnapshot"/>, individual flips can lag.
     /// </summary>
-    public IStateGetR<bool> IsPending
-    {
-        get
-        {
-            if (isPendingSignal is null)
-            {
-                LazyInitializer.EnsureInitialized(ref isPendingSignal,
-                    () => new Signal<bool>(IsPendingSnapshot, Context) { Label = $"{Label}.IsPending" });
-                // Fold any zero-crossing that raced the lazy creation into the signal.
-                SchedulePendingPublish();
-            }
-            return isPendingSignal!;
-        }
-    }
+    public IStateGetR<bool> IsPending => pendingPublisher.Signal;
 
-    // Same chained-pump shape as Transition.SchedulePendingPublish: callers sit inside
-    // invalidation cascades and update finallys where a Set would re-enter the graph, so each
-    // link publishes detached, in schedule order, reading the CURRENT snapshot at Set time --
-    // the last link always converges the signal onto the latest truth.
-    private void SchedulePendingPublish()
-    {
-        if (isPendingSignal is null)
-        {
-            return;
-        }
-
-        lock (pendingPublishLock)
-        {
-            var prev = pendingPublishChain;
-            pendingPublishChain = Task.Run(async () =>
-            {
-                TransitionFlow.Suppress();
-                await prev.ConfigureAwait(false);
-                try
-                {
-                    await isPendingSignal!.Set(IsPendingSnapshot).ConfigureAwait(false);
-                }
-                catch
-                {
-                    // A failed publish must not break the chain; the next zero-crossing
-                    // schedules another link that converges the signal.
-                }
-            });
-        }
-    }
+    private void SchedulePendingPublish() => pendingPublisher.Publish();
 
     // Registration-vs-dispose race recovery for Transition.RegisterReached.
     internal bool IsDisposed => disposed;
