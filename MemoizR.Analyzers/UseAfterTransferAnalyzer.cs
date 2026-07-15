@@ -141,6 +141,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         return loop.Body.DescendantsAndSelf().Any(operation =>
             operation.Syntax.SpanStart >= transferPosition
             && operation is IReturnOperation or IThrowOperation or IBranchOperation { BranchKind: BranchKind.Break }
+            && !IsWithinANestedFunction(operation, loop.Body)
             && IsOnTheTransfersConditionalLevel(operation, transferPosition));
     }
 
@@ -154,7 +155,13 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         switch (argument)
         {
             case IAssignmentOperation assignment:
+                // Transfer(list = other): BOTH list and other alias the handed-off object.
                 yield return assignment.Target;
+                foreach (var source in TransferSources(assignment.Value))
+                {
+                    yield return source;
+                }
+
                 break;
             case ICoalesceOperation coalesce:
                 foreach (var source in TransferSources(coalesce.Value).Concat(TransferSources(coalesce.WhenNull)))
@@ -229,7 +236,12 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             }
             else if (escape is not null && parent is ITryOperation tryOperation)
             {
-                AddHandlerRoots(roots, tryOperation, child, escapedByThrow: escape is IThrowOperation);
+                // A return whose expression can throw AFTER building the wrapper
+                // (return MayThrow(Sending.Transfer(list));) reaches the handlers like a
+                // thrown transfer does.
+                var reachesHandlers = escape is IThrowOperation
+                    || CanThrowAfterTheTransfer(escape, transfer.Syntax.Span.End);
+                AddHandlerRoots(roots, tryOperation, child, escapedByThrow: reachesHandlers);
             }
         }
 
@@ -360,7 +372,8 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             if (parent is ITryOperation { Body: { } body } && child is ICatchClauseOperation
                 && Covers(body, transferPosition)
                 && !body.Descendants().Any(operation => operation.Syntax.SpanStart >= transferPosition
-                    && !IsWithinALocalFunction(operation, body)))
+                    && !IsWithinANestedFunction(operation, body))
+                && !CanThrowAfterTheTransfer(body, transferPosition))
             {
                 return true;
             }
@@ -384,19 +397,33 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         return false;
     }
 
-    // A local-function DECLARATION does not execute (or throw) on the enclosing path: neither
-    // it nor its body counts as code that could reach a handler after the transfer.
-    private static bool IsWithinALocalFunction(IOperation operation, IOperation boundary)
+    // A local-function declaration or lambda body does not execute (or throw, or exit a loop)
+    // on the enclosing path: nothing inside one counts as code the enclosing flow runs.
+    private static bool IsWithinANestedFunction(IOperation operation, IOperation boundary)
     {
         for (var current = operation; current is not null && !ReferenceEquals(current, boundary); current = current.Parent)
         {
-            if (current is ILocalFunctionOperation)
+            if (current is ILocalFunctionOperation or IAnonymousFunctionOperation)
             {
                 return true;
             }
         }
 
         return false;
+    }
+
+    // Whether the region can still throw ONCE THE WRAPPER EXISTS: calls, creations, awaits,
+    // getters and element reads that END strictly after the transfer -- an op enclosing the
+    // transfer (MayThrow(Sending.Transfer(list))) completes after building the wrapper, while
+    // the Transfer call itself ends exactly AT the position (a throw from it means no wrapper
+    // escaped).
+    private static bool CanThrowAfterTheTransfer(IOperation region, int transferPosition)
+    {
+        return region.DescendantsAndSelf().Any(operation =>
+            operation.Syntax.Span.End > transferPosition
+            && !IsWithinANestedFunction(operation, region)
+            && operation is IInvocationOperation or IObjectCreationOperation or IAwaitOperation
+                or IPropertyReferenceOperation or IArrayElementReferenceOperation);
     }
 
     // The use is in an arm of an if/switch/?. whose SIBLING arm holds the transfer: the arms
@@ -482,7 +509,8 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     {
         var reinitRoot = reinitialization is IArgumentOperation { Parent: { } call } ? call : reinitialization;
         var canThrow = reinitRoot.DescendantsAndSelf()
-            .Any(operation => operation is IInvocationOperation or IObjectCreationOperation or IAwaitOperation);
+            .Any(operation => operation is IInvocationOperation or IObjectCreationOperation or IAwaitOperation
+                or IPropertyReferenceOperation or IArrayElementReferenceOperation);
         if (!canThrow)
         {
             return null;
@@ -497,8 +525,8 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
 
             if (parent is ITryOperation tryOperation && ReferenceEquals(child, tryOperation.Body))
             {
-                var use = tryOperation.Catches
-                    .SelectMany(catchClause => catchClause.DescendantsAndSelf())
+                var use = WindowRegionsOf(tryOperation)
+                    .SelectMany(region => region.DescendantsAndSelf())
                     .FirstOrDefault(operation => SymbolEqualityComparer.Default.Equals(ReferencedVariable(operation), variable)
                         && !IsInsideNameOf(operation));
                 if (use is not null)
@@ -509,6 +537,21 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         }
 
         return null;
+    }
+
+    // The window reaches the handlers AND the finally: both run when the reinitializing
+    // expression throws before the target was assigned.
+    private static IEnumerable<IOperation> WindowRegionsOf(ITryOperation tryOperation)
+    {
+        foreach (var catchClause in tryOperation.Catches)
+        {
+            yield return catchClause;
+        }
+
+        if (tryOperation.Finally is { } finallyBlock)
+        {
+            yield return finallyBlock;
+        }
     }
 
     private enum ReferenceRole { Use, FreshValueFromHere, ConditionalReinitialization }

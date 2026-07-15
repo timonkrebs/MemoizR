@@ -1162,6 +1162,201 @@ public class UseAfterTransferAnalyzerTests
     }
 
     [Fact]
+    public async Task EnclosingCalls_CanThrowAfterTheWrapperExists_AndReachTheCatch()
+    {
+        // MayThrow runs AFTER building the wrapper and may throw with the handoff complete:
+        // the catch use is reachable.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    try
+                    {
+                        MayThrow(Sending.Transfer(list));
+                    }
+                    catch
+                    {
+                        list.Add(1);
+                    }
+                }
+
+                private static void MayThrow(Sending<List<int>> sending)
+                {
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+    }
+
+    [Fact]
+    public async Task AssignmentRhsAliases_AreTrackedToo()
+    {
+        // Transfer(list = other): BOTH names alias the handed-off object, so the later use of
+        // the original RHS alias is a use-after-transfer.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public Sending<List<int>> M(List<int> other)
+                {
+                    List<int> list;
+                    var sending = Sending.Transfer(list = other);
+                    other.Add(1);
+                    return sending;
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+        Assert.Contains("'other'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task ThrowingReinitializers_KeepEnclosingFinallysAliveToo()
+    {
+        // The finally runs whether or not Throwing() threw before the assignment completed:
+        // on the throwing path it observes the transferred value.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    try
+                    {
+                        var sent = Sending.Transfer(list);
+                        list = Throwing();
+                    }
+                    finally
+                    {
+                        list.Add(1);
+                    }
+                }
+
+                private static List<int> Throwing()
+                {
+                    return new List<int>();
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+    }
+
+    [Fact]
+    public async Task ThrowingGetters_OpenTheReinitializationWindowToo()
+    {
+        // A property getter is a method: it can throw after the handoff, before the target is
+        // assigned, so the catch still sees the transferred value.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public static List<int> Next => new();
+
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    try
+                    {
+                        var sent = Sending.Transfer(list);
+                        list = Next;
+                    }
+                    catch
+                    {
+                        list.Add(1);
+                    }
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+    }
+
+    [Fact]
+    public async Task ReturningCalls_ThatCanThrowAfterTheTransfer_ReachTheCatch()
+    {
+        // The returning call can throw after the wrapper exists, before the method exits: the
+        // local catch runs with the handoff complete.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public Sending<List<int>>? M()
+                {
+                    var list = new List<int> { 1 };
+                    try
+                    {
+                        return MayThrow(Sending.Transfer(list));
+                    }
+                    catch
+                    {
+                        list.Add(1);
+                        return null;
+                    }
+                }
+
+                private static Sending<List<int>> MayThrow(Sending<List<int>> sending)
+                {
+                    return sending;
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+    }
+
+    [Fact]
+    public async Task LocalFunctionExits_DoNotEndTheForeachIteration()
+    {
+        // The nested return never runs on the loop path: the next MoveNext still reads the
+        // transferred collection.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    foreach (var item in list)
+                    {
+                        _ = Sending.Transfer(list);
+                        void F()
+                        {
+                            return;
+                        }
+                    }
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+    }
+
+    [Fact]
     public async Task UsingLocals_AreDisposedBySenderAfterTheTransfer()
     {
         // The scope's compiler-generated Dispose runs after the handoff with no source
