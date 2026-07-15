@@ -197,10 +197,12 @@ public sealed class StaticStateAnalyzer : DiagnosticAnalyzer
         {
             case ITypeParameterSymbol parameter:
                 // `where T : unmanaged` guarantees a no-reference value type for EVERY closed
-                // instantiation: reads hand out copies that can alias nothing, so the slot is
+                // instantiation (reads hand out copies that can alias nothing), and
+                // `where T : Enum` guarantees immutable values or immutable boxes -- both are
                 // safe without any creation-site check. (A plain `struct` constraint is NOT
-                // enough -- a struct can carry references to mutable objects.)
-                return !parameter.HasUnmanagedTypeConstraint;
+                // enough: a struct can carry references to mutable objects.)
+                return !parameter.HasUnmanagedTypeConstraint
+                    && !parameter.ConstraintTypes.Any(constraint => constraint.SpecialType == SpecialType.System_Enum);
             case IArrayTypeSymbol array:
                 return HasUnshieldedTypeParameter(array.ElementType, visited);
             case INamedTypeSymbol named

@@ -716,6 +716,131 @@ public class UseAfterTransferAnalyzerTests
     }
 
     [Fact]
+    public async Task SiblingArmBranches_CannotSkipOnTheTransferPath()
+    {
+        // The else-break never runs on the path that transferred: the reassignment at the end
+        // of the loop body is definite there, so the code after the loop sees a fresh list.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M(bool c, bool move)
+                {
+                    var list = new List<int> { 1 };
+                    while (c)
+                    {
+                        if (move)
+                        {
+                            _ = Sending.Transfer(list);
+                        }
+                        else
+                        {
+                            break;
+                        }
+
+                        list = new List<int>();
+                    }
+
+                    list.Add(1);
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task CoalescedTransferOperands_AreTracked()
+    {
+        // On the normal path the coalesce hands off `list` itself: the later Add is a
+        // use-after-transfer even though the argument is not a bare variable reference.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public Sending<List<int>> M(List<int>? list)
+                {
+                    var sending = Sending.Transfer(list ?? throw new InvalidOperationException());
+                    list.Add(1);
+                    return sending;
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+    }
+
+    [Fact]
+    public async Task CatchHandlers_AfterACompletedTransfer_AreUnreachable()
+    {
+        // Nothing follows the transfer inside the try: a completed handoff skips the handlers,
+        // and a throw from the transfer expression itself means no wrapper escaped.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    try
+                    {
+                        _ = Sending.Transfer(list);
+                    }
+                    catch
+                    {
+                        list.Add(1);
+                    }
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task CatchHandlers_WithThrowingCodeAfterTheTransfer_AreStillScanned()
+    {
+        // The call after the transfer can throw INTO the handler with the wrapper already
+        // escaped: the handler's use stays reportable.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    try
+                    {
+                        _ = Sending.Transfer(list);
+                        MayThrow();
+                    }
+                    catch
+                    {
+                        list.Add(1);
+                    }
+                }
+
+                private static void MayThrow()
+                {
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+    }
+
+    [Fact]
     public async Task CatchHandlers_ObserveAThrownTransfer()
     {
         // A thrown transfer lands in the try's handlers: the catch runs after the throw

@@ -306,6 +306,17 @@ public class StrictSendableModeTests
     }
 
     [Fact]
+    public void NativeIntegers_ArePrimitives_AndPassStrictMode()
+    {
+        // typeof(IntPtr).IsPrimitive is true, so the runtime walk's primitive short-circuit
+        // accepts nint/nuint before any field reflection -- in lockstep with the analyzer's
+        // System_IntPtr/System_UIntPtr acceptance.
+        var f = new MemoFactory();
+        Assert.NotNull(f.CreateSignal(nint.Zero));
+        Assert.NotNull(f.CreateSignal(nuint.MinValue));
+    }
+
+    [Fact]
     public void DefaultFactory_Checks_AndDisableIsTheEscapeHatch()
     {
         // The Swift 6 language-mode analog (issue #145 part A4): strict IS the default.

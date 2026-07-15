@@ -34,7 +34,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     {
         foreach (var block in context.OperationBlocks)
         {
-            foreach (var (variable, transferPosition, scanRoots, transfer) in Transfers(block))
+            foreach (var (variable, transferPosition, scanRoots, escaped, transfer) in Transfers(block))
             {
                 // A using-declared local is Disposed by the SENDER at scope end -- after the
                 // handoff, with no source reference to scan for: destroying the object the
@@ -45,7 +45,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                     continue;
                 }
 
-                ReportUsesAfter(context, scanRoots, variable, transferPosition);
+                ReportUsesAfter(context, scanRoots, escaped, variable, transferPosition);
             }
         }
     }
@@ -53,7 +53,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     // Every Sending<T> creation (constructor or Sending.Transfer) whose argument is a
     // local/parameter reference, with the position the transfer happens at and the regions the
     // report walk covers.
-    private static IEnumerable<(ISymbol Variable, int Position, List<IOperation> ScanRoots, IOperation Transfer)> Transfers(IOperation block)
+    private static IEnumerable<(ISymbol Variable, int Position, List<IOperation> ScanRoots, bool Escaped, IOperation Transfer)> Transfers(IOperation block)
     {
         foreach (var operation in block.DescendantsAndSelf())
         {
@@ -66,16 +66,56 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                 _ => (false, null),
             };
 
-            if (!isTransfer || ReferencedVariable(TransferTarget(argument)) is not { } variable)
+            if (!isTransfer)
             {
                 continue;
             }
 
-            var scanRoots = ScanRootsFor(operation, EnclosingFunctionBody(operation, block));
-            if (scanRoots.Count > 0)
+            foreach (var source in TransferSources(argument))
             {
-                yield return (variable, operation.Syntax.Span.End, scanRoots, operation);
+                if (ReferencedVariable(source) is not { } variable)
+                {
+                    continue;
+                }
+
+                var (scanRoots, escaped) = ScanRootsFor(operation, EnclosingFunctionBody(operation, block));
+                if (scanRoots.Count > 0)
+                {
+                    yield return (variable, operation.Syntax.Span.End, scanRoots, escaped, operation);
+                }
             }
+        }
+    }
+
+    // The variables an argument expression can HAND OFF. An assignment transfers its target
+    // (Transfer(list = new(...)) / Transfer(list ??= new(...)): the variable aliases the value
+    // afterwards); a null-coalescing or conditional expression transfers whichever operand the
+    // runtime picks (Transfer(list ?? fallback), Transfer(c ? a : b)) -- each is a
+    // MAY-transfer, so each is tracked.
+    private static System.Collections.Generic.IEnumerable<IOperation> TransferSources(IOperation? argument)
+    {
+        switch (argument)
+        {
+            case IAssignmentOperation assignment:
+                yield return assignment.Target;
+                break;
+            case ICoalesceOperation coalesce:
+                foreach (var source in TransferSources(coalesce.Value).Concat(TransferSources(coalesce.WhenNull)))
+                {
+                    yield return source;
+                }
+
+                break;
+            case IConditionalOperation { WhenFalse: { } whenFalse } conditional:
+                foreach (var source in TransferSources(conditional.WhenTrue).Concat(TransferSources(whenFalse)))
+                {
+                    yield return source;
+                }
+
+                break;
+            case not null:
+                yield return argument;
+                break;
         }
     }
 
@@ -85,7 +125,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     // lands in, and the FINALLY blocks of enclosing tries -- no such region, no sender-side
     // continuation at all. (break/continue are NOT exits: control resumes after the loop,
     // where later uses remain reachable, so they keep the full scope.)
-    private static List<IOperation> ScanRootsFor(IOperation transfer, IOperation scope)
+    private static (List<IOperation> Roots, bool Escaped) ScanRootsFor(IOperation transfer, IOperation scope)
     {
         var roots = new List<IOperation>();
         var escape = default(IOperation);
@@ -119,7 +159,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             roots.Add(scope);
         }
 
-        return roots;
+        return (roots, escape is not null);
     }
 
     // A THROWN transfer lands in the try's handlers -- when the throw came from the try BODY
@@ -139,15 +179,6 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         }
     }
 
-    // Transfer(list = new(...)) -- and the lazy-init form Transfer(list ??= new(...)): after
-    // the statement the variable ALIASES the transferred value on every path, so the
-    // assignment's target is what the sender keeps holding. IAssignmentOperation covers
-    // simple, coalesce and compound forms alike.
-    private static IOperation? TransferTarget(IOperation? argument)
-    {
-        return argument is IAssignmentOperation assignment ? assignment.Target : argument;
-    }
-
     // A transfer inside a nested callback only concerns the callback's own body: the outer
     // flow is not sequenced after it (the callback may run later or never), so its transfer
     // must not poison outer references. A transfer in the OUTER body rightly covers uses
@@ -165,7 +196,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         return block;
     }
 
-    private static void ReportUsesAfter(OperationBlockAnalysisContext context, List<IOperation> scanRoots, ISymbol variable, int transferPosition)
+    private static void ReportUsesAfter(OperationBlockAnalysisContext context, List<IOperation> scanRoots, bool escaped, ISymbol variable, int transferPosition)
     {
         var scope = scanRoots[scanRoots.Count - 1]; // the outermost root is the reinit scope boundary
 
@@ -178,7 +209,8 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             .SelectMany(root => root.DescendantsAndSelf())
             .Where(operation => SymbolEqualityComparer.Default.Equals(ReferencedVariable(operation), variable)
                 && operation.Syntax.SpanStart >= transferPosition
-                && !IsInASiblingArmOfTheTransfer(operation, transferPosition))
+                && !IsInASiblingArmOfTheTransfer(operation, transferPosition)
+                && (escaped || !IsInAnUnreachableCatch(operation, transferPosition)))
             .OrderBy(operation => operation.Syntax.SpanStart);
 
         // Regions where a SKIPPED conditional reinitialization dominates: inside its own arm,
@@ -220,6 +252,26 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         foreach (var (region, position) in dominated)
         {
             if (start >= position && region.Contains(start))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    // A catch handler observes a NON-ESCAPING transfer only through an exception thrown after
+    // it: when the transfer is the LAST operation of its try body, a completed handoff skips
+    // the handlers, and a throw from the transfer expression itself means no wrapper escaped.
+    // (Escaping thrown transfers scan their handlers deliberately: the throw carries the
+    // completed wrapper into them.)
+    private static bool IsInAnUnreachableCatch(IOperation use, int transferPosition)
+    {
+        for (IOperation child = use; child.Parent is { } parent; child = parent)
+        {
+            if (parent is ITryOperation { Body: { } body } && child is ICatchClauseOperation
+                && Covers(body, transferPosition)
+                && !body.Descendants().Any(operation => operation.Syntax.SpanStart >= transferPosition))
             {
                 return true;
             }
@@ -400,6 +452,10 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         return scope.DescendantsAndSelf().OfType<IBranchOperation>().Any(branch =>
             branch.Syntax.SpanStart >= transferPosition
             && branch.Syntax.Span.End <= reinitPosition
+            // A branch in a mutually exclusive sibling arm of the transfer never runs on the
+            // path that transferred (`if (move) Transfer(list); else break;`): it cannot skip
+            // anything on that path.
+            && !IsInASiblingArmOfTheTransfer(branch, transferPosition)
             && CanSkipPast(branch, reinitPosition));
     }
 

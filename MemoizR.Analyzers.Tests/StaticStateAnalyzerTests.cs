@@ -285,9 +285,10 @@ public class StaticStateAnalyzerTests
     public async Task UnmanagedTypeParameters_AreSendableForEveryInstantiation()
     {
         // `where T : unmanaged` guarantees a no-reference value type however the generic is
-        // closed: reads hand out copies that can alias nothing, so the slot needs no
-        // creation-site check. A plain `struct` constraint gives no such guarantee -- a struct
-        // can carry references to mutable objects.
+        // closed (reads hand out copies that can alias nothing), and `where T : Enum`
+        // guarantees immutable values or immutable boxes: neither slot needs a creation-site
+        // check. A plain `struct` constraint gives no such guarantee -- a struct can carry
+        // references to mutable objects.
         var diagnostics = await AnalyzeAsync("""
             using MemoizR;
 
@@ -305,6 +306,17 @@ public class StaticStateAnalyzerTests
             public class StructCache<T> where T : struct
             {
                 private static readonly T Zero = default;
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    _ = Zero;
+                }
+            }
+
+            public class EnumCache<T> where T : System.Enum
+            {
+                private static readonly T? Zero = default;
 
                 public void M()
                 {
