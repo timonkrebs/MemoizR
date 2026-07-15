@@ -122,6 +122,39 @@ public class BlazorIntegrationTests
         binder.Dispose();
     }
 
+    [Fact(Timeout = 5000)]
+    public async Task ReactionBinder_DispatchRejection_FallsBackWithoutHanging()
+    {
+        var f = new MemoFactory();
+        var v = f.CreateSignal(1);
+        var reject = false;
+        var applied = 0;
+        var binder = new ReactionBinder(
+            f,
+            work =>
+            {
+                if (Volatile.Read(ref reject))
+                {
+                    return Task.FromException(new InvalidOperationException("renderer gone"));
+                }
+                work();
+                return Task.CompletedTask;
+            },
+            () => { });
+        binder.Bind(v, x => Volatile.Write(ref applied, x));
+        await WaitForConvergenceAsync(() => Volatile.Read(ref applied) == 1);
+
+        // The dispatcher rejects the work without running it: the executor must fall back
+        // inline so the reaction's update pipeline (and any pending flag or transition hanging
+        // off it) completes instead of waiting forever on a callback that will never run.
+        Volatile.Write(ref reject, true);
+        await v.Set(5);
+        await WaitForConvergenceAsync(() => Volatile.Read(ref applied) == 5);
+        Assert.Equal(5, Volatile.Read(ref applied));
+
+        binder.Dispose();
+    }
+
     [Fact]
     public void AddMemoizR_RegistersOneFactoryPerScope()
     {

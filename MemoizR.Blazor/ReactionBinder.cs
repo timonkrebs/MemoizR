@@ -93,7 +93,27 @@ public sealed class ReactionBinder : IDisposable
     // an InvokeAsync issued from its own context.
     private sealed class DispatchExecutor(Func<Action, Task> dispatch) : IExecutor
     {
-        public void Enqueue(Action work) => _ = dispatch(work);
+        public void Enqueue(Action work) => _ = EnqueueCore(work);
+
+        private async Task EnqueueCore(Action work)
+        {
+            try
+            {
+                await dispatch(work).ConfigureAwait(false);
+            }
+            catch
+            {
+                // The dispatcher rejected the work (renderer teardown): `work` never ran, and
+                // ExecutorInvoke would wait forever on its completion -- wedging the reaction's
+                // update pipeline, its pending flag and any transition. Run it inline instead,
+                // like DedicatedThreadExecutor's after-shutdown fallback; the wrapper never
+                // throws, and the disposal re-check in the bound action keeps a torn-down
+                // component from being touched. (A dispatcher that rejects only AFTER running
+                // the work would double-run it; Blazor's dispatcher faults its task only when
+                // the work did not run.)
+                work();
+            }
+        }
 
         public bool IsCurrent => false;
     }

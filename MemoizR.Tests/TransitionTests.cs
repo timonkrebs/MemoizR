@@ -298,6 +298,71 @@ public class TransitionTests
         Assert.False(t.IsPending);
     }
 
+    [Fact(Timeout = 10000)]
+    public async Task Transition_TracksWritesThroughAnAlreadyDirtyMemo()
+    {
+        var timeProvider = new Microsoft.Extensions.Time.Testing.FakeTimeProvider();
+        var f = new MemoFactory();
+        var v = f.CreateSignal(1);
+        var m = f.CreateMemoizR(async () => await v.Get() * 2);
+        var observed = 0;
+        var r = f.BuildReaction()
+            .AddTimeProvider(timeProvider)
+            .AddDebounceTime(TimeSpan.FromMinutes(5))
+            .CreateReaction(m, x => Volatile.Write(ref observed, x));
+        await TestHelpers.WaitForConvergenceAsync(() => Volatile.Read(ref observed) == 2);
+
+        // Write 1 (untagged) dirties the memo; the frozen fake clock keeps the reaction's
+        // update parked in its debounce window, so nothing pulls the memo clean.
+        await v.Set(2);
+
+        // The tagged write hits the ALREADY-DIRTY memo. The pruned cascade would hide it from
+        // the reaction's registration -- the transition would settle at dispose with the effect
+        // still unapplied; the wavefront-aware cascade must reach and register the reaction.
+        var t = f.BeginTransition();
+        await v.Set(5);
+        t.Dispose();
+        Assert.True(t.IsPending);
+
+        timeProvider.Advance(TimeSpan.FromMinutes(6));
+        await t.Settled;
+        Assert.Equal(10, Volatile.Read(ref observed));
+        Assert.False(t.IsPending);
+    }
+
+    [Fact(Timeout = 5000)]
+    public async Task Transition_OldFault_DoesNotSettleANewerRegistration()
+    {
+        var f = new MemoFactory();
+        var v = f.CreateSignal(1);
+        var r = f.BuildReaction().CreateAdvancedReaction(async () =>
+        {
+            if (await v.Get() == 5)
+            {
+                throw new InvalidOperationException("boom");
+            }
+        });
+        await TestHelpers.WaitForConvergenceAsync(() => !r.IsPendingSnapshot);
+
+        await v.Set(5);
+        await TestHelpers.WaitForConvergenceAsync(() => r.LastStabilizationFault != null);
+        var oldFault = r.LastStabilizationFault!;
+
+        // A registration with a NEWER threshold than the recorded fault: the old fault belongs
+        // to a superseded trigger and must not fault this wavefront -- its own update is still
+        // owed a commit-or-fault at or above the threshold.
+        var t = f.BeginTransition();
+        t.RegisterReached(r, oldFault.Token + 1);
+        t.Dispose();
+        Assert.True(t.IsPending);
+        Assert.False(t.Settled.IsCompleted);
+
+        // The newer trigger arrives and commits cleanly: the transition settles unfaulted.
+        await v.Set(6);
+        await t.Settled;
+        Assert.False(t.IsPending);
+    }
+
     [Fact(Timeout = 5000)]
     public async Task Transition_PendingSignal_DrivesOtherReactions()
     {

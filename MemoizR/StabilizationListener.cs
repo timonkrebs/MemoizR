@@ -31,6 +31,10 @@ internal interface IStabilizationListener
     // Execute threw, or whose CacheCheck parent scan hit a faulting source -- the pull path
     // surfaces memo faults to the Get caller instead). The node stays dirty/checked and nothing
     // is rescheduled until its next invalidation, so a waiter must not keep waiting for a
-    // commit that will never come. Same execution constraints as OnStabilized.
-    void OnStabilizationFaulted(SignalHandlR node, Exception exception);
+    // commit that will never come. `token` is the generation the faulted update ran against,
+    // with the same threshold semantics as OnStabilized: a fault with token < a waiter's
+    // threshold belongs to an OLDER invalidation whose superseding update is still scheduled --
+    // the waiter must ignore it, or an old in-flight failure would fault a newer wavefront the
+    // rescheduled update may yet commit. Same execution constraints as OnStabilized.
+    void OnStabilizationFaulted(SignalHandlR node, int token, Exception exception);
 }

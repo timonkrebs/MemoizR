@@ -3,10 +3,16 @@ namespace MemoizR.Reactive;
 // The ambient transition tag (ADR 0007): set on the writing flow by BeginTransition and read by
 // ReactionBase.Stale. A Set's invalidation cascade runs synchronously on the writing flow, so
 // the tag reaches every transitively invalidated reaction with no extra plumbing -- the same
-// AsyncLocal pattern as RaceBranchFlow.
+// AsyncLocal pattern as RaceBranchFlow. Backed by the core's WavefrontFlow holder, whose
+// presence also tells the core's cascade not to prune at already-dirty nodes (a pruned cascade
+// would hide the tagged write from downstream registrations).
 internal static class TransitionFlow
 {
-    internal static readonly AsyncLocal<Transition?> Current = new();
+    internal static Transition? Current
+    {
+        get => WavefrontFlow.Current.Value as Transition;
+        set => WavefrontFlow.Current.Value = value;
+    }
 
     // Detached runtime flows (debounced updates, pending-publish pumps) inherit the writing
     // flow's ExecutionContext -- and with it the tag. Their incidental Stales (commit-refused
@@ -14,7 +20,7 @@ internal static class TransitionFlow
     // transition's own Pending signal would re-register that signal's observers on the
     // transition forever and it could never settle. Suppress() cuts the inheritance at the
     // detachment point; inside an async method the write stays local to that method's flow.
-    internal static void Suppress() => Current.Value = null;
+    internal static void Suppress() => WavefrontFlow.Current.Value = null;
 }
 
 /// <summary>
@@ -50,8 +56,8 @@ public sealed class Transition : IDisposable, IAsyncDisposable, IStabilizationLi
         taggedAmbientFlow = tagAmbientFlow;
         if (tagAmbientFlow)
         {
-            prior = TransitionFlow.Current.Value;
-            TransitionFlow.Current.Value = this;
+            prior = TransitionFlow.Current;
+            TransitionFlow.Current = this;
         }
     }
 
@@ -77,7 +83,7 @@ public sealed class Transition : IDisposable, IAsyncDisposable, IStabilizationLi
     {
         if (taggedAmbientFlow)
         {
-            TransitionFlow.Current.Value = prior;
+            TransitionFlow.Current = prior;
         }
         bool completed;
         lock (gate)
@@ -139,11 +145,12 @@ public sealed class Transition : IDisposable, IAsyncDisposable, IStabilizationLi
         }
         OnStabilizedCore(reaction, reaction.stateCell.LastCleanCommitToken);
         // A fault can beat the registration the same way a commit can (a zero-debounce update
-        // faulting before the listener is added); the recorded fault token recovers it.
+        // faulting before the listener is added); the recorded fault token recovers it, gated
+        // by the same threshold as live fault notifications.
         var fault = reaction.LastStabilizationFault;
-        if (fault != null && fault.Token >= threshold)
+        if (fault != null)
         {
-            OnFaultedCore(reaction, fault.Exception);
+            OnFaultedCore(reaction, fault.Token, fault.Exception);
         }
         if (reaction.IsDisposed)
         {
@@ -185,23 +192,27 @@ public sealed class Transition : IDisposable, IAsyncDisposable, IStabilizationLi
         }
     }
 
-    void IStabilizationListener.OnStabilizationFaulted(SignalHandlR node, Exception exception)
+    void IStabilizationListener.OnStabilizationFaulted(SignalHandlR node, int token, Exception exception)
     {
         if (node is ReactionBase reaction)
         {
-            OnFaultedCore(reaction, exception);
+            OnFaultedCore(reaction, token, exception);
         }
     }
 
-    private void OnFaultedCore(ReactionBase reaction, Exception exception)
+    private void OnFaultedCore(ReactionBase reaction, int token, Exception exception)
     {
         bool remove;
         var completed = false;
         lock (gate)
         {
-            remove = outstanding.Remove(reaction);
+            // Same threshold gate as the clean-commit path: a fault whose update ran against an
+            // OLDER generation than this wavefront's registration belongs to a superseded
+            // trigger -- the update our own Stale scheduled is still coming and may commit.
+            remove = outstanding.TryGetValue(reaction, out var threshold) && token >= threshold;
             if (remove)
             {
+                outstanding.Remove(reaction);
                 faults[reaction] = exception;
                 isPending = outstanding.Count > 0;
                 completed = isSealed && outstanding.Count == 0 && !settled.Task.IsCompleted;

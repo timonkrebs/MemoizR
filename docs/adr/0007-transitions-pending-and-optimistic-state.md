@@ -249,6 +249,14 @@ Where the landed code deliberately deviates from the sketches above:
 - `CreateAction` uses a plain per-run `CancellationTokenSource` instead of depending on
   `MemoizR.StructuredConcurrency`; an overload wrapping a structured resource group can be
   layered in that assembly later without touching the Reactive types.
+- A tagged write's cascade does NOT prune at already-dirty nodes (core `WavefrontFlow`, an
+  opaque ambient the Reactive tag rides in): the pruning optimization is sound for
+  invalidation but would hide the write from downstream registrations — a transition through
+  an already-dirty memo could settle before the write's effects applied, and repeated writes
+  could not raise registered thresholds. Untagged writes keep the pruned cascade. Fault
+  notifications carry the faulted update's generation token and are gated by the same
+  threshold rule as commits, so an old in-flight failure cannot fault a newer wavefront whose
+  superseding update is still owed a commit.
 - Phase 4 landed as `MemoizR.Blazor`: `BlazorDispatcherExecutor` (the exact
   `WpfDispatcherExecutor` mirror), a component-agnostic `ReactionBinder` (the render-snapshot
   pattern: apply-into-field plus `StateHasChanged`, both marshalled through `InvokeAsync`),

@@ -49,7 +49,7 @@ public sealed class ReactiveAction<TPayload>
             // Tag the detached body flow: the optimistic projection, the confirmed base write,
             // and the rollback all register their effect wavefronts on this run's transition.
             // Local to this async flow; the caller's ambient tag is untouched.
-            TransitionFlow.Current.Value = transition;
+            TransitionFlow.Current = transition;
             // The detached body also inherits the CALLER's lock-scope key: a Run issued from
             // inside a graph evaluation would make the body's Sets recursive acquisitions of
             // the caller's held ContextLock. A forced fresh scope gives the body its own.

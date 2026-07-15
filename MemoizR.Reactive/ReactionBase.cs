@@ -281,7 +281,7 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
         // Resolved before the locked region: the tag rides the writing flow (the invalidation
         // cascade runs synchronously inside the Set), and registration happens after the
         // monitor exits -- the transition's recovery checks make that ordering free.
-        var transition = TransitionFlow.Current.Value;
+        var transition = TransitionFlow.Current;
         int invalidationGeneration;
         bool pendingRose;
 
@@ -444,7 +444,7 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
     private void RecordStabilizationFault(int token, Exception exception)
     {
         lastStabilizationFault = new(token, exception);
-        NotifyStabilizationFaulted(exception);
+        NotifyStabilizationFaulted(token, exception);
     }
 
     // Eager-run contract: a reaction executes once on creation (SolidJS-style effect semantics),

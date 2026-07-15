@@ -16,7 +16,7 @@ public class StabilizationAndInvalidateTests
 
         public void OnStabilized(SignalHandlR node, int token) => Tokens.Enqueue(token);
 
-        public void OnStabilizationFaulted(SignalHandlR node, Exception exception) => Faults.Enqueue(exception);
+        public void OnStabilizationFaulted(SignalHandlR node, int token, Exception exception) => Faults.Enqueue(exception);
     }
 
     [Fact]

@@ -187,15 +187,17 @@ public abstract class SignalHandlR : IMemoHandlR
     // released regardless of their thresholds -- int.MaxValue satisfies them all by fiat.
     internal void NotifyStabilizationReleased() => NotifyStabilized(int.MaxValue);
 
-    // An update faulted instead of committing (called by ReactionBase's catch; memo faults
-    // surface to the Get caller through the pull path instead).
-    internal void NotifyStabilizationFaulted(Exception exception)
+    // An update faulted instead of committing (called by ReactionBase's fault paths; memo
+    // faults surface to the Get caller through the pull path instead). The token is the
+    // generation the faulted update ran against, so waiters can gate old in-flight faults
+    // exactly like old commits.
+    internal void NotifyStabilizationFaulted(int token, Exception exception)
     {
         foreach (var listener in stabilizationListeners)
         {
             try
             {
-                listener.OnStabilizationFaulted(this, exception);
+                listener.OnStabilizationFaulted(this, token, exception);
             }
             catch
             {
@@ -293,11 +295,14 @@ public abstract class SignalHandlR : IMemoHandlR
     // dirty (see CacheStateCell.Invalidate); propagation is skipped then because the observers
     // were already notified when this node first reached that state -- an observer that commits
     // Clean inside the race window is re-notified by CommitCleanOrRenotifyAsync instead.
+    // EXCEPT when a write-wavefront observer is active (ADR 0007): a pruned cascade would hide
+    // the tagged write from the downstream reactions' registrations, so it always propagates
+    // (see WavefrontFlow).
     // Non-async on purpose: the suppressed case is the common one under write storms and should
     // not pay for an async state machine.
     internal Task InvalidateAndPropagateAsync(CacheState state)
     {
-        if (!stateCell.Invalidate(state))
+        if (!stateCell.Invalidate(state) && !WavefrontFlow.IsActive)
         {
             return Task.CompletedTask;
         }
