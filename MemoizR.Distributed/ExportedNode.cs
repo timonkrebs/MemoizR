@@ -60,7 +60,14 @@ public sealed class ExportedNode<T> : IDisposable
     {
         var (_, evidence, sequence) = node.ValueEvidenceAndSequence;
         var notification = new StaleNotification(node.Id, node.Context.Epoch, sequence, evidence.Stamp.Serialize());
-        _ = PublishSafelyAsync(notification);
+        // The notification is snapshotted above on the caller's flow (the same publication the
+        // export reaction observed); only the SEND is detached. Publishing is bridge work, not
+        // reaction work: the export reaction calls this while its flow holds the context lock
+        // in upgradeable mode, and an in-process bridge that synchronously feeds a same-context
+        // signal (an outbox, a local mirror) would inherit that scope and be refused as a
+        // recursive exclusive acquisition -- the advertisement silently lost to
+        // LastPublishError until the next value change or heartbeat.
+        DetachedFlow.Run(() => PublishSafelyAsync(notification));
     }
 
     private async Task PublishSafelyAsync(StaleNotification notification)

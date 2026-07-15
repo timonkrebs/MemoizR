@@ -84,12 +84,37 @@ public class DistributedPackageTests
         await TestHelpers.WaitForConvergenceAsync(() => Volatile.Read(ref count) > 0); // initial eager advertisement
         var baseline = Volatile.Read(ref count);
 
+        // The publish is detached from the timer callback's flow, so each tick's advertisement
+        // lands asynchronously.
         var clock = new FakeTimeProvider();
         export.StartHeartbeat(TimeSpan.FromSeconds(30), clock);
         clock.Advance(TimeSpan.FromSeconds(30));
-        Assert.Equal(baseline + 1, Volatile.Read(ref count));
+        await TestHelpers.WaitForConvergenceAsync(() => Volatile.Read(ref count) == baseline + 1);
         clock.Advance(TimeSpan.FromSeconds(60));
-        Assert.Equal(baseline + 3, Volatile.Read(ref count));
+        await TestHelpers.WaitForConvergenceAsync(() => Volatile.Read(ref count) == baseline + 3);
+    }
+
+    [Fact]
+    public async Task Export_PublishStale_MayFeedASameContextSignal()
+    {
+        // An in-process bridge that writes advertisements into a same-context outbox signal:
+        // the publish must run on a detached flow, or the export reaction's lock scope would
+        // flow into the callback and the outbox Set would be refused as a recursive exclusive
+        // acquisition -- silently recorded as LastPublishError, losing the advertisement.
+        var host = new MemoFactory();
+        var s = host.CreateSignal(1);
+        var outbox = host.CreateEagerRelativeSignal("outbox", 0L);
+        var published = 0;
+        using var export = host.Export(s, async n =>
+        {
+            await outbox.Set(_ => n.Sequence);
+            Interlocked.Increment(ref published);
+        });
+
+        await s.Set(2);
+        await TestHelpers.WaitForConvergenceAsync(() => Volatile.Read(ref published) > 0);
+        Assert.Null(export.LastPublishError);
+        Assert.True(await outbox.Get() >= 1);
     }
 
     // ── consumer side: adoption ordering ─────────────────────────────────────────────────

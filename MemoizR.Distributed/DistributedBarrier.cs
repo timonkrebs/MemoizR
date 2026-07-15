@@ -133,23 +133,12 @@ public static class DistributedBarrier
     private static void Schedule(Func<Task> repull, Action<Exception>? onRepullError)
     {
         // The re-pull is bridge work, not reaction work: the barrier evaluates while its flow
-        // holds the context lock in UPGRADEABLE mode, and that holdership travels with the
-        // ExecutionContext into Task.Run -- an inherited flow reaching Local.Set before the
-        // reaction unwinds would be refused as a recursive exclusive acquisition inside the
-        // upgradeable scope (a race the catch below would misreport as a transport fault,
-        // leaving the mirror stale). Suppressing the flow makes the re-pull a fresh top-level
-        // flow that simply queues behind the reaction's lock, like any transport delivery.
-        if (ExecutionContext.IsFlowSuppressed())
-        {
-            Start();
-            return;
-        }
-        using (ExecutionContext.SuppressFlow())
-        {
-            Start();
-        }
-
-        void Start() => _ = Task.Run(async () =>
+        // holds the context lock in UPGRADEABLE mode, and an inherited flow reaching Local.Set
+        // before the reaction unwinds would be refused as a recursive exclusive acquisition (a
+        // race the catch below would misreport as a transport fault, leaving the mirror
+        // stale). DetachedFlow gives it a fresh top-level flow that simply queues behind the
+        // reaction's lock, like any transport delivery.
+        DetachedFlow.Run(async () =>
         {
             try
             {
