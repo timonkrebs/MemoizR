@@ -282,6 +282,39 @@ public class StaticStateAnalyzerTests
     }
 
     [Fact]
+    public async Task PolymorphicRecursion_WithAStoredParameter_IsRejectedNotAssumed()
+    {
+        // The divergent chain's SECOND level substitutes Value to List<int>: the classifier
+        // must inspect the first re-instantiation's members before cutting.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public sealed class Box<T>
+            {
+                public Box<List<T>>? Next { get; init; }
+
+                public T? Value { get; init; }
+            }
+
+            public class C
+            {
+                private static readonly Box<int> Cache = new();
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    _ = Cache;
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR004", diagnostic.Id);
+        Assert.Contains("List", diagnostic.GetMessage());
+    }
+
+    [Fact]
     public async Task PolymorphicRecursion_Terminates_AndTheClosedSlotIsAccepted()
     {
         // Box<T> exposing Box<List<T>> constructs a FRESH closed symbol per level: the member

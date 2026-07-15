@@ -215,11 +215,12 @@ public static class SendableChecker
         // Box<List<T>> member), which the re-entry check above can never catch. Its signature
         // is a NON-SHRINKING re-occurrence of the same definition: finite hand-written nesting
         // (Box<Box<Box<List<int>>>>) strictly shrinks at every recursive step and is walked to
-        // the bottom however deep it goes, while a divergent expansion re-enters its own
-        // definition at the same size or larger and is cut on the second occurrence (landing
-        // on the cycle assumption above).
+        // the bottom however deep it goes. A divergent expansion is walked through its FIRST
+        // re-instantiation -- substituted members can flip the verdict exactly one level down
+        // (Box<T> { Box<List<T>> Next; T Value; } hides the List in the second level's Value)
+        // -- and cut at the second, landing on the cycle assumption above.
         if (DefinitionOf(type) is { } definition
-            && inProgress.Any(entry => entry != type && DefinitionOf(entry) == definition && TypeSize(entry) <= TypeSize(type)))
+            && inProgress.Count(entry => entry != type && DefinitionOf(entry) == definition && TypeSize(entry) <= TypeSize(type)) >= 2)
         {
             inProgress.Remove(type);
             return null;

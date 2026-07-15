@@ -294,6 +294,17 @@ public class StrictSendableModeTests
         Assert.NotNull(await deepButClean.Get());
     }
 
+    [Fact(Timeout = 10000)]
+    public async Task PolymorphicRecursion_WithAStoredParameter_IsRejectedNotAssumed()
+    {
+        // The divergent chain's SECOND level substitutes Value to List<int>: the walk must
+        // inspect the first re-instantiation's members before cutting, or the shared mutable
+        // list hides behind the cycle assumption.
+        await Task.Yield(); // xunit requires async for Timeout, the termination backstop
+        var f = new MemoFactory();
+        Assert.Throws<InvalidOperationException>(() => f.CreateSignal(new RecursiveBoxWithValue<int>()));
+    }
+
     [Fact]
     public void DefaultFactory_Checks_AndDisableIsTheEscapeHatch()
     {
@@ -377,6 +388,16 @@ internal sealed class RecursiveBox<T>
 // recursive step SHRINKS, so the divergence cut must let the walk reach the bottom.
 internal sealed class WrapBox<T>
 {
+    public T? Value { get; init; }
+}
+
+// Polymorphic recursion that ALSO stores its parameter: the divergent chain's second level
+// substitutes Value to List<int>, so the walk must inspect the first re-instantiation's own
+// members before cutting.
+internal sealed class RecursiveBoxWithValue<T>
+{
+    public RecursiveBoxWithValue<List<T>>? Next { get; init; }
+
     public T? Value { get; init; }
 }
 
