@@ -269,7 +269,11 @@ Where the landed code deliberately deviates from the sketches above:
   writable fields, so a structural runtime check would reject every capturing lambda, including
   harmless immutable captures. This is exactly MZR002-shaped compile-time work: an analyzer
   rule flagging optimistic patches that capture mutable state (the payload type itself IS
-  checked — `CreateAction` gates `TPayload` through the strict Sendable bar).
+  checked — `CreateAction` gates `TPayload` through the strict Sendable bar). Action BODIES
+  are deliberately not classified as MZR002 computation hosts: they are user-driven process
+  code whose runs overlap only when the caller overlaps them, and the common
+  one-run-at-a-time pattern legitimately writes captured state — if wanted, that is a
+  separate, lower-severity rule.
 - Phase 4 landed as `MemoizR.Blazor`: `BlazorDispatcherExecutor` (the exact
   `WpfDispatcherExecutor` mirror), a component-agnostic `ReactionBinder` (the render-snapshot
   pattern: apply-into-field plus `StateHasChanged`, both marshalled through `InvokeAsync`),
