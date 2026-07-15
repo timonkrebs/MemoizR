@@ -45,11 +45,21 @@ internal sealed class CacheStateCell(CacheState initial)
     // observers, which were already notified when this node first reached that state -- an
     // observer that commits Clean inside the race window is re-notified by the failed commit
     // instead (see SignalHandlR.CommitCleanOrRenotifyAsync).
-    public bool Invalidate(CacheState newState)
+    public bool Invalidate(CacheState newState) => Invalidate(newState, out _);
+
+    // The out parameter returns the post-bump generation: the wavefront membership of THIS
+    // invalidation (ADR 0007). A later Clean commit reflects this invalidation exactly when its
+    // token is >= generationAfter, because TryCommitClean only succeeds against an unchanged
+    // generation -- so a registrant comparing against generationAfter can never be completed by
+    // a commit that predates its write. Taken under the gate, not read back via Generation: a
+    // stale-low volatile read could hand the registrant a pre-bump threshold that a commit from
+    // BEFORE the invalidation (delivered late) would wrongly satisfy.
+    public bool Invalidate(CacheState newState, out int generationAfter)
     {
         lock (gate)
         {
             generation++;
+            generationAfter = generation;
             if (newState <= state) return false;
             state = newState;
             return true;
@@ -88,7 +98,16 @@ internal sealed class CacheStateCell(CacheState initial)
         {
             if (generation != token) return false;
             state = CacheState.CacheClean;
+            lastCleanCommitToken = token;
             return true;
         }
     }
+
+    // The token of the last successful Clean commit; -1 before the first one. Volatile so a
+    // stabilization registrant on another flow can run the missed-notification recovery check
+    // (ADR 0007): after registering its listener it compares this against its invalidation's
+    // generationAfter -- a commit that raced the registration window is caught here, while a
+    // stale-low read only defers to the listener notification that registration now guarantees.
+    private volatile int lastCleanCommitToken = -1;
+    public int LastCleanCommitToken => lastCleanCommitToken;
 }

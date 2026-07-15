@@ -131,4 +131,42 @@ public class CacheStateCellTests
         Assert.True(cell.TryCommitClean(token));
         Assert.Equal(CacheState.CacheClean, cell.State);
     }
+
+    [Fact]
+    public void Invalidate_OutGeneration_IsTheCommitThreshold()
+    {
+        // ADR 0007: a commit reflects an invalidation exactly when its token is >= the
+        // invalidation's post-bump generation -- the wavefront-membership rule transitions
+        // complete on.
+        var cell = new CacheStateCell(CacheState.CacheClean);
+        var preToken = cell.BeginEvaluation();
+
+        Assert.True(cell.Invalidate(CacheState.CacheDirty, out var threshold));
+        Assert.True(threshold > preToken);        // strictly above every pre-bump snapshot
+        Assert.False(cell.TryCommitClean(preToken)); // a pre-invalidation evaluation can't satisfy it
+
+        var postToken = cell.BeginEvaluation();
+        Assert.True(postToken >= threshold);      // an evaluation started after the bump can
+        Assert.True(cell.TryCommitClean(postToken));
+    }
+
+    [Fact]
+    public void LastCleanCommitToken_TracksOnlySuccessfulCommits()
+    {
+        // The registration-race recovery read (ADR 0007): -1 before any commit, unchanged by a
+        // refused commit, the committed token after a successful one.
+        var cell = new CacheStateCell(CacheState.CacheClean);
+        Assert.Equal(-1, cell.LastCleanCommitToken);
+
+        var token = cell.BeginEvaluation();
+        cell.Invalidate(CacheState.CacheDirty, out var threshold);
+        Assert.False(cell.TryCommitClean(token));
+        Assert.Equal(-1, cell.LastCleanCommitToken);
+        Assert.True(cell.LastCleanCommitToken < threshold); // the recovery check would not fire
+
+        var freshToken = cell.BeginEvaluation();
+        Assert.True(cell.TryCommitClean(freshToken));
+        Assert.Equal(freshToken, cell.LastCleanCommitToken);
+        Assert.True(cell.LastCleanCommitToken >= threshold); // now it would
+    }
 }

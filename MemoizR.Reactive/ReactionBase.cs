@@ -164,8 +164,13 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
         }
 
         // By now, we're clean -- unless a Stale invalidated us along the way, in which case stay
-        // dirty so the debounced update scheduled by that Stale re-runs us.
-        stateCell.TryCommitClean(token);
+        // dirty so the debounced update scheduled by that Stale re-runs us. Already-Clean means
+        // Update's trailing commit won and already notified the stabilization listeners; skip
+        // the gate so one logical stabilization does not notify twice on the quiet path.
+        if (stateCell.State != CacheState.CacheClean)
+        {
+            TryCommitCleanAndNotify(token);
+        }
     }
 
     // Update the cached value by running the computation.
@@ -231,8 +236,11 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
 
         // We've rerun with the latest values from all of our Sources, so we no longer need to
         // update until a signal changes -- unless a Stale invalidated us mid-evaluation, in which
-        // case stay dirty so the debounced update scheduled by that Stale re-runs us.
-        stateCell.TryCommitClean(token);
+        // case stay dirty so the debounced update scheduled by that Stale re-runs us. A
+        // successful commit notifies the stabilization listeners (ADR 0007): for a reaction this
+        // is the "wavefront reached me and my side effects have applied" edge transitions
+        // complete on.
+        TryCommitCleanAndNotify(token);
     }
 
     // Run Execute on the configured executor if one was supplied, otherwise inline. Only

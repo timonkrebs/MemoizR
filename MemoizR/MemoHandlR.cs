@@ -118,6 +118,71 @@ public abstract class SignalHandlR : IMemoHandlR
         }
     }
 
+    // Stabilization listeners (ADR 0007): notified after every successful Clean commit of this
+    // node, with the generation token the commit succeeded against. Whole-array swaps under
+    // Lock, like Observers; the commit-path read is unsynchronized, so a listener registered on
+    // another flow can miss an in-flight commit -- exactly the race the registration protocol on
+    // IStabilizationListener recovers via CacheStateCell.LastCleanCommitToken. Strong references
+    // on purpose (unlike the weak Observers): a listener's lifetime is owned by its registrant,
+    // which must unregister -- transitions are short-lived and do.
+    private IStabilizationListener[] stabilizationListeners = [];
+
+    internal void AddStabilizationListener(IStabilizationListener listener)
+    {
+        lock (Lock)
+        {
+            foreach (var existing in stabilizationListeners)
+            {
+                if (ReferenceEquals(existing, listener))
+                {
+                    return;
+                }
+            }
+            stabilizationListeners = [.. stabilizationListeners, listener];
+        }
+    }
+
+    internal void RemoveStabilizationListener(IStabilizationListener listener)
+    {
+        lock (Lock)
+        {
+            stabilizationListeners = [.. stabilizationListeners.Where(x => !ReferenceEquals(x, listener))];
+        }
+    }
+
+    // The one Clean-commit gate every commit site goes through (MemoBase's early and CacheCheck
+    // commits, ReactionBase's update commits): commit against the token, then notify the
+    // stabilization listeners OUTSIDE the cell's gate. A newer invalidation can land between the
+    // commit and the callbacks, so a notification is only ever level information -- the token
+    // threshold on the listener side absorbs any reordering.
+    internal bool TryCommitCleanAndNotify(int token)
+    {
+        if (!stateCell.TryCommitClean(token))
+        {
+            return false;
+        }
+        NotifyStabilized(token);
+        return true;
+    }
+
+    private void NotifyStabilized(int token)
+    {
+        foreach (var listener in stabilizationListeners)
+        {
+            try
+            {
+                listener.OnStabilized(this, token);
+            }
+            catch
+            {
+                // Internal listeners must not throw (see IStabilizationListener); a fault
+                // escaping here would corrupt the committing evaluation's control flow
+                // (e.g. MemoBase.Update's catch would strip capture-time links for a value
+                // that WAS published). Swallowed like resource-disposal faults.
+            }
+        }
+    }
+
     // Rewire our source up-links and the parents' observer down-links to match the sources
     // captured during the current evaluation (Context.ReactionScope.CurrentGets). Must only be
     // called by IMemoizR nodes, inside their ContextLock-serialized evaluation.
@@ -239,10 +304,11 @@ public abstract class SignalHandlR : IMemoHandlR
     // Non-async, with a lock-free pre-check: if the state is already Clean, either this very
     // token's early commit succeeded (every invalidation escalates the state away from Clean, so
     // Clean here implies an unchanged generation) or a newer evaluation committed -- in both
-    // cases there is nothing to do, and the common recompute path skips the gate entirely.
+    // cases there is nothing to do (whichever commit won already notified the stabilization
+    // listeners), and the common recompute path skips the gate entirely.
     internal Task CommitCleanOrRenotifyAsync(int token)
     {
-        if (stateCell.State == CacheState.CacheClean || stateCell.TryCommitClean(token))
+        if (stateCell.State == CacheState.CacheClean || TryCommitCleanAndNotify(token))
         {
             return Task.CompletedTask;
         }

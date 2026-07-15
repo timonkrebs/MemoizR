@@ -117,4 +117,58 @@ public class CoyoteTests
         var result = await c.Get();
         if (result != 20) throw new Exception($"c.Get() expected 20, but got {result}");
     }
+
+    // Systematic exploration of Invalidate (ADR 0007) racing Gets: an Invalidate landing
+    // mid-recompute must refuse that recompute's Clean commit, or the memo caches a value
+    // computed from pre-refresh out-of-band state with nothing ever re-dirtying it.
+    [Fact]
+    public void TestInvalidateWithCoyote()
+    {
+        if (!IsCoyoteRewritten(typeof(MemoFactory).Assembly))
+        {
+            return;
+        }
+
+        // Same uncontrolled-Lock caveat as TestChainLostUpdateWithCoyote (CacheStateCell's gate).
+        var configuration = Configuration.Create()
+            .WithTestingIterations(100)
+            .WithDeadlockTimeout(100)
+            .WithPotentialDeadlocksReportedAsBugs(false);
+        var engine = TestingEngine.Create(configuration, TestInvalidateIteration);
+        engine.Run();
+        if (engine.TestReport.NumOfFoundBugs > 0)
+        {
+            var bug = engine.TestReport.BugReports.First();
+            throw new Exception($"Coyote found a bug: {bug}");
+        }
+    }
+
+    private async Task TestInvalidateIteration()
+    {
+        var f = new MemoFactory();
+        var external = 0;
+        var m = f.CreateMemoizR(() => Task.FromResult(Volatile.Read(ref external)));
+        await m.Get(); // prime so the race starts from a committed Clean value
+
+        var tasks = new List<Task>();
+        for (var i = 1; i <= 3; i++)
+        {
+            var j = i;
+            tasks.Add(Task.Run(async () =>
+            {
+                Volatile.Write(ref external, j);
+                await m.Invalidate();
+            }));
+            tasks.Add(Task.Run(async () => await m.Get()));
+        }
+        await Task.WhenAll(tasks);
+
+        // After the race quiesces, a final refresh must always surface the latest out-of-band
+        // state: a recompute that wrongly committed Clean over a racing Invalidate serves the
+        // pre-refresh value here.
+        Volatile.Write(ref external, 40);
+        await m.Invalidate();
+        var result = await m.Get();
+        if (result != 40) throw new Exception($"m.Get() expected 40, but got {result}");
+    }
 }
