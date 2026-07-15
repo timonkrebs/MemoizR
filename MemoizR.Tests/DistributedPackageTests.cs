@@ -574,6 +574,45 @@ public class DistributedPackageTests
     }
 
     [Fact]
+    public async Task Barrier_UnderclaimedEvidence_AffirmedByRepull_StillRenders()
+    {
+        // The core's documented conservative under-claim: a scan-skipped recompute (a parent
+        // recomputed to an unchanged value) keeps an OLDER stamp -- and the same publication
+        // sequence -- while its value stays valid. The resulting stamp disagreement is a
+        // spurious glitch the re-pull cannot heal (the pull answers with the identical
+        // publication, dropped as a duplicate). The barrier must not stay blocked: a re-pull
+        // round that changes nothing is both hosts AFFIRMING their current truth, and the
+        // affirmed pair renders.
+        var host = new MemoFactory();
+        var s = host.CreateSignal(4);
+        var q = host.CreateMemoizR("q", async () => await s.Get());
+        var half = host.CreateMemoizR("half", async () => await s.Get() / 2);
+        var c = host.CreateMemoizR("c", async () => await half.Get() * 10);
+        using var qExport = host.Export(q, _ => Task.CompletedTask);
+        using var cExport = host.Export(c, _ => Task.CompletedTask);
+
+        var consumer = new MemoFactory();
+        var qMirror = consumer.CreateRemoteSignal("q", 0, qExport.PullAsync);
+        var cMirror = consumer.CreateRemoteSignal("c", 0, cExport.PullAsync);
+
+        var renders = new List<(int Q, int C)>();
+        var reaction = DistributedBarrier.CreateConsistentReaction(
+            consumer, qMirror, cMirror, (vq, vc) => { lock (renders) { renders.Add((vq, vc)); } });
+
+        await qMirror.PullAsync();
+        await cMirror.PullAsync();
+        await TestHelpers.WaitForConvergenceAsync(() => { lock (renders) { return renders.Contains((4, 20)); } });
+
+        // s: 4 -> 5. q recomputes (4 -> 5, fresh stamp); half recomputes to the SAME 2, so c's
+        // scan skips the recompute and keeps its old stamp and sequence. Deliver only q's
+        // update: the barrier sees the spurious glitch, re-pulls, both hosts affirm, renders.
+        await s.Set(5);
+        await qMirror.PullAsync();
+        await TestHelpers.WaitForConvergenceAsync(() => { lock (renders) { return renders.Contains((5, 20)); } });
+        GC.KeepAlive(reaction);
+    }
+
+    [Fact]
     public async Task Barrier_ThrowingGlitchCallback_StillHeals()
     {
         // onGlitch is diagnostics only: a throwing sink (a logger that is itself down) must

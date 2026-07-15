@@ -107,6 +107,14 @@ public sealed class RemoteSignal<T>
     /// </summary>
     public Func<Task>? OnPeerReset { get; init; }
 
+    // Re-run downstream reactions on the CURRENT value and publication: the barrier's
+    // affirmation path needs a graph trigger after a re-pull round that adopted nothing (an
+    // eager relative signal always propagates, even for an identical value). Harmless against
+    // concurrent adoptions -- the publication swap rides inside the adopting Set's own
+    // exclusive-locked callback, so this republication observes either the old or the new
+    // snapshot whole, never a torn one.
+    internal Task RepublishLocalAsync() => local.Set(value => value);
+
     internal RemoteSignal(EagerRelativeSignal<T> local, Func<Task<ValuePayload<T>>> pull, int? nodeId)
     {
         this.local = local;

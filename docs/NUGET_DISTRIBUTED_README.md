@@ -13,7 +13,9 @@ with every value).
   traffic from dead incarnations, and misrouted payloads for a different node are rejected.
 - **`DistributedBarrier`** combines mirrored inputs only on a consistent, verified snapshot of
   the host's write history — a transient glitch (one mirror fresh, one stale, straddling the
-  same write) is detected via the causality stamps and healed by re-pulling the lagging side.
+  same write) is detected via the causality stamps and healed by re-pulling the lagging side;
+  a re-pull round both hosts answer with their unchanged current publications AFFIRMS the pair
+  (the stamp disagreement is a documented conservative under-claim, not a lag) and it renders.
 
 The transport is yours: three messages (stale / pull / value), delegate-shaped, with an
 in-process pairing being a few lines of glue. See the repository's

@@ -8,18 +8,25 @@ namespace MemoizR.Distributed;
 /// disagrees on a shared signal (or the mirrors sit on different incarnations of the host),
 /// the lagging side is re-pulled on the bridge's own flow (a reaction body must never Set its
 /// own graph's signals, so the re-pull is scheduled outside the evaluation) and the barrier
-/// re-runs when the adoption lands. v0 combines mirrors of the SAME host graph; barriers
-/// across different peers need the wire-v3 multi-peer epoch table.
+/// re-runs when the adoption lands. A re-pull round that changes NOTHING -- both hosts answer
+/// with exactly the publications the glitch was detected on -- is both hosts AFFIRMING their
+/// current truth: the disagreement is then the core's documented conservative stamp
+/// under-claim (a scan-skipped recompute keeps an older stamp for a still-valid value), not a
+/// lag, and the affirmed pair renders instead of blocking forever. v0 combines mirrors of the
+/// SAME host graph; barriers across different peers need the wire-v3 multi-peer epoch table.
 /// </summary>
 public static class DistributedBarrier
 {
     /// <summary>
     /// A reaction over two mirrors that calls <paramref name="render"/> exactly on consistent
-    /// verified snapshots. Keep the returned reaction (and the mirrors) strongly referenced.
-    /// Re-pull faults are reported to <paramref name="onRepullError"/> (the next advertisement
-    /// or heartbeat retries), and so is a throwing <paramref name="onGlitch"/> callback --
-    /// diagnostics must never block the healing path; rendering is skipped until evidence is
-    /// verified again.
+    /// verified snapshots -- or on a stamp-inconsistent pair that a full re-pull round
+    /// AFFIRMED (each side was verified clean by its own pull answering with the identical
+    /// publication, so the values form a real snapshot and only the conservative stamp
+    /// under-claim disagrees). Keep the returned reaction (and the mirrors) strongly
+    /// referenced. Re-pull faults are reported to <paramref name="onRepullError"/> (the next
+    /// advertisement or heartbeat retries), and so is a throwing <paramref name="onGlitch"/>
+    /// callback -- diagnostics must never block the healing path; rendering is skipped until
+    /// evidence is verified again.
     /// </summary>
     public static Reaction CreateConsistentReaction<T1, T2>(
         MemoFactory factory,
@@ -34,6 +41,7 @@ public static class DistributedBarrier
         ArgumentNullException.ThrowIfNull(second);
         ArgumentNullException.ThrowIfNull(render);
 
+        var affirmation = new AffirmationState<T1, T2>();
         return factory.BuildReaction("distributed barrier").CreateReaction(
             first.Local, second.Local, (_, _) =>
             {
@@ -64,8 +72,18 @@ public static class DistributedBarrier
                 if (firstPublication.Epoch != secondPublication.Epoch
                     || !firstPublication.Stamp.IsConsistentWith(secondPublication.Stamp))
                 {
+                    if (affirmation.IsAffirmed(firstPublication, secondPublication))
+                    {
+                        // Both hosts answered a full re-pull round with exactly these
+                        // publications: the values are their affirmed current truths and the
+                        // stamp disagreement is the documented under-claim -- render, or the
+                        // barrier would stay blocked until an unrelated value change.
+                        render(firstPublication.Value, secondPublication.Value);
+                        return;
+                    }
+
                     ReportGlitch(firstPublication.Stamp, secondPublication.Stamp, onGlitch, onRepullError);
-                    RepullLagging(first, second, firstPublication, secondPublication, onRepullError);
+                    RepullLagging(first, second, firstPublication, secondPublication, affirmation, onRepullError);
                     return;
                 }
 
@@ -97,57 +115,108 @@ public static class DistributedBarrier
         RemoteSignal<T2> second,
         AdoptedPublication<T1> firstPublication,
         AdoptedPublication<T2> secondPublication,
+        AffirmationState<T1, T2> affirmation,
         Action<Exception>? onRepullError)
     {
         // Mirrors on different incarnations of a restarting host are incomparable by design
         // (and dominance over an honestly-empty stamp would misread the empty side as lagging):
         // re-pull BOTH -- a pull returns the host's current truth, so both sides converge on it
         // and the barrier renders on the next consistent snapshot. Re-pulling only an arbitrary
-        // side would loop forever exactly in the restart case.
-        if (firstPublication.Epoch != secondPublication.Epoch)
-        {
-            Schedule(() => first.PullAsync(), onRepullError);
-            Schedule(() => second.PullAsync(), onRepullError);
-            return;
-        }
+        // side would loop forever exactly in the restart case. Within one incarnation,
+        // dominance tells which side lags when the stamps are comparable; when neither
+        // dominates (both straddle a write), re-pull both for the same reason.
+        var crossEpoch = firstPublication.Epoch != secondPublication.Epoch;
+        var firstLags = !crossEpoch && firstPublication.Stamp.IsDominatedBy(secondPublication.Stamp);
+        var secondLags = !crossEpoch && secondPublication.Stamp.IsDominatedBy(firstPublication.Stamp);
+        var pullSecondOnly = !crossEpoch && secondLags && !firstLags;
+        var pullFirstOnly = !crossEpoch && firstLags && !secondLags;
 
-        // Same incarnation: dominance tells which side lags when the stamps are comparable.
-        // When neither dominates (both straddle a write), re-pull both for the same reason.
-        var firstLags = firstPublication.Stamp.IsDominatedBy(secondPublication.Stamp);
-        var secondLags = secondPublication.Stamp.IsDominatedBy(firstPublication.Stamp);
-        if (firstLags)
-        {
-            Schedule(() => first.PullAsync(), onRepullError);
-        }
-        else if (secondLags)
-        {
-            Schedule(() => second.PullAsync(), onRepullError);
-        }
-        else
-        {
-            Schedule(() => first.PullAsync(), onRepullError);
-            Schedule(() => second.PullAsync(), onRepullError);
-        }
-    }
-
-    private static void Schedule(Func<Task> repull, Action<Exception>? onRepullError)
-    {
         // The re-pull is bridge work, not reaction work: the barrier evaluates while its flow
         // holds the context lock in UPGRADEABLE mode, and an inherited flow reaching Local.Set
         // before the reaction unwinds would be refused as a recursive exclusive acquisition (a
-        // race the catch below would misreport as a transport fault, leaving the mirror
+        // race the heal's catch would misreport as a transport fault, leaving the mirror
         // stale). DetachedFlow gives it a fresh top-level flow that simply queues behind the
         // reaction's lock, like any transport delivery.
-        DetachedFlow.Run(async () =>
+        DetachedFlow.Run(() => HealAsync(
+            first, second, firstPublication, secondPublication,
+            pullFirst: !pullSecondOnly, pullSecond: !pullFirstOnly,
+            affirmation, onRepullError));
+    }
+
+    private static async Task HealAsync<T1, T2>(
+        RemoteSignal<T1> first,
+        RemoteSignal<T2> second,
+        AdoptedPublication<T1> firstPublication,
+        AdoptedPublication<T2> secondPublication,
+        bool pullFirst,
+        bool pullSecond,
+        AffirmationState<T1, T2> affirmation,
+        Action<Exception>? onRepullError)
+    {
+        try
         {
-            try
+            if (pullFirst)
             {
-                await repull();
+                await first.PullAsync();
             }
-            catch (Exception ex)
+            if (pullSecond)
             {
-                onRepullError?.Invoke(ex);
+                await second.PullAsync();
             }
-        });
+            if (!Unchanged())
+            {
+                return; // an adoption landed; its own propagation re-runs the barrier
+            }
+
+            // The dominance-picked side answered with the identical publication. A one-sided
+            // round only proves half the pair, so verify the other side by pull too before
+            // declaring the whole pair affirmed.
+            if (!pullFirst)
+            {
+                await first.PullAsync();
+            }
+            if (!pullSecond)
+            {
+                await second.PullAsync();
+            }
+            if (!Unchanged() || firstPublication.Epoch != secondPublication.Epoch)
+            {
+                return;
+            }
+
+            affirmation.Affirm(firstPublication, secondPublication);
+            // The affirmation is knowledge the graph does not carry: re-run the barrier
+            // through the ordinary propagation (an eager signal always re-propagates).
+            await first.RepublishLocalAsync();
+        }
+        catch (Exception ex)
+        {
+            onRepullError?.Invoke(ex);
+        }
+
+        bool Unchanged() =>
+            ReferenceEquals(first.Publication, firstPublication)
+            && ReferenceEquals(second.Publication, secondPublication);
+    }
+
+    // The publication pair a full re-pull round affirmed, compared by REFERENCE: publications
+    // are immutable snapshots swapped only by adoptions, so reference identity means "no
+    // adoption happened on either mirror since the glitch was detected" -- any adoption
+    // naturally invalidates a stale affirmation. Volatile: written on the heal flow, read by
+    // the barrier reaction.
+    private sealed class AffirmationState<T1, T2>
+    {
+        private volatile Tuple<AdoptedPublication<T1>, AdoptedPublication<T2>>? pair;
+
+        internal void Affirm(AdoptedPublication<T1> first, AdoptedPublication<T2> second) =>
+            pair = Tuple.Create(first, second);
+
+        internal bool IsAffirmed(AdoptedPublication<T1> first, AdoptedPublication<T2> second)
+        {
+            var affirmed = pair;
+            return affirmed != null
+                && ReferenceEquals(affirmed.Item1, first)
+                && ReferenceEquals(affirmed.Item2, second);
+        }
     }
 }

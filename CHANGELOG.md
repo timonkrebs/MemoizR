@@ -15,8 +15,10 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
   order deliveries (including the dependency-oscillation shapes stamps cannot order),
   incarnation epochs detect host restarts (held evidence is discarded, never merged, and an
   `OnPeerReset` hook resubscribes), and abandoned epochs drop late traffic from dead
-  incarnations; `DistributedBarrier` renders only consistent, verified snapshots and re-pulls
-  the lagging mirror itself. The sample migrated to the package.
+  incarnations; `DistributedBarrier` renders only consistent, verified snapshots, re-pulls
+  the lagging mirror itself, and renders a stamp-inconsistent pair that a full re-pull round
+  AFFIRMED (the core's documented conservative stamp under-claim is a spurious glitch, not a
+  lag). The sample migrated to the package.
 - Per-node publication sequence in the core value box: strictly increasing per publication,
   carried by distributed payloads as the per-node total order that causality stamps
   deliberately do not provide.
