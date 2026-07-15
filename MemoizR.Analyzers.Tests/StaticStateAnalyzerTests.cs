@@ -251,6 +251,37 @@ public class StaticStateAnalyzerTests
     }
 
     [Fact]
+    public async Task FiniteDeepGenericNesting_IsStillFullyChecked()
+    {
+        // Hand-written nesting repeats the definition but SHRINKS at every level: the
+        // divergence cut must not fire, so the classifier reaches the List at the bottom.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public sealed class WrapBox<T>
+            {
+                public T? Value { get; init; }
+            }
+
+            public class C
+            {
+                private static readonly WrapBox<WrapBox<WrapBox<WrapBox<WrapBox<List<int>>>>>> Cache = new();
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    _ = Cache;
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR004", diagnostic.Id);
+        Assert.Contains("List", diagnostic.GetMessage());
+    }
+
+    [Fact]
     public async Task PolymorphicRecursion_Terminates_AndTheClosedSlotIsAccepted()
     {
         // Box<T> exposing Box<List<T>> constructs a FRESH closed symbol per level: the member

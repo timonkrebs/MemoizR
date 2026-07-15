@@ -279,6 +279,21 @@ public class StrictSendableModeTests
         Assert.NotNull(await signal.Get());
     }
 
+    [Fact(Timeout = 10000)]
+    public async Task FiniteDeepGenericNesting_IsStillFullyChecked()
+    {
+        // Hand-written nesting repeats the definition but SHRINKS at every level: the
+        // divergence cut must not fire, so the walk reaches the List at the bottom and strict
+        // mode rejects the graph.
+        var f = new MemoFactory();
+        Assert.Throws<InvalidOperationException>(
+            () => f.CreateSignal(new WrapBox<WrapBox<WrapBox<WrapBox<WrapBox<List<int>>>>>>()));
+
+        // And the shrinking walk accepts a genuinely Sendable deep composition.
+        var deepButClean = f.CreateSignal(new WrapBox<WrapBox<WrapBox<WrapBox<WrapBox<int>>>>>());
+        Assert.NotNull(await deepButClean.Get());
+    }
+
     [Fact]
     public void DefaultFactory_Checks_AndDisableIsTheEscapeHatch()
     {
@@ -351,11 +366,18 @@ internal record SendableOpenRecord(string Name, int Age);
 
 // Immutable, deliberately NON-sealed: the declared type passes creation-time checks...
 // Polymorphic recursion: the member re-instantiates the declaration with a GROWING argument,
-// so a naive per-closed-type cycle set never terminates (see the same-definition path cap in
-// SendableChecker/SendableSymbolClassifier).
+// so a naive per-closed-type cycle set never terminates (see the same-definition divergence
+// cut in SendableChecker/SendableSymbolClassifier).
 internal sealed class RecursiveBox<T>
 {
     public RecursiveBox<List<T>>? Next { get; init; }
+}
+
+// A plain wrapper for FINITE hand-written nesting (WrapBox<WrapBox<...<List<int>>>>): each
+// recursive step SHRINKS, so the divergence cut must let the walk reach the bottom.
+internal sealed class WrapBox<T>
+{
+    public T? Value { get; init; }
 }
 
 internal class OpenBase

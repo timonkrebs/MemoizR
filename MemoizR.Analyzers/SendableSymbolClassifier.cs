@@ -294,14 +294,17 @@ internal sealed class SendableSymbolClassifier
         }
 
         // POLYMORPHIC recursion constructs a FRESH closed symbol per level (Box<T> exposing a
-        // Box<List<T>> member), which the re-entry check above can never catch: the same
-        // DEFINITION re-entering the path more than a handful of times is treated as the same
-        // cycle -- deeper re-instantiations substitute the same declared members, and
-        // realistic nesting of one generic within itself stays far below the bound. Kept in
-        // lockstep with the runtime checker's identical cap.
+        // Box<List<T>> member), which the re-entry check above can never catch. Its signature
+        // is a NON-SHRINKING re-occurrence of the same definition: finite hand-written nesting
+        // (Box<Box<Box<List<int>>>>) strictly shrinks at every recursive step and is walked to
+        // the bottom however deep it goes, while a divergent expansion re-enters its own
+        // definition at the same size or larger and is cut on the second occurrence (landing
+        // on the cycle assumption above). Kept in lockstep with the runtime checker.
         if (named.IsGenericType
-            && inProgress.Count(entry => entry is INamedTypeSymbol { IsGenericType: true } other
-                && SymbolEqualityComparer.Default.Equals(other.OriginalDefinition, named.OriginalDefinition)) > 4)
+            && inProgress.Any(entry => entry is INamedTypeSymbol { IsGenericType: true } other
+                && !SymbolEqualityComparer.Default.Equals(other, named)
+                && SymbolEqualityComparer.Default.Equals(other.OriginalDefinition, named.OriginalDefinition)
+                && TypeSize(other) <= TypeSize(named)))
         {
             inProgress.Remove(named);
             return null;
@@ -430,6 +433,18 @@ internal sealed class SendableSymbolClassifier
     private static bool IsRootType(INamedTypeSymbol type)
     {
         return type.SpecialType == SpecialType.System_Object || type.SpecialType == SpecialType.System_ValueType;
+    }
+
+    // The number of type nodes in the constructed reference: Box<List<int>> is 3. Finite
+    // nesting shrinks this at every recursive step; polymorphic recursion grows it.
+    private static int TypeSize(ITypeSymbol type)
+    {
+        return type switch
+        {
+            IArrayTypeSymbol array => 1 + TypeSize(array.ElementType),
+            INamedTypeSymbol named => 1 + named.TypeArguments.Sum(TypeSize),
+            _ => 1,
+        };
     }
 
     private string? CheckTypeArguments(INamedTypeSymbol named, HashSet<ITypeSymbol> inProgress)

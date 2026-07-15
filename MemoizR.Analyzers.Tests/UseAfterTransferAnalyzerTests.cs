@@ -650,6 +650,69 @@ public class UseAfterTransferAnalyzerTests
     }
 
     [Fact]
+    public async Task CatchHandlers_ObserveAThrownTransfer()
+    {
+        // A thrown transfer lands in the try's handlers: the catch runs after the throw
+        // expression evaluated, so its Add touches the handed-off list.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public sealed class E : Exception
+            {
+                public E(Sending<List<int>> payload)
+                {
+                }
+            }
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    try
+                    {
+                        throw new E(Sending.Transfer(list));
+                    }
+                    catch
+                    {
+                        list.Add(1);
+                    }
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+    }
+
+    [Fact]
+    public async Task UsingLocals_AreDisposedBySenderAfterTheTransfer()
+    {
+        // The scope's compiler-generated Dispose runs after the handoff with no source
+        // reference to scan for: the sender destroys the object the receiver now owns.
+        var diagnostics = await AnalyzeAsync("""
+            using System.IO;
+            using MemoizR;
+
+            public class C
+            {
+                public Sending<MemoryStream> M()
+                {
+                    using var stream = new MemoryStream();
+                    var sent = Sending.Transfer(stream);
+                    return sent;
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+        Assert.Contains("'stream'", diagnostic.GetMessage());
+    }
+
+    [Fact]
     public async Task FinallyBlocks_RunAfterAReturnTransfer_AndAreStillScanned()
     {
         // `return Sending.Transfer(list)` exits the method -- but the enclosing finally runs

@@ -212,12 +212,14 @@ public static class SendableChecker
         }
 
         // POLYMORPHIC recursion constructs a FRESH closed type per level (Box<T> exposing a
-        // Box<List<T>> member), which the re-entry check above can never catch: the same
-        // DEFINITION re-entering the path more than a handful of times is treated as the same
-        // cycle -- deeper re-instantiations substitute the same declared members, and realistic
-        // nesting of one generic within itself stays far below the bound.
+        // Box<List<T>> member), which the re-entry check above can never catch. Its signature
+        // is a NON-SHRINKING re-occurrence of the same definition: finite hand-written nesting
+        // (Box<Box<Box<List<int>>>>) strictly shrinks at every recursive step and is walked to
+        // the bottom however deep it goes, while a divergent expansion re-enters its own
+        // definition at the same size or larger and is cut on the second occurrence (landing
+        // on the cycle assumption above).
         if (DefinitionOf(type) is { } definition
-            && inProgress.Count(entry => DefinitionOf(entry) == definition) > 4)
+            && inProgress.Any(entry => entry != type && DefinitionOf(entry) == definition && TypeSize(entry) <= TypeSize(type)))
         {
             inProgress.Remove(type);
             return null;
@@ -245,6 +247,18 @@ public static class SendableChecker
     private static Type? DefinitionOf(Type type)
     {
         return type.IsGenericType ? type.GetGenericTypeDefinition() : null;
+    }
+
+    // The number of type nodes in the constructed reference: Box<List<int>> is 3. Finite
+    // nesting shrinks this at every recursive step; polymorphic recursion grows it.
+    private static int TypeSize(Type type)
+    {
+        if (type.IsArray)
+        {
+            return 1 + TypeSize(type.GetElementType()!);
+        }
+
+        return type.IsGenericType ? 1 + type.GetGenericArguments().Sum(TypeSize) : 1;
     }
 
     private static string? CheckDeclaredMembers(Type type, Type declaringLevel, HashSet<Type> inProgress)

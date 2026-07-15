@@ -34,8 +34,17 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     {
         foreach (var block in context.OperationBlocks)
         {
-            foreach (var (variable, transferPosition, scanRoots) in Transfers(block))
+            foreach (var (variable, transferPosition, scanRoots, transfer) in Transfers(block))
             {
+                // A using-declared local is Disposed by the SENDER at scope end -- after the
+                // handoff, with no source reference to scan for: destroying the object the
+                // receiver now owns is a guaranteed use-after-transfer.
+                if (variable is ILocalSymbol { IsUsing: true })
+                {
+                    Report(context, transfer, variable);
+                    continue;
+                }
+
                 ReportUsesAfter(context, scanRoots, variable, transferPosition);
             }
         }
@@ -44,7 +53,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     // Every Sending<T> creation (constructor or Sending.Transfer) whose argument is a
     // local/parameter reference, with the position the transfer happens at and the regions the
     // report walk covers.
-    private static IEnumerable<(ISymbol Variable, int Position, List<IOperation> ScanRoots)> Transfers(IOperation block)
+    private static IEnumerable<(ISymbol Variable, int Position, List<IOperation> ScanRoots, IOperation Transfer)> Transfers(IOperation block)
     {
         foreach (var operation in block.DescendantsAndSelf())
         {
@@ -65,22 +74,22 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             var scanRoots = ScanRootsFor(operation, EnclosingFunctionBody(operation, block));
             if (scanRoots.Count > 0)
             {
-                yield return (variable, operation.Syntax.Span.End, scanRoots);
+                yield return (variable, operation.Syntax.Span.End, scanRoots, operation);
             }
         }
     }
 
     // Where the sender-side scan looks. Normally the whole scope; a transfer the flow
     // immediately leaves behind (`return Sending.Transfer(list);` / `throw`) is only still
-    // observable from the FINALLY blocks of enclosing tries, which run after the return
-    // expression evaluated -- no finally, no sender-side continuation at all. (break/continue
-    // are NOT exits: control resumes after the loop, where later uses remain reachable, so
-    // they keep the full scope.)
+    // observable from the escaping expression itself, the CATCH handlers a thrown transfer
+    // lands in, and the FINALLY blocks of enclosing tries -- no such region, no sender-side
+    // continuation at all. (break/continue are NOT exits: control resumes after the loop,
+    // where later uses remain reachable, so they keep the full scope.)
     private static List<IOperation> ScanRootsFor(IOperation transfer, IOperation scope)
     {
         var roots = new List<IOperation>();
-        var escapes = false;
-        for (var parent = transfer.Parent; parent is not null; parent = parent.Parent)
+        var escape = default(IOperation);
+        for (IOperation child = transfer; child.Parent is { } parent; child = parent)
         {
             if (ReferenceEquals(parent, scope) || parent is IAnonymousFunctionOperation or ILocalFunctionOperation)
             {
@@ -89,7 +98,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
 
             if (parent is IReturnOperation or IThrowOperation)
             {
-                if (!escapes)
+                if (escape is null)
                 {
                     // The escaping expression itself still evaluates past the transfer:
                     // `return Pair(Sending.Transfer(list), list);` reads the second argument
@@ -97,20 +106,37 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                     roots.Add(parent);
                 }
 
-                escapes = true;
+                escape = parent;
             }
-            else if (escapes && parent is ITryOperation { Finally: { } finallyBlock })
+            else if (escape is not null && parent is ITryOperation tryOperation)
             {
-                roots.Add(finallyBlock); // inner finallys first: they execute first
+                AddHandlerRoots(roots, tryOperation, child, escapedByThrow: escape is IThrowOperation);
             }
         }
 
-        if (!escapes)
+        if (escape is null)
         {
             roots.Add(scope);
         }
 
         return roots;
+    }
+
+    // A THROWN transfer lands in the try's handlers -- when the throw came from the try BODY
+    // (a throw inside one catch never reaches its sibling catches; which handler matches is
+    // not decidable statically, so every candidate is scanned). Finallys run for return and
+    // throw alike: catches before finally, inner tries first.
+    private static void AddHandlerRoots(List<IOperation> roots, ITryOperation tryOperation, IOperation child, bool escapedByThrow)
+    {
+        if (escapedByThrow && ReferenceEquals(child, tryOperation.Body))
+        {
+            roots.AddRange(tryOperation.Catches);
+        }
+
+        if (tryOperation.Finally is { } finallyBlock)
+        {
+            roots.Add(finallyBlock);
+        }
     }
 
     // Transfer(list = new(...)) -- and the lazy-init form Transfer(list ??= new(...)): after
