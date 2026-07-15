@@ -145,31 +145,35 @@ public sealed class OptimisticActionContext
             ThrowIfClosed();
         }
 
-        var id = await state.ApplyPatchAsync(patch).ConfigureAwait(false);
-        var closedMidApply = false;
-        lock (gate)
+        // Admission runs INSIDE the overlay's read-modify-write: checking `closed` and
+        // recording the id are atomic with the patch landing, and the close sweep's removals
+        // serialize on the same overlay lock -- so either this patch is rejected (the sweep
+        // won) or it lands recorded and the sweep removes it before the run seals. A patch can
+        // no longer land unrecorded in the close window and outlive the run's settlement.
+        var admitted = await state.TryApplyPatchAsync(patch, id =>
         {
-            if (closed)
+            lock (gate)
             {
-                // The run's drop swept between the overlay write above and this recording: the
-                // patch is orphaned unless removed here, on this flow.
-                closedMidApply = true;
-            }
-            else
-            {
+                if (closed)
+                {
+                    return false;
+                }
                 if (!applied.TryGetValue(state, out var entry))
                 {
                     entry = (state.RemovePatchesAsync, new List<long>());
                     applied[state] = entry;
                 }
                 entry.Ids.Add(id);
+                return true;
             }
-        }
+        }).ConfigureAwait(false);
 
-        if (closedMidApply)
+        if (!admitted)
         {
-            await state.RemovePatchesAsync([id]).ConfigureAwait(false);
-            ThrowIfClosed();
+            lock (gate)
+            {
+                ThrowIfClosed();
+            }
         }
     }
 

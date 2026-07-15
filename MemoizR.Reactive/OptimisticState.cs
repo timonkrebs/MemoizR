@@ -51,13 +51,21 @@ public sealed class OptimisticState<T> : IStateGetR<T>, INodeBackedGetR
     /// <summary>The composed read: source of truth with the in-flight patches applied.</summary>
     public Task<T> Get() => view.Get();
 
-    // Applies a patch and returns its handle; only OptimisticActionContext calls this, so every
-    // patch is owned by exactly one action run and dropped when that run ends.
-    internal async Task<long> ApplyPatchAsync(Func<T, T> patch)
+    // Applies a patch, admitting it through the caller's callback INSIDE the overlay's
+    // read-modify-write: admission (recording the id with the owning run) and landing are one
+    // atomic step against the run's close sweep, whose removals serialize on this same overlay
+    // lock -- so a patch can never land unrecorded and outlive the run's settlement. Only
+    // OptimisticActionContext calls this; a rejected patch leaves the overlay untouched.
+    internal async Task<bool> TryApplyPatchAsync(Func<T, T> patch, Func<long, bool> admit)
     {
         var id = Interlocked.Increment(ref nextPatchId);
-        await overlay.Set(list => list.Add((id, patch))).ConfigureAwait(false);
-        return id;
+        var admitted = false;
+        await overlay.Set(list =>
+        {
+            admitted = admit(id);
+            return admitted ? list.Add((id, patch)) : list;
+        }).ConfigureAwait(false);
+        return admitted;
     }
 
     // A run's patches on this state are removed in ONE read-modify-write: dropping them
