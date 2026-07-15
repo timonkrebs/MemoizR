@@ -188,6 +188,69 @@ public class StaticStateAnalyzerTests
     }
 
     [Fact]
+    public async Task InheritedMemberTypes_CarryTheOuterParameter_AndAreUnverifiable()
+    {
+        // The member walk follows the base chain like the classifier: an inherited member
+        // stores the outer T exactly like a declared one.
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public class C<T>
+            {
+                private class Base
+                {
+                    public T? Value { get; init; }
+                }
+
+                private sealed class Holder : Base
+                {
+                }
+
+                private static readonly Holder Cache = new();
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    _ = Cache;
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR004", diagnostic.Id);
+        Assert.Contains("'Cache'", diagnostic.GetMessage());
+        Assert.Contains("type parameter", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task ComputedMemberProperties_StoreNothing_AndDoNotPoisonTheSlot()
+    {
+        // `public T New => default!` holds no slot: the holder static contains no T reference,
+        // the member-level analog of the top-level computed-getter exemption.
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public class C<T>
+            {
+                private sealed class Holder
+                {
+                    public T New => default!;
+                }
+
+                private static readonly Holder Cache = new();
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    _ = Cache;
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
     public async Task TypeParameters_BuriedArbitrarilyDeep_AreStillFound()
     {
         // The walk has no depth cliff: a declared type reference is a finite tree, so the

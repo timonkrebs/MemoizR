@@ -99,7 +99,7 @@ public sealed class StaticStateAnalyzer : DiagnosticAnalyzer
         var slotType = symbol switch
         {
             IFieldSymbol { IsConst: false } field => field.Type,
-            IPropertySymbol property when HasBackingSlot(property) => property.Type,
+            IPropertySymbol property when SendableSymbolClassifier.HasBackingSlot(property) => property.Type,
             _ => null,
         };
 
@@ -149,7 +149,7 @@ public sealed class StaticStateAnalyzer : DiagnosticAnalyzer
             return "a settable slot";
         }
 
-        if (!HasBackingSlot(property))
+        if (!SendableSymbolClassifier.HasBackingSlot(property))
         {
             // A computed getter owns no static slot: a fresh value per call shares nothing,
             // and a getter handing out OTHER static state is flagged at that state's own
@@ -159,14 +159,6 @@ public sealed class StaticStateAnalyzer : DiagnosticAnalyzer
 
         var reason = NotSendableReason(property.Type, classifier);
         return reason is null ? null : $"get-only, but of non-Sendable type {SendableSymbolClassifier.Display(property.Type)} ({reason})";
-    }
-
-    // Only auto-properties own a backing slot; the compiler ties it to the property via
-    // AssociatedSymbol.
-    private static bool HasBackingSlot(IPropertySymbol property)
-    {
-        return property.ContainingType.GetMembers().OfType<IFieldSymbol>()
-            .Any(field => SymbolEqualityComparer.Default.Equals(field.AssociatedSymbol, property));
     }
 
     // MZR001 gives unbound type parameters the benefit of the doubt because the closed
@@ -223,18 +215,31 @@ public sealed class StaticStateAnalyzer : DiagnosticAnalyzer
             yield break; // metadata members are import-limited; framework internals carry no user T
         }
 
-        foreach (var member in named.GetMembers())
+        // The base chain is walked like the classifier walks it: an INHERITED member stores
+        // state (and possibly an outer type parameter) exactly like a declared one. Only
+        // STORED members contribute -- explicit fields and auto-properties; a computed member
+        // (`public T New => default!`) holds no slot, the member-level analog of the
+        // top-level computed-getter exemption.
+        for (var current = named; current is not null && !IsRootType(current); current = current.BaseType)
         {
-            switch (member)
+            foreach (var member in current.GetMembers())
             {
-                case IFieldSymbol { IsStatic: false, IsImplicitlyDeclared: false } field:
-                    yield return field.Type;
-                    break;
-                case IPropertySymbol { IsStatic: false, GetMethod: not null } property:
-                    yield return property.Type;
-                    break;
+                switch (member)
+                {
+                    case IFieldSymbol { IsStatic: false, IsImplicitlyDeclared: false } field:
+                        yield return field.Type;
+                        break;
+                    case IPropertySymbol { IsStatic: false } property when SendableSymbolClassifier.HasBackingSlot(property):
+                        yield return property.Type;
+                        break;
+                }
             }
         }
+    }
+
+    private static bool IsRootType(INamedTypeSymbol type)
+    {
+        return type.SpecialType is SpecialType.System_Object or SpecialType.System_ValueType;
     }
 
     // The mandate boundary: the static's FILE must use MemoizR. Using directives sit at the

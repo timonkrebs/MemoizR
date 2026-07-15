@@ -34,17 +34,17 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     {
         foreach (var block in context.OperationBlocks)
         {
-            foreach (var (variable, transferPosition, scope) in Transfers(block))
+            foreach (var (variable, transferPosition, scanRoots) in Transfers(block))
             {
-                ReportUsesAfter(context, scope, variable, transferPosition);
+                ReportUsesAfter(context, scanRoots, variable, transferPosition);
             }
         }
     }
 
     // Every Sending<T> creation (constructor or Sending.Transfer) whose argument is a
-    // local/parameter reference, with the position the transfer happens at and the scope its
+    // local/parameter reference, with the position the transfer happens at and the regions the
     // report walk covers.
-    private static IEnumerable<(ISymbol Variable, int Position, IOperation Scope)> Transfers(IOperation block)
+    private static IEnumerable<(ISymbol Variable, int Position, List<IOperation> ScanRoots)> Transfers(IOperation block)
     {
         foreach (var operation in block.DescendantsAndSelf())
         {
@@ -62,36 +62,47 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                 continue;
             }
 
-            var scope = EnclosingFunctionBody(operation, block);
-            if (EscapesTheScope(operation, scope))
+            var scanRoots = ScanRootsFor(operation, EnclosingFunctionBody(operation, block));
+            if (scanRoots.Count > 0)
             {
-                continue;
+                yield return (variable, operation.Syntax.Span.End, scanRoots);
             }
-
-            yield return (variable, operation.Syntax.Span.End, scope);
         }
     }
 
-    // A transfer the flow immediately leaves behind (`return Sending.Transfer(list);` /
-    // `throw`) has no sender-side continuation in its scope: every later reference is
-    // unreachable on the path that transferred. (break/continue are NOT exits: control
-    // resumes after the loop, where later uses remain reachable.)
-    private static bool EscapesTheScope(IOperation transfer, IOperation scope)
+    // Where the sender-side scan looks. Normally the whole scope; a transfer the flow
+    // immediately leaves behind (`return Sending.Transfer(list);` / `throw`) is only still
+    // observable from the FINALLY blocks of enclosing tries, which run after the return
+    // expression evaluated -- no finally, no sender-side continuation at all. (break/continue
+    // are NOT exits: control resumes after the loop, where later uses remain reachable, so
+    // they keep the full scope.)
+    private static List<IOperation> ScanRootsFor(IOperation transfer, IOperation scope)
     {
-        for (var parent = transfer.Parent; parent is not null && !ReferenceEquals(parent, scope); parent = parent.Parent)
+        var roots = new List<IOperation>();
+        var escapes = false;
+        for (var parent = transfer.Parent; parent is not null; parent = parent.Parent)
         {
-            if (parent is IReturnOperation or IThrowOperation)
-            {
-                return true;
-            }
-
-            if (parent is IAnonymousFunctionOperation or ILocalFunctionOperation)
+            if (ReferenceEquals(parent, scope) || parent is IAnonymousFunctionOperation or ILocalFunctionOperation)
             {
                 break;
             }
+
+            if (parent is IReturnOperation or IThrowOperation)
+            {
+                escapes = true;
+            }
+            else if (escapes && parent is ITryOperation { Finally: { } finallyBlock })
+            {
+                roots.Add(finallyBlock); // inner finallys first: they execute first
+            }
         }
 
-        return false;
+        if (!escapes)
+        {
+            roots.Add(scope);
+        }
+
+        return roots;
     }
 
     // Transfer(list = new(...)): after the statement the variable ALIASES the transferred
@@ -118,14 +129,17 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         return block;
     }
 
-    private static void ReportUsesAfter(OperationBlockAnalysisContext context, IOperation scope, ISymbol variable, int transferPosition)
+    private static void ReportUsesAfter(OperationBlockAnalysisContext context, List<IOperation> scanRoots, ISymbol variable, int transferPosition)
     {
+        var scope = scanRoots[scanRoots.Count - 1]; // the outermost root is the reinit scope boundary
+
         // Source-ordered walk of every later reference. References in a MUTUALLY EXCLUSIVE
         // sibling arm of the construct holding the transfer are excluded upfront: in
         // `if (move) Transfer(list); else list.Add(1);` no path runs the else after the
         // transfer. (Try constructs are not excluded -- an exception after the transfer
         // reaches the handlers and finally.)
-        var laterReferences = scope.DescendantsAndSelf()
+        var laterReferences = scanRoots
+            .SelectMany(root => root.DescendantsAndSelf())
             .Where(operation => SymbolEqualityComparer.Default.Equals(ReferencedVariable(operation), variable)
                 && operation.Syntax.SpanStart >= transferPosition
                 && !IsInASiblingArmOfTheTransfer(operation, transferPosition))

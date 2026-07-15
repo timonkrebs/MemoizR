@@ -103,41 +103,44 @@ public sealed class SubclassSmugglingAnalyzer : DiagnosticAnalyzer
             yield break;
         }
 
-        foreach (var argument in named.TypeArguments)
+        foreach (var inner in named.TypeArguments.Concat(StoredMemberTypesOf(named)))
         {
-            foreach (var nested in NamedTypesIn(argument, depth + 1, visited))
+            foreach (var nested in NamedTypesIn(inner, depth + 1, visited))
             {
                 yield return nested;
             }
         }
+    }
 
-        // A sealed Sendable DTO hides the same hole in a MEMBER type (sealed record
-        // Box(OpenBase Value)): the classifier trusted OpenBase's declared structure, so the
-        // walk must visit the member types it trusted. Source-declared types only -- metadata
-        // members are import-limited, and framework internals are not the user's smuggle
-        // surface (green-listed containers already expose their payload via type arguments).
+    // A sealed Sendable DTO hides the same hole in a MEMBER type (sealed record
+    // Box(OpenBase Value)): the classifier trusted OpenBase's declared structure, so the walk
+    // must visit the member types it trusted -- INHERITED ones included (the classifier walks
+    // base types), and only STORED ones (explicit fields and auto-properties; a computed
+    // member holds no slot). Source-declared types only -- metadata members are
+    // import-limited, and framework internals are not the user's smuggle surface (green-listed
+    // containers already expose their payload via type arguments).
+    private static System.Collections.Generic.IEnumerable<ITypeSymbol> StoredMemberTypesOf(INamedTypeSymbol named)
+    {
         if (!named.Locations.Any(location => location.IsInSource))
         {
             yield break;
         }
 
-        foreach (var member in named.GetMembers())
+        for (var current = named; current is not null && current.SpecialType != SpecialType.System_Object; current = current.BaseType)
         {
-            var memberType = member switch
+            foreach (var member in current.GetMembers())
             {
-                IFieldSymbol { IsStatic: false, IsImplicitlyDeclared: false } field => field.Type,
-                IPropertySymbol { IsStatic: false, GetMethod: not null } property => property.Type,
-                _ => null,
-            };
+                var memberType = member switch
+                {
+                    IFieldSymbol { IsStatic: false, IsImplicitlyDeclared: false } field => field.Type,
+                    IPropertySymbol { IsStatic: false } property when SendableSymbolClassifier.HasBackingSlot(property) => property.Type,
+                    _ => null,
+                };
 
-            if (memberType is null)
-            {
-                continue;
-            }
-
-            foreach (var nested in NamedTypesIn(memberType, depth + 1, visited))
-            {
-                yield return nested;
+                if (memberType is not null)
+                {
+                    yield return memberType;
+                }
             }
         }
     }

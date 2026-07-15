@@ -441,6 +441,18 @@ internal sealed class SendableSymbolClassifier
             : $"field '{field.Name}'";
     }
 
+    // Whether the property owns a backing slot (an auto-property): the compiler ties the
+    // synthesized field to the property via AssociatedSymbol. Computed getters store nothing
+    // -- state they hand out lives in some field/auto-property flagged at ITS declaration --
+    // so the static-state and smuggle walks only count stored members. (Metadata backing
+    // fields are not imported under MetadataImportOptions.Public, so metadata auto-properties
+    // read as computed: an accepted best-effort miss.)
+    internal static bool HasBackingSlot(IPropertySymbol property)
+    {
+        return property.ContainingType.GetMembers().OfType<IFieldSymbol>()
+            .Any(field => SymbolEqualityComparer.Default.Equals(field.AssociatedSymbol, property));
+    }
+
     internal static string Display(ITypeSymbol type)
     {
         return type.ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat);

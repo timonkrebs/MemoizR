@@ -544,6 +544,37 @@ public class UseAfterTransferAnalyzerTests
     }
 
     [Fact]
+    public async Task FinallyBlocks_RunAfterAReturnTransfer_AndAreStillScanned()
+    {
+        // `return Sending.Transfer(list)` exits the method -- but the enclosing finally runs
+        // AFTER the return expression evaluated, so its Add touches the transferred value.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public Sending<List<int>> M()
+                {
+                    var list = new List<int> { 1 };
+                    try
+                    {
+                        return Sending.Transfer(list);
+                    }
+                    finally
+                    {
+                        list.Add(1);
+                    }
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
     public async Task InlineAssignmentTransfer_IsTracked()
     {
         // Transfer(list = new(...)): after the statement the variable aliases the transferred

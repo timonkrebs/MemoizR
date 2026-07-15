@@ -194,6 +194,40 @@ public class SubclassSmugglingAnalyzerTests
     }
 
     [Fact]
+    public async Task InheritedMemberTypes_AreSmuggleSurfacesToo()
+    {
+        // The member walk follows the base chain like the classifier: the hole hides on the
+        // inherited member exactly like on a declared one.
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public record OpenPerson(string Name);
+
+            public class BoxBase
+            {
+                public OpenPerson? Value { get; init; }
+            }
+
+            public sealed class Box : BoxBase
+            {
+            }
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    f.CreateSignal(new Box());
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR006", diagnostic.Id);
+        Assert.Contains("OpenPerson", diagnostic.GetMessage());
+    }
+
+    [Fact]
     public async Task SendableAbstractBase_IsStillASmuggleSurface()
     {
         // [Sendable] lets an abstract base PASS MZR001 (Error), but the attribute is
