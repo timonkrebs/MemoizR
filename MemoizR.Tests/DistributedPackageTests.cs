@@ -95,6 +95,71 @@ public class DistributedPackageTests
     }
 
     [Fact]
+    public async Task Export_Pull_RefreshesAStickyUnverifiablePublication()
+    {
+        // Unverifiability can outlive its cause: a memo that catches a faulted dependency
+        // publishes its fallback with no-claim evidence and commits CLEAN (a fault is not a
+        // Set; nothing bumped its generation), and nothing ever re-dirties it once the
+        // dependency heals without a value change. Served on a pull, the consumer's mirror
+        // drops the unchanged publication as a duplicate and stays unverifiable forever (the
+        // barrier never renders). A pull must instead force a fresh evaluation of the
+        // unverifiable chain and answer with the host's current best claim.
+        var host = new MemoFactory();
+        var s = host.CreateSignal(1);
+        var trigger = host.CreateSignal(0);
+        var failing = false;
+        var m1 = host.CreateMemoizR("m1", async () =>
+        {
+            var v = await s.Get();
+            if (Volatile.Read(ref failing))
+            {
+                throw new InvalidOperationException("m1 source down");
+            }
+            return v - v + 11; // always 11, still depends on s
+        });
+        var m2 = host.CreateMemoizR("m2", async () =>
+        {
+            var t = await trigger.Get();
+            try
+            {
+                return t + await m1.Get() + 100;
+            }
+            catch (InvalidOperationException)
+            {
+                return 999; // the caught-fault fallback: published as unverifiable
+            }
+        });
+        using var export = host.Export(m2, _ => Task.CompletedTask);
+
+        Assert.Equal(111, await m2.Get());
+        var baseline = await export.PullAsync();
+        Assert.False(baseline.Unverifiable);
+
+        Volatile.Write(ref failing, true);
+        await s.Set(2);       // dirties m1, whose evaluation now faults
+        await trigger.Set(1); // dirties m2 directly, so its own computation runs and catches
+        Assert.Equal(999, await m2.Get());
+        Volatile.Write(ref failing, false); // m1's next evaluation heals to the SAME 11
+
+        // The sticky shape: m2 committed its fallback CLEAN with no-claim evidence, and stays
+        // that way through quiescence -- nothing is left to re-dirty it.
+        await TestHelpers.WaitForConvergenceAsync(() => m2.Evidence.Unverifiable);
+        var payload = await export.PullAsync();
+        Assert.False(payload.Unverifiable);
+        Assert.Equal(112, payload.Value); // trigger(1) + healed m1(11) + 100
+        Assert.True(payload.Sequence > baseline.Sequence);
+        Assert.False(m2.Evidence.Unverifiable);
+
+        // The consumer-side heal completes: the fresh publication has a higher sequence, so
+        // the mirror adopts it and stops being unverifiable.
+        var consumer = new MemoFactory();
+        var mirror = consumer.CreateRemoteSignal("m2", 0, export.PullAsync);
+        await mirror.OnValueAsync(payload);
+        Assert.False(mirror.Unverifiable);
+        Assert.Equal(112, await mirror.Local.Get());
+    }
+
+    [Fact]
     public async Task Export_PublishStale_MayFeedASameContextSignal()
     {
         // An in-process bridge that writes advertisements into a same-context outbox signal:

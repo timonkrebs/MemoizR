@@ -48,7 +48,38 @@ public sealed class ExportedNode<T> : IDisposable
     {
         await node.ReadWithEvidence();
         var (value, evidence, sequence) = node.ValueEvidenceAndSequence;
+        if (evidence.Unverifiable)
+        {
+            // An unverifiable publication can be STICKY while the node is lazily clean:
+            // contagion from a since-healed source survives an equal-value parent scan (the
+            // scan proves the inputs did not change, not that the cached value was ever
+            // vouched for), so the node would answer every heartbeat-driven pull with the same
+            // no-claim publication and sequence -- which the consumer's mirror drops as a
+            // duplicate, leaving it unverifiable forever. A pull is the express request for
+            // the host's current best claim: force ONE fresh evaluation of the unverifiable
+            // chain through the ordinary invalidation entry (exactly what an upstream write
+            // would do) and answer with its outcome -- verified now, or honestly still
+            // unverifiable (a live torn spell; no retry loop, the next heartbeat tries again).
+            await RefreshUnverifiableChainAsync(node);
+            await node.ReadWithEvidence();
+            (value, evidence, sequence) = node.ValueEvidenceAndSequence;
+        }
         return new ValuePayload<T>(node.Id, node.Context.Epoch, sequence, value, evidence.Stamp.Serialize(), evidence.Unverifiable);
+    }
+
+    // Dirty every source whose current evidence is unverifiable (recursively, sources before
+    // consumers) so one Get re-evaluates the whole poisoned chain bottom-up: refreshing only
+    // this node would just re-consume the sticky no-claim evidence and republish it.
+    private static async Task RefreshUnverifiableChainAsync(SignalHandlR handle)
+    {
+        foreach (var source in handle.Sources)
+        {
+            if (source is SignalHandlR sourceHandle && sourceHandle.Evidence.Unverifiable)
+            {
+                await RefreshUnverifiableChainAsync(sourceHandle);
+            }
+        }
+        await handle.InvalidateAndPropagateAsync(CacheState.CacheDirty);
     }
 
     /// <summary>
