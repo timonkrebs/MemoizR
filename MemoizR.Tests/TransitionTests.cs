@@ -300,6 +300,42 @@ public class TransitionTests
     }
 
     [Fact(Timeout = 5000)]
+    public async Task Transition_WritesAfterSeal_DoNotExtendTheWavefront()
+    {
+        var f = new MemoFactory();
+        var v1 = f.CreateSignal(1);
+        var v2 = f.CreateSignal(1);
+        var gate1 = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var gate2 = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var r1 = f.BuildReaction().CreateAdvancedReaction(async () =>
+        {
+            if (await v1.Get() == 5) await gate1.Task;
+        });
+        var r2 = f.BuildReaction().CreateAdvancedReaction(async () =>
+        {
+            if (await v2.Get() == 9) await gate2.Task;
+        });
+        await TestHelpers.WaitForConvergenceAsync(() => !r1.IsPendingSnapshot && !r2.IsPendingSnapshot);
+
+        var t = f.BeginTransition();
+        await v1.Set(5);
+        t.Dispose();
+        Assert.True(t.IsPending); // r1 is parked, the sealed wavefront is {r1}
+
+        // Fire-and-forget work that escaped the scope still carries the tag: its write must not
+        // extend the SEALED wavefront -- r2 stays parked forever, so joining it would hang
+        // settlement on a write the scope never made.
+        TransitionFlow.Current = t;
+        await v2.Set(9);
+        TransitionFlow.Suppress();
+
+        gate1.SetResult();
+        await t.Settled; // settles on r1 alone
+        Assert.False(t.IsPending);
+        gate2.SetResult(); // unpark the stray effect
+    }
+
+    [Fact(Timeout = 5000)]
     public async Task Transition_ParentFaultWithSuccessfulRerun_SettlesClean_WithoutAFaultRecord()
     {
         var f = new MemoFactory();

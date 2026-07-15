@@ -135,13 +135,15 @@ re-derived for a pull-based, multi-threaded graph. A **transition** tracks one w
 every reaction the writes invalidate — until all its effects have applied:
 
 ```cs
-await using (var t = f.BeginTransition()) // seals on dispose; await using also awaits settlement
-{
-    await v1.Set(5);      // Sets inside the scope are tracked, transitively through memos
-    _ = t.IsPending;      // snapshot: effects still in flight?
-    _ = t.Pending;        // reactive IStateGetR<bool> — a spinner is just a reaction on it
-}
+var t = f.BeginTransition();
+await v1.Set(5);          // Sets inside the scope are tracked, transitively through memos
+_ = t.IsPending;          // snapshot: effects still in flight?
+_ = t.Pending;            // reactive IStateGetR<bool> — a spinner is just a reaction on it
+t.Dispose();              // seals the wavefront (writes after this are no longer tracked)
 await t.Settled;          // the onSettled analog; reaction faults aggregate here
+
+// or in one step — seal at the block end AND await settlement:
+await using (f.BeginTransition()) { await v1.Set(5); }
 
 r1.IsPending;             // per-reaction reactive "an update is scheduled or running" flag
 ```

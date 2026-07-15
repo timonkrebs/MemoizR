@@ -121,10 +121,12 @@ public sealed class Transition : IDisposable, IAsyncDisposable, IStabilizationLi
         var subscribe = false;
         lock (gate)
         {
-            if (settled.Task.IsCompleted)
+            if (isSealed)
             {
-                // A fully settled transition is immutable; a Set performed on a flow that
-                // still carries the tag after settlement is not tracked.
+                // Dispose FIXES the wavefront: a Set performed by work that still carries the
+                // tag after the scope closed (fire-and-forget spawned inside it) must not
+                // extend, fault, or hang the sealed transition. Covers settled too (settlement
+                // implies sealed).
                 return;
             }
 
