@@ -262,6 +262,26 @@ See [ADR 0003](docs/adr/0003-sendable-checking-and-isolation-assertions.md) (run
 [ADR 0005](docs/adr/0005-custom-executors.md) (executors), and
 [ADR 0006](docs/adr/0006-actor-engine-prototype.md) (actor engine) for the design and its limits.
 
+### Blazor
+
+With the `MemoizR.Blazor` package the same threading contract reaches Blazor — Server and
+WebAssembly. `services.AddMemoizR()` registers one graph per circuit (circuits are genuinely
+multi-threaded, exactly what the cross-flow guarantees are for), and components inheriting
+`MemoizRComponentBase` project nodes into render-ready fields: dependency evaluation on the
+thread pool, only the field write plus `StateHasChanged` marshalled through the component's
+`InvokeAsync`:
+
+```cs
+protected override void OnInitialized()
+{
+    Bind(optimistic, value => todos = value);          // re-renders on every committed change
+    Bind(addTodo.IsPending, p => submitDisabled = p);  // pending indicator drives the button
+}
+```
+
+Reactions owned by services rather than components can target a renderer dispatcher directly
+with `f.AddBlazorDispatcher(dispatcher)`.
+
 ### WPF / UI threads
 
 With the `MemoizR.Wpf` package the whole dependency graph keeps evaluating on the thread pool;

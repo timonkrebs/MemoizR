@@ -1,6 +1,7 @@
 # ADR 0007 — Transitions, `IsPending`, and optimistic state with automatic rollback
 
-- Status: Proposed (phases 1–3 implemented on this branch; 4–5 open)
+- Status: Proposed (phases 1–4 implemented on this branch — phase 4 without the sample app and
+  bUnit component tests; phase 5 open)
 - Date: 2026-07-15
 - Deciders: MemoizR maintainers
 - Inspiration: Solid 2.0's async architecture (deferred stabilization, `isPending`,
@@ -248,6 +249,13 @@ Where the landed code deliberately deviates from the sketches above:
 - `CreateAction` uses a plain per-run `CancellationTokenSource` instead of depending on
   `MemoizR.StructuredConcurrency`; an overload wrapping a structured resource group can be
   layered in that assembly later without touching the Reactive types.
+- Phase 4 landed as `MemoizR.Blazor`: `BlazorDispatcherExecutor` (the exact
+  `WpfDispatcherExecutor` mirror), a component-agnostic `ReactionBinder` (the render-snapshot
+  pattern: apply-into-field plus `StateHasChanged`, both marshalled through `InvokeAsync`),
+  `MemoizRComponentBase` gluing it to components, and `services.AddMemoizR()` for the
+  scoped-per-circuit factory. Integration-tested against `Dispatcher.CreateDefault()` — the
+  renderer dispatcher Blazor Server uses — so the thread-pool/renderer split is pinned without
+  a renderer; the optimistic-todo sample app and bUnit component tests remain open.
 
 ## Consequences
 
