@@ -37,6 +37,20 @@ public static class ReactiveMemoFactory
         return new(memoFactory, memoFactory.Executor, label);
     }
 
+    /// <summary>
+    /// Opens a transition scope (ADR 0007): Sets performed inside it are tagged, and the
+    /// returned <see cref="Transition"/> tracks every reaction the writes invalidate until all
+    /// of them have committed clean again -- observable via <see cref="Transition.IsPending"/> /
+    /// <see cref="Transition.Pending"/> and awaitable via <see cref="Transition.Settled"/>.
+    /// <c>using</c> seals the wavefront at scope end; <c>await using</c> additionally awaits
+    /// settlement. Scopes nest innermost-wins: writes inside an inner scope are tracked by the
+    /// inner transition only.
+    /// </summary>
+    public static Transition BeginTransition(this MemoFactory memoFactory)
+    {
+        return new(memoFactory.Context);
+    }
+
     // Factory-level sugar for the common case: identical to BuildReaction().CreateReaction(..)
     // with the default label and debounce -- use BuildReaction to configure either. The
     // threading contract is the builder's: dependencies are registered in parameter order, the

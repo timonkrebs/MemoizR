@@ -183,6 +183,28 @@ public abstract class SignalHandlR : IMemoHandlR
         }
     }
 
+    // Dispose-time release (ADR 0007): the node will never commit again, so waiters must be
+    // released regardless of their thresholds -- int.MaxValue satisfies them all by fiat.
+    internal void NotifyStabilizationReleased() => NotifyStabilized(int.MaxValue);
+
+    // An update faulted instead of committing (called by ReactionBase's catch; memo faults
+    // surface to the Get caller through the pull path instead).
+    internal void NotifyStabilizationFaulted(Exception exception)
+    {
+        foreach (var listener in stabilizationListeners)
+        {
+            try
+            {
+                listener.OnStabilizationFaulted(this, exception);
+            }
+            catch
+            {
+                // Same contract as NotifyStabilized: listener faults must not escape into the
+                // faulting evaluation's control flow.
+            }
+        }
+    }
+
     // Rewire our source up-links and the parents' observer down-links to match the sources
     // captured during the current evaluation (Context.ReactionScope.CurrentGets). Must only be
     // called by IMemoizR nodes, inside their ContextLock-serialized evaluation.

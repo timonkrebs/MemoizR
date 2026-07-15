@@ -130,6 +130,9 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
         // re-acquires locks or re-runs the parent scan.
         pending.Cancel();
         RemoveParentObservers();
+        // A dead reaction will never commit: release waiters (transitions) instead of leaving
+        // them pending forever (ADR 0007).
+        NotifyStabilizationReleased();
     }
 
     protected abstract Task Execute();
@@ -208,7 +211,7 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
             {
                 await InvokeExecute();
             }
-            catch
+            catch (Exception exception)
             {
                 stateCell.Force(CacheState.CacheDirty);
                 // A reaction has no pull path: if a FIRST run throws with no links wired, no
@@ -223,6 +226,9 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
                 {
                     UpdateSourceAndObserverLinks();
                 }
+                // No commit will follow and nothing reschedules until the next invalidation:
+                // waiters (transitions) must hear the fault instead of a commit (ADR 0007).
+                NotifyStabilizationFaulted(exception);
                 throw;
             }
 
@@ -268,12 +274,27 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
             return Task.CompletedTask;
         }
 
+        // Resolved before the locked region: the tag rides the writing flow (the invalidation
+        // cascade runs synchronously inside the Set), and registration happens after the
+        // monitor exits -- the transition's recovery checks make that ordering free.
+        var transition = TransitionFlow.Current.Value;
+        int invalidationGeneration;
+        bool pendingRose;
+
         CancellationTokenSource superseded;
         lock (staleLock)
         {
             // Escalate and bump the generation so an in-flight recompute can't commit Clean over
             // this invalidation; the debounce below still (re)schedules the update regardless.
-            stateCell.Invalidate(state);
+            // The post-bump generation is this invalidation's wavefront membership: a commit
+            // reflects it exactly when its token is >= this value (ADR 0007).
+            stateCell.Invalidate(state, out invalidationGeneration);
+
+            // Every Stale spawns exactly one debounced update, whose outermost finally
+            // decrements -- so the count is exactly "scheduled or running updates", and its
+            // zero-crossings drive IsPending.
+            pendingRose = Interlocked.Increment(ref pendingCount) == 1;
+
             superseded = cts;
             cts = new();
 
@@ -297,11 +318,24 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
         // inline on this stack, and that continuation takes other locks (ExitEvaluationScope).
         superseded.Cancel();
 
+        transition?.RegisterReached(this, invalidationGeneration);
+        if (pendingRose)
+        {
+            SchedulePendingPublish();
+        }
+
         return Task.CompletedTask;
     }
 
     private async Task RunDebouncedUpdateAsync(TimeSpan debounceTime, CancellationToken token)
     {
+        // This detached task inherits the triggering Set's ExecutionContext -- including any
+        // ambient transition tag. The update's incidental Stales (commit-refused renotifies,
+        // diamond marks) are machinery, not writes: left tagged they could re-arm the
+        // transition forever. Local to this method's flow (async methods are an
+        // ExecutionContext boundary), so the caller's tag is untouched.
+        TransitionFlow.Suppress();
+
         // Balances the EnterEvaluationScope performed by the Stale that spawned this task --
         // on the full-run path AND the superseded-early-return path.
         try
@@ -354,6 +388,12 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
         finally
         {
             Context.ExitEvaluationScope();
+            // Balances the Stale that spawned this run; the zero-crossing publishes
+            // IsPending == false ("nothing scheduled or running").
+            if (Interlocked.Decrement(ref pendingCount) == 0)
+            {
+                SchedulePendingPublish();
+            }
         }
     }
 
@@ -361,6 +401,73 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
     {
         return Stale(state, DebounceTime);
     }
+
+    // "An update is scheduled or running" (ADR 0007): incremented by every Stale, decremented
+    // when its spawned update finishes (committed, superseded, paused-out, or faulted). Note
+    // the asymmetry with transitions: a PAUSED reaction reads not-pending here (nothing is in
+    // flight) while a transition it was reached by stays pending until a Resume commits.
+    private int pendingCount;
+    private Signal<bool>? isPendingSignal;
+    private Task pendingPublishChain = Task.CompletedTask;
+    private readonly Lock pendingPublishLock = new();
+
+    /// <summary>Snapshot of <see cref="IsPending"/>, sync-readable (e.g. from a render).</summary>
+    public bool IsPendingSnapshot => Volatile.Read(ref pendingCount) > 0;
+
+    /// <summary>
+    /// The reactive "an update of this reaction is in flight" flag (ADR 0007): true from an
+    /// invalidation scheduling an update until that update has run -- an ordinary graph node,
+    /// so a progress indicator is just another reaction on it. Published from a detached
+    /// runtime flow; it converges on <see cref="IsPendingSnapshot"/>, individual flips can lag.
+    /// </summary>
+    public IStateGetR<bool> IsPending
+    {
+        get
+        {
+            if (isPendingSignal is null)
+            {
+                LazyInitializer.EnsureInitialized(ref isPendingSignal,
+                    () => new Signal<bool>(IsPendingSnapshot, Context) { Label = $"{Label}.IsPending" });
+                // Fold any zero-crossing that raced the lazy creation into the signal.
+                SchedulePendingPublish();
+            }
+            return isPendingSignal!;
+        }
+    }
+
+    // Same chained-pump shape as Transition.SchedulePendingPublish: callers sit inside
+    // invalidation cascades and update finallys where a Set would re-enter the graph, so each
+    // link publishes detached, in schedule order, reading the CURRENT snapshot at Set time --
+    // the last link always converges the signal onto the latest truth.
+    private void SchedulePendingPublish()
+    {
+        if (isPendingSignal is null)
+        {
+            return;
+        }
+
+        lock (pendingPublishLock)
+        {
+            var prev = pendingPublishChain;
+            pendingPublishChain = Task.Run(async () =>
+            {
+                TransitionFlow.Suppress();
+                await prev.ConfigureAwait(false);
+                try
+                {
+                    await isPendingSignal!.Set(IsPendingSnapshot).ConfigureAwait(false);
+                }
+                catch
+                {
+                    // A failed publish must not break the chain; the next zero-crossing
+                    // schedules another link that converges the signal.
+                }
+            });
+        }
+    }
+
+    // Registration-vs-dispose race recovery for Transition.RegisterReached.
+    internal bool IsDisposed => disposed;
 
     // Eager-run contract: a reaction executes once on creation (SolidJS-style effect semantics),
     // scheduled through the same invalidation/debounce machinery as every other trigger.

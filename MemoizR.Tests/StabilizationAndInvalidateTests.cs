@@ -12,8 +12,11 @@ public class StabilizationAndInvalidateTests
     private sealed class RecordingListener : IStabilizationListener
     {
         public readonly System.Collections.Concurrent.ConcurrentQueue<int> Tokens = new();
+        public readonly System.Collections.Concurrent.ConcurrentQueue<Exception> Faults = new();
 
         public void OnStabilized(SignalHandlR node, int token) => Tokens.Enqueue(token);
+
+        public void OnStabilizationFaulted(SignalHandlR node, Exception exception) => Faults.Enqueue(exception);
     }
 
     [Fact]

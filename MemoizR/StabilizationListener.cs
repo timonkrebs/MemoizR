@@ -21,6 +21,14 @@ internal interface IStabilizationListener
     // non-blocking, must not re-enter the graph (no Get/Set/Invalidate), and must complete any
     // TaskCompletionSource with RunContinuationsAsynchronously. Calls can arrive out of order
     // across flows and more than once per logical stabilization -- treat the token as level
-    // information (threshold comparison), never as an edge.
+    // information (threshold comparison), never as an edge. A dispose-time release arrives as
+    // token == int.MaxValue: the node will never commit again, so every threshold is moot.
     void OnStabilized(SignalHandlR node, int token);
+
+    // Called when an update of `node` faulted instead of committing (today: a reaction whose
+    // Execute threw -- the pull path surfaces memo faults to the Get caller instead). The node
+    // stays dirty and nothing is rescheduled until its next invalidation, so a waiter must not
+    // keep waiting for a commit that will never come. Same execution constraints as
+    // OnStabilized.
+    void OnStabilizationFaulted(SignalHandlR node, Exception exception);
 }
