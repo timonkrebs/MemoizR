@@ -65,6 +65,28 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
 
     private async Task RunResumeUpdate(bool detachedScope)
     {
+        // A resume update is in-flight work like any debounced update: a paused reaction's
+        // invalidations already drained the counter (their updates parked out), so without
+        // this the arbitrary-length Execute below would run with IsPending reading false.
+        if (Interlocked.Increment(ref pendingCount) == 1)
+        {
+            SchedulePendingPublish();
+        }
+        try
+        {
+            await RunResumeUpdateCore(detachedScope);
+        }
+        finally
+        {
+            if (Interlocked.Decrement(ref pendingCount) == 0)
+            {
+                SchedulePendingPublish();
+            }
+        }
+    }
+
+    private async Task RunResumeUpdateCore(bool detachedScope)
+    {
         // Serialize like the debounced update path: the node mutex ensures only one update of
         // this reaction runs at a time (Resume vs concurrent debounced updates -- without it, a
         // stale in-flight Execute could apply its side effects after a newer one finished), and

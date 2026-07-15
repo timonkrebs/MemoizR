@@ -60,16 +60,21 @@ A **transition** is the unit "this write (or group of writes), until every react
 invalidated has committed clean again."
 
 ```csharp
-await using var t = f.BeginTransition();
+var t = f.BeginTransition();
 await v1.Set(5);                  // Sets inside the scope are tagged with the transition
 await v2.Set("x");
+t.Dispose();                      // seals the wavefront (or: await using (t) { ...Sets... })
 
 // observable state:
 t.IsPending          // bool snapshot (sync-readable, e.g. from a render)
 t.Pending            // IStateGetR<bool> — reactive, other nodes can depend on it
-await t.Settled;     // Task — completes when the wavefront has stabilized (onSettled analog)
-t.Exception          // set when a reached reaction's update faulted
+await t.Settled;     // completes once sealed AND the wavefront stabilized (onSettled analog);
+                     // reached-reaction faults surface here as an AggregateException
 ```
+
+Settlement requires the seal (only sealing fixes the wavefront — early drain between two Sets
+must not settle), so `Settled` is awaited AFTER the scope: an `await using` block seals at the
+block end and additionally awaits settlement itself.
 
 **Mechanics** (all hooks exist today):
 
@@ -138,17 +143,18 @@ concurrent writers and can resurrect stale state; removing an overlay cannot.
 var todos     = f.CreateSignal(ImmutableList<Todo>.Empty);
 
 // optimistic view = base + pending patches, in one node
-var optimistic = f.CreateOptimistic(todos);        // IStateGetR<ImmutableList<Todo>>
+var optimistic = f.CreateOptimistic<ImmutableList<Todo>>(todos);
 
-var addTodo = f.CreateAction<Todo>(async (todo, action) =>
+var addTodo = f.CreateAction<Todo>(async (todo, ctx) =>
 {
-    action.Apply(optimistic, list => list.Add(todo with { Pending = true })); // instant projection
-    var confirmed = await api.SaveAsync(todo, action.Token);                  // the process step
-    await action.Confirm(todos, list => list.Add(confirmed));                 // commit + drop patch
-});                                                                            // fault/cancel ⇒ patch removed ⇒ automatic rollback
+    await ctx.Apply(optimistic, list => list.Add(todo with { Pending = true })); // instant projection
+    var confirmed = await api.SaveAsync(todo, ctx.Token);                        // the process step
+    await todos.Set((await todos.Get()).Add(confirmed));                         // confirm the source
+});                       // run end drops the patches: on fault/cancel that IS the rollback
 
-await addTodo.Run(newTodo);      // returns the action's Transition
-addTodo.IsPending                // pending indicator for free (it IS a transition)
+var run = addTodo.Run(newTodo);  // detached; run.Completion is the body, run.Settled the effects
+addTodo.IsPending                // reactive pending indicator across all runs
+await run.Settled;               // the UI reflects the final outcome (patch gone)
 ```
 
 **Internals:**
@@ -257,6 +263,13 @@ Where the landed code deliberately deviates from the sketches above:
   notifications carry the faulted update's generation token and are gated by the same
   threshold rule as commits, so an old in-flight failure cannot fault a newer wavefront whose
   superseding update is still owed a commit.
+- Known strict-mode gap, deferred to the phase-5 analyzers: optimistic patch DELEGATES are not
+  runtime-validated. A patch runs inside the view's computation on whichever flow pulls, so a
+  lambda closing over mutable state crosses flows — but closure display classes always carry
+  writable fields, so a structural runtime check would reject every capturing lambda, including
+  harmless immutable captures. This is exactly MZR002-shaped compile-time work: an analyzer
+  rule flagging optimistic patches that capture mutable state (the payload type itself IS
+  checked — `CreateAction` gates `TPayload` through the strict Sendable bar).
 - Phase 4 landed as `MemoizR.Blazor`: `BlazorDispatcherExecutor` (the exact
   `WpfDispatcherExecutor` mirror), a component-agnostic `ReactionBinder` (the render-snapshot
   pattern: apply-into-field plus `StateHasChanged`, both marshalled through `InvokeAsync`),

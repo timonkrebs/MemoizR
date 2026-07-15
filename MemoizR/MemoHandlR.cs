@@ -120,12 +120,15 @@ public abstract class SignalHandlR : IMemoHandlR
 
     // Stabilization listeners (ADR 0007): notified after every successful Clean commit of this
     // node, with the generation token the commit succeeded against. Whole-array swaps under
-    // Lock, like Observers; the commit-path read is unsynchronized, so a listener registered on
-    // another flow can miss an in-flight commit -- exactly the race the registration protocol on
-    // IStabilizationListener recovers via CacheStateCell.LastCleanCommitToken. Strong references
-    // on purpose (unlike the weak Observers): a listener's lifetime is owned by its registrant,
-    // which must unregister -- transitions are short-lived and do.
-    private IStabilizationListener[] stabilizationListeners = [];
+    // Lock, like Observers; volatile because the commit-path read has no lock (ADR 0001 rule 2:
+    // the swap's release needs a pairing acquire, or a weakly-ordered CPU could enumerate a
+    // stale array indefinitely). The recovery protocol still matters for the REAL race -- a
+    // commit that read the array before a registration landed -- but with the volatile pairing
+    // that window is bounded by the registrant's subsequent LastCleanCommitToken read instead
+    // of being unbounded. Strong references on purpose (unlike the weak Observers): a
+    // listener's lifetime is owned by its registrant, which must unregister -- transitions are
+    // short-lived and do.
+    private volatile IStabilizationListener[] stabilizationListeners = [];
 
     internal void AddStabilizationListener(IStabilizationListener listener)
     {

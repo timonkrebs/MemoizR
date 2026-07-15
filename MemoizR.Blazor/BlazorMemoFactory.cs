@@ -27,7 +27,24 @@ public static class BlazorMemoFactory
 // reaction actions.
 internal sealed class BlazorDispatcherExecutor(Dispatcher dispatcher) : IExecutor
 {
-    public void Enqueue(Action work) => _ = dispatcher.InvokeAsync(work);
+    public void Enqueue(Action work) => _ = EnqueueCore(work);
+
+    private async Task EnqueueCore(Action work)
+    {
+        try
+        {
+            await dispatcher.InvokeAsync(work).ConfigureAwait(false);
+        }
+        catch
+        {
+            // The dispatcher rejected the work without running it (circuit/renderer teardown):
+            // ExecutorInvoke would wait forever on a callback that never runs, wedging the
+            // reaction's update pipeline, its pending flag and any transition. Run it inline
+            // instead -- the ExecutorInvoke wrapper never throws, and Blazor's dispatcher
+            // faults its task only when the work did not run, so this cannot double-run it.
+            work();
+        }
+    }
 
     public bool IsCurrent => dispatcher.CheckAccess();
 }

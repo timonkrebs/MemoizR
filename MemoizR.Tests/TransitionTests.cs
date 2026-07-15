@@ -210,6 +210,37 @@ public class TransitionTests
     }
 
     [Fact(Timeout = 5000)]
+    public async Task Reaction_IsPending_CoversResumeUpdates()
+    {
+        var f = new MemoFactory();
+        var v = f.CreateSignal(1);
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var r = f.BuildReaction().CreateAdvancedReaction(async () =>
+        {
+            if (await v.Get() == 5)
+            {
+                await gate.Task;
+            }
+        });
+        await TestHelpers.WaitForConvergenceAsync(() => !r.IsPendingSnapshot);
+
+        // Paused: the scheduled update parks out without executing, draining the counter.
+        r.Pause();
+        await v.Set(5);
+        await TestHelpers.WaitForConvergenceAsync(() => !r.IsPendingSnapshot);
+
+        // The resume update runs the arbitrary-length effect; the pending flag must cover it.
+        var resume = r.Resume();
+        await TestHelpers.WaitForConvergenceAsync(() => r.IsPendingSnapshot);
+        Assert.True(r.IsPendingSnapshot);
+
+        gate.SetResult();
+        await resume;
+        Assert.False(r.IsPendingSnapshot);
+        await TestHelpers.WaitForConvergenceAsync(() => !r.IsPending.Get().Result);
+    }
+
+    [Fact(Timeout = 5000)]
     public async Task Transition_PausedReaction_KeepsPendingUntilResumeCommits()
     {
         var f = new MemoFactory();
