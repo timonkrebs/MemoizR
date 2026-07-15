@@ -69,14 +69,33 @@ public sealed class ExportedNode<T> : IDisposable
 
     // Dirty every source whose current evidence is unverifiable (recursively, sources before
     // consumers) so one Get re-evaluates the whole poisoned chain bottom-up: refreshing only
-    // this node would just re-consume the sticky no-claim evidence and republish it.
+    // this node would just re-consume the sticky no-claim evidence and republish it. The whole
+    // chain is invalidated under one exclusive ContextLock acquisition -- the same discipline
+    // as MemoBase.Invalidate() and a parent-driven Stale, so no evaluation's commit window
+    // interleaves with a half-invalidated chain.
     private static async Task RefreshUnverifiableChainAsync(SignalHandlR handle)
+    {
+        var scope = handle.Context.ReactionScope;
+        try
+        {
+            using (await scope.ContextLock.ExclusiveLockAsync())
+            {
+                await InvalidateUnverifiableChainAsync(handle);
+            }
+        }
+        finally
+        {
+            GC.KeepAlive(scope);
+        }
+    }
+
+    private static async Task InvalidateUnverifiableChainAsync(SignalHandlR handle)
     {
         foreach (var source in handle.Sources)
         {
             if (source is SignalHandlR sourceHandle && sourceHandle.Evidence.Unverifiable)
             {
-                await RefreshUnverifiableChainAsync(sourceHandle);
+                await InvalidateUnverifiableChainAsync(sourceHandle);
             }
         }
         await handle.InvalidateAndPropagateAsync(CacheState.CacheDirty);
