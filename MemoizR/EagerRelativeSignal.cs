@@ -10,7 +10,14 @@ public sealed class EagerRelativeSignal<T> : MemoHandlR<T>, IStampedGetR<T>
 
     internal EagerRelativeSignal(T value, Context context) : base(context)
     {
-        SetValueAndStamp(value, CausalityStamp.ForSignal(Id, 0, context.Epoch));
+        if (context.StampsEnabled)
+        {
+            SetValueAndStamp(value, CausalityStamp.ForSignal(Id, 0, context.Epoch));
+        }
+        else
+        {
+            SetValueUnstamped(value);
+        }
     }
 
     public async Task Set(Func<T, T> fn)
@@ -36,8 +43,16 @@ public sealed class EagerRelativeSignal<T> : MemoHandlR<T>, IStampedGetR<T>
                 {
                     // Every Set bumps the causality trigger: a relative update always propagates
                     // CacheDirty (there is no equality short-cut here), so the trigger mirrors
-                    // exactly what observers are told (issue #39).
-                    SetValueAndStamp(fn(Value), CausalityStamp.ForSignal(Id, ++trigger, Context.Epoch));
+                    // exactly what observers are told (issue #39). A stamps-disabled context
+                    // builds no stamp at all.
+                    if (Context.StampsEnabled)
+                    {
+                        SetValueAndStamp(fn(Value), CausalityStamp.ForSignal(Id, ++trigger, Context.Epoch));
+                    }
+                    else
+                    {
+                        SetValueUnstamped(fn(Value));
+                    }
                 }
 
                 await PropagateStaleToObserversAsync(CacheState.CacheDirty);

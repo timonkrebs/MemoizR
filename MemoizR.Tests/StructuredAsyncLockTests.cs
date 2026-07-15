@@ -121,7 +121,11 @@ public class AsyncAsymmetricLockTests
         Assert.NotEqual(0, lockScope);
     }
 
-    [Fact(Timeout = 10000)]
+    // 30s, not the 10s of the stress tests below: this test holds the lock across a
+    // Task.Delay(5) for each of its ~400 serialized acquisitions, several seconds of strictly
+    // sequential work that a slow CI runner pushed past 10s (observed twice on macos-latest,
+    // including on a no-code-change dependency bump).
+    [Fact(Timeout = 30000)]
     public async Task UpgradeableLock_ThreadSavety()
     {
         // Arrange
