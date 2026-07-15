@@ -89,6 +89,14 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
 
             if (parent is IReturnOperation or IThrowOperation)
             {
+                if (!escapes)
+                {
+                    // The escaping expression itself still evaluates past the transfer:
+                    // `return Pair(Sending.Transfer(list), list);` reads the second argument
+                    // after the handoff, before the method returns.
+                    roots.Add(parent);
+                }
+
                 escapes = true;
             }
             else if (escapes && parent is ITryOperation { Finally: { } finallyBlock })
@@ -105,11 +113,13 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         return roots;
     }
 
-    // Transfer(list = new(...)): after the statement the variable ALIASES the transferred
-    // value -- the assignment's target is what the sender keeps holding.
+    // Transfer(list = new(...)) -- and the lazy-init form Transfer(list ??= new(...)): after
+    // the statement the variable ALIASES the transferred value on every path, so the
+    // assignment's target is what the sender keeps holding. IAssignmentOperation covers
+    // simple, coalesce and compound forms alike.
     private static IOperation? TransferTarget(IOperation? argument)
     {
-        return argument is ISimpleAssignmentOperation assignment ? assignment.Target : argument;
+        return argument is IAssignmentOperation assignment ? assignment.Target : argument;
     }
 
     // A transfer inside a nested callback only concerns the callback's own body: the outer
@@ -212,9 +222,9 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             };
 
             if (dominatingPart is not null
-                && parent.Syntax.Span.Contains(transferPosition)
-                && !child.Syntax.Span.Contains(transferPosition)
-                && !dominatingPart.Syntax.Span.Contains(transferPosition)
+                && Covers(parent, transferPosition)
+                && !Covers(child, transferPosition)
+                && !Covers(dominatingPart, transferPosition)
                 && !IsInACaseGuard(parent, transferPosition))
             {
                 return true;
@@ -238,7 +248,16 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             _ => System.Linq.Enumerable.Empty<IOperation?>(),
         };
 
-        return guards.Any(guard => guard is not null && guard.Syntax.Span.Contains(transferPosition));
+        return guards.Any(guard => guard is not null && Covers(guard, transferPosition));
+    }
+
+    // transferPosition is the transfer's EXCLUSIVE span end, so an operation whose span ends
+    // exactly there (the switch value IS the transfer: `switch (Sending.Transfer(list))`)
+    // still covers it -- plain TextSpan.Contains excludes its own end.
+    private static bool Covers(IOperation operation, int transferPosition)
+    {
+        var span = operation.Syntax.Span;
+        return span.Contains(transferPosition) || span.End == transferPosition;
     }
 
     // The region a skipped conditional reinitialization dominates: its nearest enclosing arm
@@ -361,7 +380,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                 continue;
             }
 
-            if (!child.Syntax.Span.Contains(transferPosition))
+            if (!Covers(child, transferPosition))
             {
                 return false;
             }

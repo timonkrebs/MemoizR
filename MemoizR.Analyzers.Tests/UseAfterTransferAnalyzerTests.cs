@@ -574,6 +574,82 @@ public class UseAfterTransferAnalyzerTests
     }
 
     [Fact]
+    public async Task SwitchValueTransfers_DominateTheArms()
+    {
+        // The switch VALUE evaluates before the selected case -- and here the value IS the
+        // transfer, whose exclusive span end must still count as covering the position.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    switch (Sending.Transfer(list))
+                    {
+                        case var _:
+                            list.Add(1);
+                            break;
+                    }
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+    }
+
+    [Fact]
+    public async Task CoalesceAssignmentTransfer_IsTracked()
+    {
+        // The lazy-init handoff aliases the variable to the transferred value on BOTH paths
+        // (already non-null, or just assigned): the later Add is a use-after-transfer.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public Sending<List<int>> M()
+                {
+                    List<int>? list = null;
+                    var sending = Sending.Transfer(list ??= new List<int> { 1 });
+                    list.Add(1);
+                    return sending;
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+    }
+
+    [Fact]
+    public async Task EscapingExpressions_StillReadTheirLaterArguments()
+    {
+        // The return expression evaluates its remaining arguments AFTER the transfer, before
+        // the method exits: the second argument is a use on the transfer path.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public (Sending<List<int>>, List<int>) M()
+                {
+                    var list = new List<int> { 1 };
+                    return (Sending.Transfer(list), list);
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+    }
+
+    [Fact]
     public async Task FinallyBlocks_RunAfterAReturnTransfer_AndAreStillScanned()
     {
         // `return Sending.Transfer(list)` exits the method -- but the enclosing finally runs
