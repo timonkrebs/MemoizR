@@ -175,8 +175,17 @@ public sealed class RemoteSignal<T>
             verdict = Classify(payload, pulledAtGeneration);
             if (verdict is AdoptionVerdict.Adopt or AdoptionVerdict.AdoptReset)
             {
-                CommitOrdering(payload, incoming, verdict == AdoptionVerdict.AdoptReset);
-                await local.Set(_ => payload.Value);
+                var adopted = CommitOrdering(payload, incoming, verdict == AdoptionVerdict.AdoptReset);
+                await local.Set(_ =>
+                {
+                    // The snapshot becomes visible as part of the graph write, under the same
+                    // exclusive context lock: a barrier evaluation (upgradeable, excluded by
+                    // the exclusive) can never observe the new evidence while the local graph
+                    // value still lags behind the queued Set -- publication and graph value
+                    // advance together, and the Set's own propagation re-runs the barrier.
+                    publication = adopted;
+                    return payload.Value;
+                });
             }
         }
         finally
@@ -256,8 +265,9 @@ public sealed class RemoteSignal<T>
         return pulledAtGeneration is null ? AdoptionVerdict.VerifyByPull : AdoptionVerdict.Drop;
     }
 
-    // Must be called under the adoption gate.
-    private void CommitOrdering(ValuePayload<T> payload, CausalityStamp incoming, bool isReset)
+    // Must be called under the adoption gate. Commits the ordering state and builds the new
+    // publication snapshot; the caller makes it visible inside the local graph write.
+    private AdoptedPublication<T> CommitOrdering(ValuePayload<T> payload, CausalityStamp incoming, bool isReset)
     {
         CausalityStamp heldVerifiedStamp;
         if (isReset)
@@ -280,7 +290,7 @@ public sealed class RemoteSignal<T>
 
         currentEpoch = payload.Epoch;
         lastSequence = payload.Sequence;
-        publication = new AdoptedPublication<T>(
+        return new AdoptedPublication<T>(
             payload.Value,
             payload.Epoch,
             payload.Unverifiable ? heldVerifiedStamp : incoming,
