@@ -32,9 +32,12 @@ for project in \
     Source/Test/Test.csproj \
     Tools/CLI/Coyote.CLI.csproj \
     Scripts/NuGet/Coyote.Meta.csproj; do
+    # -p: (not /p:) -- git-bash on Windows applies MSYS path conversion to
+    # slash-prefixed arguments, mangling /p:Foo=bar into a stray 'p:Foo=bar'
+    # that MSBuild rejects with MSB1008. The dash form is never converted.
     dotnet pack -c Release \
-        "/p:VersionPrefix=$COYOTE_VERSION_PREFIX" \
-        "/p:VersionSuffix=$COYOTE_VERSION_SUFFIX" \
+        "-p:VersionPrefix=$COYOTE_VERSION_PREFIX" \
+        "-p:VersionSuffix=$COYOTE_VERSION_SUFFIX" \
         "$SRC_DIR/$project"
 done
 
