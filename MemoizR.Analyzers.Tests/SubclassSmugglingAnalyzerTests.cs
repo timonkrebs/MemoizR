@@ -305,4 +305,53 @@ public class SubclassSmugglingAnalyzerTests
 
         Assert.Empty(diagnostics);
     }
+
+    [Fact]
+    public async Task GreenListedTaskSurfaces_StillHintTheUpcastSmuggle()
+    {
+        // Task needs no accidental user subclass: every Task<TResult> IS one, so a declared
+        // Task surface can smuggle an arbitrary payload past the creation check (which sees
+        // only typeof(Task)). ValidateWrittenValues is the runtime net -- hint it.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using System.Threading.Tasks;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    f.CreateSignal<Task>(Task.FromResult<List<int>>(new List<int>()));
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR006", diagnostic.Id);
+        Assert.Contains("Task", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task GenericTaskSurfaces_KeepTheGreenListExemption()
+    {
+        // A declared Task<T> exposes its payload as a TYPE ARGUMENT the walk already
+        // unfolds; the surface itself stays exempt -- user code subclassing Task<T> is not
+        // a plausible failure mode.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Threading.Tasks;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    f.CreateSignal(Task.FromResult(1));
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
 }

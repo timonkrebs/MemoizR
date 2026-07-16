@@ -200,10 +200,15 @@ public sealed class SubclassSmugglingAnalyzer : DiagnosticAnalyzer
     // promise for itself), so the assertion binds the declaring author and NOT every subclass
     // or implementer -- the smuggle hole reopens exactly where the Error rule went quiet.
     // Green-listed framework types (Uri is not sealed!) are not plausibly subclassed by
-    // accident, object stays MZR001's, and value types cannot be subclassed at all.
+    // accident, object stays MZR001's, and value types cannot be subclassed at all. The
+    // exception is a surface whose green-listed GENERIC subclass the framework itself ships
+    // (Task <- Task<TResult>): no accident needed -- the creation check sees only the
+    // declared type, and ValidateWrittenValues is the net that catches the instance.
     internal static bool IsSmuggleSurface(INamedTypeSymbol named)
     {
-        if (named.SpecialType == SpecialType.System_Object || SendableSymbolClassifier.IsFrameworkGreenListed(named))
+        if (named.SpecialType == SpecialType.System_Object
+            || (SendableSymbolClassifier.IsFrameworkGreenListed(named)
+                && !SendableSymbolClassifier.HasAGreenListedGenericSubclass(named)))
         {
             return false;
         }

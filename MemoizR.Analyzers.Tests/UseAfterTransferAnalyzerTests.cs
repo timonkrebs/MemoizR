@@ -5182,4 +5182,299 @@ public class UseAfterTransferAnalyzerTests
         Assert.Equal("MZR005", diagnostic.Id);
         Assert.Contains("'list'", diagnostic.GetMessage());
     }
+
+    [Fact]
+    public async Task FieldStoredDelegates_InvokedThroughTheField_AreUses()
+    {
+        // The reading lambda lives in a FIELD slot: invoking through the field after the
+        // handoff runs it exactly like a local-held delegate would.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                private Action? use;
+
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    this.use = () => list.Add(1);
+                    var sending = Sending.Transfer(list);
+                    this.use!();
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task FieldStoredDelegates_OverwrittenBeforeTheInvocation_AreQuiet()
+    {
+        // The definite overwrite replaces the field's invocation list before the call:
+        // the reading lambda is no longer what `this.use!()` runs.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                private Action? use;
+
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    this.use = () => list.Add(1);
+                    var sending = Sending.Transfer(list);
+                    this.use = () => { };
+                    this.use!();
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task FilteredCatchesOfUnrelatedTypes_CannotSeeAnExplicitThrow()
+    {
+        // C# tests the clause TYPE before running any filter: a filtered catch of an
+        // unrelated type can never receive the InvalidOperationException, so the handler
+        // never observes the transferred value.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    try
+                    {
+                        var sending = Sending.Transfer(list);
+                        throw new InvalidOperationException();
+                    }
+                    catch (ArgumentException) when (MayPass())
+                    {
+                        list.Add(1);
+                    }
+                }
+
+                private static bool MayPass() => true;
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task FilteredCatchesOfMatchingTypes_StillSeeAnExplicitThrow()
+    {
+        // The type gate passes, so whether the handler runs is down to the filter -- which
+        // may pass: the catch stays reachable and its read reports.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    try
+                    {
+                        var sending = Sending.Transfer(list);
+                        throw new InvalidOperationException();
+                    }
+                    catch (InvalidOperationException) when (MayPass())
+                    {
+                        list.Add(1);
+                    }
+                }
+
+                private static bool MayPass() => true;
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+    }
+
+    [Fact]
+    public async Task EnclosingResetFailures_AtOrBeforeTheHandoff_DoNotOpenTheWindow()
+    {
+        // The only throw-capable operation in the reinitializing RHS is the Transfer call
+        // itself: if it throws, no wrapper escaped; if it succeeds, the local is reset
+        // before the catch could ever run. The handler never sees a transferred value.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    try
+                    {
+                        list = (Sending.Transfer(list), (List<int>)null!).Item2;
+                    }
+                    catch
+                    {
+                        list.Add(1);
+                    }
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task NestedDelegateStores_ExecutedOnlyAfterTheCall_AreNotInTheInvocationList()
+    {
+        // Configure() runs only AFTER use(): the store it carries cannot be in the
+        // delegate's invocation list at the call, which still runs the no-op.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    Action use = () => { };
+                    void Touch() { list.Add(1); }
+                    void Configure() { use = Touch; }
+                    var sending = Sending.Transfer(list);
+                    use();
+                    Configure();
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task NestedDelegateStores_WhoseCallRanBeforeTheConsumer_StayInTheInvocationList()
+    {
+        // Configure() ran before the handoff: at use() the reading target IS the delegate's
+        // current value.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    Action use = () => { };
+                    void Touch() { list.Add(1); }
+                    void Configure() { use = Touch; }
+                    Configure();
+                    var sending = Sending.Transfer(list);
+                    use();
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+    }
+
+    [Fact]
+    public async Task ConditionalDelegateReturns_AreEscapes()
+    {
+        // The stored reading delegate leaves through a conditional expression: callers can
+        // receive and invoke it after the handoff.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public Action? M(bool flag)
+                {
+                    var list = new List<int> { 1 };
+                    Action use = () => list.Add(1);
+                    var sending = Sending.Transfer(list);
+                    return flag ? use : null;
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+    }
+
+    [Fact]
+    public async Task CoalesceDelegateReturns_AreEscapes()
+    {
+        // `use ?? fallback` publishes the stored reading delegate exactly like a bare
+        // return of it would.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public Action M(Action fallback)
+                {
+                    var list = new List<int> { 1 };
+                    Action? use = () => list.Add(1);
+                    var sending = Sending.Transfer(list);
+                    return use ?? fallback;
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+    }
+
+    [Fact]
+    public async Task LockEntries_AreThrowCapable_AndKeepTheirCatchesReachable()
+    {
+        // The hidden Monitor.Enter can throw (a null gate) after the handoff: the catch
+        // runs while the transferred list is still sender-reachable.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M(object? maybeGate)
+                {
+                    var list = new List<int> { 1 };
+                    try
+                    {
+                        var sending = Sending.Transfer(list);
+                        lock (maybeGate!) { }
+                    }
+                    catch
+                    {
+                        list.Add(1);
+                    }
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+    }
 }

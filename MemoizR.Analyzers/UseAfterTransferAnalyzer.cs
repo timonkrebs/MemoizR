@@ -59,7 +59,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                 if (EnclosingReinitializingAssignment(transfer, variable) is { } enclosingReinit)
                 {
                     var reported = ReportUsesAfter(context, new List<IOperation> { enclosingReinit }, escaped, variable, transferPosition, transfer, scope);
-                    if (!reported && CatchUseDuringReinitialization(enclosingReinit, variable, scope) is { } windowUse)
+                    if (!reported && CatchUseDuringReinitialization(enclosingReinit, variable, transferPosition, scope) is { } windowUse)
                     {
                         Report(context, windowUse, variable);
                         reported = true;
@@ -794,7 +794,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                     // A throwing RHS/out-call can reach an enclosing catch AFTER the handoff
                     // but BEFORE the reinitialization completed: the handler still sees the
                     // transferred value on that path.
-                    if (CatchUseDuringReinitialization(reference.Parent!, variable, scope) is { } windowUse)
+                    if (CatchUseDuringReinitialization(reference.Parent!, variable, transferPosition, scope) is { } windowUse)
                     {
                         Report(context, windowUse, variable);
                         return true;
@@ -889,7 +889,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             return null;
         }
 
-        if (CatchUseDuringReinitialization(call, variable, scope) is { } windowUse)
+        if (CatchUseDuringReinitialization(call, variable, transferPosition, scope) is { } windowUse)
         {
             Report(context, windowUse, variable);
             return true;
@@ -1035,11 +1035,6 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
 
     private static bool ClauseCanCatch(ICatchClauseOperation catchClause, IThrowOperation thrown)
     {
-        if (catchClause.Filter is not null)
-        {
-            return true; // a filter may pass
-        }
-
         var exception = thrown.Exception;
         while (exception is IConversionOperation conversion)
         {
@@ -1051,6 +1046,9 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             return true;
         }
 
+        // C# tests the clause TYPE before evaluating any filter: a filtered clause of an
+        // unrelated type never receives the throw -- the filter only matters (and may
+        // pass) once the type gate admits it.
         return catchClause.ExceptionType is not { } caughtType
             || caughtType.SpecialType == SpecialType.System_Object
             || SelfAndBases(thrownType).Contains(caughtType, SymbolEqualityComparer.Default);
@@ -1518,6 +1516,17 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                     or IArrayInitializerOperation or IObjectOrCollectionInitializerOperation
                     or IArrayCreationOperation or IAnonymousObjectCreationOperation:
                     continue; // wrappers: the payload rides along
+                // value-selecting expressions: either arm can BE the result (`flag ? use
+                // : null`), so the payload rides -- a reference in the CONDITION or the
+                // governing value is only examined, never published.
+                case IConditionalOperation conditional when !ReferenceEquals(child, conditional.Condition):
+                    continue;
+                case ICoalesceOperation:
+                    continue;
+                case ISwitchExpressionArmOperation arm when ReferenceEquals(child, arm.Value):
+                    continue;
+                case ISwitchExpressionOperation switchExpression when !ReferenceEquals(child, switchExpression.Value):
+                    continue;
                 case IReturnOperation { Kind: not OperationKind.YieldBreak }:
                     return true;
                 case IArgumentOperation:
@@ -1549,7 +1558,26 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             }
         }
 
-        return ReferencedVariable(receiver);
+        return ReferencedSlot(receiver);
+    }
+
+    // The slot a delegate lives in: a local, a parameter, or a field/property on the
+    // method's OWN instance (`this.use` and bare `use` name the same slot; another
+    // instance's slot is not this one). Cross-method mutation of such a slot stays
+    // invisible, matching the best-effort store model.
+    private static ISymbol? ReferencedSlot(IOperation? reference)
+    {
+        if (ReferencedVariable(reference) is { } variable)
+        {
+            return variable;
+        }
+
+        return reference switch
+        {
+            IFieldReferenceOperation { Instance: null or IInstanceReferenceOperation } field => field.Field,
+            IPropertyReferenceOperation { Instance: null or IInstanceReferenceOperation } property => property.Property,
+            _ => null,
+        };
     }
 
     // Every callable stored in the delegate local that can still be its value AT THE CALL:
@@ -1600,7 +1628,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             // Action use = use2 (alone or inside a combine): the copy SNAPSHOTS what the
             // source holds AT THE COPY -- stores landing in the source afterwards are not
             // in use's invocation list.
-            if (ReferencedVariable(item) is { } alias)
+            if (ReferencedSlot(item) is { } alias)
             {
                 foreach (var carried in StoredCallables(alias, scope, site, transferPosition, visited))
                 {
@@ -1645,7 +1673,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         foreach (var operation in scope.DescendantsAndSelf())
         {
             if (operation is ICompoundAssignmentOperation { OperatorKind: BinaryOperatorKind.Subtract } removal
-                && SymbolEqualityComparer.Default.Equals(ReferencedVariable(removal.Target), delegateLocal)
+                && SymbolEqualityComparer.Default.Equals(ReferencedSlot(removal.Target), delegateLocal)
                 && operation.Syntax.Span.End <= consumer.Syntax.SpanStart
                 && !IsConditionalWithin(removal, scope)
                 && Callable(removal.Value) is IMethodReferenceOperation methodReference)
@@ -1670,11 +1698,11 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                         && declarator.Initializer is { } initializer
                     => (initializer.Value, true),
                 ISimpleAssignmentOperation assignment
-                    when SymbolEqualityComparer.Default.Equals(ReferencedVariable(assignment.Target), delegateLocal)
+                    when SymbolEqualityComparer.Default.Equals(ReferencedSlot(assignment.Target), delegateLocal)
                     => (assignment.Value, true),
                 // use += adds a target; -= only removes, storing nothing.
                 ICompoundAssignmentOperation { OperatorKind: BinaryOperatorKind.Add } combined
-                    when SymbolEqualityComparer.Default.Equals(ReferencedVariable(combined.Target), delegateLocal)
+                    when SymbolEqualityComparer.Default.Equals(ReferencedSlot(combined.Target), delegateLocal)
                     => (combined.Value, false),
                 _ => null,
             };
@@ -1682,14 +1710,65 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             if (matched is { } store
                 && !IsInASiblingArmOfTheTransfer(operation, transferPosition)
                 && (operation.Syntax.SpanStart < consumer.Syntax.Span.End || SharesALoopWith(operation, consumer))
-                // A store inside a local function nothing ever invokes never executed.
-                && !IsInAnUnreferencedNestedFunction(operation, scope))
+                && NestedStoreCanBeCurrent(operation, scope, consumer))
             {
                 stores.Add((operation, store.Value, store.Replaces));
             }
         }
 
         return stores;
+    }
+
+    // A store inside a nested local function is in the list at the call only if its
+    // function can have RUN by then: an invocation source-before the consumer (or carried
+    // back around by a loop) qualifies -- transitively so when that invocation itself sits
+    // in a nested function -- and a method-group lift may travel and run anywhere. A
+    // function nothing references cannot have run at all.
+    private static bool NestedStoreCanBeCurrent(IOperation store, IOperation scope, IOperation consumer)
+    {
+        for (var parent = store.Parent; parent is not null && !ReferenceEquals(parent, scope); parent = parent.Parent)
+        {
+            if (parent is ILocalFunctionOperation nested
+                && !CanHaveRunBefore(nested.Symbol, scope, consumer, new HashSet<IMethodSymbol>(SymbolEqualityComparer.Default)))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static bool CanHaveRunBefore(IMethodSymbol localFunction, IOperation scope, IOperation consumer, HashSet<IMethodSymbol> visited)
+    {
+        if (!visited.Add(localFunction.OriginalDefinition))
+        {
+            return false;
+        }
+
+        return scope.DescendantsAndSelf().Any(operation => operation switch
+        {
+            IInvocationOperation invocation
+                when SymbolEqualityComparer.Default.Equals(invocation.TargetMethod.OriginalDefinition, localFunction.OriginalDefinition)
+                => (operation.Syntax.SpanStart < consumer.Syntax.Span.End || SharesALoopWith(operation, consumer))
+                    && NestedCallSiteCanRun(operation, scope, consumer, visited),
+            IMethodReferenceOperation methodReference
+                => SymbolEqualityComparer.Default.Equals(methodReference.Method.OriginalDefinition, localFunction.OriginalDefinition),
+            _ => false,
+        });
+    }
+
+    private static bool NestedCallSiteCanRun(IOperation callSite, IOperation scope, IOperation consumer, HashSet<IMethodSymbol> visited)
+    {
+        for (var parent = callSite.Parent; parent is not null && !ReferenceEquals(parent, scope); parent = parent.Parent)
+        {
+            if (parent is ILocalFunctionOperation nested
+                && !CanHaveRunBefore(nested.Symbol, scope, consumer, visited))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private static bool SharesALoopWith(IOperation store, IOperation consumer)
@@ -1865,8 +1944,10 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                 or IDynamicIndexerAccessOperation or IDynamicObjectCreationOperation
                 or IEventAssignmentOperation
                 // scope exits dispose: Dispose/DisposeAsync is user code and can throw;
-                // a foreach hides MoveNext/Dispose calls on a possibly-custom enumerator
-                or IUsingOperation or IUsingDeclarationOperation or IForEachLoopOperation,
+                // a foreach hides MoveNext/Dispose calls on a possibly-custom enumerator;
+                // a lock's hidden Monitor.Enter throws on a null gate
+                or IUsingOperation or IUsingDeclarationOperation or IForEachLoopOperation
+                or ILockOperation,
         };
     }
 
@@ -1980,13 +2061,13 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     // The exception WINDOW between the transfer and a completed reinitialization: when the
     // reinitializing expression can throw (an invocation, creation or await), an enclosing
     // catch entered from the try BODY observes the still-transferred value.
-    private static IOperation? CatchUseDuringReinitialization(IOperation reinitialization, ISymbol variable, IOperation scope)
+    private static IOperation? CatchUseDuringReinitialization(IOperation reinitialization, ISymbol variable, int transferPosition, IOperation scope)
     {
         var reinitRoot = reinitialization is IArgumentOperation { Parent: { } call } ? call : reinitialization;
-        var failures = reinitRoot.DescendantsAndSelf()
-            .Where(operation => CanThrow(operation)
-                && (operation is IThrowOperation || !IsInsideAThrow(operation)))
-            .ToList();
+        // Only failures once the wrapper EXISTS open the window: a throw from the transfer
+        // expression itself (or earlier RHS work) means nothing escaped, and operations in
+        // sibling arms or nested functions never run on this path at all.
+        var failures = ThrowCapableOpsAfter(reinitRoot, transferPosition).ToList();
         if (failures.Count == 0)
         {
             return null;

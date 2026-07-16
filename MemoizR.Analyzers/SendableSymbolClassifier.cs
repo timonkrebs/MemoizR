@@ -124,6 +124,36 @@ internal sealed class SendableSymbolClassifier
         return IsKnownImmutable(named) || IsTaskOfT(named) || IsKnownSendableCollection(named);
     }
 
+    // A green-listed non-generic class whose green-listed GENERIC sibling derives from it
+    // (Task <- Task<TResult>): the upcast needs no user subclass -- every async method
+    // manufactures one -- so an arbitrary payload can ride behind the surface past checks
+    // that trust the declared type wholesale.
+    internal static bool HasAGreenListedGenericSubclass(INamedTypeSymbol named)
+    {
+        if (named.Arity != 0 || named.IsValueType || named.ContainingNamespace is null)
+        {
+            return false;
+        }
+
+        return named.ContainingNamespace.GetTypeMembers(named.Name)
+            .Any(sibling => sibling.Arity > 0
+                && IsFrameworkGreenListed(sibling)
+                && DerivesFrom(sibling, named));
+    }
+
+    private static bool DerivesFrom(INamedTypeSymbol candidate, INamedTypeSymbol baseType)
+    {
+        for (var current = candidate.BaseType; current is not null; current = current.BaseType)
+        {
+            if (SymbolEqualityComparer.Default.Equals(current, baseType))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     private static bool IsKnownImmutable(ITypeSymbol type)
     {
         if (type is not INamedTypeSymbol named || named.Arity != 0 || !IsDeclaredInFrameworkAssembly(named))
