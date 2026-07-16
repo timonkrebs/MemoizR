@@ -4965,6 +4965,86 @@ public class UseAfterTransferAnalyzerTests
     }
 
     [Fact]
+    public async Task GotoCaseEdges_MakeSiblingArmsReachable()
+    {
+        // goto default re-enters the sibling arm AFTER the handoff: the arms are not
+        // mutually exclusive on that path.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M(int n)
+                {
+                    var list = new List<int> { 1 };
+                    switch (n)
+                    {
+                        case 0:
+                            _ = Sending.Transfer(list);
+                            goto default;
+                        default:
+                            list.Add(1);
+                            break;
+                    }
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+    }
+
+    [Fact]
+    public async Task KeyValuePairCreate_IsACarrierFactory()
+    {
+        // KeyValuePair.Create stores both arguments exactly like its constructor.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(KeyValuePair.Create("k", list));
+                    list.Add(1);
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task WithInitializerOverwrites_DropTheOperandSlot()
+    {
+        // The with-initializer definitely replaces Value: the receiver's clone never
+        // retains the constructor's list.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public record Box(List<int> Value);
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(new Box(list) with { Value = new List<int>() });
+                    list.Add(1);
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
     public async Task AnonymousObjectInitializers_AreTransferSources()
     {
         // Transfer(new { Value = list }) hands off an object graph containing the same list:

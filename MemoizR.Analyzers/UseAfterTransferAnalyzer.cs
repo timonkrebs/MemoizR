@@ -522,7 +522,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             IConversionOperation conversion => new[] { conversion.Operand },
             // Tuple.Create(list) is the constructor spelling of a framework value carrier.
             IInvocationOperation { TargetMethod: { Name: "Create", ContainingType: { } factory } } factoryCall
-                when factory.Name is "Tuple" or "ValueTuple" && IsFrameworkDeclared(factory) =>
+                when factory.Name is "Tuple" or "ValueTuple" or "KeyValuePair" && IsFrameworkDeclared(factory) =>
                 factoryCall.Arguments.Select(argument => (IOperation?)argument.Value),
             // Transfer([list]): matched by SYNTAX -- ICollectionExpressionOperation is not
             // public in the Roslyn this analyzer compiles against, but the children are
@@ -1204,7 +1204,8 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     // Everything an object creation deterministically stores: its initializer's
     // compiler-known slots -- and, for a POSITIONAL RECORD, the primary constructor's
     // arguments, each stored in its same-named auto-property.
-    private static System.Collections.Generic.IEnumerable<IOperation?> ObjectCreationCarriedParts(IObjectCreationOperation creation)
+    private static System.Collections.Generic.IEnumerable<IOperation?> ObjectCreationCarriedParts(
+        IObjectCreationOperation creation, HashSet<string>? alsoOverwritten = null)
     {
         if (creation.Initializer is { } initializer)
         {
@@ -1231,6 +1232,15 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             yield break;
         }
 
+        foreach (var carried in RecordConstructorCarriedParts(creation, alsoOverwritten))
+        {
+            yield return carried;
+        }
+    }
+
+    private static System.Collections.Generic.IEnumerable<IOperation?> RecordConstructorCarriedParts(
+        IObjectCreationOperation creation, HashSet<string>? alsoOverwritten)
+    {
         if (creation.Constructor is not { ContainingType: { IsRecord: true } recordType } constructor
             || !constructor.DeclaringSyntaxReferences.Any(reference =>
                 reference.GetSyntax() is Microsoft.CodeAnalysis.CSharp.Syntax.RecordDeclarationSyntax))
@@ -1238,11 +1248,11 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             yield break;
         }
 
-        var overwritten = new HashSet<string>(
-            (creation.Initializer?.Initializers ?? System.Collections.Immutable.ImmutableArray<IOperation>.Empty)
-                .OfType<ISimpleAssignmentOperation>()
-                .Select(member => (member.Target as IPropertyReferenceOperation)?.Property.Name)
-                .Where(name => name is not null)!);
+        var overwritten = OverwrittenSlots(creation.Initializer);
+        if (alsoOverwritten is not null)
+        {
+            overwritten.UnionWith(alsoOverwritten);
+        }
 
         foreach (var argument in creation.Arguments)
         {
@@ -1325,15 +1335,29 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         }
 
         // The clone SHALLOW-COPIES the operand's slots: a compound operand unfolds its
-        // carried parts, and a leaf operand (a record variable) shares its reference-typed
-        // contents with the receiver-owned clone -- the variable itself is a source.
-        var operandParts = operand is null
-            ? System.Linq.Enumerable.Empty<IOperation?>()
-            : CarriedParts(operand) ?? new[] { (IOperation?)operand };
+        // carried parts -- minus slots the with-initializer definitely OVERWRITES -- and a
+        // leaf operand (a record variable) shares its reference-typed contents with the
+        // receiver-owned clone, so the variable itself is a source.
+        var overwritten = OverwrittenSlots(withOperation.Initializer);
+        var operandParts = operand switch
+        {
+            null => System.Linq.Enumerable.Empty<IOperation?>(),
+            IObjectCreationOperation creation => ObjectCreationCarriedParts(creation, overwritten),
+            _ => CarriedParts(operand) ?? new[] { (IOperation?)operand },
+        };
 
         return withOperation.Initializer is { } initializer
             ? operandParts.Concat(InitializerCarriedParts(initializer))
             : operandParts;
+    }
+
+    private static HashSet<string> OverwrittenSlots(IObjectOrCollectionInitializerOperation? initializer)
+    {
+        return new HashSet<string>(
+            (initializer?.Initializers ?? System.Collections.Immutable.ImmutableArray<IOperation>.Empty)
+                .OfType<ISimpleAssignmentOperation>()
+                .Select(member => (member.Target as IPropertyReferenceOperation)?.Property.Name)
+                .Where(name => name is not null)!);
     }
 
     private static bool RetainsItsSlot(IOperation? member)
@@ -1859,13 +1883,23 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                 && Covers(parent, transferPosition)
                 && !Covers(child, transferPosition)
                 && !Covers(dominatingPart, transferPosition)
-                && !IsInACaseGuard(parent, transferPosition))
+                && !IsInACaseGuard(parent, transferPosition)
+                // goto case/default re-enters a sibling arm: the arms are not mutually
+                // exclusive when the transfer's own case jumps on.
+                && !(parent is ISwitchOperation switchOperation && TheTransfersCaseJumpsOn(switchOperation, transferPosition)))
             {
                 return true;
             }
         }
 
         return false;
+    }
+
+    private static bool TheTransfersCaseJumpsOn(ISwitchOperation switchOperation, int transferPosition)
+    {
+        var transferCase = switchOperation.Cases.FirstOrDefault(switchCase => Covers(switchCase, transferPosition));
+        return transferCase is not null
+            && transferCase.Descendants().Any(operation => operation is IBranchOperation { BranchKind: BranchKind.GoTo });
     }
 
     // A `when` guard is arm-SELECTION machinery, not an arm: a failing guard falls through to
