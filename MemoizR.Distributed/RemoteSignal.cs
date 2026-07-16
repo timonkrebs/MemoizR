@@ -84,6 +84,15 @@ public sealed class RemoteSignal<T>
     // the refused delivery may have been that incarnation's only advertisement.
     private bool pendingEpochVerification;
 
+    // Gate-guarded: the last resubscription window closed on a FAILED hook, so the pull
+    // channel may still be routed to a dead incarnation. While suspect, the mirror never
+    // initiates verification pulls from superseded stale answers (zero fresh evidence) -- a
+    // broken channel answering a self-solicited pull with a dead epoch could commit it and
+    // abandon the live one. Cleared by the next successful resubscription or by any pull
+    // answer that gets adopted (the channel demonstrably served accepted truth); fresh pulls
+    // triggered by real deliveries stay allowed, so a repaired bridge heals normally.
+    private bool pullChannelSuspect;
+
     private volatile Exception? lastBackgroundError;
 
     /// <summary>
@@ -231,6 +240,13 @@ public sealed class RemoteSignal<T>
                     publication = CommitOrdering(payload, incoming, isReset);
                     return payload.Value;
                 });
+
+                if (pulledAtGeneration is not null)
+                {
+                    // The pull channel served an answer this mirror adopted: demonstrably
+                    // healthy again, so mirror-initiated re-verification is re-enabled.
+                    pullChannelSuspect = false;
+                }
             }
         }
         finally
@@ -284,6 +300,7 @@ public sealed class RemoteSignal<T>
             resettling = false;
             verify = pendingEpochVerification && resubscribed;
             pendingEpochVerification = false;
+            pullChannelSuspect = !resubscribed;
             Interlocked.Increment(ref epochGeneration);
         }
         finally
@@ -378,6 +395,14 @@ public sealed class RemoteSignal<T>
         if (pulledAtGeneration == Volatile.Read(ref epochGeneration))
         {
             return AdoptionVerdict.AdoptReset;
+        }
+        // A superseded stale answer carries zero fresh evidence: while the channel is suspect
+        // (the last resubscription FAILED), re-verifying from it would actively solicit the
+        // possibly-still-broken channel -- drop instead; deliveries and advertisements keep
+        // their verification pulls, so a repaired bridge heals normally.
+        if (pulledAtGeneration is not null && pullChannelSuspect)
+        {
+            return AdoptionVerdict.Drop;
         }
         return AdoptionVerdict.VerifyByPull;
     }

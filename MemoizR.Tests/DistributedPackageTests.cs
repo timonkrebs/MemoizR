@@ -734,6 +734,68 @@ public class DistributedPackageTests
     }
 
     [Fact]
+    public async Task RemoteSignal_AfterFailedResubscription_StaleAnswersDoNotSelfSolicit()
+    {
+        // A pull issued during the resubscription window is still in flight when the hook
+        // FAILS. Its delayed answer arrives superseded (the close bumped the generation) --
+        // re-verifying it would actively pull the channel just reported broken, and a dead
+        // epoch answered by that fresh-generation pull could commit. While the channel is
+        // suspect, superseded stale answers are dropped without self-solicitation; a real
+        // delivery (the repaired bridge's advertisement) still verifies and heals normally.
+        var epoch1 = 11L;
+        var epoch2 = 22L;
+        var epoch3 = 33L;
+        var deadEpoch = 99L;
+        var failHook = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var windowAnswer = new TaskCompletionSource<ValuePayload<int>>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var hookRuns = 0;
+        var pulls = 0;
+        var consumer = new MemoFactory();
+        var mirror = consumer.CreateRemoteSignal("mirror", 0,
+            () =>
+            {
+                var n = Interlocked.Increment(ref pulls);
+                return n switch
+                {
+                    1 => Task.FromResult(new ValuePayload<int>(1000, epoch2, 1, 222, CausalityStamp.ForSignal(1000, 1, epoch2).Serialize(), false)),
+                    2 => windowAnswer.Task,
+                    _ => Task.FromResult(new ValuePayload<int>(1000, epoch3, 1, 333, CausalityStamp.ForSignal(1000, 1, epoch3).Serialize(), false)),
+                };
+            },
+            onPeerReset: async () =>
+            {
+                if (Interlocked.Increment(ref hookRuns) == 1)
+                {
+                    await failHook.Task;
+                    throw new InvalidOperationException("resubscribe transport down");
+                }
+            });
+
+        await mirror.OnValueAsync(new ValuePayload<int>(1000, epoch1, 5, 111, CausalityStamp.ForSignal(1000, 5, epoch1).Serialize(), false));
+
+        var delivery = mirror.OnValueAsync(new ValuePayload<int>(1000, epoch2, 1, 222, CausalityStamp.ForSignal(1000, 1, epoch2).Serialize(), false));
+        await TestHelpers.WaitForConvergenceAsync(() => Volatile.Read(ref hookRuns) == 1);
+
+        // A pull issued inside the window, still awaiting its answer when the hook fails.
+        var windowPull = mirror.PullAsync();
+        failHook.SetResult();
+        await Assert.ThrowsAsync<InvalidOperationException>(() => delivery.WaitAsync(TimeSpan.FromSeconds(10)));
+
+        // The delayed in-window answer (a dead incarnation) arrives superseded: dropped, and
+        // NOT re-verified -- no self-initiated pull touches the broken channel.
+        windowAnswer.SetResult(new ValuePayload<int>(1000, deadEpoch, 7, 999, CausalityStamp.ForSignal(1000, 7, deadEpoch).Serialize(), false));
+        await windowPull.WaitAsync(TimeSpan.FromSeconds(10));
+        await Task.Delay(100);
+        Assert.Equal(2, Volatile.Read(ref pulls));
+        Assert.Equal(epoch2, mirror.Publication!.Epoch);
+
+        // The repaired bridge's advertisement heals normally (and re-trusts the channel).
+        await mirror.OnStaleAsync(new StaleNotification(1000, epoch3, 1, CausalityStamp.Empty.Serialize()));
+        Assert.Equal(epoch3, mirror.Publication!.Epoch);
+        Assert.Equal(333, await mirror.Local.Get());
+    }
+
+    [Fact]
     public async Task RemoteSignal_QueuedVerificationHookFailure_IsRecorded()
     {
         // The queued verification pull after a window close can commit ANOTHER reset; if
