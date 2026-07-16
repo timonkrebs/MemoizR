@@ -11,8 +11,10 @@ namespace MemoizR.Analyzers;
 // optimistic state, so everything its closure captures crosses flows exactly like a node value.
 // A capture whose type is not Sendable (a List<int> local), or a read of writable state on the
 // enclosing object (a non-readonly field, a settable property), is therefore unsynchronized
-// cross-flow sharing. Reads of Sendable-typed captures stay unflagged -- capturing the action
-// payload or other immutable snapshots is the idiomatic pattern. This rule exists because the
+// cross-flow sharing -- and so are a method-group patch's receiver, a bare `this` handed to a
+// helper, and static state a patch reads (shared without any capture at all). Reads of
+// Sendable-typed captures stay unflagged -- capturing the action payload or other immutable
+// snapshots is the idiomatic pattern. This rule exists because the
 // RUNTIME cannot check it: closure display classes always carry writable fields, so a
 // structural runtime check would reject every capturing lambda. Captured-state WRITES inside a
 // patch are MZR002's territory (Apply is a computation host), and a Set inside one is MZR003's.
@@ -55,7 +57,7 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         // metadata or another file and cannot be walked.
         foreach (var argument in invocation.Arguments)
         {
-            InspectMethodGroupReceiver(context, classifier, argument.Value, reported);
+            InspectMethodGroupReceiver(context, classifier, argument.Value, invocation.SemanticModel, reported);
         }
 
         foreach (var patch in ComputationLambdas.OfInvocation(invocation))
@@ -71,14 +73,10 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         OperationAnalysisContext context,
         SendableSymbolClassifier classifier,
         IOperation value,
+        SemanticModel? semanticModel,
         HashSet<ISymbol> reported)
     {
-        while (value is IConversionOperation conversion)
-        {
-            value = conversion.Operand;
-        }
-
-        if (value is not IDelegateCreationOperation { Target: IMethodReferenceOperation { Instance: { } receiver } }
+        if (ResolveMethodReference(value, semanticModel, visitedVariables: null) is not { Instance: { } receiver }
             || receiver.Type is not { } receiverType)
         {
             return;
@@ -99,6 +97,44 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
             name,
             $"its type '{SendableSymbolClassifier.Display(receiverType)}' is not Sendable ({reason})",
             reported);
+    }
+
+    // The delegate argument may be the method group itself, a conversion over it, or a variable
+    // whose (same-tree) initializer holds it -- the same resolution ComputationLambdas applies
+    // to computation bodies, so a `Func<int,int> patch = helper.Patch;` stored one statement
+    // earlier does not hide the receiver. GetOperation on an initializer yields the reference
+    // without the delegate-creation wrapper, hence the bare case.
+    private static IMethodReferenceOperation? ResolveMethodReference(
+        IOperation? value,
+        SemanticModel? semanticModel,
+        HashSet<ISymbol>? visitedVariables)
+    {
+        while (true)
+        {
+            switch (value)
+            {
+                case IConversionOperation conversion:
+                    value = conversion.Operand;
+                    continue;
+                case IDelegateCreationOperation creation:
+                    value = creation.Target;
+                    continue;
+                case IMethodReferenceOperation methodReference:
+                    return methodReference;
+                case ILocalReferenceOperation or IFieldReferenceOperation or IPropertyReferenceOperation:
+                    visitedVariables ??= new HashSet<ISymbol>(SymbolEqualityComparer.Default);
+                    var variable = ComputationLambdas.ReferencedVariable(value);
+                    if (variable is null || !visitedVariables.Add(variable))
+                    {
+                        return null;
+                    }
+
+                    value = ComputationLambdas.SameTreeInitializerOperation(variable, semanticModel);
+                    continue;
+                default:
+                    return null;
+            }
+        }
     }
 
     private static ISymbol? ReceiverSymbol(IOperation receiver)
@@ -159,7 +195,64 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
                 }
 
                 break;
+
+            // Static state needs no capture to be shared: the read is baked into the stored
+            // delegate and re-executes on pull flows while any code mutates the static. Same
+            // verdicts as enclosing-object state; const fields are compile-time values, not
+            // storage.
+            case IFieldReferenceOperation { Field: { IsStatic: true, IsConst: false } } staticField:
+                if (!staticField.Field.IsReadOnly)
+                {
+                    Report(context, operation, staticField.Field, staticField.Field.Name, "it is writable static state", reported);
+                }
+                else
+                {
+                    ReportIfNotSendable(context, classifier, operation, staticField.Field, staticField.Field.Type, reported);
+                }
+
+                break;
+            case IPropertyReferenceOperation { Property.IsStatic: true } staticProperty:
+                if (staticProperty.Property.SetMethod is { IsInitOnly: false })
+                {
+                    Report(context, operation, staticProperty.Property, staticProperty.Property.Name, "it is writable static state", reported);
+                }
+                else
+                {
+                    ReportIfNotSendable(context, classifier, operation, staticProperty.Property, staticProperty.Property.Type, reported);
+                }
+
+                break;
+
+            // A bare `this` -- the implicit receiver of a helper call (`ReadCounter()`) or an
+            // explicit argument (`Use(this)`) -- captures the whole enclosing object without
+            // naming a member, so it is held to the TYPE's sendability like a method-group
+            // receiver: hiding a state read behind a helper must not evade what the direct read
+            // would flag. Receivers of the member reads the cases above inspect are skipped;
+            // those get the finer per-member verdict.
+            case IInstanceReferenceOperation { ReferenceKind: InstanceReferenceKind.ContainingTypeInstance } instance
+                when instance.Type is { } enclosingType && !IsInspectedMemberReceiver(instance):
+                var reason = classifier.GetNotSendableReason(enclosingType);
+                if (reason is not null)
+                {
+                    Report(
+                        context,
+                        operation,
+                        enclosingType,
+                        "this",
+                        $"its type '{SendableSymbolClassifier.Display(enclosingType)}' is not Sendable ({reason})",
+                        reported);
+                }
+
+                break;
         }
+    }
+
+    // True when the reference is the receiver of a member read InspectCapture handles itself:
+    // reporting `this` under those too would double-count every ordinary `x => x + counter`.
+    private static bool IsInspectedMemberReceiver(IInstanceReferenceOperation instance)
+    {
+        return (instance.Parent is IFieldReferenceOperation field && ReferenceEquals(field.Instance, instance))
+            || (instance.Parent is IPropertyReferenceOperation property && ReferenceEquals(property.Instance, instance));
     }
 
     private static bool IsOnEnclosingInstance(IOperation? receiver)

@@ -150,9 +150,18 @@ Flagged, once per captured symbol per patch:
 - a **captured local or parameter whose type is not Sendable** (the same classifier verdicts as
   MZR001; type parameters keep the benefit of the doubt);
 - a read of **writable state on the enclosing object** (a non-readonly field, a settable
-  property) — the patch re-reads it on other flows while the owner mutates it freely;
+  property; `init` counts as immutable) — the patch re-reads it on other flows while the owner
+  mutates it freely;
 - a read of a **readonly/get-only member whose type is not Sendable** — the object handed out
-  is what gets shared. Computed get-only property bodies are not chased.
+  is what gets shared. Computed get-only property bodies are not chased;
+- a **method-group patch's receiver** (`ctx.Apply(state, helper.Patch)`, directly or stored in
+  a delegate variable first) — the receiver is captured into the stored delegate even when the
+  method body lives in metadata and cannot be walked;
+- a **bare `this`** handed to a helper (`x => ReadCounter()`, `Use(this)`) — the whole
+  enclosing object is captured with no member to inspect, so it is held to its type's
+  sendability: hiding the read behind a helper must not evade the rule;
+- a read of **static state** that is writable or of a non-Sendable type (`const` is a
+  compile-time value) — statics are shared across every flow without any capture at all.
 
 Reads of Sendable-typed captures stay unflagged: capturing the action payload or other
 immutable snapshots is the idiomatic pattern. Captured-state **writes** inside a patch are

@@ -62,6 +62,15 @@ internal static class ComputationLambdas
                 }
 
                 break;
+            case IMethodReferenceOperation bareMethodReference:
+                // Like the bare-lambda case: GetOperation on a variable initializer's method
+                // group yields the reference without the delegate-creation wrapper.
+                if (ResolveMethodBody(bareMethodReference.Method, semanticModel) is { } resolvedBare)
+                {
+                    yield return resolvedBare;
+                }
+
+                break;
             case IConversionOperation conversion:
                 foreach (var body in BodiesIn(conversion.Operand, semanticModel, visitedVariables))
                 {
@@ -89,7 +98,8 @@ internal static class ComputationLambdas
         }
     }
 
-    private static ISymbol? ReferencedVariable(IOperation reference)
+    // Shared with MZR004's method-group receiver resolution.
+    public static ISymbol? ReferencedVariable(IOperation reference)
     {
         return reference switch
         {
@@ -109,33 +119,12 @@ internal static class ComputationLambdas
     private static IEnumerable<ComputationBody> BodiesFromVariableInitializer(ISymbol? variable, SemanticModel? semanticModel, HashSet<ISymbol>? visitedVariables)
     {
         visitedVariables ??= new HashSet<ISymbol>(SymbolEqualityComparer.Default);
-        if (variable is null || semanticModel is null || !visitedVariables.Add(variable))
+        if (variable is null || !visitedVariables.Add(variable))
         {
             yield break;
         }
 
-        var declaration = variable.DeclaringSyntaxReferences.FirstOrDefault();
-        if (declaration is null || declaration.SyntaxTree != semanticModel.SyntaxTree)
-        {
-            yield break;
-        }
-
-        // Locals and fields declare through VariableDeclaratorSyntax; auto-properties with an
-        // initializer (`Func<...> Compute { get; } = async () => ...`) through
-        // PropertyDeclarationSyntax. Computed properties have no initializer and stay
-        // unresolvable, as they should.
-        var initializer = declaration.GetSyntax() switch
-        {
-            VariableDeclaratorSyntax { Initializer.Value: { } value } => value,
-            PropertyDeclarationSyntax { Initializer.Value: { } value } => value,
-            _ => null,
-        };
-        if (initializer is null)
-        {
-            yield break;
-        }
-
-        var operation = semanticModel.GetOperation(initializer);
+        var operation = SameTreeInitializerOperation(variable, semanticModel);
         if (operation is null)
         {
             yield break;
@@ -145,6 +134,34 @@ internal static class ComputationLambdas
         {
             yield return body;
         }
+    }
+
+    // The variable's same-tree INITIALIZER as an operation. Locals and fields declare through
+    // VariableDeclaratorSyntax; auto-properties with an initializer (`Func<...> Compute { get; }
+    // = async () => ...`) through PropertyDeclarationSyntax. Computed properties have no
+    // initializer and stay unresolvable, as they should. Shared with MZR004's method-group
+    // receiver resolution.
+    public static IOperation? SameTreeInitializerOperation(ISymbol? variable, SemanticModel? semanticModel)
+    {
+        if (variable is null || semanticModel is null)
+        {
+            return null;
+        }
+
+        var declaration = variable.DeclaringSyntaxReferences.FirstOrDefault();
+        if (declaration is null || declaration.SyntaxTree != semanticModel.SyntaxTree)
+        {
+            return null;
+        }
+
+        var initializer = declaration.GetSyntax() switch
+        {
+            VariableDeclaratorSyntax { Initializer.Value: { } value } => value,
+            PropertyDeclarationSyntax { Initializer.Value: { } value } => value,
+            _ => null,
+        };
+
+        return initializer is null ? null : semanticModel.GetOperation(initializer);
     }
 
     // A method group (`f.CreateMemoizR(Compute)`) or local-function reference is as much a
