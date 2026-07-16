@@ -10,8 +10,6 @@
     <Version>0.0.5</Version>
     <Authors>Timon Krebs</Authors>
     <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
-    <ImplicitUsings>enable</ImplicitUsings>
-    <Nullable>enable</Nullable>
     <PackageReadmeFile>NUGET_BLAZOR_README.md</PackageReadmeFile>
     <PackageIcon>MemoizR-Small.png</PackageIcon>
     <!-- Optional: Publish the repository URL in the built .nupkg (in the NuSpec <Repository> element) -->
@@ -30,8 +28,8 @@
         <None Include="..\docs\MemoizR-Small.png" Pack="true" PackagePath="\" />
   </ItemGroup>
   <ItemGroup>
-    <PackageReference Include="Microsoft.AspNetCore.Components" Version="10.0.0" />
-    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.0" />
-    <PackageReference Include="Microsoft.SourceLink.GitHub" Version="10.0.300" PrivateAssets="All" />
+    <PackageReference Include="Microsoft.AspNetCore.Components" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" />
+    <PackageReference Include="Microsoft.SourceLink.GitHub" PrivateAssets="All" />
   </ItemGroup>
 </Project>

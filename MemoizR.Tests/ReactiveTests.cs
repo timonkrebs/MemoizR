@@ -1,4 +1,4 @@
-using xRetry;
+using xRetry.v3;
 
 namespace MemoizR.Tests;
 
@@ -91,7 +91,7 @@ public class ReactiveTests
         var m1 = f.BuildReaction()
         .CreateAsyncEnumerableExperimental(v1);
 
-        await Task.Delay(100);
+        await Task.Delay(100, TestContext.Current.CancellationToken);
 
         var _ = Task.Run(async () =>
         {
@@ -101,37 +101,37 @@ public class ReactiveTests
                 invocationCount++;
                 await Task.Delay(100);
             }
-        });
+        }, TestContext.Current.CancellationToken);
 
-        await Task.Delay(200);
+        await Task.Delay(200, TestContext.Current.CancellationToken);
         Assert.Equal(0, result);
         Assert.Equal(0, invocationCount);
 
         await v1.Set(2);
         Assert.Equal(0, result);
         Assert.Equal(0, invocationCount);
-        await Task.Delay(200);
+        await Task.Delay(200, TestContext.Current.CancellationToken);
         Assert.Equal(2, result);
         Assert.Equal(1, invocationCount);
 
         await v1.Set(3);
         Assert.Equal(2, result);
         Assert.Equal(1, invocationCount);
-        await Task.Delay(200);
+        await Task.Delay(200, TestContext.Current.CancellationToken);
         Assert.Equal(3, result);
         Assert.Equal(2, invocationCount);
 
         await v1.Set(3);
         Assert.Equal(3, result);
         Assert.Equal(2, invocationCount);
-        await Task.Delay(200);
+        await Task.Delay(200, TestContext.Current.CancellationToken);
         Assert.Equal(3, result);
         Assert.Equal(2, invocationCount);
 
         await v1.Set(4);
         Assert.Equal(3, result);
         Assert.Equal(2, invocationCount);
-        await Task.Delay(200);
+        await Task.Delay(200, TestContext.Current.CancellationToken);
         Assert.Equal(4, result);
         Assert.Equal(3, invocationCount);
         Assert.NotNull(m1);
@@ -158,7 +158,7 @@ public class ReactiveTests
         // Same-value Set must not retrigger: a negative assertion, so it keeps a real
         // quiescence window instead of a poll.
         await v1.Set(2);
-        await Task.Delay(20);
+        await Task.Delay(20, TestContext.Current.CancellationToken);
 
         Assert.Equal(2, invocations);
     }
@@ -912,7 +912,7 @@ public class ReactiveTests
 
         r.Pause();
         await v1.Set(5);
-        await Task.Delay(100); // give the (paused) debounced update every chance to run wrongly
+        await Task.Delay(100, TestContext.Current.CancellationToken); // give the (paused) debounced update every chance to run wrongly
         Assert.Equal(1, last); // paused: must not have executed
 
         await r.Resume();
@@ -968,7 +968,7 @@ public class ReactiveTests
         Assert.False(TestHelpers.Observes(v1.Observers, r), "the disposed reaction is still observing its source");
 
         await v1.Set(5);
-        await Task.Delay(100); // negative assertion: nothing may run -- needs a real window
+        await Task.Delay(100, TestContext.Current.CancellationToken); // negative assertion: nothing may run -- needs a real window
         Assert.Equal(1, last);
         GC.KeepAlive(r);
     }
@@ -1027,7 +1027,7 @@ public class ReactiveTests
         await v1.Set(2);
         await v2.Set(20);
         await v3.Set(200);
-        await Task.Delay(100);
+        await Task.Delay(100, TestContext.Current.CancellationToken);
         Assert.Equal(111, last);
         GC.KeepAlive(r);
     }
@@ -1051,7 +1051,7 @@ public class ReactiveTests
         Assert.Equal(1, invocations);
 
         await s.Set(2);        // m re-checks to 2 % 2 == 0 (unchanged) -> the scan must resolve Clean
-        await Task.Delay(150); // negative assertion: a real quiescence window, not a poll
+        await Task.Delay(150, TestContext.Current.CancellationToken); // negative assertion: a real quiescence window, not a poll
         Assert.Equal(1, invocations);
 
         await s.Set(3);        // m = 3 % 2 == 1 (changed) -> the reaction must run again

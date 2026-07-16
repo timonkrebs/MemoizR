@@ -1,4 +1,4 @@
-using xRetry;
+using xRetry.v3;
 using static MemoizR.Tests.TestHelpers;
 
 namespace MemoizR.Tests;

@@ -1,5 +1,5 @@
 using System.Runtime.CompilerServices;
-using xRetry;
+using xRetry.v3;
 
 namespace MemoizR.Tests;
 
