@@ -40,6 +40,23 @@ internal static class DiagnosticDescriptors
                      "mutation — the very thing the reactive graph exists to replace (the SE-0412 analog).",
         helpLinkUri: HelpUri);
 
+    public static readonly DiagnosticDescriptor NonSendablePatchCapture = new(
+        id: "MZR004",
+        title: "Optimistic patch captures non-Sendable state",
+        messageFormat: "'{0}' is captured by an optimistic patch, but {1} — the patch is stored in the overlay " +
+                       "and re-executed by the view's computation on whichever flow pulls it, so captured state " +
+                       "is shared across flows; capture an immutable snapshot instead, or lift the state into a " +
+                       "Signal",
+        category: Category,
+        defaultSeverity: DiagnosticSeverity.Warning,
+        isEnabledByDefault: true,
+        description: "A patch passed to OptimisticActionContext.Apply outlives the applying code: it runs inside " +
+                     "the optimistic view's computation on arbitrary flows until the run ends. Its closure " +
+                     "captures therefore cross flows exactly like node values do — the closure-capture mirror of " +
+                     "MZR001, closing the strict-mode gap recorded in ADR 0007 (runtime checking would reject " +
+                     "every capturing lambda, because closure display classes always carry writable fields).",
+        helpLinkUri: HelpUri);
+
     public static readonly DiagnosticDescriptor SetInsideComputation = new(
         id: "MZR003",
         title: "A graph write inside a reactive computation throws at runtime",

@@ -483,4 +483,55 @@ public class CapturedMutationAnalyzerTests
         var diagnostic = Assert.Single(diagnostics);
         Assert.Contains("captured local 'counter'", diagnostic.GetMessage());
     }
+
+    // Apply's patch is a computation host (ADR 0007): it re-runs inside the view's computation
+    // on arbitrary flows, so a captured-state write in one is exactly this rule's data race.
+    [Fact]
+    public async Task OptimisticPatch_WritingCapturedLocal_IsFlagged()
+    {
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    int applied = 0;
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x => { applied++; return x; });
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR002", diagnostic.Id);
+        Assert.Contains("captured local 'applied'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task OptimisticPatch_PureProjection_IsNotFlagged()
+    {
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x => x + p);
+                    });
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
 }

@@ -1,7 +1,8 @@
 # ADR 0007 — Transitions, `IsPending`, and optimistic state with automatic rollback
 
 - Status: Proposed (phases 1–4 implemented, including the optimistic-todo sample app with bUnit
-  component tests; phase 5 open)
+  component tests; of phase 5, the patch-purity analyzer (MZR004) is implemented — the
+  `WriteBatch` decision and actor-engine parity remain open)
 - Date: 2026-07-15
 - Deciders: MemoizR maintainers
 - Inspiration: Solid 2.0's async architecture (deferred stabilization, `isPending`,
@@ -263,17 +264,16 @@ Where the landed code deliberately deviates from the sketches above:
   notifications carry the faulted update's generation token and are gated by the same
   threshold rule as commits, so an old in-flight failure cannot fault a newer wavefront whose
   superseding update is still owed a commit.
-- Known strict-mode gap, deferred to the phase-5 analyzers: optimistic patch DELEGATES are not
-  runtime-validated. A patch runs inside the view's computation on whichever flow pulls, so a
-  lambda closing over mutable state crosses flows — but closure display classes always carry
-  writable fields, so a structural runtime check would reject every capturing lambda, including
-  harmless immutable captures. This is exactly MZR002-shaped compile-time work: an analyzer
-  rule flagging optimistic patches that capture mutable state (the payload type itself IS
-  checked — `CreateAction` gates `TPayload` through the strict Sendable bar). Action BODIES
-  are deliberately not classified as MZR002 computation hosts: they are user-driven process
-  code whose runs overlap only when the caller overlaps them, and the common
-  one-run-at-a-time pattern legitimately writes captured state — if wanted, that is a
-  separate, lower-severity rule.
+- The strict-mode gap for optimistic patch DELEGATES (a patch runs inside the view's
+  computation on whichever flow pulls, so a lambda closing over mutable state crosses flows,
+  but closure display classes always carry writable fields, so a structural RUNTIME check
+  would reject every capturing lambda) is closed at build time by the phase-5 analyzers:
+  **MZR004** flags non-Sendable captures and reads of writable enclosing-object state in
+  patches, and `Apply` is classified as a computation host so a captured-state WRITE in a
+  patch is MZR002's data race and a `Set` in one is MZR003's runtime throw (see ADR 0004).
+  Action BODIES remain deliberately unclassified: they are user-driven process code whose
+  runs overlap only when the caller overlaps them, and the common one-run-at-a-time pattern
+  legitimately writes captured state — if wanted, that is a separate, lower-severity rule.
 - Phase 4 landed as `MemoizR.Blazor`: `BlazorDispatcherExecutor` (the exact
   `WpfDispatcherExecutor` mirror), a component-agnostic `ReactionBinder` (the render-snapshot
   pattern: apply-into-field plus `StateHasChanged`, both marshalled through `InvokeAsync`),

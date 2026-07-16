@@ -266,6 +266,25 @@ internal static class ComputationLambdas
         };
     }
 
+    // "Captured" = declared outside the computation's declaring syntax (the lambda expression,
+    // or the method/local-function declaration for a method-group computation). The span test
+    // (rather than comparing containing symbols) is what keeps nested non-computation lambdas
+    // correct: a local declared in a nested LINQ lambda belongs to the computation and must not
+    // be treated as captured, while a local of the enclosing method must be. Shared by MZR002
+    // (captured writes) and MZR004 (non-Sendable captures).
+    public static bool IsDeclaredOutside(ISymbol symbol, SyntaxNode scope)
+    {
+        var declaration = symbol.DeclaringSyntaxReferences.FirstOrDefault();
+        if (declaration is null)
+        {
+            // Compiler-generated (e.g. a setter's value parameter): nothing actionable to point at.
+            return false;
+        }
+
+        return declaration.SyntaxTree != scope.SyntaxTree
+            || !scope.Span.Contains(declaration.Span);
+    }
+
     // The tightest useful squiggle for an invocation: the member name, not the whole call with
     // its (possibly multi-line lambda) arguments.
     public static Location NameLocation(IInvocationOperation invocation)

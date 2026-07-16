@@ -136,6 +136,31 @@ lock. (The cost is a false negative for a nested function invoked synchronously 
 computation; the runtime exception still guards that path. MZR002 keeps the full walk: a
 captured-state write is a data race whenever the callback runs, deferred or not.)
 
+### MZR004 — optimistic patch captures non-Sendable state
+
+The closure-capture mirror of MZR001, closing the strict-mode gap recorded in ADR 0007: a patch
+passed to `OptimisticActionContext.Apply` is stored in the overlay and **re-executed by the
+view's computation on whichever flow pulls** the optimistic state, so everything the patch's
+closure captures crosses flows exactly like a node value — but the *runtime* cannot check it
+(closure display classes always carry writable fields, so a structural runtime check would
+reject every capturing lambda, immutable captures included).
+
+Flagged, once per captured symbol per patch:
+
+- a **captured local or parameter whose type is not Sendable** (the same classifier verdicts as
+  MZR001; type parameters keep the benefit of the doubt);
+- a read of **writable state on the enclosing object** (a non-readonly field, a settable
+  property) — the patch re-reads it on other flows while the owner mutates it freely;
+- a read of a **readonly/get-only member whose type is not Sendable** — the object handed out
+  is what gets shared. Computed get-only property bodies are not chased.
+
+Reads of Sendable-typed captures stay unflagged: capturing the action payload or other
+immutable snapshots is the idiomatic pattern. Captured-state **writes** inside a patch are
+MZR002's territory — `Apply` is classified as a computation host (the patch is genuinely
+engine-executed, unlike action *bodies*, which are user-driven process code and deliberately
+not hosts) — and a `Set` inside a patch is MZR003's, since the patch runs inside the view
+memo's recompute whose flow holds the evaluation lock.
+
 ### Testing strategy
 
 The analyzer tests compile snippets in-memory **against the real MemoizR assemblies**

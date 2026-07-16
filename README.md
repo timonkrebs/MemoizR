@@ -224,7 +224,8 @@ The same discipline is checked at **build time** by analyzers bundled in the NuG
 |------|-------|
 | `MZR001` | A non-Sendable value type at a `Create*` call — the compile-time mirror of strict mode |
 | `MZR002` | A computation writing captured locals, fields, or statics — lift that state into a `Signal` |
-| `MZR003` | `Signal.Set` inside a computation, which throws `InvalidOperationException` at runtime |
+| `MZR003` | `Signal.Set` or `memo.Invalidate()` inside a computation, which throws `InvalidOperationException` at runtime |
+| `MZR004` | An optimistic patch capturing non-Sendable state — the patch re-runs inside the view's computation on whichever flow pulls it |
 
 Reaction side effects can be pinned to an **executor** — the analog of Swift's custom actor
 executors (SE-0392). `AddSynchronizationContext(uiContext)` covers UI threads;

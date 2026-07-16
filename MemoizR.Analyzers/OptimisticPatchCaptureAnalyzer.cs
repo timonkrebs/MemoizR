@@ -1,0 +1,152 @@
+using System.Collections.Generic;
+using System.Collections.Immutable;
+using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.Diagnostics;
+using Microsoft.CodeAnalysis.Operations;
+
+namespace MemoizR.Analyzers;
+
+// MZR004, the closure-capture mirror of MZR001 (ADR 0007 phase 5): an optimistic patch is
+// stored in the overlay and re-executed by the view's computation on whichever flow pulls the
+// optimistic state, so everything its closure captures crosses flows exactly like a node value.
+// A capture whose type is not Sendable (a List<int> local), or a read of writable state on the
+// enclosing object (a non-readonly field, a settable property), is therefore unsynchronized
+// cross-flow sharing. Reads of Sendable-typed captures stay unflagged -- capturing the action
+// payload or other immutable snapshots is the idiomatic pattern. This rule exists because the
+// RUNTIME cannot check it: closure display classes always carry writable fields, so a
+// structural runtime check would reject every capturing lambda. Captured-state WRITES inside a
+// patch are MZR002's territory (Apply is a computation host), and a Set inside one is MZR003's.
+[DiagnosticAnalyzer(LanguageNames.CSharp)]
+public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
+{
+    public override ImmutableArray<DiagnosticDescriptor> SupportedDiagnostics { get; } =
+        ImmutableArray.Create(DiagnosticDescriptors.NonSendablePatchCapture);
+
+    public override void Initialize(AnalysisContext context)
+    {
+        context.ConfigureGeneratedCodeAnalysis(GeneratedCodeAnalysisFlags.None);
+        context.EnableConcurrentExecution();
+
+        // The classifier caches verdicts per type symbol, so it must be scoped to one
+        // compilation: symbols cached across compilations would be both wrong and a leak.
+        context.RegisterCompilationStartAction(compilationStart =>
+        {
+            var classifier = new SendableSymbolClassifier();
+            compilationStart.RegisterOperationAction(
+                operationContext => Analyze(operationContext, classifier),
+                OperationKind.Invocation);
+        });
+    }
+
+    private static void Analyze(OperationAnalysisContext context, SendableSymbolClassifier classifier)
+    {
+        var invocation = (IInvocationOperation)context.Operation;
+        if (!FactoryMethods.IsOptimisticPatchHost(invocation.TargetMethod))
+        {
+            return;
+        }
+
+        foreach (var patch in ComputationLambdas.OfInvocation(invocation))
+        {
+            // One report per captured symbol per patch: a capture is a property of the closure,
+            // not of each of its reads.
+            var reported = new HashSet<ISymbol>(SymbolEqualityComparer.Default);
+            foreach (var operation in ComputationLambdas.Descend(patch.Body))
+            {
+                InspectCapture(context, classifier, operation, patch.Scope, reported);
+            }
+        }
+    }
+
+    private static void InspectCapture(
+        OperationAnalysisContext context,
+        SendableSymbolClassifier classifier,
+        IOperation operation,
+        SyntaxNode scope,
+        HashSet<ISymbol> reported)
+    {
+        switch (operation)
+        {
+            case ILocalReferenceOperation local when ComputationLambdas.IsDeclaredOutside(local.Local, scope):
+                ReportIfNotSendable(context, classifier, operation, local.Local, local.Local.Type, reported);
+                break;
+            case IParameterReferenceOperation parameter when ComputationLambdas.IsDeclaredOutside(parameter.Parameter, scope):
+                ReportIfNotSendable(context, classifier, operation, parameter.Parameter, parameter.Parameter.Type, reported);
+                break;
+
+            // A member access on the enclosing object captures `this`. Writable storage is
+            // flagged outright -- the patch re-reads it on other flows while the owner mutates
+            // it freely; readonly/get-only members are held to the member TYPE's sendability
+            // (the object handed out is what gets shared). A computed get-only property's body
+            // is not chased: like type parameters elsewhere, it gets the benefit of the doubt.
+            case IFieldReferenceOperation { Field.IsStatic: false } field when IsOnEnclosingInstance(field.Instance):
+                if (!field.Field.IsReadOnly)
+                {
+                    Report(context, operation, field.Field, "it is writable state of the enclosing object", reported);
+                }
+                else
+                {
+                    ReportIfNotSendable(context, classifier, operation, field.Field, field.Field.Type, reported);
+                }
+
+                break;
+            case IPropertyReferenceOperation { Property.IsStatic: false } property when IsOnEnclosingInstance(property.Instance):
+                if (property.Property.SetMethod is not null)
+                {
+                    Report(context, operation, property.Property, "it is writable state of the enclosing object", reported);
+                }
+                else
+                {
+                    ReportIfNotSendable(context, classifier, operation, property.Property, property.Property.Type, reported);
+                }
+
+                break;
+        }
+    }
+
+    private static bool IsOnEnclosingInstance(IOperation? receiver)
+    {
+        return receiver is IInstanceReferenceOperation { ReferenceKind: InstanceReferenceKind.ContainingTypeInstance };
+    }
+
+    private static void ReportIfNotSendable(
+        OperationAnalysisContext context,
+        SendableSymbolClassifier classifier,
+        IOperation operation,
+        ISymbol symbol,
+        ITypeSymbol type,
+        HashSet<ISymbol> reported)
+    {
+        var reason = classifier.GetNotSendableReason(type);
+        if (reason is null)
+        {
+            return;
+        }
+
+        Report(
+            context,
+            operation,
+            symbol,
+            $"its type '{SendableSymbolClassifier.Display(type)}' is not Sendable ({reason})",
+            reported);
+    }
+
+    private static void Report(
+        OperationAnalysisContext context,
+        IOperation operation,
+        ISymbol symbol,
+        string problem,
+        HashSet<ISymbol> reported)
+    {
+        if (!reported.Add(symbol))
+        {
+            return;
+        }
+
+        context.ReportDiagnostic(Diagnostic.Create(
+            DiagnosticDescriptors.NonSendablePatchCapture,
+            operation.Syntax.GetLocation(),
+            symbol.Name,
+            problem));
+    }
+}

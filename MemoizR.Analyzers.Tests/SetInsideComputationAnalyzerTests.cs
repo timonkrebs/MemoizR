@@ -465,4 +465,32 @@ public class SetInsideComputationAnalyzerTests
 
         Assert.Empty(diagnostics);
     }
+
+    // A patch runs inside the view memo's recompute, whose flow holds the evaluation lock in
+    // upgradeable mode -- a Set in one throws exactly like a Set in the memo's own computation.
+    [Fact]
+    public async Task SetInsideOptimisticPatch_IsFlagged()
+    {
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var v = f.CreateSignal(1);
+                    var state = f.CreateOptimistic<int>(v);
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x => { _ = v.Set(2); return x; });
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR003", diagnostic.Id);
+        Assert.Contains("Signal<int>.Set", diagnostic.GetMessage());
+    }
 }
