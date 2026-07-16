@@ -116,9 +116,9 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             yield return (variable, transfer.Syntax.Span.End, scanRoots, escaped, transfer, enclosingBody);
         }
 
-        // A transfer inside a CALLED local function is sequenced before the caller's
-        // continuation: every call site acts as a transfer of its own. Lambdas stay
-        // deferred-scoped (they may run later or never).
+        // A transfer inside a CALLED local function or lambda is sequenced before the
+        // caller's continuation: every call site acts as a transfer of its own. A stored
+        // but never-invoked callable stays deferred-scoped.
         foreach (var propagated in CallSiteTransfers(enclosingBody, variable, transfer, block,
             new HashSet<IMethodSymbol>(SymbolEqualityComparer.Default)))
         {
@@ -133,7 +133,13 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     private static IEnumerable<(ISymbol Variable, int Position, List<IOperation> ScanRoots, bool Escaped, IOperation Transfer, IOperation Scope)> CallSiteTransfers(
         IOperation transferBody, ISymbol variable, IOperation anchor, IOperation block, HashSet<IMethodSymbol> visited)
     {
-        if (transferBody is not ILocalFunctionOperation declaration || !visited.Add(declaration.Symbol))
+        var functionSymbol = transferBody switch
+        {
+            ILocalFunctionOperation declaration => declaration.Symbol,
+            IAnonymousFunctionOperation lambda => lambda.Symbol,
+            _ => null,
+        };
+        if (functionSymbol is null || !visited.Add(functionSymbol))
         {
             yield break;
         }
@@ -141,15 +147,15 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         // A by-value parameter definitely reassigned before the handoff no longer aliases
         // ANY caller argument: the callee transferred its own fresh value.
         if (variable is IParameterSymbol parameterVariable
-            && SymbolEqualityComparer.Default.Equals(parameterVariable.ContainingSymbol.OriginalDefinition, declaration.Symbol)
-            && DefinitelyReassignedBefore(declaration, variable, anchor))
+            && SymbolEqualityComparer.Default.Equals(parameterVariable.ContainingSymbol.OriginalDefinition, functionSymbol)
+            && DefinitelyReassignedBefore(transferBody, variable, anchor))
         {
             yield break;
         }
 
         foreach (var invocation in block.DescendantsAndSelf().OfType<IInvocationOperation>())
         {
-            if (!InvokesTheDeclaration(invocation, declaration, block))
+            if (!InvokesTheBody(invocation, transferBody, functionSymbol, block))
             {
                 continue;
             }
@@ -160,7 +166,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                 continue; // self-recursion: the body scan already covers it
             }
 
-            foreach (var entry in CallSiteEntries(invocation, callBody, variable, declaration, block, visited))
+            foreach (var entry in CallSiteEntries(invocation, callBody, variable, functionSymbol, block, visited))
             {
                 yield return entry;
             }
@@ -168,9 +174,9 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     }
 
     private static IEnumerable<(ISymbol Variable, int Position, List<IOperation> ScanRoots, bool Escaped, IOperation Transfer, IOperation Scope)> CallSiteEntries(
-        IInvocationOperation invocation, IOperation callBody, ISymbol variable, ILocalFunctionOperation declaration, IOperation block, HashSet<IMethodSymbol> visited)
+        IInvocationOperation invocation, IOperation callBody, ISymbol variable, IMethodSymbol functionSymbol, IOperation block, HashSet<IMethodSymbol> visited)
     {
-        foreach (var callVariable in CallSiteVariables(invocation, variable, declaration))
+        foreach (var callVariable in CallSiteVariables(invocation, variable, functionSymbol))
         {
             if (callBody is ILocalFunctionOperation)
             {
@@ -190,26 +196,28 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         }
     }
 
-    private static bool InvokesTheDeclaration(IInvocationOperation invocation, ILocalFunctionOperation declaration, IOperation block)
+    private static bool InvokesTheBody(IInvocationOperation invocation, IOperation transferBody, IMethodSymbol functionSymbol, IOperation block)
     {
-        // move() runs Move when the delegate local can hold it at the call.
+        // move() runs the body when the delegate local can hold it at the call -- a stored
+        // METHOD GROUP matches by symbol, a stored LAMBDA by the operation itself.
         if (invocation.TargetMethod.MethodKind == MethodKind.DelegateInvoke)
         {
             return DelegateReceiver(invocation) is { } receiver
                 && StoredCallables(receiver, block, invocation, transferPosition: 0, new HashSet<ISymbol>(SymbolEqualityComparer.Default))
-                    .OfType<IMethodReferenceOperation>()
-                    .Any(reference => SymbolEqualityComparer.Default.Equals(reference.Method.OriginalDefinition, declaration.Symbol));
+                    .Any(callable => ReferenceEquals(callable, transferBody)
+                        || (callable is IMethodReferenceOperation methodReference
+                            && SymbolEqualityComparer.Default.Equals(methodReference.Method.OriginalDefinition, functionSymbol)));
         }
 
-        return SymbolEqualityComparer.Default.Equals(invocation.TargetMethod.OriginalDefinition, declaration.Symbol);
+        return SymbolEqualityComparer.Default.Equals(invocation.TargetMethod.OriginalDefinition, functionSymbol);
     }
 
     // The caller-side variable the transferred callee variable aliases at THIS call: a
     // captured local stays itself; a PARAMETER maps to the matching argument's sources.
-    private static IEnumerable<ISymbol> CallSiteVariables(IInvocationOperation invocation, ISymbol variable, ILocalFunctionOperation declaration)
+    private static IEnumerable<ISymbol> CallSiteVariables(IInvocationOperation invocation, ISymbol variable, IMethodSymbol functionSymbol)
     {
         if (variable is not IParameterSymbol parameter
-            || !SymbolEqualityComparer.Default.Equals(parameter.ContainingSymbol.OriginalDefinition, declaration.Symbol))
+            || !SymbolEqualityComparer.Default.Equals(parameter.ContainingSymbol.OriginalDefinition, functionSymbol))
         {
             yield return variable;
             yield break;
@@ -333,6 +341,9 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             && ReferenceEquals(assignment.Target, operation)
             && assignment.Syntax.Span.End <= limit
             && SymbolEqualityComparer.Default.Equals(ReferencedVariable(operation), variable)
+            // A replacement built FROM the variable (x = x, x = Wrap(x)) is not provably a
+            // different object: the alias may survive.
+            && ReadWithin(assignment.Value, variable) is null
             && !IsConditionalWithin(assignment, region)
             && !ABranchCanSkip(assignment, region.Syntax.SpanStart, region));
     }
@@ -461,10 +472,11 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             IAnonymousObjectCreationOperation anonymous => anonymous.Initializers.Select(initializer =>
                 (IOperation?)(initializer is ISimpleAssignmentOperation member ? member.Value : initializer)),
             IObjectCreationOperation creation => ObjectCreationCarriedParts(creation),
-            // box with { Value = list }: the receiver's CLONE carries the same reference in
-            // its slot. The operand itself stays a leaf like a spread's: the original object
-            // is not handed off, only its contents are copied into the clone.
-            IWithOperation { Initializer: { } withInitializer } => InitializerCarriedParts(withInitializer),
+            // box with { Value = list }: the receiver's CLONE copies the operand's stored
+            // contents, then applies the initializer -- an INLINE operand's carried parts
+            // are in the clone; a variable operand stays a leaf (its object is not handed
+            // off, only copied from).
+            IWithOperation withOperation => WithCarriedParts(withOperation),
             IConversionOperation conversion => new[] { conversion.Operand },
             // Transfer([list]): matched by SYNTAX -- ICollectionExpressionOperation is not
             // public in the Roslyn this analyzer compiles against, but the children are
@@ -708,7 +720,24 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                     new HashSet<IMethodSymbol>(SymbolEqualityComparer.Default)) == BodyEffect.Reads)
             .Select(reference => (Operation: (IOperation)reference, CallEffect: (BodyEffect?)BodyEffect.Reads));
 
-        var orderedUses = laterReferences.Concat(callableCalls).Concat(methodGroupEscapes)
+        // A stored delegate that CAPTURED the transferred variable and escapes after the
+        // handoff (returned, passed on, stored elsewhere) can run later against the
+        // receiver-owned object. Calls are classified separately, and a bare store target
+        // rewrites the local without running anything.
+        var delegateEscapes = scanRoots
+            .SelectMany(root => root.DescendantsAndSelf())
+            .OfType<ILocalReferenceOperation>()
+            .Where(reference => reference.Local.Type is { TypeKind: TypeKind.Delegate }
+                && reference.Syntax.SpanStart >= transferPosition
+                && !IsAStoreTargetOrInvokeReceiver(reference)
+                && !IsInsideNameOf(reference)
+                && !IsInASiblingArmOfTheTransfer(reference, transferPosition)
+                && (escaped || !IsInAnUnreachableCatch(reference, transferPosition))
+                && !IsWithinALocalFunctionBody(reference, scanRoots)
+                && AnyStoredCallableReads(reference.Local, variable, reference, 0, scope))
+            .Select(reference => (Operation: (IOperation)reference, CallEffect: (BodyEffect?)BodyEffect.Reads));
+
+        var orderedUses = laterReferences.Concat(callableCalls).Concat(methodGroupEscapes).Concat(delegateEscapes)
             .OrderBy(use => use.Operation.Syntax.SpanStart);
 
         // Regions where a SKIPPED conditional reinitialization dominates: inside its own arm,
@@ -1087,22 +1116,33 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                 indexer.Arguments.Select(argument => (IOperation?)argument.Value).Concat(new[] { (IOperation?)member.Value }),
             ISimpleAssignmentOperation member when StoresIntoACompilerKnownSlot(member) => new[] { (IOperation?)member.Value },
             // Child = { Value = list }: writes INTO the object the transferred payload
-            // already reaches -- the nested initializer carries by the same rules.
-            IMemberInitializerOperation { Initializer: { } nested } => InitializerCarriedParts(nested),
+            // already reaches -- when Child is a RETAINED slot. A computed member hands out
+            // a temporary the payload never keeps.
+            IMemberInitializerOperation { Initializer: { } nested } memberInitializer
+                when RetainsItsSlot(memberInitializer.InitializedMember) => InitializerCarriedParts(nested),
             IInvocationOperation add when IsFrameworkDeclared(add.TargetMethod.ContainingType) =>
                 add.Arguments.Select(argument => (IOperation?)argument.Value),
             _ => System.Linq.Enumerable.Empty<IOperation?>(),
         });
     }
 
-    // Types living in the SAME ASSEMBLY as System.Object (the core library): their
-    // collection contracts store what they are handed. A System.* NAMESPACE proves nothing --
-    // any referenced assembly can declare one.
+    // Types from the framework's own collection assemblies: their contracts store what
+    // they are handed. Anchored on the CORE LIBRARY's assembly identity plus the framework
+    // collection assemblies by exact name -- a System.* NAMESPACE in a user assembly proves
+    // nothing.
     private static bool IsFrameworkDeclared(INamedTypeSymbol? type)
     {
         if (type is null)
         {
             return false;
+        }
+
+        if (type.ContainingAssembly?.Identity.Name is
+            "System.Runtime" or "System.Collections" or "System.Collections.Concurrent"
+            or "System.Collections.Immutable" or "System.Collections.Specialized"
+            or "System.Collections.NonGeneric" or "netstandard" or "mscorlib")
+        {
+            return true;
         }
 
         for (ITypeSymbol? current = type; current is not null; current = current.BaseType)
@@ -1114,6 +1154,29 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         }
 
         return false;
+    }
+
+    private static System.Collections.Generic.IEnumerable<IOperation?> WithCarriedParts(IWithOperation withOperation)
+    {
+        var operand = withOperation.Operand;
+        while (operand is IConversionOperation conversion)
+        {
+            operand = conversion.Operand;
+        }
+
+        var operandParts = operand is not null && CarriedParts(operand) is { } parts
+            ? parts
+            : System.Linq.Enumerable.Empty<IOperation?>();
+
+        return withOperation.Initializer is { } initializer
+            ? operandParts.Concat(InitializerCarriedParts(initializer))
+            : operandParts;
+    }
+
+    private static bool RetainsItsSlot(IOperation? member)
+    {
+        return member is IFieldReferenceOperation
+            || (member is IPropertyReferenceOperation property && SendableSymbolClassifier.HasBackingSlot(property.Property));
     }
 
     private static bool StoresIntoACompilerKnownSlot(ISimpleAssignmentOperation member)
@@ -1210,23 +1273,38 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             return BodyEffect.None;
         }
 
-        var candidates = StoredCallables(delegateLocal, scope, invocation, transferPosition,
-            new HashSet<ISymbol>(SymbolEqualityComparer.Default));
-        var reads = candidates.Any(callable => callable switch
-        {
-            IAnonymousFunctionOperation lambda =>
-                EffectOf(lambda, variable, scope, new HashSet<IMethodSymbol>(SymbolEqualityComparer.Default), out _) == BodyEffect.Reads,
-            IMethodReferenceOperation { Method: { MethodKind: MethodKind.LocalFunction } method } =>
-                LocalFunctionCallEffect(method, variable, scope, new HashSet<IMethodSymbol>(SymbolEqualityComparer.Default)) == BodyEffect.Reads,
-            _ => false,
-        });
+        return AnyStoredCallableReads(delegateLocal, variable, invocation, transferPosition, scope)
+            ? BodyEffect.Reads
+            : BodyEffect.None;
+    }
 
-        return reads ? BodyEffect.Reads : BodyEffect.None;
+    private static bool AnyStoredCallableReads(ISymbol delegateLocal, ISymbol variable, IOperation consumer, int transferPosition, IOperation scope)
+    {
+        return StoredCallables(delegateLocal, scope, consumer, transferPosition, new HashSet<ISymbol>(SymbolEqualityComparer.Default))
+            .Any(callable => callable switch
+            {
+                IAnonymousFunctionOperation lambda =>
+                    EffectOf(lambda, variable, scope, new HashSet<IMethodSymbol>(SymbolEqualityComparer.Default), out _) == BodyEffect.Reads,
+                IMethodReferenceOperation { Method: { MethodKind: MethodKind.LocalFunction } method } =>
+                    LocalFunctionCallEffect(method, variable, scope, new HashSet<IMethodSymbol>(SymbolEqualityComparer.Default)) == BodyEffect.Reads,
+                _ => false,
+            });
     }
 
     // The local the invocation calls through -- behind a ?. receiver too: use?.Invoke() puts
     // a placeholder in Instance, and the real receiver hangs off the enclosing conditional
     // access.
+    private static bool IsAStoreTargetOrInvokeReceiver(ILocalReferenceOperation reference)
+    {
+        return reference.Parent switch
+        {
+            IAssignmentOperation assignment when ReferenceEquals(assignment.Target, reference) => true,
+            IInvocationOperation invocation when ReferenceEquals(invocation.Instance, reference) => true,
+            IConditionalAccessOperation conditionalAccess when ReferenceEquals(conditionalAccess.Operation, reference) => true,
+            _ => false,
+        };
+    }
+
     private static ISymbol? DelegateReceiver(IInvocationOperation invocation)
     {
         var receiver = invocation.Instance;
