@@ -106,12 +106,17 @@ class Bench
         for (var round = 0; round < 5; round++)
         {
             GC.Collect(); GC.WaitForPendingFinalizers(); GC.Collect();
-            var a0 = GC.GetAllocatedBytesForCurrentThread();
+            // Process-wide, not per-thread: the scenarios await inside their loops, so
+            // continuations hop pool threads and per-thread counters would miss (or even
+            // negatively skew) everything allocated off the starting thread. Nothing else
+            // allocates concurrently in this single-scenario process, and best-of-5 absorbs
+            // the residual noise.
+            var a0 = GC.GetTotalAllocatedBytes(precise: true);
             var sw = Stopwatch.StartNew();
             await run(n);
             sw.Stop();
             var ns = sw.Elapsed.TotalNanoseconds / n;
-            if (ns < bestNs) { bestNs = ns; bytesPer = (GC.GetAllocatedBytesForCurrentThread() - a0) / (double)n; }
+            if (ns < bestNs) { bestNs = ns; bytesPer = (GC.GetTotalAllocatedBytes(precise: true) - a0) / (double)n; }
         }
         Console.WriteLine($"{name,-46} {bestNs,8:F0} ns/op {bytesPer,8:F0} B/op");
     }

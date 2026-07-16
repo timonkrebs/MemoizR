@@ -203,15 +203,19 @@ public sealed class RemoteSignal<T>
             verdict = Classify(payload, pulledAtGeneration);
             if (verdict is AdoptionVerdict.Adopt or AdoptionVerdict.AdoptReset)
             {
-                var adopted = CommitOrdering(payload, incoming, verdict == AdoptionVerdict.AdoptReset);
+                var isReset = verdict == AdoptionVerdict.AdoptReset;
                 await local.Set(_ =>
                 {
-                    // The snapshot becomes visible as part of the graph write, under the same
-                    // exclusive context lock: a barrier evaluation (upgradeable, excluded by
-                    // the exclusive) can never observe the new evidence while the local graph
-                    // value still lags behind the queued Set -- publication and graph value
-                    // advance together, and the Set's own propagation re-runs the barrier.
-                    publication = adopted;
+                    // Ordering state and snapshot commit atomically WITH the graph write, under
+                    // the same exclusive context lock: a barrier evaluation (upgradeable,
+                    // excluded by the exclusive) can never observe the new evidence while the
+                    // local graph value still lags behind the queued Set, and a Set that fails
+                    // to acquire at all (a bridge delivering from a same-context reaction flow
+                    // is refused as a recursive acquisition) leaves the ordering untouched --
+                    // the redelivery must adopt, not be duplicate-dropped against a sequence
+                    // the graph never published. The callback still runs inside the adoption
+                    // gate, so the ordering fields stay gate-consistent for Classify/OnStale.
+                    publication = CommitOrdering(payload, incoming, isReset);
                     return payload.Value;
                 });
             }

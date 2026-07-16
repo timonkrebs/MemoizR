@@ -602,6 +602,40 @@ public class DistributedPackageTests
     }
 
     [Fact]
+    public async Task RemoteSignal_FailedLocalWrite_DoesNotAdvanceTheOrdering()
+    {
+        // A bridge that (wrongly) delivers from inside a same-context reaction flow: the
+        // local write is refused as a recursive acquisition and the delivery faults. The
+        // ordering state must not have advanced -- the redelivery from a proper transport
+        // flow must adopt, instead of being duplicate-dropped against a sequence the graph
+        // never published.
+        var epoch = 11L;
+        var consumer = new MemoFactory();
+        var mirror = consumer.CreateRemoteSignal<int>("mirror", 0,
+            () => throw new InvalidOperationException("no pull in this test"));
+        var payload = new ValuePayload<int>(1000, epoch, 1, 111, CausalityStamp.ForSignal(1000, 1, epoch).Serialize(), false);
+
+        var poke = consumer.CreateSignal(0);
+        Task? adoptInsideReaction = null;
+        var reactionRan = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var reaction = consumer.BuildReaction().CreateReaction(poke, _ =>
+        {
+            adoptInsideReaction ??= mirror.OnValueAsync(payload);
+            reactionRan.TrySetResult();
+        });
+
+        await reactionRan.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => adoptInsideReaction!);
+        Assert.False(mirror.HasEvidence);
+
+        // The redelivery from a clean flow adopts.
+        await mirror.OnValueAsync(payload);
+        Assert.Equal(111, await mirror.Local.Get());
+        Assert.Equal(epoch, mirror.Publication!.Epoch);
+        GC.KeepAlive(reaction);
+    }
+
+    [Fact]
     public async Task RemoteSignal_SupersededNewerRestartAnswer_IsReverified_NotDropped()
     {
         // Two racing verification pulls under one generation: the OLDER restart's answer
