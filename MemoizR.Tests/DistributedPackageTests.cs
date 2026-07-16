@@ -546,6 +546,62 @@ public class DistributedPackageTests
     }
 
     [Fact]
+    public async Task RemoteSignal_EpochChangeRefusedDuringResubscription_IsVerifiedWhenTheWindowCloses()
+    {
+        // The peer restarts AGAIN while the previous reset's resubscription hook is still
+        // running. The mid-window delivery is refused (it may have travelled the dead
+        // channel) -- but it may have been the new incarnation's ONLY advertisement, so
+        // closing the window must answer it with one fresh verification pull instead of
+        // pinning the mirror to the now-dead epoch. Hook runs stay strictly sequential.
+        var epoch1 = 11L;
+        var epoch2 = 22L;
+        var epoch3 = 33L;
+        var releaseFirstHook = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var hookRuns = 0;
+        var pulls = 0;
+        var consumer = new MemoFactory();
+        var mirror = consumer.CreateRemoteSignal("mirror", 0,
+            () =>
+            {
+                var n = Interlocked.Increment(ref pulls);
+                return Task.FromResult(n == 1
+                    // The verification pull that commits the first reset (epoch1 -> epoch2).
+                    ? new ValuePayload<int>(1000, epoch2, 1, 222, CausalityStamp.ForSignal(1000, 1, epoch2).Serialize(), false)
+                    // Every later pull answers the live truth: the second restart's incarnation.
+                    : new ValuePayload<int>(1000, epoch3, 1, 333, CausalityStamp.ForSignal(1000, 1, epoch3).Serialize(), false));
+            },
+            onPeerReset: async () =>
+            {
+                if (Interlocked.Increment(ref hookRuns) == 1)
+                {
+                    await releaseFirstHook.Task;
+                }
+            });
+
+        await mirror.OnValueAsync(new ValuePayload<int>(1000, epoch1, 5, 111, CausalityStamp.ForSignal(1000, 5, epoch1).Serialize(), false));
+
+        // First restart: the unsolicited delivery triggers the verification pull, the reset
+        // commits, and hook 1 blocks -- the resubscription window is open.
+        var delivery = mirror.OnValueAsync(new ValuePayload<int>(1000, epoch2, 1, 222, CausalityStamp.ForSignal(1000, 1, epoch2).Serialize(), false));
+        await TestHelpers.WaitForConvergenceAsync(() => Volatile.Read(ref hookRuns) == 1);
+
+        // Second restart mid-resubscription: its single-shot delivery is refused (and no
+        // second hook starts -- windows are single-flight), but remembered.
+        await mirror.OnValueAsync(new ValuePayload<int>(1000, epoch3, 1, 333, CausalityStamp.ForSignal(1000, 1, epoch3).Serialize(), false));
+        Assert.Equal(epoch2, mirror.Publication!.Epoch);
+        Assert.Equal(1, Volatile.Read(ref hookRuns));
+
+        releaseFirstHook.SetResult();
+        await delivery.WaitAsync(TimeSpan.FromSeconds(10));
+
+        // Closing the window verifies the refused epoch change by pull and adopts the live
+        // incarnation, running its hook in sequence.
+        await TestHelpers.WaitForConvergenceAsync(() => Volatile.Read(ref hookRuns) == 2);
+        Assert.Equal(epoch3, mirror.Publication!.Epoch);
+        Assert.Equal(333, await mirror.Local.Get());
+    }
+
+    [Fact]
     public async Task RemoteSignal_DelayedPayloadFromASkippedIncarnation_CannotAbandonTheLiveEpoch()
     {
         // The host restarted twice and the mirror never saw the middle incarnation, so that

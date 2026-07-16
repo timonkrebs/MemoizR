@@ -36,7 +36,9 @@ public sealed record AdoptedPublication<T>(T Value, long Epoch, CausalityStamp S
 ///    <see cref="OnPeerReset"/> runs so the bridge can resubscribe -- and while that
 ///    resubscription is in flight, epoch-changing answers are refused entirely (they may have
 ///    travelled the dead incarnation's channel), with pulls issued inside the window
-///    invalidated when it closes;
+///    invalidated when it closes and any refusal re-verified by one fresh pull then (the peer
+///    may have restarted again mid-resubscription, and that delivery may have been the new
+///    incarnation's only advertisement);
 ///  - within an epoch, the publication SEQUENCE totally orders deliveries: anything at or
 ///    below the last adopted sequence is a late or duplicated delivery and is dropped --
 ///    including the dependency-oscillation shapes causality stamps cannot order, and equally
@@ -76,6 +78,11 @@ public sealed class RemoteSignal<T>
     // the window: declaring no resubscription means the channel is address-stable, and a fresh
     // pull's answer always reflects whoever is actually alive.
     private bool resettling;
+
+    // Gate-guarded: an epoch change was refused while the window was open (the peer restarted
+    // again mid-resubscription). Closing the window answers it with one verification pull --
+    // the refused delivery may have been that incarnation's only advertisement.
+    private bool pendingEpochVerification;
     private volatile AdoptedPublication<T>? publication;
 
     private enum AdoptionVerdict { Drop, Adopt, AdoptReset, VerifyByPull }
@@ -112,10 +119,11 @@ public sealed class RemoteSignal<T>
     /// and the adoption gate is released: the hook may freely pull or feed this same mirror
     /// (re-entering the adoption path), and if it throws, the failure surfaces to the
     /// delivering caller while the value stays adopted -- redeliveries drop as duplicates and
-    /// only the resubscription itself needs retrying. Back-to-back resets can overlap hook
-    /// runs; a resubscribing bridge must tolerate that (or recreate the mirror for a clean
-    /// slate). The abandoned-epoch set stays bounded by the number of restarts this mirror
-    /// lived through.
+    /// only the resubscription itself needs retrying. Hook runs are SINGLE-FLIGHT: while one
+    /// is in flight, no further epoch change can commit (refused deliveries are re-verified by
+    /// pull once the resubscription attempt finishes), so back-to-back restarts run their
+    /// hooks strictly in sequence. The abandoned-epoch set stays bounded by the number of
+    /// restarts this mirror lived through.
     /// </summary>
     public Func<Task>? OnPeerReset { get; init; }
 
@@ -238,18 +246,44 @@ public sealed class RemoteSignal<T>
 
     // The resubscription attempt is over (success or failure -- either way the delivering
     // caller knows): close the window and invalidate every pull issued inside it, whose
-    // answers may have travelled the dead incarnation's channel.
+    // answers may have travelled the dead incarnation's channel. Windows are SINGLE-FLIGHT by
+    // construction -- while one is open, no epoch change can commit, so no second hook can
+    // start -- which is what makes this unconditional close pair 1:1 with the hook invocation
+    // that opened the window (no per-reset window identity needed). If an epoch change was
+    // refused while the window was open, verify it now on a detached best-effort pull: that
+    // refusal may have been the dead-epoch delivery's ONLY advertisement (no heartbeat), and
+    // dropping it silently would pin the mirror to a dead incarnation.
     private async Task CloseResettlingWindowAsync()
     {
+        bool verify;
         await adoptionGate.WaitAsync();
         try
         {
             resettling = false;
+            verify = pendingEpochVerification;
+            pendingEpochVerification = false;
             Interlocked.Increment(ref epochGeneration);
         }
         finally
         {
             adoptionGate.Release();
+        }
+
+        if (verify)
+        {
+            DetachedFlow.Run(async () =>
+            {
+                try
+                {
+                    await PullAsync();
+                }
+                catch
+                {
+                    // Best-effort recovery of a refused single-shot advertisement; a faulted
+                    // transport here is retried by the next advertisement or heartbeat like
+                    // any other lost delivery.
+                }
+            });
         }
     }
 
@@ -300,11 +334,19 @@ public sealed class RemoteSignal<T>
 
         // An epoch change: only a pull issued after the last committed epoch change may commit
         // it -- and never while a reset's resubscription is still in flight (the answer may
-        // have travelled the dead incarnation's channel). An unsolicited payload gets a
-        // verification pull instead; a superseded pull answer (an epoch change committed since
-        // it was issued) is just dropped -- whatever committed is newer knowledge, and the
-        // live incarnation keeps advertising.
-        if (!resettling && pulledAtGeneration == Volatile.Read(ref epochGeneration))
+        // have travelled the dead incarnation's channel). A refusal during the window is
+        // remembered and answered with a verification pull when the window closes: the peer
+        // may have restarted AGAIN mid-resubscription, and this delivery may have been the new
+        // incarnation's only advertisement. Otherwise an unsolicited payload gets a
+        // verification pull directly; a superseded pull answer (an epoch change committed
+        // since it was issued) is just dropped -- whatever committed is newer knowledge, and
+        // the live incarnation keeps advertising.
+        if (resettling)
+        {
+            pendingEpochVerification = true;
+            return AdoptionVerdict.Drop;
+        }
+        if (pulledAtGeneration == Volatile.Read(ref epochGeneration))
         {
             return AdoptionVerdict.AdoptReset;
         }
