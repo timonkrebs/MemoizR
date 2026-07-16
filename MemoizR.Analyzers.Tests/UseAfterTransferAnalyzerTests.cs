@@ -4098,6 +4098,256 @@ public class UseAfterTransferAnalyzerTests
     }
 
     [Fact]
+    public async Task RedeclaredPositionalProperties_DropTheParameter()
+    {
+        // The explicit Value property has its own initializer: the primary parameter is
+        // never stored, so the receiver's Box does not carry the list.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public record Box(List<int> Value)
+            {
+                public List<int> Value { get; init; } = new List<int>();
+            }
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(new Box(list));
+                    list.Add(1);
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task InspectedDelegates_DoNotEscape()
+    {
+        // A null check neither runs the delegate nor lets it leave the scope.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    Action use = () => list.Add(1);
+                    var sending = Sending.Transfer(list);
+                    if (use != null)
+                    {
+                    }
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task OutResetsBeforeTheTransfer_BreakTheParameterAlias()
+    {
+        // Fresh(out x) rewrites the parameter before the handoff: the callee transferred
+        // its own fresh value, not the caller's list.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    void Move(List<int> x)
+                    {
+                        Fresh(out x);
+                        _ = Sending.Transfer(x);
+                    }
+                    Move(list);
+                    list.Add(1);
+                }
+
+                private static void Fresh(out List<int> target) => target = new List<int>();
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task UnmatchedThrowTypes_CannotSkipResets()
+    {
+        // The catch cannot catch InvalidOperationException: the throwing path exits the
+        // method, so every path reaching the Add ran the reset.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M(bool bad)
+                {
+                    var list = new List<int> { 1 };
+                    try
+                    {
+                        _ = Sending.Transfer(list);
+                        if (bad) throw new System.InvalidOperationException();
+                        list = new List<int>();
+                    }
+                    catch (System.ArgumentException)
+                    {
+                    }
+
+                    list.Add(1);
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task OutArguments_DoNotMaskReadingBodies()
+    {
+        // The out write lands only when Reset returns -- AFTER its body read the
+        // transferred list.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    void Reset(out List<int> fresh)
+                    {
+                        list.Add(1);
+                        fresh = new List<int>();
+                    }
+                    _ = Sending.Transfer(list);
+                    Reset(out list);
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+    }
+
+    [Fact]
+    public async Task ThrowCapableSiblingArms_DoNotReachTheCatch()
+    {
+        // MayThrow lives in the arm the transfer path never runs: no exception can carry
+        // the wrapper into the handler.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M(bool move)
+                {
+                    var list = new List<int> { 1 };
+                    try
+                    {
+                        if (move)
+                        {
+                            _ = Sending.Transfer(list);
+                        }
+                        else
+                        {
+                            MayThrow();
+                        }
+                    }
+                    catch
+                    {
+                        list.Add(1);
+                    }
+                }
+
+                private static void MayThrow()
+                {
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task WrappingCalls_CanThrowBeforeTheReset_AndKeepThePathOpen()
+    {
+        // MayThrow can fail after the wrapper exists and before the reset: the caught path
+        // resumes with the transferred list still in the variable.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    try
+                    {
+                        MayThrow(Sending.Transfer(list));
+                        list = new List<int>();
+                    }
+                    catch
+                    {
+                    }
+
+                    list.Add(1);
+                }
+
+                private static void MayThrow(Sending<List<int>> sending)
+                {
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+    }
+
+    [Fact]
+    public async Task RefParameterTransfers_StayMappedToTheCaller()
+    {
+        // x writes through to the caller's slot: the fresh value was transferred AND lives
+        // in list, so the caller's Add touches the handed-off object.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    void Move(ref List<int> x)
+                    {
+                        x = new List<int>();
+                        _ = Sending.Transfer(x);
+                    }
+                    Move(ref list);
+                    list.Add(1);
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+    }
+
+    [Fact]
     public async Task AnonymousObjectInitializers_AreTransferSources()
     {
         // Transfer(new { Value = list }) hands off an object graph containing the same list:

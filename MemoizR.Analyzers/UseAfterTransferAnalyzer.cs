@@ -146,7 +146,9 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
 
         // A by-value parameter definitely reassigned before the handoff no longer aliases
         // ANY caller argument: the callee transferred its own fresh value.
-        if (variable is IParameterSymbol parameterVariable
+        // (ref/out parameters write THROUGH to the caller's slot: the alias survives any
+        // reassignment, so only by-value parameters lose it.)
+        if (variable is IParameterSymbol { RefKind: RefKind.None } parameterVariable
             && SymbolEqualityComparer.Default.Equals(parameterVariable.ContainingSymbol.OriginalDefinition, functionSymbol)
             && DefinitelyReassignedBefore(transferBody, variable, anchor))
         {
@@ -336,16 +338,15 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     private static bool DefinitelyReassignedBefore(IOperation region, ISymbol variable, IOperation transfer)
     {
         var limit = transfer.Syntax.SpanStart;
-        return region.DescendantsAndSelf().Any(operation =>
-            operation.Parent is ISimpleAssignmentOperation assignment
-            && ReferenceEquals(assignment.Target, operation)
-            && assignment.Syntax.Span.End <= limit
-            && SymbolEqualityComparer.Default.Equals(ReferencedVariable(operation), variable)
-            // A replacement built FROM the variable (x = x, x = Wrap(x)) is not provably a
-            // different object: the alias may survive.
-            && ReadWithin(assignment.Value, variable) is null
-            && !IsConditionalWithin(assignment, region)
-            && !ABranchCanSkip(assignment, region.Syntax.SpanStart, region));
+        return region.DescendantsAndSelf()
+            .Where(operation => SymbolEqualityComparer.Default.Equals(ReferencedVariable(operation), variable))
+            .Any(reference => ResetShapeOf(reference, variable, region, out var read) is { } reset
+                // A replacement built FROM the variable (x = x, x = Wrap(x)) is not provably
+                // a different object: the alias may survive.
+                && read is null
+                && reset.Syntax.Span.End <= limit
+                && !IsConditionalWithin(reset, region)
+                && !ABranchCanSkip(reset, region.Syntax.SpanStart, region));
     }
 
     // An enclosing foreach KEEPS READING its collection after the body iteration that
@@ -783,8 +784,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             .OfType<ILocalReferenceOperation>()
             .Where(reference => reference.Local.Type is { TypeKind: TypeKind.Delegate }
                 && reference.Syntax.SpanStart >= transferPosition
-                && !IsAStoreTargetOrInvokeReceiver(reference)
-                && !IsInsideNameOf(reference)
+                && EscapesTheScope(reference)
                 && !IsInASiblingArmOfTheTransfer(reference, transferPosition)
                 && (escaped || !IsInAnUnreachableCatch(reference, transferPosition))
                 && !IsWithinALocalFunctionBody(reference, scanRoots)
@@ -853,7 +853,11 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             .SelectMany(argument => argument.Value.DescendantsAndSelf())
             .Where(operation => SymbolEqualityComparer.Default.Equals(ReferencedVariable(operation), variable)
                 && operation.Syntax.SpanStart >= floorPosition
-                && !IsInsideNameOf(operation))
+                && !IsInsideNameOf(operation)
+                // An OUT write lands only when the callee returns -- AFTER its body ran --
+                // so it can never feed the body a fresh value. The call-site reference is
+                // classified as a reinitialization by the direct scan instead.
+                && operation.Parent is not IArgumentOperation { Parameter.RefKind: RefKind.Out })
             .OrderBy(operation => operation.Syntax.SpanStart);
 
         foreach (var reference in references)
@@ -1099,8 +1103,14 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
 
         foreach (var argument in creation.Arguments)
         {
+            // Only the SYNTHESIZED positional property stores its parameter (its declaring
+            // syntax IS the parameter); an explicitly redeclared property replaces the
+            // storage and may never read it.
             if (argument.Parameter is { } parameter
-                && recordType.GetMembers(parameter.Name).OfType<IPropertySymbol>().Any(SendableSymbolClassifier.HasBackingSlot))
+                && recordType.GetMembers(parameter.Name).OfType<IPropertySymbol>().Any(property =>
+                    SendableSymbolClassifier.HasBackingSlot(property)
+                    && property.DeclaringSyntaxReferences.Any(reference =>
+                        reference.GetSyntax() is Microsoft.CodeAnalysis.CSharp.Syntax.ParameterSyntax)))
             {
                 yield return argument.Value;
             }
@@ -1299,15 +1309,33 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     // The local the invocation calls through -- behind a ?. receiver too: use?.Invoke() puts
     // a placeholder in Instance, and the real receiver hangs off the enclosing conditional
     // access.
-    private static bool IsAStoreTargetOrInvokeReceiver(ILocalReferenceOperation reference)
+    // A delegate reference ESCAPES when it is returned, passed as an argument, or stored
+    // into a non-local slot -- merely inspecting it (use != null) runs nothing, a local
+    // copy is an alias resolved at ITS uses, and calls/stores are classified separately.
+    private static bool EscapesTheScope(ILocalReferenceOperation reference)
     {
-        return reference.Parent switch
+        for (IOperation child = reference; child.Parent is { } parent; child = parent)
         {
-            IAssignmentOperation assignment when ReferenceEquals(assignment.Target, reference) => true,
-            IInvocationOperation invocation when ReferenceEquals(invocation.Instance, reference) => true,
-            IConditionalAccessOperation conditionalAccess when ReferenceEquals(conditionalAccess.Operation, reference) => true,
-            _ => false,
-        };
+            switch (parent)
+            {
+                case IConversionOperation or IDelegateCreationOperation or ITupleOperation
+                    or IArrayInitializerOperation or IObjectOrCollectionInitializerOperation
+                    or IArrayCreationOperation or IAnonymousObjectCreationOperation:
+                    continue; // wrappers: the payload rides along
+                case IReturnOperation { Kind: not OperationKind.YieldBreak }:
+                    return true;
+                case IArgumentOperation:
+                    return true;
+                case ISimpleAssignmentOperation assignment when !ReferenceEquals(child, assignment.Target):
+                    return ReferencedVariable(assignment.Target) is null; // a non-local slot publishes
+                case ICompoundAssignmentOperation compound when !ReferenceEquals(child, compound.Target):
+                    return ReferencedVariable(compound.Target) is null;
+                default:
+                    return false;
+            }
+        }
+
+        return false;
     }
 
     private static ISymbol? DelegateReceiver(IInvocationOperation invocation)
@@ -1511,6 +1539,8 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         return region.DescendantsAndSelf().Any(operation =>
             operation.Syntax.Span.End > transferPosition
             && !IsWithinANestedFunction(operation, region)
+            // An op in a mutually exclusive sibling arm never runs on the transferred path.
+            && !IsInASiblingArmOfTheTransfer(operation, transferPosition)
             && CanThrow(operation));
     }
 
@@ -1779,7 +1809,10 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     {
         var reinitPosition = reinitialization.Syntax.SpanStart;
         return scope.DescendantsAndSelf().Any(operation =>
-            operation.Syntax.SpanStart >= transferPosition
+            // An op WRAPPING the transfer (MayThrow(Sending.Transfer(list))) completes -- and
+            // can fail -- after the wrapper exists; the transfer itself (ending exactly AT the
+            // position) cannot have let the wrapper escape when it throws.
+            operation.Syntax.Span.End > transferPosition
             && operation.Syntax.Span.End <= reinitPosition
             // A jump in a mutually exclusive sibling arm of the transfer never runs on the
             // path that transferred (`if (move) Transfer(list); else break;`): it cannot skip
@@ -1790,12 +1823,9 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
 
     private static bool CanSkipPast(IOperation operation, int reinitPosition, IOperation scope)
     {
-        // A caught FAILURE resumes AFTER its try: any throw-capable operation (an explicit
-        // throw, a call that may fail, ...) skips a reset that try still contains.
         if (CanThrow(operation))
         {
-            return NearestCatchingTry(operation) is { } catchingTry
-                && catchingTry.Syntax.Span.Contains(reinitPosition);
+            return ACaughtFailureCanResumePast(operation, reinitPosition);
         }
 
         // Returning exits the enclosing function past the reset. Inside a CALLED body's scan
@@ -1825,6 +1855,41 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             if (exits)
             {
                 return parent.Syntax.Span.Contains(reinitPosition);
+            }
+        }
+
+        return false;
+    }
+
+    // A caught FAILURE resumes AFTER its try: any throw-capable operation (an explicit
+    // throw, a call that may fail, ...) skips a reset that try still contains. An EXPLICIT
+    // throw carries its type -- a catch that cannot catch it absorbs nothing -- and it
+    // governs its whole subtree (the operand evaluating is not an independent failure path
+    // worth modeling).
+    private static bool ACaughtFailureCanResumePast(IOperation operation, int reinitPosition)
+    {
+        if (operation is not IThrowOperation && IsInsideAThrow(operation))
+        {
+            return false;
+        }
+
+        return NearestCatchingTry(operation) is { } catchingTry
+            && catchingTry.Syntax.Span.Contains(reinitPosition)
+            && (operation is not IThrowOperation thrown || CatchesTheThrow(catchingTry, thrown));
+    }
+
+    private static bool IsInsideAThrow(IOperation operation)
+    {
+        for (var parent = operation.Parent; parent is not null; parent = parent.Parent)
+        {
+            if (parent is IThrowOperation)
+            {
+                return true;
+            }
+
+            if (parent is IAnonymousFunctionOperation or ILocalFunctionOperation)
+            {
+                return false;
             }
         }
 
