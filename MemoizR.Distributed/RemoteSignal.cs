@@ -83,6 +83,19 @@ public sealed class RemoteSignal<T>
     // again mid-resubscription). Closing the window answers it with one verification pull --
     // the refused delivery may have been that incarnation's only advertisement.
     private bool pendingEpochVerification;
+
+    private volatile Exception? lastBackgroundError;
+
+    /// <summary>
+    /// The last error a background recovery step threw -- the queued verification pull after
+    /// a resubscription window closed, including an <see cref="OnPeerReset"/> failure for a
+    /// reset that background pull committed. Background steps have no delivering caller to
+    /// surface to, so failures land here (like <c>ExportedNode.LastPublishError</c>); a bridge
+    /// that must react promptly to resubscription failures should observe its own hook.
+    /// Transport faults recorded here are self-healing -- the next advertisement or heartbeat
+    /// retries.
+    /// </summary>
+    public Exception? LastBackgroundError => lastBackgroundError;
     private volatile AdoptedPublication<T>? publication;
 
     private enum AdoptionVerdict { Drop, Adopt, AdoptReset, VerifyByPull }
@@ -286,11 +299,14 @@ public sealed class RemoteSignal<T>
                 {
                     await PullAsync();
                 }
-                catch
+                catch (Exception ex)
                 {
-                    // Best-effort recovery of a refused single-shot advertisement; a faulted
-                    // transport here is retried by the next advertisement or heartbeat like
-                    // any other lost delivery.
+                    // Best-effort recovery of a refused single-shot advertisement, with no
+                    // delivering caller to surface to: record instead of swallowing -- this
+                    // can be an OnPeerReset failure for the reset this pull just committed,
+                    // which the bridge must be able to learn about. A plain transport fault
+                    // is retried by the next advertisement or heartbeat.
+                    lastBackgroundError = ex;
                 }
             });
         }

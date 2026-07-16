@@ -93,7 +93,17 @@ public sealed class ExportedNode<T> : IDisposable
     {
         foreach (var source in handle.Sources)
         {
-            if (source is SignalHandlR sourceHandle && sourceHandle.Evidence.Unverifiable)
+            // Recurse into unverifiable sources AND non-clean ones: a dependency whose
+            // evaluation FAULTED keeps its previous verified evidence and parks at CacheCheck
+            // (the core's serve-last-good contract), so filtering on unverifiability alone
+            // would let the refreshed consumer clean-commit that stale cached value as
+            // VERIFIED -- and lose the unverifiability marker that makes pulls refresh at all.
+            // Forcing the parked part of the chain to genuinely re-evaluate answers honestly:
+            // still unverifiable while the fault persists, freshly verified once it healed.
+            // Signals never leave CacheClean and are never recursed; re-evaluating a merely
+            // scan-pending node is an equal-value commit that dirties nobody.
+            if (source is SignalHandlR sourceHandle
+                && (sourceHandle.Evidence.Unverifiable || sourceHandle.stateCell.State != CacheState.CacheClean))
             {
                 await InvalidateUnverifiableChainAsync(sourceHandle);
             }

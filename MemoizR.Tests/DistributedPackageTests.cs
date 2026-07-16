@@ -160,6 +160,63 @@ public class DistributedPackageTests
     }
 
     [Fact]
+    public async Task Export_Pull_ReattemptsFaultParkedDependencies()
+    {
+        // A dependency that FAULTED keeps its previous verified evidence and parks at
+        // CacheCheck, serving its last good value. The unverifiable-chain refresh must force
+        // it to genuinely re-evaluate: while the fault persists the pull answers honestly
+        // unverifiable, and once healed it answers with the dependency's FRESH value -- never
+        // a verified payload built on the stale parked one.
+        var host = new MemoFactory();
+        var s = host.CreateSignal(1);
+        var trigger = host.CreateSignal(0);
+        var failing = false;
+        var m1 = host.CreateMemoizR("m1", async () =>
+        {
+            var v = await s.Get();
+            if (Volatile.Read(ref failing))
+            {
+                throw new InvalidOperationException("m1 source down");
+            }
+            return v + 10; // s-dependent: the parked value goes stale when s moves
+        });
+        var m2 = host.CreateMemoizR("m2", async () =>
+        {
+            var t = await trigger.Get();
+            try
+            {
+                return t + await m1.Get() + 100;
+            }
+            catch (InvalidOperationException)
+            {
+                return 999;
+            }
+        });
+
+        Assert.Equal(111, await m2.Get()); // s=1: m1=11, trigger=0
+
+        Volatile.Write(ref failing, true);
+        await s.Set(2);       // m1's honest value is now 12 -- but its evaluation faults
+        await trigger.Set(1); // m2's own computation runs and catches
+        Assert.Equal(999, await m2.Get());
+        Assert.True(m2.Evidence.Unverifiable);
+
+        using var export = host.Export(m2, _ => Task.CompletedTask);
+
+        // While the fault persists, the refresh re-attempts the chain and answers honestly.
+        var stillBroken = await export.PullAsync();
+        Assert.True(stillBroken.Unverifiable);
+        Assert.Equal(999, stillBroken.Value);
+
+        // Once healed, the refresh recomputes the dependency itself: trigger(1) + fresh
+        // m1(12) + 100 -- never a verified payload built on the stale parked 11.
+        Volatile.Write(ref failing, false);
+        var healed = await export.PullAsync();
+        Assert.False(healed.Unverifiable);
+        Assert.Equal(113, healed.Value);
+    }
+
+    [Fact]
     public async Task Export_PublishStale_MayFeedASameContextSignal()
     {
         // An in-process bridge that writes advertisements into a same-context outbox signal:
@@ -672,6 +729,55 @@ public class DistributedPackageTests
         // ... superseding the newer restart's answer, which must be re-verified, not dropped.
         secondAnswer.SetResult(new ValuePayload<int>(1000, epoch3, 1, 333, CausalityStamp.ForSignal(1000, 1, epoch3).Serialize(), false));
         await delivery3.WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.Equal(epoch3, mirror.Publication!.Epoch);
+        Assert.Equal(333, await mirror.Local.Get());
+    }
+
+    [Fact]
+    public async Task RemoteSignal_QueuedVerificationHookFailure_IsRecorded()
+    {
+        // The queued verification pull after a window close can commit ANOTHER reset; if
+        // that reset's OnPeerReset fails there is no delivering caller to surface to -- the
+        // failure must land in LastBackgroundError instead of vanishing (the value is still
+        // adopted, like every hook failure).
+        var epoch1 = 11L;
+        var epoch2 = 22L;
+        var epoch3 = 33L;
+        var releaseFirstHook = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var hookRuns = 0;
+        var pulls = 0;
+        var consumer = new MemoFactory();
+        var mirror = consumer.CreateRemoteSignal("mirror", 0,
+            () =>
+            {
+                var n = Interlocked.Increment(ref pulls);
+                return Task.FromResult(n == 1
+                    ? new ValuePayload<int>(1000, epoch2, 1, 222, CausalityStamp.ForSignal(1000, 1, epoch2).Serialize(), false)
+                    : new ValuePayload<int>(1000, epoch3, 1, 333, CausalityStamp.ForSignal(1000, 1, epoch3).Serialize(), false));
+            },
+            onPeerReset: async () =>
+            {
+                if (Interlocked.Increment(ref hookRuns) == 1)
+                {
+                    await releaseFirstHook.Task;
+                    return;
+                }
+                throw new InvalidOperationException("resubscribe to the newest incarnation failed");
+            });
+
+        await mirror.OnValueAsync(new ValuePayload<int>(1000, epoch1, 5, 111, CausalityStamp.ForSignal(1000, 5, epoch1).Serialize(), false));
+
+        var delivery = mirror.OnValueAsync(new ValuePayload<int>(1000, epoch2, 1, 222, CausalityStamp.ForSignal(1000, 1, epoch2).Serialize(), false));
+        await TestHelpers.WaitForConvergenceAsync(() => Volatile.Read(ref hookRuns) == 1);
+
+        // A third incarnation's one-shot delivery is refused mid-window and remembered.
+        await mirror.OnValueAsync(new ValuePayload<int>(1000, epoch3, 1, 333, CausalityStamp.ForSignal(1000, 1, epoch3).Serialize(), false));
+
+        releaseFirstHook.SetResult(); // hook 1 succeeds; the close queues the verification
+        await delivery.WaitAsync(TimeSpan.FromSeconds(10));
+
+        // The queued verification adopts epoch3; its hook throws; the failure is recorded.
+        await TestHelpers.WaitForConvergenceAsync(() => mirror.LastBackgroundError is InvalidOperationException);
         Assert.Equal(epoch3, mirror.Publication!.Epoch);
         Assert.Equal(333, await mirror.Local.Get());
     }
