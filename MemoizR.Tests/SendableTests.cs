@@ -279,6 +279,24 @@ public class ValidateWrittenValuesTests
     }
 
     [Fact]
+    public void AsyncTasks_BehindTheNonGenericSurface_StillCheckTheirResult()
+    {
+        // Declared as plain Task the creation check passes, but the INSTANCE is an internal
+        // subtype of Task<List<int>>: trusting the implementation must not skip the
+        // green-listed generic base's arguments, or a cast re-opens the upcast-smuggling
+        // hole this option exists to close.
+        var f = new MemoFactory(options: MemoFactoryOptions.StrictSendableChecks | MemoFactoryOptions.ValidateWrittenValues);
+        var ex = Assert.Throws<InvalidOperationException>(() => f.CreateSignal<Task>(ComputeListAsync()));
+        Assert.Contains("List", ex.Message);
+
+        static async Task<List<int>> ComputeListAsync()
+        {
+            await Task.Yield();
+            return new List<int> { 1 };
+        }
+    }
+
+    [Fact]
     public void FrameworkImplementations_OfGreenListedTypes_AreSendable()
     {
         // The green-list trust covers same-assembly framework implementations only: a USER

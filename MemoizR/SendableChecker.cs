@@ -160,7 +160,13 @@ public static class SendableChecker
         // never name these internals, so the lockstep contract is untouched.)
         if (IsFrameworkImplementationOfAGreenListedType(type))
         {
-            return null;
+            // Trusted -- except that the green-listed GENERIC bases it implements are still
+            // its visible contract: CreateSignal<Task>(ComputeListAsync()) hands an internal
+            // subtype of Task<List<int>> through the non-generic Task surface, and skipping
+            // the base's arguments would re-open the upcast-smuggling hole ValidateWrittenValues
+            // exists to close. The implementation's OWN arguments (state machines, comparers)
+            // stay unchecked plumbing.
+            return CheckGreenListedBaseArguments(type, inProgress);
         }
 
         // The trust escape hatch comes before the structural rejections so that an interface or
@@ -182,6 +188,20 @@ public static class SendableChecker
         }
 
         return CheckFields(type, inProgress);
+    }
+
+    private static string? CheckGreenListedBaseArguments(Type type, HashSet<Type> inProgress)
+    {
+        for (var baseType = type.BaseType; baseType is not null; baseType = baseType.BaseType)
+        {
+            if (baseType.IsGenericType && KnownSendableGenericDefinitions.Contains(baseType.GetGenericTypeDefinition())
+                && CheckTypeArguments(baseType, inProgress) is { } reason)
+            {
+                return reason;
+            }
+        }
+
+        return null;
     }
 
     private static bool IsFrameworkImplementationOfAGreenListedType(Type type)

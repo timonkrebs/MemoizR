@@ -2941,6 +2941,148 @@ public class UseAfterTransferAnalyzerTests
     }
 
     [Fact]
+    public async Task DelegateCallsInsideCalledFunctions_AreFollowed()
+    {
+        // F() runs the delegate, and the delegate runs the reading lambda: the chain
+        // reaches the transferred value transitively.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public Sending<List<int>> M()
+                {
+                    var list = new List<int> { 1 };
+                    Action use = () => list.Add(1);
+                    void F()
+                    {
+                        use();
+                    }
+                    var sending = Sending.Transfer(list);
+                    F();
+                    return sending;
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+    }
+
+    [Fact]
+    public async Task IndexerInitializerValues_AreTransferSources()
+    {
+        // ["x"] = list stores the same reference into the dictionary the receiver now owns.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(new Dictionary<string, List<int>> { ["x"] = list });
+                    list.Add(1);
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task GenericLocalFunctionCalls_ResolveTheirDeclarations()
+    {
+        // Use<int>() carries a constructed symbol; the declaration carries the definition --
+        // the lookup must still connect them.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public Sending<List<int>> M()
+                {
+                    var list = new List<int> { 1 };
+                    void Use<T>()
+                    {
+                        list.Add(1);
+                    }
+                    var sending = Sending.Transfer(list);
+                    Use<int>();
+                    return sending;
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+    }
+
+    [Fact]
+    public async Task CombinedDelegateStores_AreCallablesToo()
+    {
+        // += multicasts the reading lambda onto the delegate: invoking it after the handoff
+        // runs that lambda.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public Sending<List<int>> M()
+                {
+                    var list = new List<int> { 1 };
+                    Action use = () => { };
+                    use += () => list.Add(1);
+                    var sending = Sending.Transfer(list);
+                    use();
+                    return sending;
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+    }
+
+    [Fact]
+    public async Task LocalReturnsBeforeResets_KeepTheResetConditional()
+    {
+        // Reset(true) returns before the assignment: the call completes without rewriting,
+        // and the later Add still touches the transferred list.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    void Reset(bool skip)
+                    {
+                        if (skip) return;
+                        list = new List<int>();
+                    }
+                    _ = Sending.Transfer(list);
+                    Reset(true);
+                    list.Add(1);
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+    }
+
+    [Fact]
     public async Task AnonymousObjectInitializers_AreTransferSources()
     {
         // Transfer(new { Value = list }) hands off an object graph containing the same list:

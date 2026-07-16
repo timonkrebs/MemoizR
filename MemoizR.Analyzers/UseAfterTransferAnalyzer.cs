@@ -304,8 +304,12 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             IObjectCreationOperation { Initializer: { } objectInitializer } => objectInitializer.Initializers
                 .SelectMany(element => element switch
                 {
-                    // Member writes carry through compiler-known slots only; a collection
-                    // initializer's Add elements carry like collection-expression elements.
+                    // Member writes carry through compiler-known slots only; an INDEXER
+                    // initializer (["x"] = list) stores value AND keys into the collection;
+                    // a collection initializer's Add elements carry like collection
+                    // expressions.
+                    ISimpleAssignmentOperation { Target: IPropertyReferenceOperation { Property.IsIndexer: true } indexer } member =>
+                        indexer.Arguments.Select(argument => (IOperation?)argument.Value).Concat(new[] { (IOperation?)member.Value }),
                     ISimpleAssignmentOperation member when StoresIntoACompilerKnownSlot(member) => new[] { (IOperation?)member.Value },
                     IInvocationOperation add => add.Arguments.Select(argument => (IOperation?)argument.Value),
                     _ => System.Linq.Enumerable.Empty<IOperation?>(),
@@ -779,12 +783,13 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         return BodyEffect.None;
     }
 
-    // The operations EffectOf walks: references to the variable, plus LOCAL-FUNCTION calls,
-    // whose bodies read or reset transitively (`void Outer() { Use(); }` -- the sibling's
-    // reference sits source-before the transfer, so only the call chain surfaces it).
+    // The operations EffectOf walks: references to the variable, plus LOCAL-FUNCTION and
+    // DELEGATE calls, whose bodies read or reset transitively (`void Outer() { Use(); }` /
+    // `void F() { use(); }` -- the callee's reference sits source-before the transfer, so
+    // only the call chain surfaces it).
     private static bool IsABodyEvent(IOperation operation, ISymbol variable, IOperation region)
     {
-        if (operation is IInvocationOperation { TargetMethod.MethodKind: MethodKind.LocalFunction })
+        if (operation is IInvocationOperation { TargetMethod.MethodKind: MethodKind.LocalFunction or MethodKind.DelegateInvoke })
         {
             return !IsInAnUnreferencedNestedFunction(operation, region);
         }
@@ -807,7 +812,11 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                 return (BodyEffect.Reads, argumentRead, null);
             }
 
-            var callEffect = LocalFunctionCallEffect(invocation.TargetMethod, variable, scope, inProgress);
+            // Delegate stores resolve without the transfer-arm filter here (position 0):
+            // which arm holds the transfer is a scope-level question the body cannot ask.
+            var callEffect = invocation.TargetMethod.MethodKind == MethodKind.DelegateInvoke
+                ? DelegateCallEffect(invocation, variable, transferPosition: 0, scope)
+                : LocalFunctionCallEffect(invocation.TargetMethod, variable, scope, inProgress);
             if (argumentsEffect == BodyEffect.Resets)
             {
                 return (BodyEffect.Resets, null, invocation);
@@ -910,8 +919,8 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     {
         return region.DescendantsAndSelf().Any(operation => operation switch
         {
-            IInvocationOperation invocation => SymbolEqualityComparer.Default.Equals(invocation.TargetMethod, localFunction),
-            IMethodReferenceOperation methodReference => SymbolEqualityComparer.Default.Equals(methodReference.Method, localFunction),
+            IInvocationOperation invocation => SymbolEqualityComparer.Default.Equals(invocation.TargetMethod.OriginalDefinition, localFunction),
+            IMethodReferenceOperation methodReference => SymbolEqualityComparer.Default.Equals(methodReference.Method.OriginalDefinition, localFunction),
             _ => false,
         });
     }
@@ -922,9 +931,11 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     // detected at the reference where it occurs.
     private static BodyEffect LocalFunctionCallEffect(IMethodSymbol localFunction, ISymbol variable, IOperation scope, HashSet<IMethodSymbol> inProgress)
     {
+        // Use<int>() carries a CONSTRUCTED symbol; the declaration carries the definition.
+        var definition = localFunction.OriginalDefinition;
         var declaration = scope.DescendantsAndSelf().OfType<ILocalFunctionOperation>()
-            .FirstOrDefault(operation => SymbolEqualityComparer.Default.Equals(operation.Symbol, localFunction));
-        if (declaration is null || !inProgress.Add(localFunction))
+            .FirstOrDefault(operation => SymbolEqualityComparer.Default.Equals(operation.Symbol, definition));
+        if (declaration is null || !inProgress.Add(definition))
         {
             return BodyEffect.None;
         }
@@ -935,7 +946,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         }
         finally
         {
-            inProgress.Remove(localFunction);
+            inProgress.Remove(definition);
         }
     }
 
@@ -1000,6 +1011,10 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                 ISimpleAssignmentOperation assignment
                     when SymbolEqualityComparer.Default.Equals(ReferencedVariable(assignment.Target), delegateLocal)
                     => assignment.Value,
+                // use += () => ...: the combine keeps every previous target AND adds this one.
+                ICompoundAssignmentOperation combined
+                    when SymbolEqualityComparer.Default.Equals(ReferencedVariable(combined.Target), delegateLocal)
+                    => combined.Value,
                 _ => null,
             };
 
@@ -1374,16 +1389,25 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             // path that transferred (`if (move) Transfer(list); else break;`): it cannot skip
             // anything on that path.
             && !IsInASiblingArmOfTheTransfer(operation, transferPosition)
-            && CanSkipPast(operation, reinitPosition));
+            && CanSkipPast(operation, reinitPosition, scope));
     }
 
-    private static bool CanSkipPast(IOperation operation, int reinitPosition)
+    private static bool CanSkipPast(IOperation operation, int reinitPosition, IOperation scope)
     {
         // A caught throw resumes AFTER its try: it skips a reset that try still contains.
         if (operation is IThrowOperation)
         {
             return NearestCatchingTry(operation) is { } catchingTry
                 && catchingTry.Syntax.Span.Contains(reinitPosition);
+        }
+
+        // Returning exits the enclosing function past the reset. Inside a CALLED body's scan
+        // that means the call completes without rewriting -- the caller's later uses still
+        // see the transferred value. In the OUTER scan those later uses are unreachable on
+        // the returning path, so nothing is skipped for them.
+        if (operation is IReturnOperation { Kind: not OperationKind.YieldReturn })
+        {
+            return scope is ILocalFunctionOperation or IAnonymousFunctionOperation;
         }
 
         if (operation is not IBranchOperation branch)
