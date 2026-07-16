@@ -287,8 +287,9 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     // The sub-expressions a compound argument carries into the handoff: whichever operand the
     // runtime picks for ??/?:/switch expressions, EVERY element of a tuple, array or anonymous
     // object (Transfer((list, 0)) / Transfer(new[] { list }) / Transfer(new { Value = list }):
-    // the container deterministically stores its contents, unlike an arbitrary object
-    // initializer's setters), and a conversion's operand. Null marks a leaf.
+    // the container deterministically stores its contents), an object initializer's writes to
+    // COMPILER-KNOWN slots (fields and auto-properties; a custom setter may not store what it
+    // was handed, so it stays a leaf), and a conversion's operand. Null marks a leaf.
     private static System.Collections.Generic.IEnumerable<IOperation?>? CarriedParts(IOperation argument)
     {
         return argument switch
@@ -300,6 +301,11 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             IArrayCreationOperation { Initializer: { } initializer } => initializer.ElementValues,
             IAnonymousObjectCreationOperation anonymous => anonymous.Initializers.Select(initializer =>
                 (IOperation?)(initializer is ISimpleAssignmentOperation member ? member.Value : initializer)),
+            IObjectCreationOperation { Initializer: { } objectInitializer } => objectInitializer.Initializers
+                .OfType<ISimpleAssignmentOperation>()
+                .Where(member => member.Target is IFieldReferenceOperation
+                    || (member.Target is IPropertyReferenceOperation property && SendableSymbolClassifier.HasBackingSlot(property.Property)))
+                .Select(member => (IOperation?)member.Value),
             IConversionOperation conversion => new[] { conversion.Operand },
             // Transfer([list]): matched by SYNTAX -- ICollectionExpressionOperation is not
             // public in the Roslyn this analyzer compiles against, but the children are

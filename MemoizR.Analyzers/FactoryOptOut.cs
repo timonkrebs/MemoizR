@@ -74,7 +74,7 @@ internal static class FactoryOptOut
     // MemoFactory-returning) are the belt; a source-declared lookalike is not followed either.
     private static bool ReturnsItsOwnFluentReceiver(IMethodSymbol method)
     {
-        return method.Name is "AddExecutor" or "AddSynchronizationContext" or "AddTimeProvider" or "AddWpfDispatcher"
+        return method.Name is "AddExecutor" or "AddSynchronizationContext" or "AddTimeProvider" or "AddWpfDispatcher" or "AddBlazorDispatcher"
             && method.Arity == 0
             && method.ReturnType is INamedTypeSymbol { Name: "MemoFactory" } factoryType
             && factoryType.ContainingNamespace?.ToDisplayString() == "MemoizR"

@@ -619,6 +619,30 @@ public class SendableTypeArgumentAnalyzerTests
     }
 
     [Fact]
+    public async Task BlazorFluentOptOutFactory_IsStillExempt()
+    {
+        // AddBlazorDispatcher mirrors AddWpfDispatcher: it returns the SAME factory via
+        // AddExecutor, so the opt-out evidence one hop up the chain still holds.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+            using Microsoft.AspNetCore.Components;
+
+            public class C
+            {
+                public void M(Dispatcher dispatcher)
+                {
+                    new MemoFactory(options: MemoFactoryOptions.DisableSendableChecks)
+                        .AddBlazorDispatcher(dispatcher)
+                        .CreateSignal(new List<int>());
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
     public async Task FluentlyConfiguredOptOutFactory_IsStillExempt()
     {
         // AddExecutor/AddTimeProvider mutate and return the SAME factory, so the opt-out

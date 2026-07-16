@@ -2722,6 +2722,97 @@ public class UseAfterTransferAnalyzerTests
     }
 
     [Fact]
+    public async Task ObjectInitializerFieldStores_AreTransferSources()
+    {
+        // Box.Value is a FIELD: the initializer deterministically stores the same list into
+        // the object the receiver now owns.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class Box
+            {
+                public List<int>? Value;
+            }
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(new Box { Value = list });
+                    list.Add(1);
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task ObjectInitializerAutoPropertyStores_AreTransferSources()
+    {
+        // An auto-property is a compiler-known slot: the initializer's store is as
+        // deterministic as a field write.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class Box
+            {
+                public List<int>? Value { get; set; }
+            }
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(new Box { Value = list });
+                    list.Add(1);
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+    }
+
+    [Fact]
+    public async Task ObjectInitializerCustomSetters_AreNotDeterministicStores()
+    {
+        // A custom setter may not store what it was handed: only compiler-known slots count
+        // as carrying the reference to the receiver.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class Sink
+            {
+                public List<int>? Value
+                {
+                    get => null;
+                    set { }
+                }
+            }
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(new Sink { Value = list });
+                    list.Add(1);
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
     public async Task AnonymousObjectInitializers_AreTransferSources()
     {
         // Transfer(new { Value = list }) hands off an object graph containing the same list:

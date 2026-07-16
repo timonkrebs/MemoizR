@@ -108,9 +108,10 @@ internal static class FactoryMethods
     // the referenced one) must not be classified as the reactive factory: its APIs publish
     // nothing into a MemoizR graph, so firing MZR001-003 on them would be pure false positives
     // (a build break under warnings-as-errors). Kept in lockstep with the identity checks on
-    // the SendableAttribute and the green-lists in SendableSymbolClassifier. MemoizR.Wpf is in
-    // the set for the fluent opt-out follow (WpfMemoFactory.AddWpfDispatcher); no factory-
-    // method names live there, so it draws no creation/computation classifications.
+    // the SendableAttribute and the green-lists in SendableSymbolClassifier. MemoizR.Wpf and
+    // MemoizR.Blazor are in the set for the fluent opt-out follows (AddWpfDispatcher /
+    // AddBlazorDispatcher); no factory-method names live there, so they draw no
+    // creation/computation classifications.
     internal static bool IsLibraryType(INamedTypeSymbol type)
     {
         if (type.Locations.Any(location => location.IsInSource))
@@ -119,6 +120,6 @@ internal static class FactoryMethods
         }
 
         return type.ContainingAssembly?.Identity.Name is
-            "MemoizR" or "MemoizR.Reactive" or "MemoizR.StructuredConcurrency" or "MemoizR.Wpf";
+            "MemoizR" or "MemoizR.Reactive" or "MemoizR.StructuredConcurrency" or "MemoizR.Wpf" or "MemoizR.Blazor";
     }
 }
