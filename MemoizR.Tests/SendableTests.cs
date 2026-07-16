@@ -233,6 +233,28 @@ public class ValidateWrittenValuesTests
         var relative = f.CreateEagerRelativeSignal<OpenBase>(new OpenBase());
         await Assert.ThrowsAsync<InvalidOperationException>(() => relative.Set(_ => new MutableChild()));
     }
+
+    [Fact]
+    public async Task FrameworkPolymorphicValues_KeepTheGreenListVerdict()
+    {
+        // typeof(int) is a System.RuntimeType: an internal runtime implementation of the
+        // green-listed Type. The write check sees the INSTANCE's type, so the entry's trust
+        // must extend to the runtime's own subclasses or every Signal<Type> write throws.
+        var f = new MemoFactory(options: MemoFactoryOptions.StrictSendableChecks | MemoFactoryOptions.ValidateWrittenValues);
+        var signal = f.CreateSignal<Type>(typeof(int));
+        await signal.Set(typeof(string));
+        Assert.Equal(typeof(string), await signal.Get());
+    }
+
+    [Fact]
+    public void FrameworkImplementations_OfGreenListedTypes_AreSendable()
+    {
+        // The green-list trust covers same-assembly framework implementations only: a USER
+        // subclass of a green-listed type still walks structurally -- that is the smuggle
+        // surface ValidateWrittenValues exists to catch.
+        Assert.True(SendableChecker.IsSendable(typeof(int).GetType(), out var reason), reason);
+        Assert.False(SendableChecker.IsSendable(typeof(MutableChild)));
+    }
 }
 
 public class SendingTransferTests

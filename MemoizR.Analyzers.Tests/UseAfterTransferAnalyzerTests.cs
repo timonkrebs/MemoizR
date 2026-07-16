@@ -1704,6 +1704,145 @@ public class UseAfterTransferAnalyzerTests
     }
 
     [Fact]
+    public async Task ConditionalReinitializersInLocalFunctions_DoNotEndTracking()
+    {
+        // Use(false) skips the reset and reads the transferred list: only a reassignment
+        // that DEFINITELY runs before any read makes the call safe.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public Sending<List<int>> M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(list);
+                    void Use(bool reset)
+                    {
+                        if (reset) list = new List<int>();
+                        list.Add(1);
+                    }
+                    Use(false);
+                    return sending;
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+    }
+
+    [Fact]
+    public async Task ReadsDominatedByALocalFunctionsConditionalReset_AreFresh()
+    {
+        // Every path through the call either resets before the read or skips both: the
+        // transferred value is never touched.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public Sending<List<int>> M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(list);
+                    void Use(bool reset)
+                    {
+                        if (reset)
+                        {
+                            list = new List<int>();
+                            list.Add(1);
+                        }
+                    }
+                    Use(false);
+                    return sending;
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task YieldReturnTransfers_KeepTheSenderScanAlive()
+    {
+        // yield return hands the wrapper to the caller and RESUMES the same body on the next
+        // MoveNext: the later Add is ordinary sender-side use, not code past a method exit.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public IEnumerable<Sending<List<int>>> M()
+                {
+                    var list = new List<int> { 1 };
+                    yield return Sending.Transfer(list);
+                    list.Add(1);
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task YieldReturns_DoNotEndTheForeachIteration()
+    {
+        // The iterator resumes INSIDE the loop on the next MoveNext: the foreach still reads
+        // the transferred collection.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public IEnumerable<int> M()
+                {
+                    var list = new List<int> { 1 };
+                    foreach (var item in list)
+                    {
+                        _ = Sending.Transfer(list);
+                        yield return item;
+                    }
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+    }
+
+    [Fact]
+    public async Task AnonymousObjectInitializers_AreTransferSources()
+    {
+        // Transfer(new { Value = list }) hands off an object graph containing the same list:
+        // anonymous members deterministically store what they were built from.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(new { Value = list });
+                    list.Add(1);
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
     public async Task ArrayInitializerElements_AreTransferSources()
     {
         // Transfer(new[] { list }) hands off the array WITH its element: the array carries

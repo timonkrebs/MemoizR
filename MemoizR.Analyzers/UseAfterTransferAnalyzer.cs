@@ -193,7 +193,9 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     // nested switch or inner loop resumes inside the body, and the next MoveNext still runs.
     private static bool ExitsTheLoop(IOperation operation, IForEachLoopOperation loop)
     {
-        if (operation is IReturnOperation or IThrowOperation)
+        // yield return only SUSPENDS the iterator: the next MoveNext resumes inside the loop,
+        // so the foreach keeps iterating (yield break, like return, ends it for good).
+        if (operation is IReturnOperation { Kind: not OperationKind.YieldReturn } or IThrowOperation)
         {
             return true;
         }
@@ -250,9 +252,10 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     }
 
     // The sub-expressions a compound argument carries into the handoff: whichever operand the
-    // runtime picks for ??/?:/switch expressions, EVERY element of a tuple or array
-    // (Transfer((list, 0)) / Transfer(new[] { list }): the container hands off its contents
-    // with it), and a conversion's operand. Null marks a leaf.
+    // runtime picks for ??/?:/switch expressions, EVERY element of a tuple, array or anonymous
+    // object (Transfer((list, 0)) / Transfer(new[] { list }) / Transfer(new { Value = list }):
+    // the container deterministically stores its contents, unlike an arbitrary object
+    // initializer's setters), and a conversion's operand. Null marks a leaf.
     private static System.Collections.Generic.IEnumerable<IOperation?>? CarriedParts(IOperation argument)
     {
         return argument switch
@@ -262,6 +265,8 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             ISwitchExpressionOperation switchExpression => switchExpression.Arms.Select(arm => (IOperation?)arm.Value),
             ITupleOperation tuple => tuple.Elements,
             IArrayCreationOperation { Initializer: { } initializer } => initializer.ElementValues,
+            IAnonymousObjectCreationOperation anonymous => anonymous.Initializers.Select(initializer =>
+                (IOperation?)(initializer is ISimpleAssignmentOperation member ? member.Value : initializer)),
             IConversionOperation conversion => new[] { conversion.Operand },
             _ => null,
         };
@@ -272,7 +277,8 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     // observable from the escaping expression itself, the CATCH handlers a thrown transfer
     // lands in, and the FINALLY blocks of enclosing tries -- no such region, no sender-side
     // continuation at all. (break/continue are NOT exits: control resumes after the loop,
-    // where later uses remain reachable, so they keep the full scope.)
+    // where later uses remain reachable, so they keep the full scope. Neither is yield
+    // return: the iterator resumes right after it on the next MoveNext.)
     private static (List<IOperation> Roots, bool Escaped) ScanRootsFor(IOperation transfer, IOperation scope)
     {
         var roots = new List<IOperation>();
@@ -284,7 +290,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                 break;
             }
 
-            if (parent is IReturnOperation or IThrowOperation)
+            if (parent is IReturnOperation { Kind: not OperationKind.YieldReturn } or IThrowOperation)
             {
                 if (escape is null)
                 {
@@ -493,8 +499,10 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     }
 
     // Whether CALLING the local function reads the transferred value: the body is scanned in
-    // source order, and a body that REASSIGNS the variable (with a non-reading RHS) before any
-    // read only ever touches the fresh value.
+    // source order. A reassignment (with a non-reading RHS) that DEFINITELY runs before any
+    // read means the call only ever touches the fresh value; a CONDITIONAL one
+    // (`if (reset) list = new();`) may be skipped, so later reads still count -- except the
+    // ones it dominates (same arm, after it), which read the value it wrote.
     private static bool LocalFunctionReads(IMethodSymbol localFunction, ISymbol variable, IOperation scope)
     {
         var declaration = scope.DescendantsAndSelf().OfType<ILocalFunctionOperation>()
@@ -509,16 +517,52 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                 && !IsInsideNameOf(operation))
             .OrderBy(operation => operation.Syntax.SpanStart);
 
+        var dominated = default(List<(Microsoft.CodeAnalysis.Text.TextSpan Region, int Position)>);
         foreach (var reference in references)
         {
-            if (reference.Parent is ISimpleAssignmentOperation assignment
-                && ReferenceEquals(assignment.Target, reference))
+            if (IsDominatedByASkippedReinitialization(dominated, reference))
             {
-                return assignment.Value.DescendantsAndSelf().Any(operation =>
-                    SymbolEqualityComparer.Default.Equals(ReferencedVariable(operation), variable));
+                continue;
             }
 
-            return true; // a plain read of the transferred value
+            if (reference.Parent is not ISimpleAssignmentOperation assignment
+                || !ReferenceEquals(assignment.Target, reference))
+            {
+                return true; // a plain read of the transferred value
+            }
+
+            if (assignment.Value.DescendantsAndSelf().Any(operation =>
+                    SymbolEqualityComparer.Default.Equals(ReferencedVariable(operation), variable)))
+            {
+                return true; // the RHS builds the replacement FROM the transferred value
+            }
+
+            if (!IsConditionalWithin(assignment, declaration)
+                && !ABranchCanSkip(assignment, declaration.Syntax.SpanStart, declaration))
+            {
+                return false; // a definite reset: every call rewrites before any read
+            }
+
+            (dominated ??= new List<(Microsoft.CodeAnalysis.Text.TextSpan, int)>())
+                .Add((DominatingRegion(assignment).Syntax.Span, reference.Syntax.Span.End));
+        }
+
+        return false;
+    }
+
+    // Whether control can reach past the operation without executing it, judged within the
+    // local function's body: any conditional/loop/switch/try ancestor below the declaration
+    // makes it skippable -- and a nested function's body is deferred entirely.
+    private static bool IsConditionalWithin(IOperation operation, ILocalFunctionOperation declaration)
+    {
+        for (var parent = operation.Parent; parent is not null && !ReferenceEquals(parent, declaration); parent = parent.Parent)
+        {
+            if (parent is IConditionalOperation or ISwitchOperation or ISwitchExpressionOperation
+                or ILoopOperation or ITryOperation or IConditionalAccessOperation
+                or IAnonymousFunctionOperation or ILocalFunctionOperation)
+            {
+                return true;
+            }
         }
 
         return false;

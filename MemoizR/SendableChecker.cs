@@ -147,6 +147,20 @@ public static class SendableChecker
             return CheckTypeArguments(type, inProgress);
         }
 
+        // The runtime hands out internal implementations of green-listed types: typeof(int) is
+        // a System.RuntimeType, a continuation is a ContinuationTaskFromTask. The write-time
+        // check (ValidateWrittenValues) sees those instance types, so the green-list verdict
+        // extends to subtypes declared in the SAME ASSEMBLY as their entry -- they are the
+        // implementation the entry vouches for, unnameable from user code. A USER subclass
+        // lives in a user assembly and still walks structurally: that is exactly the smuggle
+        // surface the write check exists to catch. (No analyzer mirror: declared types can
+        // never name these internals, so the lockstep contract is untouched.) Type arguments
+        // of a generic implementation are still checked, like the definitions above.
+        if (KnownSendable.Any(entry => !entry.IsValueType && entry.IsAssignableFrom(type) && type.Assembly == entry.Assembly))
+        {
+            return CheckTypeArguments(type, inProgress);
+        }
+
         // The trust escape hatch comes before the structural rejections so that an interface or
         // internally-synchronized class can be opted in.
         if (type.IsDefined(typeof(SendableAttribute), inherit: false))
