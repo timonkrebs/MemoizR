@@ -47,6 +47,16 @@ public sealed class ExportedNode<T> : IDisposable
     public async Task<ValuePayload<T>> PullAsync()
     {
         await node.ReadWithEvidence();
+
+        // The export-time chain check can miss a LAZY memo whose sources only wire on first
+        // evaluation (and dynamic rewiring can splice a mirror in later): the pull is the
+        // wire egress, so it re-checks against the now-wired chain -- the read above just
+        // evaluated the node, so the wiring is current.
+        if (MirrorLocals.TouchesMirrorLocal(node))
+        {
+            throw new InvalidOperationException(MirrorLocals.ReExportMessage);
+        }
+
         var (value, evidence, sequence) = node.ValueEvidenceAndSequence;
         if (evidence.Unverifiable || node.stateCell.State != CacheState.CacheClean)
         {

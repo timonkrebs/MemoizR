@@ -84,6 +84,50 @@ public class DistributedPackageTests
     }
 
     [Fact]
+    public async Task Export_ValueTypeSignalThroughItsStampedInterface_Exports()
+    {
+        // A value-type Signal<T>'s stamped interface is IStampedGetR<T> at runtime (the T? in
+        // its declaration is a nullable ANNOTATION on the unconstrained parameter, not
+        // Nullable<T>), so generic bridge code holding the interface exports through the
+        // ordinary generic overload -- pinned here so the interface path stays supported.
+        var host = new MemoFactory();
+        var s = host.CreateSignal(5);
+        IStampedGetR<int> node = s;
+        using var export = host.Export(node, _ => Task.CompletedTask);
+        Assert.Equal(s.Id, export.NodeId);
+
+        var payload = await export.PullAsync();
+        Assert.Equal(5, payload.Value);
+        Assert.False(payload.Unverifiable);
+
+        await s.Set(6);
+        var newer = await export.PullAsync();
+        Assert.Equal(6, newer.Value);
+        Assert.True(newer.Sequence > payload.Sequence);
+    }
+
+    [Fact]
+    public async Task Export_OfANodeDerivedFromAMirror_Throws()
+    {
+        // A memo over a mirror carries stamps captured from the consumer-local trigger, not
+        // the origin's evidence: re-exporting it is the mirror re-export unsoundness one hop
+        // removed.
+        var consumer = new MemoFactory();
+        var mirror = consumer.CreateRemoteSignal<int>("mirror", 0,
+            () => throw new InvalidOperationException("no pull in this test"));
+
+        var derived = consumer.CreateMemoizR("derived", async () => await mirror.Local.Get() + 1);
+        await derived.Get(); // wire the sources
+        Assert.Throws<InvalidOperationException>(() => consumer.Export(derived, _ => Task.CompletedTask));
+
+        // A LAZY memo has no wired sources at export time and passes the fail-fast check --
+        // the wire egress catches it: the pull's own read wires the chain before the check.
+        var lazyDerived = consumer.CreateMemoizR("lazy", async () => await mirror.Local.Get() + 2);
+        using var export = consumer.Export(lazyDerived, _ => Task.CompletedTask);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => export.PullAsync());
+    }
+
+    [Fact]
     public void Export_NodeOfAnotherContext_Throws()
     {
         var f1 = new MemoFactory();
