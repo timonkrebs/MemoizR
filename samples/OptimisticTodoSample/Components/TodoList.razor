@@ -1,0 +1,72 @@
+@inherits MemoizR.MemoizRComponentBase
+@inject TodoState State
+
+<div class="todo-container">
+    <form @onsubmit="Add">
+        <input placeholder="What needs doing? (include 'fail' to watch the rollback)"
+               @bind="draft" @bind:event="oninput" />
+        <button type="submit" disabled="@addPending">
+            @(addPending ? "Saving…" : "Add")
+        </button>
+    </form>
+
+    @if (error is not null)
+    {
+        <p class="error" role="alert">@error</p>
+    }
+
+    <ul>
+        @foreach (var todo in todos)
+        {
+            <li class="@(todo.Pending ? "pending" : "settled")">@todo.Text</li>
+        }
+    </ul>
+</div>
+
+@code {
+    // The render snapshot: renders are synchronous, the graph is async, so the bindings below
+    // project the nodes into these fields on the renderer's context and re-render on change.
+    private ImmutableList<TodoItem> todos = ImmutableList<TodoItem>.Empty;
+    private bool addPending;
+    private string draft = "";
+    private string? error;
+
+    protected override void OnInitialized()
+    {
+        Bind(State.Todos, value => todos = value);
+        Bind(State.AddTodo.IsPending, pending => addPending = pending);
+    }
+
+    private void Add()
+    {
+        var text = draft.Trim();
+        if (text.Length == 0)
+        {
+            return;
+        }
+        draft = "";
+        error = null;
+
+        // Fire the process-layer action; the optimistic projection appears via the Todos
+        // binding immediately, so the handler itself has nothing to render.
+        _ = ObserveAsync(State.AddTodo.Run(text), text);
+    }
+
+    // The run's Completion carries the body's outcome; the rollback has already happened by
+    // the time it faults, so the only UI concern left is telling the user.
+    private async Task ObserveAsync(MemoizR.Reactive.ActionRun run, string text)
+    {
+        try
+        {
+            await run.Completion;
+        }
+        catch (Exception ex)
+        {
+            await InvokeAsync(() =>
+            {
+                error = $"\"{text}\" was not saved: {ex.Message}";
+                StateHasChanged();
+            });
+        }
+    }
+}

@@ -1,7 +1,7 @@
 # ADR 0007 — Transitions, `IsPending`, and optimistic state with automatic rollback
 
-- Status: Proposed (phases 1–4 implemented on this branch — phase 4 without the sample app and
-  bUnit component tests; phase 5 open)
+- Status: Proposed (phases 1–4 implemented, including the optimistic-todo sample app with bUnit
+  component tests; phase 5 open)
 - Date: 2026-07-15
 - Deciders: MemoizR maintainers
 - Inspiration: Solid 2.0's async architecture (deferred stabilization, `isPending`,
@@ -280,7 +280,11 @@ Where the landed code deliberately deviates from the sketches above:
   `MemoizRComponentBase` gluing it to components, and `services.AddMemoizR()` for the
   scoped-per-circuit factory. Integration-tested against `Dispatcher.CreateDefault()` — the
   renderer dispatcher Blazor Server uses — so the thread-pool/renderer split is pinned without
-  a renderer; the optimistic-todo sample app and bUnit component tests remain open.
+  a renderer. The optimistic-todo sample app (`samples/OptimisticTodoSample`, Blazor Server)
+  demonstrates the whole stack — instant projection, pending-driven button, structural
+  rollback on rejection — and its bUnit tests (`samples/OptimisticTodoSample.Tests`) replay
+  the PDF's transition lifecycle table through Blazor's real test renderer against a gated
+  fake server, including the overlapping-actions case.
 
 ## Consequences
 
