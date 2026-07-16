@@ -4645,6 +4645,144 @@ public class UseAfterTransferAnalyzerTests
     }
 
     [Fact]
+    public async Task SendableArguments_AreNotRemappedAtCallSites()
+    {
+        // Move receives a boxed immutable int: nothing mutable reached the receiver, so
+        // the caller's later read is harmless.
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    void Move(object x)
+                    {
+                        _ = Sending.Transfer(x);
+                    }
+                    var id = 1;
+                    Move(id);
+                    _ = id;
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task LeafWithOperands_ShareTheirSlots()
+    {
+        // The clone shallow-copies box's Value: the receiver-owned clone and the sender's
+        // box now share the same list, so mutating through box is a use.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public record Box(List<int> Value)
+            {
+                public int Other { get; init; }
+            }
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    var box = new Box(list);
+                    var sending = Sending.Transfer(box with { Other = 1 });
+                    box.Value.Add(1);
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+        Assert.Contains("'box'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task EnumConstrainedGenericSources_AreHarmless()
+    {
+        // Enum values are copied immutable values: the same exemption the statics rule
+        // grants where T : Enum.
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public class C
+            {
+                public void M<T>(T value) where T : System.Enum
+                {
+                    _ = Sending.Transfer(value);
+                    _ = value;
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task ForeachAdvancement_IsThrowCapable()
+    {
+        // A custom enumerator's MoveNext/Dispose can throw after the body's handoff: the
+        // catch then observes the transferred list.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M(IEnumerable<int> xs)
+                {
+                    var list = new List<int> { 1 };
+                    try
+                    {
+                        foreach (var item in xs)
+                        {
+                            _ = Sending.Transfer(list);
+                        }
+                    }
+                    catch
+                    {
+                        list.Add(1);
+                    }
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+    }
+
+    [Fact]
+    public async Task ConditionalDelegateStores_ExpandTheirArms()
+    {
+        // One runtime path stores the reading Touch: the guarded call can run it after the
+        // handoff.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M(bool flag)
+                {
+                    var list = new List<int> { 1 };
+                    void Touch() => list.Add(1);
+                    Action? use = flag ? Touch : null;
+                    var sending = Sending.Transfer(list);
+                    use?.Invoke();
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+    }
+
+    [Fact]
     public async Task AnonymousObjectInitializers_AreTransferSources()
     {
         // Transfer(new { Value = list }) hands off an object graph containing the same list:

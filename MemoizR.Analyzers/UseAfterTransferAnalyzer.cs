@@ -103,7 +103,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                     continue;
                 }
 
-                foreach (var entry in EntriesFor(operation, variable, block))
+                foreach (var entry in EntriesFor(operation, variable, block, classifier))
                 {
                     yield return entry;
                 }
@@ -127,7 +127,9 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         // its constraints prove it harmless.
         if (source.Type is ITypeParameterSymbol typeParameter)
         {
-            return typeParameter.HasUnmanagedTypeConstraint ? null : variable;
+            var provenHarmless = typeParameter.HasUnmanagedTypeConstraint
+                || typeParameter.ConstraintTypes.Any(constraint => constraint.SpecialType == SpecialType.System_Enum);
+            return provenHarmless ? null : variable;
         }
 
         return source.Type is { } sourceType && classifier.GetNotSendableReason(sourceType) is null
@@ -136,7 +138,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     }
 
     private static IEnumerable<(ISymbol Variable, int Position, List<IOperation> ScanRoots, bool Escaped, IOperation Transfer, IOperation Scope)> EntriesFor(
-        IOperation transfer, ISymbol variable, IOperation block)
+        IOperation transfer, ISymbol variable, IOperation block, SendableSymbolClassifier classifier)
     {
         var enclosingBody = EnclosingFunctionBody(transfer, block);
         var (scanRoots, escaped) = ScanRootsFor(transfer, enclosingBody);
@@ -148,7 +150,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         // A transfer inside a CALLED local function or lambda is sequenced before the
         // caller's continuation: every call site acts as a transfer of its own. A stored
         // but never-invoked callable stays deferred-scoped.
-        foreach (var propagated in CallSiteTransfers(enclosingBody, variable, transfer, block,
+        foreach (var propagated in CallSiteTransfers(enclosingBody, variable, transfer, block, classifier,
             new HashSet<IMethodSymbol>(SymbolEqualityComparer.Default)))
         {
             yield return propagated;
@@ -160,7 +162,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     // through that declaration's own callers. A transferred PARAMETER remaps to the caller's
     // argument at each site.
     private static IEnumerable<(ISymbol Variable, int Position, List<IOperation> ScanRoots, bool Escaped, IOperation Transfer, IOperation Scope)> CallSiteTransfers(
-        IOperation transferBody, ISymbol variable, IOperation anchor, IOperation block, HashSet<IMethodSymbol> visited)
+        IOperation transferBody, ISymbol variable, IOperation anchor, IOperation block, SendableSymbolClassifier classifier, HashSet<IMethodSymbol> visited)
     {
         var functionSymbol = transferBody switch
         {
@@ -197,7 +199,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                 continue; // self-recursion: the body scan already covers it
             }
 
-            foreach (var entry in CallSiteEntries(invocation, callBody, variable, functionSymbol, block, visited))
+            foreach (var entry in CallSiteEntries(invocation, callBody, variable, functionSymbol, block, classifier, visited))
             {
                 yield return entry;
             }
@@ -205,13 +207,13 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     }
 
     private static IEnumerable<(ISymbol Variable, int Position, List<IOperation> ScanRoots, bool Escaped, IOperation Transfer, IOperation Scope)> CallSiteEntries(
-        IInvocationOperation invocation, IOperation callBody, ISymbol variable, IMethodSymbol functionSymbol, IOperation block, HashSet<IMethodSymbol> visited)
+        IInvocationOperation invocation, IOperation callBody, ISymbol variable, IMethodSymbol functionSymbol, IOperation block, SendableSymbolClassifier classifier, HashSet<IMethodSymbol> visited)
     {
-        foreach (var callVariable in CallSiteVariables(invocation, variable, functionSymbol))
+        foreach (var callVariable in CallSiteVariables(invocation, variable, functionSymbol, classifier))
         {
             if (callBody is ILocalFunctionOperation)
             {
-                foreach (var nested in CallSiteTransfers(callBody, callVariable, invocation, block, visited))
+                foreach (var nested in CallSiteTransfers(callBody, callVariable, invocation, block, classifier, visited))
                 {
                     yield return nested;
                 }
@@ -245,7 +247,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
 
     // The caller-side variable the transferred callee variable aliases at THIS call: a
     // captured local stays itself; a PARAMETER maps to the matching argument's sources.
-    private static IEnumerable<ISymbol> CallSiteVariables(IInvocationOperation invocation, ISymbol variable, IMethodSymbol functionSymbol)
+    private static IEnumerable<ISymbol> CallSiteVariables(IInvocationOperation invocation, ISymbol variable, IMethodSymbol functionSymbol, SendableSymbolClassifier classifier)
     {
         if (variable is not IParameterSymbol parameter
             || !SymbolEqualityComparer.Default.Equals(parameter.ContainingSymbol.OriginalDefinition, functionSymbol))
@@ -262,7 +264,9 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
 
         foreach (var source in TransferSources(argument.Value))
         {
-            if (ReferencedVariable(source) is { } mapped)
+            // The same Sendable filter as the direct path: a boxed int argument hands the
+            // receiver nothing mutable.
+            if (TrackedVariableOf(source, classifier) is { } mapped)
             {
                 yield return mapped;
             }
@@ -1222,9 +1226,12 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             operand = conversion.Operand;
         }
 
-        var operandParts = operand is not null && CarriedParts(operand) is { } parts
-            ? parts
-            : System.Linq.Enumerable.Empty<IOperation?>();
+        // The clone SHALLOW-COPIES the operand's slots: a compound operand unfolds its
+        // carried parts, and a leaf operand (a record variable) shares its reference-typed
+        // contents with the receiver-owned clone -- the variable itself is a source.
+        var operandParts = operand is null
+            ? System.Linq.Enumerable.Empty<IOperation?>()
+            : CarriedParts(operand) ?? new[] { (IOperation?)operand };
 
         return withOperation.Initializer is { } initializer
             ? operandParts.Concat(InitializerCarriedParts(initializer))
@@ -1446,11 +1453,14 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                 continue;
             }
 
-            if (Callable(value) is { } callable)
+            var yieldedACallable = false;
+            foreach (var callable in Callables(value))
             {
+                yieldedACallable = true;
                 yield return callable;
             }
-            else if (ReferencedVariable(value) is { } alias)
+
+            if (!yieldedACallable && ReferencedVariable(value) is { } alias)
             {
                 // Action use = use2: the copy SNAPSHOTS what the source holds AT THE COPY --
                 // stores landing in the source afterwards are not in use's invocation list.
@@ -1551,6 +1561,37 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         }
 
         return false;
+    }
+
+    // Every callable a stored value can BE at runtime: `flag ? Touch : fallback` puts
+    // either arm in the delegate, `a ?? b` likewise.
+    private static System.Collections.Generic.IEnumerable<IOperation> Callables(IOperation? stored)
+    {
+        while (stored is IDelegateCreationOperation or IConversionOperation)
+        {
+            stored = stored is IDelegateCreationOperation creation ? creation.Target : ((IConversionOperation)stored).Operand;
+        }
+
+        switch (stored)
+        {
+            case IAnonymousFunctionOperation or IMethodReferenceOperation:
+                yield return stored;
+                break;
+            case IConditionalOperation { WhenFalse: { } whenFalse } conditional:
+                foreach (var callable in Callables(conditional.WhenTrue).Concat(Callables(whenFalse)))
+                {
+                    yield return callable;
+                }
+
+                break;
+            case ICoalesceOperation coalesce:
+                foreach (var callable in Callables(coalesce.Value).Concat(Callables(coalesce.WhenNull)))
+                {
+                    yield return callable;
+                }
+
+                break;
+        }
     }
 
     private static IOperation? Callable(IOperation? stored)
@@ -1674,8 +1715,9 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                 or IDynamicInvocationOperation or IDynamicMemberReferenceOperation
                 or IDynamicIndexerAccessOperation or IDynamicObjectCreationOperation
                 or IEventAssignmentOperation
-                // scope exits dispose: Dispose/DisposeAsync is user code and can throw
-                or IUsingOperation or IUsingDeclarationOperation,
+                // scope exits dispose: Dispose/DisposeAsync is user code and can throw;
+                // a foreach hides MoveNext/Dispose calls on a possibly-custom enumerator
+                or IUsingOperation or IUsingDeclarationOperation or IForEachLoopOperation,
         };
     }
 
