@@ -10,7 +10,10 @@
          ReferenceOutputAssembly=false because the library has no runtime dependency on them;
          the ProjectReference only orders the build so the dll below exists when packing. -->
     <ProjectReference Include="..\MemoizR.Analyzers\MemoizR.Analyzers.csproj" ReferenceOutputAssembly="false" PrivateAssets="all" />
-    <None Include="..\MemoizR.Analyzers\bin\$(Configuration)\netstandard2.0\MemoizR.Analyzers.dll" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
+    <!-- UseArtifactsOutput moved build output out of the per-project bin/ tree, so the
+         analyzer dll is picked up from the centralized artifacts path (single-TFM project:
+         its pivot is just the lowercased configuration). -->
+    <None Include="$(ArtifactsPath)\bin\MemoizR.Analyzers\$(Configuration.ToLowerInvariant())\MemoizR.Analyzers.dll" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
   </ItemGroup>
 
   <PropertyGroup>

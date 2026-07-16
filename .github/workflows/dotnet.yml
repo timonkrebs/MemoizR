@@ -16,6 +16,9 @@ jobs:
   build:
 
     strategy:
+      # Let every OS leg run to completion: one leg's failure cancelling the others
+      # hides whether a problem is platform-specific and slows the diagnosis loop.
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, ubuntu-24.04-arm, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
