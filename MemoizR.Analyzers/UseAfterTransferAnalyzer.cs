@@ -705,39 +705,8 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                 CallEffect: (BodyEffect?)CallEffectOf(invocation, variable, transferPosition, scope)))
             .Where(call => call.CallEffect != BodyEffect.None);
 
-        // Converting a READING local function to a delegate after the handoff escapes like a
-        // lambda: the delegate can run later with the retained alias (a resetting body makes
-        // no such promise -- it may never run).
-        var methodGroupEscapes = scanRoots
-            .SelectMany(root => root.DescendantsAndSelf())
-            .OfType<IMethodReferenceOperation>()
-            .Where(reference => reference.Method.MethodKind == MethodKind.LocalFunction
-                && reference.Syntax.SpanStart >= transferPosition
-                && !IsInASiblingArmOfTheTransfer(reference, transferPosition)
-                && (escaped || !IsInAnUnreachableCatch(reference, transferPosition))
-                && !IsWithinALocalFunctionBody(reference, scanRoots)
-                && LocalFunctionCallEffect(reference.Method, variable, scope,
-                    new HashSet<IMethodSymbol>(SymbolEqualityComparer.Default)) == BodyEffect.Reads)
-            .Select(reference => (Operation: (IOperation)reference, CallEffect: (BodyEffect?)BodyEffect.Reads));
-
-        // A stored delegate that CAPTURED the transferred variable and escapes after the
-        // handoff (returned, passed on, stored elsewhere) can run later against the
-        // receiver-owned object. Calls are classified separately, and a bare store target
-        // rewrites the local without running anything.
-        var delegateEscapes = scanRoots
-            .SelectMany(root => root.DescendantsAndSelf())
-            .OfType<ILocalReferenceOperation>()
-            .Where(reference => reference.Local.Type is { TypeKind: TypeKind.Delegate }
-                && reference.Syntax.SpanStart >= transferPosition
-                && !IsAStoreTargetOrInvokeReceiver(reference)
-                && !IsInsideNameOf(reference)
-                && !IsInASiblingArmOfTheTransfer(reference, transferPosition)
-                && (escaped || !IsInAnUnreachableCatch(reference, transferPosition))
-                && !IsWithinALocalFunctionBody(reference, scanRoots)
-                && AnyStoredCallableReads(reference.Local, variable, reference, 0, scope))
-            .Select(reference => (Operation: (IOperation)reference, CallEffect: (BodyEffect?)BodyEffect.Reads));
-
-        var orderedUses = laterReferences.Concat(callableCalls).Concat(methodGroupEscapes).Concat(delegateEscapes)
+        var orderedUses = laterReferences.Concat(callableCalls)
+            .Concat(EscapeUses(scanRoots, escaped, variable, transferPosition, scope))
             .OrderBy(use => use.Operation.Syntax.SpanStart);
 
         // Regions where a SKIPPED conditional reinitialization dominates: inside its own arm,
@@ -787,6 +756,42 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         }
 
         return false;
+    }
+
+    // Post-transfer ESCAPES of callables that captured the transferred variable: a READING
+    // local function converted to a delegate, or a stored delegate reference leaving the
+    // scope -- both can run later against the receiver-owned object. Calls are classified
+    // separately; a bare store target rewrites the local without running anything, and a
+    // resetting body makes no promise (it may never run).
+    private static IEnumerable<(IOperation Operation, BodyEffect? CallEffect)> EscapeUses(
+        List<IOperation> scanRoots, bool escaped, ISymbol variable, int transferPosition, IOperation scope)
+    {
+        var methodGroupEscapes = scanRoots
+            .SelectMany(root => root.DescendantsAndSelf())
+            .OfType<IMethodReferenceOperation>()
+            .Where(reference => reference.Method.MethodKind == MethodKind.LocalFunction
+                && reference.Syntax.SpanStart >= transferPosition
+                && !IsInASiblingArmOfTheTransfer(reference, transferPosition)
+                && (escaped || !IsInAnUnreachableCatch(reference, transferPosition))
+                && !IsWithinALocalFunctionBody(reference, scanRoots)
+                && LocalFunctionCallEffect(reference.Method, variable, scope,
+                    new HashSet<IMethodSymbol>(SymbolEqualityComparer.Default)) == BodyEffect.Reads)
+            .Select(reference => (Operation: (IOperation)reference, CallEffect: (BodyEffect?)BodyEffect.Reads));
+
+        var delegateEscapes = scanRoots
+            .SelectMany(root => root.DescendantsAndSelf())
+            .OfType<ILocalReferenceOperation>()
+            .Where(reference => reference.Local.Type is { TypeKind: TypeKind.Delegate }
+                && reference.Syntax.SpanStart >= transferPosition
+                && !IsAStoreTargetOrInvokeReceiver(reference)
+                && !IsInsideNameOf(reference)
+                && !IsInASiblingArmOfTheTransfer(reference, transferPosition)
+                && (escaped || !IsInAnUnreachableCatch(reference, transferPosition))
+                && !IsWithinALocalFunctionBody(reference, scanRoots)
+                && AnyStoredCallableReads(reference.Local, variable, reference, 0, scope))
+            .Select(reference => (Operation: (IOperation)reference, CallEffect: (BodyEffect?)BodyEffect.Reads));
+
+        return methodGroupEscapes.Concat(delegateEscapes);
     }
 
     private static BodyEffect CallEffectOf(IInvocationOperation invocation, ISymbol variable, int transferPosition, IOperation scope)
