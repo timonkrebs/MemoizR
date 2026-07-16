@@ -267,6 +267,18 @@ public class ValidateWrittenValuesTests
     }
 
     [Fact]
+    public async Task FrozenSetInstances_KeepTheGreenListVerdict()
+    {
+        // ToFrozenSet hands out internal implementations (FrozenSet<T> is deliberately
+        // abstract): the instance is still the green-listed frozen collection, whatever
+        // specialized subtype the runtime picked.
+        var f = new MemoFactory(options: MemoFactoryOptions.StrictSendableChecks | MemoFactoryOptions.ValidateWrittenValues);
+        var signal = f.CreateSignal(System.Collections.Frozen.FrozenSet.ToFrozenSet(new[] { 1 }));
+        await signal.Set(System.Collections.Frozen.FrozenSet.ToFrozenSet(new[] { 2, 3 }));
+        Assert.Equal(2, (await signal.Get())!.Count);
+    }
+
+    [Fact]
     public void FrameworkImplementations_OfGreenListedTypes_AreSendable()
     {
         // The green-list trust covers same-assembly framework implementations only: a USER

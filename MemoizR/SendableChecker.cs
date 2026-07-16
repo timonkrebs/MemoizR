@@ -149,16 +149,16 @@ public static class SendableChecker
 
         // The runtime hands out internal implementations of green-listed types: typeof(int) is
         // a System.RuntimeType, an async method's Task is an AsyncStateMachineBox whose
-        // generic arguments carry the compiler-generated state machine, captured locals and
-        // all. The write-time check (ValidateWrittenValues) sees those instance types, so the
-        // green-list verdict extends to subtypes declared in the SAME ASSEMBLY as their entry
-        // -- trusted wholesale like the entry itself, type arguments included: they are
-        // runtime plumbing, not the declared surface (the DECLARED type's arguments were
-        // already vetted by the creation-time check). A USER subclass lives in a user assembly
-        // and still walks structurally: exactly the smuggle surface the write check exists to
-        // catch. (No analyzer mirror: declared types can never name these internals, so the
-        // lockstep contract is untouched.)
-        if (KnownSendable.Any(entry => !entry.IsValueType && entry.IsAssignableFrom(type) && type.Assembly == entry.Assembly))
+        // generic arguments carry the compiler-generated state machine, and ToFrozenSet picks
+        // a specialized FrozenSet subtype. The write-time check (ValidateWrittenValues) sees
+        // those instance types, so the green-list verdict extends to subtypes declared in the
+        // SAME ASSEMBLY as their entry -- trusted wholesale like the entry itself, type
+        // arguments included: they are runtime plumbing, not the declared surface (the
+        // DECLARED type's arguments were already vetted by the creation-time check). A USER
+        // subclass lives in a user assembly and still walks structurally: exactly the smuggle
+        // surface the write check exists to catch. (No analyzer mirror: declared types can
+        // never name these internals, so the lockstep contract is untouched.)
+        if (IsFrameworkImplementationOfAGreenListedType(type))
         {
             return null;
         }
@@ -182,6 +182,26 @@ public static class SendableChecker
         }
 
         return CheckFields(type, inProgress);
+    }
+
+    private static bool IsFrameworkImplementationOfAGreenListedType(Type type)
+    {
+        if (KnownSendable.Any(entry => !entry.IsValueType && entry.IsAssignableFrom(type) && type.Assembly == entry.Assembly))
+        {
+            return true;
+        }
+
+        for (var baseType = type.BaseType; baseType is not null; baseType = baseType.BaseType)
+        {
+            if (baseType.IsGenericType
+                && KnownSendableGenericDefinitions.Contains(baseType.GetGenericTypeDefinition())
+                && type.Assembly == baseType.GetGenericTypeDefinition().Assembly)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     // Categories that can never be verified structurally, whatever their fields say.

@@ -139,21 +139,40 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             // wrapper, not the transferred object. A `lock (gate)` around the transfer is the
             // same shape: the compiler-generated Monitor.Exit touches the handed-off object
             // at scope end.
-            var scopeExitTarget = parent switch
+            var (scopeExitTarget, body) = parent switch
             {
-                IUsingOperation usingOperation => usingOperation.Resources,
-                ILockOperation lockOperation => lockOperation.LockedValue,
-                _ => null,
+                IUsingOperation usingOperation => ((IOperation?)usingOperation.Resources, usingOperation.Body),
+                ILockOperation lockOperation => ((IOperation?)lockOperation.LockedValue, lockOperation.Body),
+                _ => (null, null),
             };
 
+            // The construct captured the OBJECT at entry: after a definite reassignment the
+            // generated Dispose/Monitor.Exit touches the old object, not the one handed off.
             if (scopeExitTarget is not null
-                && SymbolEqualityComparer.Default.Equals(ReferencedVariable(scopeExitTarget), variable))
+                && SymbolEqualityComparer.Default.Equals(ReferencedVariable(scopeExitTarget), variable)
+                && !(body is not null && DefinitelyReassignedBefore(body, variable, transfer)))
             {
                 return true;
             }
         }
 
         return false;
+    }
+
+    // Whether the variable definitely no longer holds the captured object when the transfer
+    // runs: a reassignment that COMPLETES before it, unskippable within the region. The
+    // ASSIGNMENT's end decides -- `stream = MakeFrom(Sending.Transfer(stream))` transfers the
+    // old object while the reassignment is still in flight.
+    private static bool DefinitelyReassignedBefore(IOperation region, ISymbol variable, IOperation transfer)
+    {
+        var limit = transfer.Syntax.SpanStart;
+        return region.DescendantsAndSelf().Any(operation =>
+            operation.Parent is ISimpleAssignmentOperation assignment
+            && ReferenceEquals(assignment.Target, operation)
+            && assignment.Syntax.Span.End <= limit
+            && SymbolEqualityComparer.Default.Equals(ReferencedVariable(operation), variable)
+            && !IsConditionalWithin(assignment, region)
+            && !ABranchCanSkip(assignment, region.Syntax.SpanStart, region));
     }
 
     // An enclosing foreach KEEPS READING its collection after the body iteration that
@@ -169,9 +188,13 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                 break;
             }
 
+            // The enumerator iterates the collection captured at LOOP ENTRY: an iteration
+            // that definitely reassigns before transferring hands off a different object
+            // than the one MoveNext keeps reading.
             if (parent is IForEachLoopOperation foreachLoop
                 && SymbolEqualityComparer.Default.Equals(ReferencedVariable(foreachLoop.Collection), variable)
-                && !DefinitelyExitsAfter(foreachLoop, transferPosition))
+                && !DefinitelyExitsAfter(foreachLoop, transferPosition)
+                && !DefinitelyReassignedBefore(foreachLoop.Body, variable, transfer))
             {
                 return true;
             }
@@ -388,7 +411,10 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             .Where(invocation => invocation.TargetMethod.MethodKind == MethodKind.LocalFunction
                 && invocation.Syntax.SpanStart >= transferPosition
                 && !IsInASiblingArmOfTheTransfer(invocation, transferPosition)
-                && (escaped || !IsInAnUnreachableCatch(invocation, transferPosition)))
+                && (escaped || !IsInAnUnreachableCatch(invocation, transferPosition))
+                // A call written inside a local function that nothing ever invokes runs no
+                // more than the declaration around it does.
+                && !IsWithinAnUncalledLocalFunction(invocation, scanRoots, scope))
             .Select(invocation => (Operation: (IOperation)invocation,
                 CallEffect: (BodyEffect?)LocalFunctionCallEffect(invocation.TargetMethod, variable, scope)))
             .Where(call => call.CallEffect != BodyEffect.None);
@@ -459,6 +485,14 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             return true;
         }
 
+        // Arguments run BEFORE the body's reset: Reset(list.Count) reads the transferred
+        // value first, and the reset cannot retroactively excuse it.
+        if (call is IInvocationOperation invocation && SiblingArgumentRead(invocation.Arguments, variable, transferPosition) is { } argumentRead)
+        {
+            Report(context, argumentRead, variable);
+            return true;
+        }
+
         if (ReinitializationRole(call, transferPosition, scope) != ReferenceRole.FreshValueFromHere)
         {
             (dominated ??= new List<(Microsoft.CodeAnalysis.Text.TextSpan, int)>())
@@ -495,18 +529,17 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     }
 
     // A catch handler observes a NON-ESCAPING transfer only through an exception thrown after
-    // it: when the transfer is the LAST operation of its try body, a completed handoff skips
-    // the handlers, and a throw from the transfer expression itself means no wrapper escaped.
-    // (Escaping thrown transfers scan their handlers deliberately: the throw carries the
-    // completed wrapper into them.)
+    // it: when nothing THROW-CAPABLE follows the handoff in the try body -- later code that
+    // cannot throw (`var x = 0;`) never reaches the handler with a completed wrapper, and a
+    // throw from the transfer expression itself means no wrapper escaped. (Escaping thrown
+    // transfers scan their handlers deliberately: the throw carries the completed wrapper
+    // into them.)
     private static bool IsInAnUnreachableCatch(IOperation use, int transferPosition)
     {
         for (IOperation child = use; child.Parent is { } parent; child = parent)
         {
             if (parent is ITryOperation { Body: { } body } && child is ICatchClauseOperation
                 && Covers(body, transferPosition)
-                && !body.Descendants().Any(operation => operation.Syntax.SpanStart >= transferPosition
-                    && !IsWithinANestedFunction(operation, body))
                 && !CanThrowAfterTheTransfer(body, transferPosition))
             {
                 return true;
@@ -538,16 +571,19 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
 
     // What ENTERING the region does to the variable, scanned in source order from the top.
     // Reads: some path reads the transferred value (`read` is that reference -- possibly the
-    // RHS of a reassignment built FROM it). Resets: a non-reading reassignment that runs
-    // before any read on every path (not nested in a conditional/loop/try, no branch able to
-    // skip it) rewrites the variable. None: the region never touches the transferred value --
-    // reads a skipped conditional reset dominates (same arm, after it) see the fresh value.
+    // RHS/sibling argument of a reset built FROM it). Resets: a non-reading reset (simple
+    // assignment, out argument, deconstruction target) that runs before any read on every
+    // path (not nested in a conditional/loop/try, no branch able to skip it) rewrites the
+    // variable. None: the region never touches the transferred value -- reads a skipped
+    // conditional reset dominates (same arm, after it) see the fresh value, and references
+    // inside nested local functions the region never invokes cannot run at all.
     private static BodyEffect EffectOf(IOperation region, ISymbol variable, out IOperation? read)
     {
         read = null;
         var references = region.DescendantsAndSelf()
             .Where(operation => SymbolEqualityComparer.Default.Equals(ReferencedVariable(operation), variable)
-                && !IsInsideNameOf(operation))
+                && !IsInsideNameOf(operation)
+                && !IsInAnUnreferencedNestedFunction(operation, region))
             .OrderBy(operation => operation.Syntax.SpanStart);
 
         var dominated = default(List<(Microsoft.CodeAnalysis.Text.TextSpan Region, int Position)>);
@@ -558,32 +594,112 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                 continue;
             }
 
-            if (reference.Parent is not ISimpleAssignmentOperation assignment
-                || !ReferenceEquals(assignment.Target, reference))
+            var reset = ResetShapeOf(reference, variable, region, out read);
+            if (reset is null)
             {
                 read = reference; // a plain read of the transferred value
                 return BodyEffect.Reads;
             }
 
-            read = assignment.Value.DescendantsAndSelf().FirstOrDefault(operation =>
-                SymbolEqualityComparer.Default.Equals(ReferencedVariable(operation), variable)
-                && !IsInsideNameOf(operation));
             if (read is not null)
             {
-                return BodyEffect.Reads; // the RHS builds the replacement FROM the transferred value
+                return BodyEffect.Reads; // the replacement is built FROM the transferred value
             }
 
-            if (!IsConditionalWithin(assignment, region)
-                && !ABranchCanSkip(assignment, region.Syntax.SpanStart, region))
+            if (!IsConditionalWithin(reset, region)
+                && !ABranchCanSkip(reset, region.Syntax.SpanStart, region))
             {
                 return BodyEffect.Resets; // rewrites before any read on every path
             }
 
             (dominated ??= new List<(Microsoft.CodeAnalysis.Text.TextSpan, int)>())
-                .Add((DominatingRegion(assignment).Syntax.Span, reference.Syntax.Span.End));
+                .Add((DominatingRegion(reset).Syntax.Span, reference.Syntax.Span.End));
         }
 
         return BodyEffect.None;
+    }
+
+    // The reset operation the reference belongs to (null when it is an ordinary read),
+    // mirroring the outer Classify's shapes: a simple-assignment target, an `out` argument
+    // (the callee must assign it and cannot read it), or a deconstruction target. `read`
+    // carries the reference that still reads the transferred value on the way in -- the
+    // reassignment's RHS or a sibling argument.
+    private static IOperation? ResetShapeOf(IOperation reference, ISymbol variable, IOperation region, out IOperation? read)
+    {
+        read = null;
+
+        if (reference.Parent is ISimpleAssignmentOperation assignment && ReferenceEquals(assignment.Target, reference))
+        {
+            read = ReadWithin(assignment.Value, variable);
+            return assignment;
+        }
+
+        if (reference.Parent is IArgumentOperation { Parameter.RefKind: RefKind.Out } outArgument)
+        {
+            read = SiblingArgumentRead(outArgument, variable, region.Syntax.SpanStart);
+            return outArgument;
+        }
+
+        if (DeconstructionOf(reference) is { } deconstruction)
+        {
+            read = ReadWithin(deconstruction.Value, variable);
+            return deconstruction;
+        }
+
+        return null;
+    }
+
+    private static IOperation? ReadWithin(IOperation expression, ISymbol variable)
+    {
+        return expression.DescendantsAndSelf().FirstOrDefault(operation =>
+            SymbolEqualityComparer.Default.Equals(ReferencedVariable(operation), variable)
+            && !IsInsideNameOf(operation));
+    }
+
+    // A reference inside a nested local function that nothing in the region ever invokes (or
+    // lifts into a delegate) can never run by entering the region: the declaration alone
+    // executes nothing. Lambda bodies stay visible -- building the delegate is itself the
+    // escape.
+    private static bool IsInAnUnreferencedNestedFunction(IOperation reference, IOperation region)
+    {
+        for (var parent = reference.Parent; parent is not null && !ReferenceEquals(parent, region); parent = parent.Parent)
+        {
+            if (parent is ILocalFunctionOperation nested && !IsReferencedWithin(region, nested.Symbol))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool IsReferencedWithin(IOperation region, IMethodSymbol localFunction)
+    {
+        return region.DescendantsAndSelf().Any(operation => operation switch
+        {
+            IInvocationOperation invocation => SymbolEqualityComparer.Default.Equals(invocation.TargetMethod, localFunction),
+            IMethodReferenceOperation methodReference => SymbolEqualityComparer.Default.Equals(methodReference.Method, localFunction),
+            _ => false,
+        });
+    }
+
+    // The outer-scan variant: the boundary is the scan-root set instead of a single region.
+    private static bool IsWithinAnUncalledLocalFunction(IOperation operation, List<IOperation> scanRoots, IOperation scope)
+    {
+        for (var current = operation.Parent; current is not null; current = current.Parent)
+        {
+            if (current is ILocalFunctionOperation nested && !IsReferencedWithin(scope, nested.Symbol))
+            {
+                return true;
+            }
+
+            if (scanRoots.Contains(current))
+            {
+                return false;
+            }
+        }
+
+        return false;
     }
 
     // Whether CALLING the local function reads the transferred value -- or definitely
@@ -862,10 +978,15 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             _ => ImmutableArray<IArgumentOperation>.Empty,
         };
 
-        // Position-filtered: when the same invocation performs the handoff
-        // (Reset(Sending.Transfer(list), out list)), the reference inside the transfer
-        // argument itself is the handoff, not a post-transfer read.
-        return arguments.Where(argument => !ReferenceEquals(argument, outArgument))
+        return SiblingArgumentRead(arguments.Where(argument => !ReferenceEquals(argument, outArgument)), variable, transferPosition);
+    }
+
+    // Position-filtered: when the same invocation performs the handoff
+    // (Reset(Sending.Transfer(list), out list)), the reference inside the transfer
+    // argument itself is the handoff, not a post-transfer read.
+    private static IOperation? SiblingArgumentRead(System.Collections.Generic.IEnumerable<IArgumentOperation> arguments, ISymbol variable, int transferPosition)
+    {
+        return arguments
             .SelectMany(argument => argument.Value.DescendantsAndSelf())
             .FirstOrDefault(operation => SymbolEqualityComparer.Default.Equals(ReferencedVariable(operation), variable)
                 && operation.Syntax.SpanStart >= transferPosition

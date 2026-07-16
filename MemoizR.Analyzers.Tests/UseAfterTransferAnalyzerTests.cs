@@ -1982,6 +1982,271 @@ public class UseAfterTransferAnalyzerTests
     }
 
     [Fact]
+    public async Task UncalledNestedDeclarations_DoNotMakeTheCallARead()
+    {
+        // F() runs nothing: the only reference lives in a nested declaration F never
+        // invokes, and declarations do not execute.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public Sending<List<int>> M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(list);
+                    void F()
+                    {
+                        void Unused()
+                        {
+                            list.Add(1);
+                        }
+                    }
+                    F();
+                    return sending;
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task WrapperCalls_ThatReachAReadingFunction_StillReport()
+    {
+        // Outer() -> Use() -> the read runs after the handoff: the chained call is a use.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public Sending<List<int>> M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(list);
+                    void Outer()
+                    {
+                        Use();
+                    }
+                    void Use()
+                    {
+                        list.Add(1);
+                    }
+                    Outer();
+                    return sending;
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+    }
+
+    [Fact]
+    public async Task CallsInsideUncalledLocalFunctions_AreNotUses()
+    {
+        // Use() is only invoked from Outer's body, and Outer never runs: neither the
+        // declaration nor the call inside it executes.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public Sending<List<int>> M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(list);
+                    void Outer()
+                    {
+                        Use();
+                    }
+                    void Use()
+                    {
+                        list.Add(1);
+                    }
+                    return sending;
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task GeneratedDisposes_TrackTheCapturedObject_NotTheReassignedVariable()
+    {
+        // The using captured the ORIGINAL stream at entry: after the definite reassignment,
+        // scope-end Dispose touches the old object, not the one handed off.
+        var diagnostics = await AnalyzeAsync("""
+            using System.IO;
+            using MemoizR;
+
+            public class C
+            {
+                public Sending<MemoryStream> M()
+                {
+                    var stream = new MemoryStream();
+                    using (stream)
+                    {
+                        stream = new MemoryStream();
+                        return Sending.Transfer(stream);
+                    }
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task ForeachIteration_AfterADefiniteReassignment_ReadsADifferentList()
+    {
+        // The enumerator iterates the collection captured at loop entry: every iteration
+        // reassigns before transferring, so MoveNext never touches the handed-off object.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    foreach (var item in list)
+                    {
+                        list = new List<int>();
+                        _ = Sending.Transfer(list);
+                    }
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task ArgumentsOfResettingCalls_AreEvaluatedBeforeTheReset()
+    {
+        // Reset(list.Count): the argument reads the transferred value BEFORE the body's
+        // reset runs -- the reset cannot retroactively excuse it.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public Sending<List<int>> M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(list);
+                    void Reset(int unused)
+                    {
+                        list = new List<int>();
+                    }
+                    Reset(list.Count);
+                    return sending;
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+    }
+
+    [Fact]
+    public async Task NonThrowingCodeAfterTheTransfer_DoesNotKeepCatchesAlive()
+    {
+        // Nothing after the completed handoff can throw: the handler can never observe the
+        // wrapper, so its read is unreachable on every transferred path.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    try
+                    {
+                        var sent = Sending.Transfer(list);
+                        var x = 0;
+                        _ = x;
+                    }
+                    catch
+                    {
+                        list.Add(1);
+                    }
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task OutResets_InLocalFunctionBodies_AreReinitializers()
+    {
+        // An out parameter must be assigned before Init returns: calling Reset only ever
+        // rewrites the variable, exactly like a simple assignment.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public Sending<List<int>> M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(list);
+                    void Reset()
+                    {
+                        Init(out list);
+                    }
+                    Reset();
+                    list.Add(1);
+                    return sending;
+                }
+
+                private static void Init(out List<int> target) => target = new List<int>();
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task DeconstructionResets_InLocalFunctionBodies_AreReinitializers()
+    {
+        // A deconstruction target is definitely assigned like a simple-assignment target --
+        // inside a called body too.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public Sending<List<int>> M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(list);
+                    void Reset()
+                    {
+                        (list, _) = (new List<int>(), 0);
+                    }
+                    Reset();
+                    return sending;
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
     public async Task AnonymousObjectInitializers_AreTransferSources()
     {
         // Transfer(new { Value = list }) hands off an object graph containing the same list:
