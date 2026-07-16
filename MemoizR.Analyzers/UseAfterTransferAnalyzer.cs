@@ -27,14 +27,19 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     {
         context.ConfigureGeneratedCodeAnalysis(GeneratedCodeAnalysisFlags.None);
         context.EnableConcurrentExecution();
-        context.RegisterOperationBlockAction(AnalyzeBlock);
+        // The classifier caches verdicts per type symbol, so it is scoped to one compilation.
+        context.RegisterCompilationStartAction(compilationStart =>
+        {
+            var classifier = new SendableSymbolClassifier();
+            compilationStart.RegisterOperationBlockAction(blockContext => AnalyzeBlock(blockContext, classifier));
+        });
     }
 
-    private static void AnalyzeBlock(OperationBlockAnalysisContext context)
+    private static void AnalyzeBlock(OperationBlockAnalysisContext context, SendableSymbolClassifier classifier)
     {
         foreach (var block in context.OperationBlocks)
         {
-            foreach (var (variable, transferPosition, scanRoots, escaped, transfer, scope) in Transfers(block))
+            foreach (var (variable, transferPosition, scanRoots, escaped, transfer, scope) in Transfers(block, classifier))
             {
                 // A using-declared local -- or an existing local/parameter handed to a using
                 // STATEMENT as its resource -- is Disposed by the SENDER at scope end, after
@@ -73,7 +78,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     // stores resolve against the BODY even when the scanned regions are narrower (an
     // escaping `return Pair(Sending.Transfer(list), Use());` still calls a Use declared
     // outside the return expression).
-    private static IEnumerable<(ISymbol Variable, int Position, List<IOperation> ScanRoots, bool Escaped, IOperation Transfer, IOperation Scope)> Transfers(IOperation block)
+    private static IEnumerable<(ISymbol Variable, int Position, List<IOperation> ScanRoots, bool Escaped, IOperation Transfer, IOperation Scope)> Transfers(IOperation block, SendableSymbolClassifier classifier)
     {
         foreach (var operation in block.DescendantsAndSelf())
         {
@@ -93,7 +98,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
 
             foreach (var source in TransferSources(argument))
             {
-                if (ReferencedVariable(source) is not { } variable)
+                if (TrackedVariableOf(source, classifier) is not { } variable)
                 {
                     continue;
                 }
@@ -104,6 +109,22 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                 }
             }
         }
+    }
+
+    // The variable a source hands off -- none when it is not a local/parameter, and none
+    // when its type is deeply Sendable: such a source (an int tuple element, say) cannot
+    // alias mutable state with the receiver, and tracking it would bury the real handoffs
+    // beside it.
+    private static ISymbol? TrackedVariableOf(IOperation source, SendableSymbolClassifier classifier)
+    {
+        if (ReferencedVariable(source) is not { } variable)
+        {
+            return null;
+        }
+
+        return source.Type is { } sourceType && classifier.GetNotSendableReason(sourceType) is null
+            ? null
+            : variable;
     }
 
     private static IEnumerable<(ISymbol Variable, int Position, List<IOperation> ScanRoots, bool Escaped, IOperation Transfer, IOperation Scope)> EntriesFor(
@@ -1379,6 +1400,8 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             .DefaultIfEmpty(int.MinValue)
             .Max();
 
+        var removals = DelegateRemovals(delegateLocal, scope, consumer);
+
         foreach (var (site, value, _) in stores)
         {
             if (site.Syntax.SpanStart < killPoint)
@@ -1388,6 +1411,15 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
 
             if (Callable(value) is { } callable)
             {
+                // A definite `-= M` after the store strips that target: only METHOD GROUPS
+                // are identifiable (removing a fresh lambda instance removes nothing).
+                if (callable is IMethodReferenceOperation storedGroup
+                    && removals.Any(removal => removal.Position > site.Syntax.SpanStart
+                        && SymbolEqualityComparer.Default.Equals(removal.Method, storedGroup.Method.OriginalDefinition)))
+                {
+                    continue;
+                }
+
                 yield return callable;
             }
             else if (ReferencedVariable(value) is { } alias)
@@ -1400,6 +1432,24 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                 }
             }
         }
+    }
+
+    private static List<(int Position, IMethodSymbol Method)> DelegateRemovals(ISymbol delegateLocal, IOperation scope, IOperation consumer)
+    {
+        var removals = new List<(int Position, IMethodSymbol Method)>();
+        foreach (var operation in scope.DescendantsAndSelf())
+        {
+            if (operation is ICompoundAssignmentOperation { OperatorKind: BinaryOperatorKind.Subtract } removal
+                && SymbolEqualityComparer.Default.Equals(ReferencedVariable(removal.Target), delegateLocal)
+                && operation.Syntax.Span.End <= consumer.Syntax.SpanStart
+                && !IsConditionalWithin(removal, scope)
+                && Callable(removal.Value) is IMethodReferenceOperation methodReference)
+            {
+                removals.Add((operation.Syntax.SpanStart, methodReference.Method.OriginalDefinition));
+            }
+        }
+
+        return removals;
     }
 
     private static List<(IOperation Site, IOperation Value, bool Replaces)> DelegateStores(
@@ -1562,7 +1612,8 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             _ => operation is IInvocationOperation or IObjectCreationOperation or IAwaitOperation
                 or IPropertyReferenceOperation or IArrayElementReferenceOperation or IThrowOperation
                 or IDynamicInvocationOperation or IDynamicMemberReferenceOperation
-                or IDynamicIndexerAccessOperation or IDynamicObjectCreationOperation,
+                or IDynamicIndexerAccessOperation or IDynamicObjectCreationOperation
+                or IEventAssignmentOperation,
         };
     }
 

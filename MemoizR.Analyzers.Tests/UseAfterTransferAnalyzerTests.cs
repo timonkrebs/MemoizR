@@ -4348,6 +4348,98 @@ public class UseAfterTransferAnalyzerTests
     }
 
     [Fact]
+    public async Task SendableTupleElements_AreNotTracked()
+    {
+        // The tuple copies id by value and int is deeply immutable: only the list can alias
+        // mutable state with the receiver, so only its use reports.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var id = 1;
+                    var list = new List<int> { 1 };
+                    var sent = Sending.Transfer((id, list));
+                    _ = id;
+                    list.Add(1);
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task EventAccessors_AreThrowCapable()
+    {
+        // A custom add accessor is user code: it can throw after the completed handoff and
+        // land in the catch, which reads the transferred list.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public event Action? Changed;
+
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    try
+                    {
+                        var sent = Sending.Transfer(list);
+                        Changed += Handler;
+                    }
+                    catch
+                    {
+                        list.Add(1);
+                    }
+                }
+
+                private static void Handler()
+                {
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+    }
+
+    [Fact]
+    public async Task DefinitelyRemovedTargets_CannotRun()
+    {
+        // use -= Touch empties the invocation list before the handoff: the null-conditional
+        // call runs nothing.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    void Touch() => list.Add(1);
+                    Action? use = Touch;
+                    use -= Touch;
+                    var sending = Sending.Transfer(list);
+                    use?.Invoke();
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
     public async Task AnonymousObjectInitializers_AreTransferSources()
     {
         // Transfer(new { Value = list }) hands off an object graph containing the same list:

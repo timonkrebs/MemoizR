@@ -7,6 +7,28 @@ namespace MemoizR.Analyzers.Tests;
 // framework types (Uri is not sealed) stay quiet.
 public class SubclassSmugglingAnalyzerTests
 {
+    [Fact]
+    public async Task NonSendableTypeArguments_AreMzr001sTerritory()
+    {
+        // List<int> never passes the creation check: there is no smuggle hole to hint
+        // about on a value MZR001 already rejects.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    f.CreateSignal(new List<int>());
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
     private static Task<System.Collections.Immutable.ImmutableArray<Diagnostic>> AnalyzeAsync(string source)
         => AnalyzerTestHarness.AnalyzeAsync(source, new SubclassSmugglingAnalyzer());
 

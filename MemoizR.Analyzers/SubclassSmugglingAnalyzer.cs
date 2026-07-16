@@ -23,10 +23,17 @@ public sealed class SubclassSmugglingAnalyzer : DiagnosticAnalyzer
     {
         context.ConfigureGeneratedCodeAnalysis(GeneratedCodeAnalysisFlags.None);
         context.EnableConcurrentExecution();
-        context.RegisterOperationAction(Analyze, OperationKind.Invocation);
+        // The classifier caches verdicts per type symbol, so it is scoped to one compilation.
+        context.RegisterCompilationStartAction(compilationStart =>
+        {
+            var classifier = new SendableSymbolClassifier();
+            compilationStart.RegisterOperationAction(
+                operationContext => Analyze(operationContext, classifier),
+                OperationKind.Invocation);
+        });
     }
 
-    private static void Analyze(OperationAnalysisContext context)
+    private static void Analyze(OperationAnalysisContext context, SendableSymbolClassifier classifier)
     {
         var invocation = (IInvocationOperation)context.Operation;
         var method = invocation.TargetMethod;
@@ -44,6 +51,13 @@ public sealed class SubclassSmugglingAnalyzer : DiagnosticAnalyzer
 
         foreach (var typeArgument in method.TypeArguments)
         {
+            // A type argument the Sendable classifier REJECTS is MZR001's territory: the
+            // value never passes the creation check, so there is no smuggle hole to hint at.
+            if (classifier.GetNotSendableReason(typeArgument) is not null)
+            {
+                continue;
+            }
+
             // Smuggling hides inside Sendable CONTAINERS too (ImmutableArray<OpenBase>,
             // Task<OpenBase>): the container passes the green-lists, but the non-sealed element
             // type is the smuggle surface -- unfold nested type arguments.
