@@ -1127,6 +1127,18 @@ public class DistributedPackageTests
         await s.Set(5);
         await qMirror.PullAsync();
         await TestHelpers.WaitForConvergenceAsync(() => { lock (renders) { return renders.Contains((5, 20)); } });
+
+        // The pair moves on with a REAL change (both sides advance consistently), which
+        // expires the affirmation ...
+        await s.Set(6); // half: 2 -> 3, so c recomputes too
+        await qMirror.PullAsync();
+        await cMirror.PullAsync();
+        await TestHelpers.WaitForConvergenceAsync(() => { lock (renders) { return renders.Contains((6, 30)); } });
+
+        // ... and a NEW under-claim glitch earns its own heal round and still converges.
+        await s.Set(7); // half stays 3: c scan-skips again
+        await qMirror.PullAsync();
+        await TestHelpers.WaitForConvergenceAsync(() => { lock (renders) { return renders.Contains((7, 30)); } });
         GC.KeepAlive(reaction);
     }
 

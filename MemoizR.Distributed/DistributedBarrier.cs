@@ -55,12 +55,23 @@ public static class DistributedBarrier
                 // and its own propagation re-runs the barrier anyway.
                 var firstPublication = first.Publication;
                 var secondPublication = second.Publication;
+                if (firstPublication is null || secondPublication is null)
+                {
+                    return; // nothing synced yet: no pair observed, nothing to verify or expire
+                }
+
+                // An affirmation vouches only for the exact pair its heal round verified:
+                // observing ANY other pair expires it (single-shot). Today a pair provably
+                // cannot RETURN to an affirmed content anyway -- stamp triggers are monotone
+                // per signal within an epoch, and empty stamps never reach the inconsistent
+                // branch -- but the expiry keeps that safety local to the barrier instead of
+                // resting on a monotonicity invariant maintained elsewhere.
+                var affirmed = affirmation.MatchOrExpire(firstPublication, secondPublication);
 
                 // Absent evidence (nothing synced yet) and unverifiable evidence mean the same
                 // thing to a consumer: CANNOT VERIFY -- no render, never a guess. The pull that
                 // heals an unverifiable spell is driven by advertisements/heartbeats, not here.
-                if (firstPublication is null || secondPublication is null
-                    || firstPublication.Unverifiable || secondPublication.Unverifiable)
+                if (firstPublication.Unverifiable || secondPublication.Unverifiable)
                 {
                     return;
                 }
@@ -72,7 +83,7 @@ public static class DistributedBarrier
                 if (firstPublication.Epoch != secondPublication.Epoch
                     || !firstPublication.Stamp.IsConsistentWith(secondPublication.Stamp))
                 {
-                    if (affirmation.IsAffirmed(firstPublication, secondPublication))
+                    if (affirmed)
                     {
                         // Both hosts answered a full re-pull round with exactly these
                         // publications: the values are their affirmed current truths and the
@@ -206,10 +217,10 @@ public static class DistributedBarrier
     }
 
     // The publication pair a full re-pull round affirmed, compared by CONTENT (the record's
-    // value equality): any adoption that actually changes value or evidence invalidates a
-    // stale affirmation, while an equal-content republication (a re-racing export) keeps the
-    // pair affirmed -- which is exactly what the round proved. Volatile: written on the heal
-    // flow, read by the barrier reaction.
+    // value equality): an equal-content republication (a re-racing export) keeps the pair
+    // affirmed -- which is exactly what the round proved -- while observing any OTHER pair
+    // expires the affirmation, so its authority never outlives the heal round that earned it.
+    // Volatile: written on the heal flow, read by the barrier reaction.
     private sealed class AffirmationState<T1, T2>
     {
         private volatile Tuple<AdoptedPublication<T1>, AdoptedPublication<T2>>? pair;
@@ -217,12 +228,19 @@ public static class DistributedBarrier
         internal void Affirm(AdoptedPublication<T1> first, AdoptedPublication<T2> second) =>
             pair = Tuple.Create(first, second);
 
-        internal bool IsAffirmed(AdoptedPublication<T1> first, AdoptedPublication<T2> second)
+        internal bool MatchOrExpire(AdoptedPublication<T1> first, AdoptedPublication<T2> second)
         {
             var affirmed = pair;
-            return affirmed != null
-                && Equals(affirmed.Item1, first)
-                && Equals(affirmed.Item2, second);
+            if (affirmed == null)
+            {
+                return false;
+            }
+            if (Equals(affirmed.Item1, first) && Equals(affirmed.Item2, second))
+            {
+                return true;
+            }
+            pair = null;
+            return false;
         }
     }
 }
