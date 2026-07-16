@@ -119,17 +119,19 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         // A transfer inside a CALLED local function is sequenced before the caller's
         // continuation: every call site acts as a transfer of its own. Lambdas stay
         // deferred-scoped (they may run later or never).
-        foreach (var propagated in CallSiteTransfers(enclosingBody, block,
+        foreach (var propagated in CallSiteTransfers(enclosingBody, variable, block,
             new HashSet<IMethodSymbol>(SymbolEqualityComparer.Default)))
         {
-            yield return (variable, propagated.Position, propagated.Roots, propagated.Escaped, propagated.Site, propagated.Scope);
+            yield return propagated;
         }
     }
 
-    // Call sites of the local function whose body contains the transfer -- transitively:
-    // a call inside ANOTHER declaration only runs through that declaration's own callers.
-    private static IEnumerable<(int Position, List<IOperation> Roots, bool Escaped, IOperation Site, IOperation Scope)> CallSiteTransfers(
-        IOperation transferBody, IOperation block, HashSet<IMethodSymbol> visited)
+    // Call sites of the local function whose body contains the transfer -- direct calls and
+    // DELEGATE-CARRIED ones -- transitively: a call inside ANOTHER declaration only runs
+    // through that declaration's own callers. A transferred PARAMETER remaps to the caller's
+    // argument at each site.
+    private static IEnumerable<(ISymbol Variable, int Position, List<IOperation> ScanRoots, bool Escaped, IOperation Transfer, IOperation Scope)> CallSiteTransfers(
+        IOperation transferBody, ISymbol variable, IOperation block, HashSet<IMethodSymbol> visited)
     {
         if (transferBody is not ILocalFunctionOperation declaration || !visited.Add(declaration.Symbol))
         {
@@ -138,7 +140,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
 
         foreach (var invocation in block.DescendantsAndSelf().OfType<IInvocationOperation>())
         {
-            if (!SymbolEqualityComparer.Default.Equals(invocation.TargetMethod.OriginalDefinition, declaration.Symbol))
+            if (!InvokesTheDeclaration(invocation, declaration, block))
             {
                 continue;
             }
@@ -149,9 +151,21 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                 continue; // self-recursion: the body scan already covers it
             }
 
+            foreach (var entry in CallSiteEntries(invocation, callBody, variable, declaration, block, visited))
+            {
+                yield return entry;
+            }
+        }
+    }
+
+    private static IEnumerable<(ISymbol Variable, int Position, List<IOperation> ScanRoots, bool Escaped, IOperation Transfer, IOperation Scope)> CallSiteEntries(
+        IInvocationOperation invocation, IOperation callBody, ISymbol variable, ILocalFunctionOperation declaration, IOperation block, HashSet<IMethodSymbol> visited)
+    {
+        foreach (var callVariable in CallSiteVariables(invocation, variable, declaration))
+        {
             if (callBody is ILocalFunctionOperation)
             {
-                foreach (var nested in CallSiteTransfers(callBody, block, visited))
+                foreach (var nested in CallSiteTransfers(callBody, callVariable, block, visited))
                 {
                     yield return nested;
                 }
@@ -162,7 +176,47 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             var (roots, escaped) = ScanRootsFor(invocation, callBody);
             if (roots.Count > 0)
             {
-                yield return (invocation.Syntax.Span.End, roots, escaped, invocation, callBody);
+                yield return (callVariable, invocation.Syntax.Span.End, roots, escaped, invocation, callBody);
+            }
+        }
+    }
+
+    private static bool InvokesTheDeclaration(IInvocationOperation invocation, ILocalFunctionOperation declaration, IOperation block)
+    {
+        // move() runs Move when the delegate local can hold it at the call.
+        if (invocation.TargetMethod.MethodKind == MethodKind.DelegateInvoke)
+        {
+            return DelegateReceiver(invocation) is { } receiver
+                && StoredCallables(receiver, block, invocation, transferPosition: 0, new HashSet<ISymbol>(SymbolEqualityComparer.Default))
+                    .OfType<IMethodReferenceOperation>()
+                    .Any(reference => SymbolEqualityComparer.Default.Equals(reference.Method.OriginalDefinition, declaration.Symbol));
+        }
+
+        return SymbolEqualityComparer.Default.Equals(invocation.TargetMethod.OriginalDefinition, declaration.Symbol);
+    }
+
+    // The caller-side variable the transferred callee variable aliases at THIS call: a
+    // captured local stays itself; a PARAMETER maps to the matching argument's sources.
+    private static IEnumerable<ISymbol> CallSiteVariables(IInvocationOperation invocation, ISymbol variable, ILocalFunctionOperation declaration)
+    {
+        if (variable is not IParameterSymbol parameter
+            || !SymbolEqualityComparer.Default.Equals(parameter.ContainingSymbol.OriginalDefinition, declaration.Symbol))
+        {
+            yield return variable;
+            yield break;
+        }
+
+        var argument = invocation.Arguments.FirstOrDefault(candidate => candidate.Parameter?.Ordinal == parameter.Ordinal);
+        if (argument is null)
+        {
+            yield break;
+        }
+
+        foreach (var source in TransferSources(argument.Value))
+        {
+            if (ReferencedVariable(source) is { } mapped)
+            {
+                yield return mapped;
             }
         }
     }
@@ -187,14 +241,41 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             // assigns the fresh element to the variable right after its RHS evaluated.
             if (parent is IDeconstructionAssignmentOperation deconstruction
                 && !ReferenceEquals(child, deconstruction.Target)
-                && deconstruction.Target.DescendantsAndSelf()
-                    .Any(element => SymbolEqualityComparer.Default.Equals(ReferencedVariable(element), variable)))
+                && DeconstructionFreshlyResets(deconstruction, variable))
             {
                 return deconstruction;
             }
         }
 
         return null;
+    }
+
+    // Only the POSITIONALLY MATCHED RHS element decides: `(list, _) = (list, Transfer(list))`
+    // writes the transferred reference back into the variable, resetting nothing. A
+    // non-tuple RHS (a method returning a tuple) is opaque -- it could return the same
+    // object -- so tracking continues.
+    private static bool DeconstructionFreshlyResets(IDeconstructionAssignmentOperation deconstruction, ISymbol variable)
+    {
+        var value = deconstruction.Value;
+        while (value is IConversionOperation conversion)
+        {
+            value = conversion.Operand;
+        }
+
+        if (deconstruction.Target is not ITupleOperation targets || value is not ITupleOperation values)
+        {
+            return false;
+        }
+
+        for (var i = 0; i < targets.Elements.Length && i < values.Elements.Length; i++)
+        {
+            if (SymbolEqualityComparer.Default.Equals(ReferencedVariable(targets.Elements[i]), variable))
+            {
+                return ReadWithin(values.Elements[i], variable) is null;
+            }
+        }
+
+        return false;
     }
 
     private static bool IsDisposedByAnEnclosingUsing(IOperation transfer, ISymbol variable)
@@ -370,19 +451,11 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             IArrayCreationOperation { Initializer: { } initializer } => initializer.ElementValues,
             IAnonymousObjectCreationOperation anonymous => anonymous.Initializers.Select(initializer =>
                 (IOperation?)(initializer is ISimpleAssignmentOperation member ? member.Value : initializer)),
-            IObjectCreationOperation { Initializer: { } objectInitializer } => objectInitializer.Initializers
-                .SelectMany(element => element switch
-                {
-                    // Member writes carry through compiler-known slots only; an INDEXER
-                    // initializer (["x"] = list) stores value AND keys into the collection;
-                    // a collection initializer's Add elements carry like collection
-                    // expressions.
-                    ISimpleAssignmentOperation { Target: IPropertyReferenceOperation { Property.IsIndexer: true } indexer } member =>
-                        indexer.Arguments.Select(argument => (IOperation?)argument.Value).Concat(new[] { (IOperation?)member.Value }),
-                    ISimpleAssignmentOperation member when StoresIntoACompilerKnownSlot(member) => new[] { (IOperation?)member.Value },
-                    IInvocationOperation add => add.Arguments.Select(argument => (IOperation?)argument.Value),
-                    _ => System.Linq.Enumerable.Empty<IOperation?>(),
-                }),
+            IObjectCreationOperation { Initializer: { } objectInitializer } => InitializerCarriedParts(objectInitializer),
+            // box with { Value = list }: the receiver's CLONE carries the same reference in
+            // its slot. The operand itself stays a leaf like a spread's: the original object
+            // is not handed off, only its contents are copied into the clone.
+            IWithOperation { Initializer: { } withInitializer } => InitializerCarriedParts(withInitializer),
             IConversionOperation conversion => new[] { conversion.Operand },
             // Transfer([list]): matched by SYNTAX -- ICollectionExpressionOperation is not
             // public in the Roslyn this analyzer compiles against, but the children are
@@ -937,6 +1010,21 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         return null;
     }
 
+    // Member writes carry through compiler-known slots only; an INDEXER initializer
+    // (["x"] = list) stores value AND keys into the collection; a collection initializer's
+    // Add elements carry like collection expressions.
+    private static System.Collections.Generic.IEnumerable<IOperation?> InitializerCarriedParts(IObjectOrCollectionInitializerOperation initializer)
+    {
+        return initializer.Initializers.SelectMany(element => element switch
+        {
+            ISimpleAssignmentOperation { Target: IPropertyReferenceOperation { Property.IsIndexer: true } indexer } member =>
+                indexer.Arguments.Select(argument => (IOperation?)argument.Value).Concat(new[] { (IOperation?)member.Value }),
+            ISimpleAssignmentOperation member when StoresIntoACompilerKnownSlot(member) => new[] { (IOperation?)member.Value },
+            IInvocationOperation add => add.Arguments.Select(argument => (IOperation?)argument.Value),
+            _ => System.Linq.Enumerable.Empty<IOperation?>(),
+        });
+    }
+
     private static bool StoresIntoACompilerKnownSlot(ISimpleAssignmentOperation member)
     {
         return member.Target is IFieldReferenceOperation
@@ -1263,7 +1351,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             IUnaryOperation unary => unary.OperatorMethod is not null,
             IBinaryOperation binary => binary.OperatorMethod is not null,
             _ => operation is IInvocationOperation or IObjectCreationOperation or IAwaitOperation
-                or IPropertyReferenceOperation or IArrayElementReferenceOperation,
+                or IPropertyReferenceOperation or IArrayElementReferenceOperation or IThrowOperation,
         };
     }
 

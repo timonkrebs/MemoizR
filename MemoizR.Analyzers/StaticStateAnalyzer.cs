@@ -58,8 +58,10 @@ public sealed class StaticStateAnalyzer : DiagnosticAnalyzer
     private static void Analyze(SymbolAnalysisContext context, SendableSymbolClassifier classifier, ConcurrentDictionary<SyntaxTree, bool> treeUsesMemoizR, System.Lazy<bool> hasGlobalMemoizRUsing)
     {
         var symbol = context.Symbol;
-        if (!symbol.IsStatic || symbol.IsImplicitlyDeclared)
+        if (!symbol.IsStatic || symbol.IsImplicitlyDeclared || symbol.IsAbstract)
         {
+            // A static ABSTRACT member is only a contract: the interface owns no storage --
+            // the implementing types own (and answer for) the actual slots.
             return;
         }
 

@@ -13,6 +13,25 @@ public class StaticStateAnalyzerTests
         => AnalyzerTestHarness.AnalyzeAsync(source, new StaticStateAnalyzer());
 
     [Fact]
+    public async Task StaticAbstractInterfaceContracts_OwnNoSlot()
+    {
+        // A static abstract member is only a CONTRACT: the interface holds no storage, so
+        // there is nothing shared to flag -- the implementing types own (and answer for)
+        // the actual slots.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public interface IState<T>
+            {
+                static abstract List<int> Items { get; set; }
+            }
+            """);
+
+        Assert.Empty(diagnostics.Where(d => d.Id == "MZR004"));
+    }
+
+    [Fact]
     public async Task MutableStaticSlots_AreFlagged()
     {
         var diagnostics = await AnalyzeAsync("""

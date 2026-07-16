@@ -3287,6 +3287,150 @@ public class UseAfterTransferAnalyzerTests
     }
 
     [Fact]
+    public async Task ParameterTransfers_RemapToTheCallersArgument()
+    {
+        // Move(list) hands the caller's list to the parameter the body transfers: at the
+        // call site the tracked variable is the argument, not the callee's alias.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    void Move(List<int> x)
+                    {
+                        _ = Sending.Transfer(x);
+                    }
+                    Move(list);
+                    list.Add(1);
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task DeconstructionsWritingTheValueBack_DoNotReset()
+    {
+        // The matched RHS element IS the old list: the deconstruction writes the transferred
+        // reference back, so the later Add still touches it.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    (list, _) = (list, Sending.Transfer(list));
+                    list.Add(1);
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+    }
+
+    [Fact]
+    public async Task WithExpressionInitializers_AreTransferSources()
+    {
+        // The clone the receiver owns carries the same list in its Value slot.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public record Box
+            {
+                public List<int>? Value { get; init; }
+            }
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    var box = new Box();
+                    var sending = Sending.Transfer(box with { Value = list });
+                    list.Add(1);
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task TransfersPropagate_ThroughDelegateCarriedFunctions()
+    {
+        // move() invokes Move through the delegate: the handoff inside it is sequenced
+        // before the caller's Add exactly like a direct call.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    void Move()
+                    {
+                        _ = Sending.Transfer(list);
+                    }
+                    Action move = Move;
+                    move();
+                    list.Add(1);
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+    }
+
+    [Fact]
+    public async Task ExplicitThrows_KeepCatchesAlive()
+    {
+        // Rethrowing an existing exception allocates nothing, but still runs after the
+        // completed handoff and lands in the handler, which then reads the transferred list.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M(System.Exception ex)
+                {
+                    var list = new List<int> { 1 };
+                    try
+                    {
+                        var sent = Sending.Transfer(list);
+                        throw ex;
+                    }
+                    catch
+                    {
+                        list.Add(1);
+                    }
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+    }
+
+    [Fact]
     public async Task AnonymousObjectInitializers_AreTransferSources()
     {
         // Transfer(new { Value = list }) hands off an object graph containing the same list:
