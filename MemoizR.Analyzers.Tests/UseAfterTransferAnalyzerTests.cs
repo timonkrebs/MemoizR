@@ -2691,6 +2691,37 @@ public class UseAfterTransferAnalyzerTests
     }
 
     [Fact]
+    public async Task CallablesInsideEscapingExpressions_ResolveAgainstTheWholeBody()
+    {
+        // The escaping expression evaluates Use() after the handoff, before the method
+        // exits -- and Use's declaration sits OUTSIDE the return expression, so the lookup
+        // must reach the whole body.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public Sending<List<int>> M()
+                {
+                    var list = new List<int> { 1 };
+                    int Use()
+                    {
+                        list.Add(1);
+                        return 0;
+                    }
+                    return Pair(Sending.Transfer(list), Use());
+                }
+
+                private static Sending<List<int>> Pair(Sending<List<int>> sending, int x) => sending;
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+    }
+
+    [Fact]
     public async Task AnonymousObjectInitializers_AreTransferSources()
     {
         // Transfer(new { Value = list }) hands off an object graph containing the same list:

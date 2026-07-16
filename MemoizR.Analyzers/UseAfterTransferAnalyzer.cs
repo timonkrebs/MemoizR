@@ -34,7 +34,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     {
         foreach (var block in context.OperationBlocks)
         {
-            foreach (var (variable, transferPosition, scanRoots, escaped, transfer) in Transfers(block))
+            foreach (var (variable, transferPosition, scanRoots, escaped, transfer, scope) in Transfers(block))
             {
                 // A using-declared local -- or an existing local/parameter handed to a using
                 // STATEMENT as its resource -- is Disposed by the SENDER at scope end, after
@@ -53,8 +53,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                 // reads still inside the RHS (after the transfer) and the throw window count.
                 if (EnclosingReinitializingAssignment(transfer, variable) is { } enclosingReinit)
                 {
-                    var scope = scanRoots[scanRoots.Count - 1];
-                    if (!ReportUsesAfter(context, new List<IOperation> { enclosingReinit }, escaped, variable, transferPosition)
+                    if (!ReportUsesAfter(context, new List<IOperation> { enclosingReinit }, escaped, variable, transferPosition, scope)
                         && CatchUseDuringReinitialization(enclosingReinit, variable, scope) is { } windowUse)
                     {
                         Report(context, windowUse, variable);
@@ -63,15 +62,18 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                     continue;
                 }
 
-                ReportUsesAfter(context, scanRoots, escaped, variable, transferPosition);
+                ReportUsesAfter(context, scanRoots, escaped, variable, transferPosition, scope);
             }
         }
     }
 
     // Every Sending<T> creation (constructor or Sending.Transfer) whose argument is a
-    // local/parameter reference, with the position the transfer happens at and the regions the
-    // report walk covers.
-    private static IEnumerable<(ISymbol Variable, int Position, List<IOperation> ScanRoots, bool Escaped, IOperation Transfer)> Transfers(IOperation block)
+    // local/parameter reference, with the position the transfer happens at, the regions the
+    // report walk covers, and the enclosing function body -- declarations and delegate
+    // stores resolve against the BODY even when the scanned regions are narrower (an
+    // escaping `return Pair(Sending.Transfer(list), Use());` still calls a Use declared
+    // outside the return expression).
+    private static IEnumerable<(ISymbol Variable, int Position, List<IOperation> ScanRoots, bool Escaped, IOperation Transfer, IOperation Scope)> Transfers(IOperation block)
     {
         foreach (var operation in block.DescendantsAndSelf())
         {
@@ -96,10 +98,11 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                     continue;
                 }
 
-                var (scanRoots, escaped) = ScanRootsFor(operation, EnclosingFunctionBody(operation, block));
+                var enclosingBody = EnclosingFunctionBody(operation, block);
+                var (scanRoots, escaped) = ScanRootsFor(operation, enclosingBody);
                 if (scanRoots.Count > 0)
                 {
-                    yield return (variable, operation.Syntax.Span.End, scanRoots, escaped, operation);
+                    yield return (variable, operation.Syntax.Span.End, scanRoots, escaped, operation, enclosingBody);
                 }
             }
         }
@@ -458,9 +461,8 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         return block;
     }
 
-    private static bool ReportUsesAfter(OperationBlockAnalysisContext context, List<IOperation> scanRoots, bool escaped, ISymbol variable, int transferPosition)
+    private static bool ReportUsesAfter(OperationBlockAnalysisContext context, List<IOperation> scanRoots, bool escaped, ISymbol variable, int transferPosition, IOperation scope)
     {
-        var scope = scanRoots[scanRoots.Count - 1]; // the outermost root is the reinit scope boundary
 
         // Source-ordered walk of every later reference. References in a MUTUALLY EXCLUSIVE
         // sibling arm of the construct holding the transfer are excluded upfront: in
