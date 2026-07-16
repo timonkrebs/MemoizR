@@ -30,6 +30,13 @@ jobs:
       uses: actions/setup-dotnet@v5
       with:
         dotnet-version: 10.0.x
+    - name: Build Coyote fork packages
+      # Packs Microsoft.Coyote from the timonkrebs/coyote fork (pinned commit) into
+      # the local feed that nuget.config maps 'Microsoft.Coyote*' to. The fork adds
+      # .NET 10 support and models System.Threading.Lock, which MemoizR's systematic
+      # tests require; no published feed carries those changes yet.
+      shell: bash
+      run: bash eng/build-coyote-packages.sh
     - name: Restore dependencies
       run: dotnet restore
     - name: Build
@@ -42,12 +49,15 @@ jobs:
       run: dotnet test --no-build --verbosity normal --filter "FullyQualifiedName!~CoyoteTests"
     - name: Install Coyote CLI
       run: |
-        dotnet tool install --global Microsoft.Coyote.CLI
+        # The CLI comes from the timonkrebs/coyote fork (see nuget.config), which can
+        # rewrite net10.0 assemblies and control System.Threading.Lock.
+        dotnet tool install --global Microsoft.Coyote.CLI --version 1.8.0-net10.1 --add-source packages/coyote
         echo "$HOME/.dotnet/tools" >> $GITHUB_PATH
     - name: Coyote Rewrite
       run: |
-        # Use net10.0 as targeted in the project file. Rewrite in dependency order.
-        cd MemoizR.Tests/bin/Debug/net10.0/
+        # Build output follows the artifacts layout (UseArtifactsOutput in
+        # Directory.Build.props). Rewrite in dependency order.
+        cd artifacts/bin/MemoizR.Tests/debug/
         coyote rewrite MemoizR.StructuredAsyncLock.dll
         coyote rewrite MemoizR.dll
         coyote rewrite MemoizR.Reactive.dll
@@ -73,6 +83,9 @@ jobs:
       uses: actions/setup-dotnet@v5
       with:
         dotnet-version: 10.0.x
+    - name: Build Coyote fork packages
+      shell: bash
+      run: bash eng/build-coyote-packages.sh
     - name: Cognitive Complexity gate (S3776 <= 15)
       run: dotnet build -p:MeasureCognitiveComplexity=true -p:WarningsAsErrors=S3776
 
