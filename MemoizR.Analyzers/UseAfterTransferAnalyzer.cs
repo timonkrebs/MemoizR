@@ -415,9 +415,11 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
 
             // The enumerator iterates the collection captured at LOOP ENTRY: an iteration
             // that definitely reassigns before transferring hands off a different object
-            // than the one MoveNext keeps reading.
+            // than the one MoveNext keeps reading. A collection EXPRESSION built from the
+            // variable (list.Where(...)) keeps pulling from the same list -- and even an
+            // eager copy re-runs the transfer itself on the next iteration.
             if (parent is IForEachLoopOperation foreachLoop
-                && SymbolEqualityComparer.Default.Equals(ReferencedVariable(foreachLoop.Collection), variable)
+                && ReadWithin(foreachLoop.Collection, variable) is not null
                 && !DefinitelyExitsAfter(foreachLoop, transferPosition)
                 && !DefinitelyReassignedBefore(foreachLoop.Body, variable, transfer))
             {
@@ -854,7 +856,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             .Where(reference => reference is ILocalReferenceOperation or IParameterReferenceOperation
                 && DelegateSymbolOf(reference) is { } delegateSymbol
                 && reference.Syntax.SpanStart >= transferPosition
-                && EscapesTheScope(reference)
+                && EscapesTheScope(reference, scope)
                 && !IsInASiblingArmOfTheTransfer(reference, transferPosition)
                 && (escaped || !IsInAnUnreachableCatch(reference, transferPosition))
                 && !IsWithinALocalFunctionBody(reference, scanRoots)
@@ -1521,7 +1523,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     // A delegate reference ESCAPES when it is returned, passed as an argument, or stored
     // into a non-local slot -- merely inspecting it (use != null) runs nothing, a local
     // copy is an alias resolved at ITS uses, and calls/stores are classified separately.
-    private static bool EscapesTheScope(IOperation reference)
+    private static bool EscapesTheScope(IOperation reference, IOperation scope)
     {
         for (IOperation child = reference; child.Parent is { } parent; child = parent)
         {
@@ -1544,8 +1546,8 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                     continue;
                 case IReturnOperation { Kind: not OperationKind.YieldBreak }:
                     return true;
-                case IArgumentOperation:
-                    return true;
+                case IArgumentOperation argument:
+                    return !IsDroppedByAnInertLocalFunction(argument, scope);
                 case ISimpleAssignmentOperation assignment when !ReferenceEquals(child, assignment.Target):
                     return ReferencedVariable(assignment.Target) is null; // a non-local slot publishes
                 case ICompoundAssignmentOperation compound when !ReferenceEquals(child, compound.Target):
@@ -1556,6 +1558,32 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         }
 
         return false;
+    }
+
+    // An argument to a SAME-SCOPE local function whose body never references the parameter
+    // is dropped, not published: nothing can run or store a delegate its callee never
+    // touches. Any reference at all keeps the escape (the body may invoke, store, or
+    // forward it), and methods outside the scope stay opaque escapes.
+    private static bool IsDroppedByAnInertLocalFunction(IArgumentOperation argument, IOperation scope)
+    {
+        if (argument.Parent is not IInvocationOperation { TargetMethod: { MethodKind: MethodKind.LocalFunction } target }
+            || argument.Parameter is not { } parameter)
+        {
+            return false;
+        }
+
+        var definition = target.OriginalDefinition;
+        var declaration = scope.DescendantsAndSelf().OfType<ILocalFunctionOperation>()
+            .FirstOrDefault(operation => SymbolEqualityComparer.Default.Equals(operation.Symbol, definition));
+        if (declaration is null || parameter.Ordinal >= definition.Parameters.Length)
+        {
+            return false;
+        }
+
+        var declared = definition.Parameters[parameter.Ordinal];
+        return !declaration.DescendantsAndSelf().Any(operation =>
+            operation is IParameterReferenceOperation reference
+            && SymbolEqualityComparer.Default.Equals(reference.Parameter, declared));
     }
 
     private static ISymbol? DelegateReceiver(IInvocationOperation invocation)
@@ -1590,7 +1618,10 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         return reference switch
         {
             IFieldReferenceOperation { Instance: null or IInstanceReferenceOperation } field => field.Field,
-            IPropertyReferenceOperation { Instance: null or IInstanceReferenceOperation } property => property.Property,
+            // Only a BACKING slot stores what its setter was handed: custom accessors may
+            // discard the assignment and manufacture something else entirely.
+            IPropertyReferenceOperation { Instance: null or IInstanceReferenceOperation } property
+                when SendableSymbolClassifier.HasBackingSlot(property.Property) => property.Property,
             _ => null,
         };
     }
@@ -1611,24 +1642,31 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         var stores = DelegateStores(delegateLocal, scope, consumer, transferPosition);
 
         // A definite overwrite replaces the whole invocation list: candidates begin at the
-        // LAST replace that runs on every path to the call.
+        // LAST replace that runs on every path TO THE CALL -- a branch-local overwrite
+        // counts when the call lives in the same arm (`if (flag) { use = ...; use(); }`).
         var killPoint = stores
-            .Where(store => store.Replaces && !IsConditionalWithin(store.Site, scope))
+            .Where(store => store.Replaces && !MakesTheStoreConditionalTowards(store.Site, consumer, scope))
             .Select(store => store.Site.Syntax.SpanStart)
             .DefaultIfEmpty(int.MinValue)
             .Max();
 
-        var survivors = SurvivingStoreIndices(stores, delegateLocal, scope, consumer);
+        var cancelled = CancelledComponents(stores, delegateLocal, scope, consumer);
 
         for (var index = 0; index < stores.Count; index++)
         {
             var (site, value, _) = stores[index];
-            if (site.Syntax.SpanStart < killPoint || !survivors.Contains(index))
+            if (site.Syntax.SpanStart < killPoint)
             {
                 continue;
             }
 
-            foreach (var resolved in ResolvedCallables(value, site, scope, transferPosition, visited))
+            var components = ResolvedCallables(value, site, scope, transferPosition, visited).ToList();
+            if (cancelled.TryGetValue(index, out var removedMethods))
+            {
+                RemoveLastOccurrences(components, removedMethods);
+            }
+
+            foreach (var resolved in components)
             {
                 yield return resolved;
             }
@@ -1657,29 +1695,85 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         }
     }
 
-    // A definite `-= M` strips ONE matching target -- the last prior add/assignment of M
-    // (only method groups are identifiable; removing a fresh lambda instance removes
-    // nothing). Duplicate subscriptions survive their single removal.
-    private static HashSet<int> SurvivingStoreIndices(
+    // A definite `-= M` strips ONE occurrence of M -- Delegate.Remove semantics: the last
+    // occurrence definitely present among the prior stores, combined invocation lists
+    // included (only method groups are identifiable; removing a fresh lambda instance
+    // removes nothing, and an occurrence under a conditional arm is not definitely there
+    // to strip). Duplicate subscriptions survive their single removal.
+    private static Dictionary<int, List<IMethodSymbol>> CancelledComponents(
         List<(IOperation Site, IOperation Value, bool Replaces)> stores, ISymbol delegateLocal, IOperation scope, IOperation consumer)
     {
-        var survivors = new HashSet<int>(Enumerable.Range(0, stores.Count));
+        var cancelled = new Dictionary<int, List<IMethodSymbol>>();
         foreach (var removal in DelegateRemovals(delegateLocal, scope, consumer).OrderBy(removal => removal.Position))
         {
             for (var index = stores.Count - 1; index >= 0; index--)
             {
-                if (survivors.Contains(index)
-                    && stores[index].Site.Syntax.SpanStart < removal.Position
-                    && Callable(stores[index].Value) is IMethodReferenceOperation storedGroup
-                    && SymbolEqualityComparer.Default.Equals(removal.Method, storedGroup.Method.OriginalDefinition))
+                if (stores[index].Site.Syntax.SpanStart < removal.Position
+                    && RemainingDefiniteOccurrences(stores[index].Value, removal.Method, cancelled, index) > 0)
                 {
-                    survivors.Remove(index);
+                    if (!cancelled.TryGetValue(index, out var methods))
+                    {
+                        cancelled[index] = methods = new List<IMethodSymbol>();
+                    }
+
+                    methods.Add(removal.Method);
                     break;
                 }
             }
         }
 
-        return survivors;
+        return cancelled;
+    }
+
+    private static int RemainingDefiniteOccurrences(
+        IOperation value, IMethodSymbol method, Dictionary<int, List<IMethodSymbol>> cancelled, int index)
+    {
+        var present = DefiniteMethodGroups(value)
+            .Count(group => SymbolEqualityComparer.Default.Equals(group.Method.OriginalDefinition, method));
+        var taken = cancelled.TryGetValue(index, out var methods)
+            ? methods.Count(taken => SymbolEqualityComparer.Default.Equals(taken, method))
+            : 0;
+        return present - taken;
+    }
+
+    // The method groups DEFINITELY in a stored value's invocation list: `+` combines carry
+    // both sides and wrappers are transparent, but a conditional's arms are ALTERNATIVES.
+    private static System.Collections.Generic.IEnumerable<IMethodReferenceOperation> DefiniteMethodGroups(IOperation? stored)
+    {
+        while (stored is IDelegateCreationOperation or IConversionOperation)
+        {
+            stored = stored is IDelegateCreationOperation creation ? creation.Target : ((IConversionOperation)stored).Operand;
+        }
+
+        switch (stored)
+        {
+            case IMethodReferenceOperation group:
+                yield return group;
+                break;
+            case IBinaryOperation { OperatorKind: BinaryOperatorKind.Add } combine:
+                foreach (var group in DefiniteMethodGroups(combine.LeftOperand).Concat(DefiniteMethodGroups(combine.RightOperand)))
+                {
+                    yield return group;
+                }
+
+                break;
+        }
+    }
+
+    private static void RemoveLastOccurrences(List<IOperation> components, List<IMethodSymbol> removedMethods)
+    {
+        foreach (var method in removedMethods)
+        {
+            for (var position = components.Count - 1; position >= 0; position--)
+            {
+                if (components[position] is IMethodReferenceOperation group
+                    && SymbolEqualityComparer.Default.Equals(group.Method.OriginalDefinition, method))
+                {
+                    components.RemoveAt(position);
+                    break;
+                }
+            }
+        }
     }
 
     private static List<(int Position, IMethodSymbol Method)> DelegateRemovals(ISymbol delegateLocal, IOperation scope, IOperation consumer)
@@ -1860,6 +1954,45 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                     return null;
             }
         }
+    }
+
+    // Whether the store is conditional ON THE WAY TO the consumer: a conditional construct
+    // between them makes the overwrite skippable, but an arm the CONSUMER itself lives in
+    // ran on every path that reaches it -- from that ancestor upward, store and consumer
+    // share every branch. Nested function bodies stay deferred (they run on their own
+    // schedule), and a try body is definite only where a failure cannot resume past it.
+    private static bool MakesTheStoreConditionalTowards(IOperation store, IOperation consumer, IOperation scope)
+    {
+        for (IOperation child = store; child.Parent is { } parent && !ReferenceEquals(parent, scope); child = parent)
+        {
+            if (parent is IAnonymousFunctionOperation or ILocalFunctionOperation)
+            {
+                return true;
+            }
+
+            if (child.Syntax.Span.Contains(consumer.Syntax.Span))
+            {
+                return false;
+            }
+
+            if (parent is ITryOperation tryOperation)
+            {
+                if (!RunsToCompletionOrExits(tryOperation, child))
+                {
+                    return true;
+                }
+
+                continue;
+            }
+
+            if (parent is IConditionalOperation or ISwitchOperation or ISwitchExpressionOperation
+                or ILoopOperation or IConditionalAccessOperation)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     // Whether control can reach past the operation without executing it, judged within the

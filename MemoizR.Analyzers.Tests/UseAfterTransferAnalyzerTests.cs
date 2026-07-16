@@ -5448,6 +5448,201 @@ public class UseAfterTransferAnalyzerTests
     }
 
     [Fact]
+    public async Task ForeachCollectionsBuiltFromTheVariable_KeepReadingIt()
+    {
+        // The Where wrapper's enumerator pulls from the SAME list: the next MoveNext after
+        // the handoff is a sender-side read even though the collection expression is not
+        // the bare variable.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using System.Linq;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    foreach (var item in list.Where(_ => true))
+                    {
+                        var sending = Sending.Transfer(list);
+                    }
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+    }
+
+    [Fact]
+    public async Task BranchLocalOverwrites_KillEarlierStores()
+    {
+        // Every path that reaches use() ran the branch's own overwrite first: the stale
+        // pre-branch Touch cannot be what the call invokes.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M(bool flag)
+                {
+                    var list = new List<int> { 1 };
+                    void Touch() { list.Add(1); }
+                    Action use = Touch;
+                    if (flag)
+                    {
+                        use = () => { };
+                        var sending = Sending.Transfer(list);
+                        use();
+                    }
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task CustomAccessorDelegateProperties_AreNotSlots()
+    {
+        // The setter discards and the getter manufactures: nothing stored is ever
+        // returned, so the assignment cannot be what the invocation runs.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                private Action Use { get => () => { }; set { } }
+
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    void Touch() { list.Add(1); }
+                    Use = Touch;
+                    var sending = Sending.Transfer(list);
+                    Use();
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task AutoPropertyDelegateSlots_StayTracked()
+    {
+        // An auto-property IS a backing slot: what the setter stored is what the
+        // invocation runs.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                private Action? Use { get; set; }
+
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    this.Use = () => list.Add(1);
+                    var sending = Sending.Transfer(list);
+                    this.Use!();
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task RemovalsCancelInsideCombinedStores()
+    {
+        // use -= Touch strips the reading target out of the combined invocation list:
+        // what remains at the call is the no-op.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    void Touch() { list.Add(1); }
+                    Action noop = () => { };
+                    Action use = (Action)Touch + noop;
+                    use -= Touch;
+                    var sending = Sending.Transfer(list);
+                    use();
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task InertLocalFunctionArguments_AreNotEscapes()
+    {
+        // Ignore never references its parameter: the delegate is dropped, not published
+        // -- nothing can run it after the handoff.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    void Ignore(Action a) { }
+                    Action use = () => list.Add(1);
+                    var sending = Sending.Transfer(list);
+                    Ignore(use);
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task LocalFunctionArgumentsThatTouchTheParameter_StayEscapes()
+    {
+        // Run invokes what it was handed: the reading lambda executes after the handoff.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    void Run(Action a) { a(); }
+                    Action use = () => list.Add(1);
+                    var sending = Sending.Transfer(list);
+                    Run(use);
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+    }
+
+    [Fact]
     public async Task ImmutableCollectionFactories_AreTransferSources()
     {
         // ImmutableArray.Create(list) stores its ARGUMENTS as elements: the receiver owns
