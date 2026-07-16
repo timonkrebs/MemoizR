@@ -962,7 +962,13 @@ public class ReactiveTests
         var last = -1;
         var r = f.BuildReaction().CreateReaction(v1, v => last = v);
 
-        await TestHelpers.WaitForConvergenceAsync(() => last == 1); // initial run done
+        // Gate on the COMMIT, not just the side effect: the body's write (last = v) becomes
+        // visible before the run's epilogue rewires Sources/Observers and commits Clean.
+        // Disposing inside that window sweeps a not-yet-final Sources array and the epilogue
+        // re-adds the observer entry afterwards, tripping the unsubscribe assertion below
+        // (seen on the slower arm CI runners). The Clean commit is ordered strictly after
+        // the rewiring, so it marks the initial run as fully quiesced.
+        await TestHelpers.WaitForConvergenceAsync(() => last == 1 && ((IMemoizR)r).State == CacheState.CacheClean);
 
         r.Dispose();
         Assert.False(TestHelpers.Observes(v1.Observers, r), "the disposed reaction is still observing its source");
@@ -1012,7 +1018,10 @@ public class ReactiveTests
         var last = -1;
         var r = f.BuildReaction().CreateReaction(v1, v2, v3, (a, b, c) => last = a + b + c);
 
-        await TestHelpers.WaitForConvergenceAsync(() => last == 111); // initial run wired all three
+        // Same commit gate as Reaction_Dispose_StopsTriggeringAndUnsubscribes: only the Clean
+        // commit orders after the epilogue's link rewiring, so Dispose below cannot race the
+        // initial run's subscription sweep.
+        await TestHelpers.WaitForConvergenceAsync(() => last == 111 && ((IMemoizR)r).State == CacheState.CacheClean);
         Assert.True(TestHelpers.Observes(v1.Observers, r), "r should observe v1 before dispose");
         Assert.True(TestHelpers.Observes(v2.Observers, r), "r should observe v2 before dispose");
         Assert.True(TestHelpers.Observes(v3.Observers, r), "r should observe v3 before dispose");
