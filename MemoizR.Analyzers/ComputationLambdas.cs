@@ -176,8 +176,8 @@ internal static class ComputationLambdas
     // A method group (`f.CreateMemoizR(Compute)`) or local-function reference is as much a
     // computation as a lambda; its declaration is the body to analyze. Resolution is same-tree
     // by design: another tree's declarations have no operation model here, and the runtime
-    // checks still cover what the analyzer cannot see.
-    private static ComputationBody? ResolveMethodBody(IMethodSymbol method, SemanticModel? semanticModel)
+    // checks still cover what the analyzer cannot see. Shared with MZR004's helper chasing.
+    public static ComputationBody? ResolveMethodBody(IMethodSymbol method, SemanticModel? semanticModel)
     {
         if (semanticModel is null)
         {
