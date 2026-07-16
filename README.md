@@ -200,6 +200,64 @@ the lagging mirror itself). A runnable two-peer demo lives in
 epoch table, wire v3, evidence splicing) is
 [#148](https://github.com/timonkrebs/MemoizR/issues/148).
 
+### Exporting nodes: the problem the glitch barrier solves
+
+The problem, in one story: **a consumer combining two values that never existed together.**
+A weather server holds one signal and derives two values from it:
+
+```
+temperature ──┬─► dewPoint   ──[wire]──►  dewMirror  ──┐
+              │                                        ├─► comfort (glitch barrier)
+              └─► heatIndex  ──[wire]──►  heatMirror ──┘
+```
+
+`temperature` changes 20° → 30°; both derived values recompute and both updates head across
+the wire — but networks reorder things. The dashboard receives the new `dewPoint` (25) while
+the new `heatIndex` (35) is still in flight, so for a moment it holds `(25, 25)`: each number
+is individually a value the server once published, but this *pair never existed* — nothing in
+the values themselves says which `temperature` they came from. Inside one process MemoizR's
+locks make such glitches impossible; across a network no lock can span the two machines, so
+the export layer makes glitch-freedom *checkable* instead:
+
+```cs
+// ── Server (peer A) ── disjoint id slices keep stamps unambiguous across peers
+var host = new MemoFactory("server", idRangeStart: 1_000, idRangeEnd: 2_000);
+var temperature = host.CreateSignal("temperature", 20.0);
+var dewPoint  = host.CreateMemoizR("dewPoint",  async () => await temperature.Get() - 5);
+var heatIndex = host.CreateMemoizR("heatIndex", async () => await temperature.Get() + 5);
+
+// An export is just a reaction: whenever the value advances, a tiny stale ADVERTISEMENT
+// (id + ordering header + causality stamp — NO value) goes to your transport. Values move
+// only when a consumer PULLS, so laziness survives the network.
+using var dewExport  = host.Export(dewPoint,  advert => SendToDashboard(advert));
+using var heatExport = host.Export(heatIndex, advert => SendToDashboard(advert));
+
+// ── Dashboard (peer B) ── a real bridge pumps these from gRPC/WebSockets
+var dash = new MemoFactory("dashboard", idRangeStart: 2_000, idRangeEnd: 3_000);
+var dewMirror  = dash.CreateRemoteSignal("dew",  0.0, dewExport.PullAsync);
+var heatMirror = dash.CreateRemoteSignal("heat", 0.0, heatExport.PullAsync);
+// (transport deliveries feed dewMirror.OnStaleAsync / OnValueAsync)
+
+// The barrier renders ONLY pairs that provably belong to the same write history.
+var comfort = DistributedBarrier.CreateConsistentReaction(
+    dash, dewMirror, heatMirror,
+    (dew, heat) => Render(dew, heat));
+```
+
+Every pulled value arrives with its causality stamp — a receipt listing exactly which version
+of each input the value was computed from. Replaying the race: the fresh `dewPoint` adopts
+with the receipt `{temperature: v1}` while `heatIndex` still carries `{temperature: v0}`. The
+barrier compares receipts, sees the pair straddles a write, and refuses to render — no
+cross-machine lock needed, the evidence alone detects the tear. The receipts also say which
+side is behind (v0 is dominated by v1), so the barrier re-pulls the lagging mirror itself and
+renders once the receipts agree: the dashboard skips straight from the old consistent state
+`(15, 25)` to the new one `(25, 35)`, and the phantom `(25, 25)` never renders. **Exports
+ship values with proof of what they were computed from, and the consumer refuses to combine
+values whose proofs disagree — recovering by asking again rather than by guessing.** The rest
+of the package keeps that story true on a real network: sequences drop duplicated and late
+deliveries, incarnation epochs catch host restarts (re-verified by pull, never trusted
+blindly), and heartbeats cover the transitions the value cascade deliberately does not push.
+
 Purely-local graphs that will never be synchronized can opt out of the stamp bookkeeping
 entirely with `new MemoFactory(options: MemoFactoryOptions.DisableCausalityStamps)` — same
 semantics, honest no-claim evidence, and the recompute paths measure below the pre-stamps
