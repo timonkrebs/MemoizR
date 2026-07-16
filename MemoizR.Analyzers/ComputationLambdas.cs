@@ -79,12 +79,9 @@ internal static class ComputationLambdas
 
                 break;
             case IArrayCreationOperation { Initializer: { } initializer }:
-                foreach (var element in initializer.ElementValues)
+                foreach (var body in BodiesInArrayElements(initializer, semanticModel, visitedVariables))
                 {
-                    foreach (var body in BodiesIn(element, semanticModel, visitedVariables))
-                    {
-                        yield return body;
-                    }
+                    yield return body;
                 }
 
                 break;
@@ -95,6 +92,18 @@ internal static class ComputationLambdas
                 }
 
                 break;
+        }
+    }
+
+    // The params array of computations the structured-concurrency factories take.
+    private static IEnumerable<ComputationBody> BodiesInArrayElements(IArrayInitializerOperation initializer, SemanticModel? semanticModel, HashSet<ISymbol>? visitedVariables)
+    {
+        foreach (var element in initializer.ElementValues)
+        {
+            foreach (var body in BodiesIn(element, semanticModel, visitedVariables))
+            {
+                yield return body;
+            }
         }
     }
 

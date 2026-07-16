@@ -171,29 +171,14 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
             // (the object handed out is what gets shared). A computed get-only property's body
             // is not chased: like type parameters elsewhere, it gets the benefit of the doubt.
             case IFieldReferenceOperation { Field.IsStatic: false } field when IsOnEnclosingInstance(field.Instance):
-                if (!field.Field.IsReadOnly)
-                {
-                    Report(context, operation, field.Field, field.Field.Name, "it is writable state of the enclosing object", reported);
-                }
-                else
-                {
-                    ReportIfNotSendable(context, classifier, operation, field.Field, field.Field.Type, reported);
-                }
-
+                InspectStateRead(
+                    context, classifier, operation, field.Field, field.Field.Type,
+                    writable: !field.Field.IsReadOnly, "it is writable state of the enclosing object", reported);
                 break;
             case IPropertyReferenceOperation { Property.IsStatic: false } property when IsOnEnclosingInstance(property.Instance):
-                // An init accessor surfaces as SetMethod but cannot run after construction:
-                // `{ get; init; }` is immutable state, held (like readonly fields) only to its
-                // TYPE's sendability -- the same verdict the runtime SendableChecker gives it.
-                if (property.Property.SetMethod is { IsInitOnly: false })
-                {
-                    Report(context, operation, property.Property, property.Property.Name, "it is writable state of the enclosing object", reported);
-                }
-                else
-                {
-                    ReportIfNotSendable(context, classifier, operation, property.Property, property.Property.Type, reported);
-                }
-
+                InspectStateRead(
+                    context, classifier, operation, property.Property, property.Property.Type,
+                    writable: IsSettable(property.Property), "it is writable state of the enclosing object", reported);
                 break;
 
             // Static state needs no capture to be shared: the read is baked into the stored
@@ -201,26 +186,14 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
             // verdicts as enclosing-object state; const fields are compile-time values, not
             // storage.
             case IFieldReferenceOperation { Field: { IsStatic: true, IsConst: false } } staticField:
-                if (!staticField.Field.IsReadOnly)
-                {
-                    Report(context, operation, staticField.Field, staticField.Field.Name, "it is writable static state", reported);
-                }
-                else
-                {
-                    ReportIfNotSendable(context, classifier, operation, staticField.Field, staticField.Field.Type, reported);
-                }
-
+                InspectStateRead(
+                    context, classifier, operation, staticField.Field, staticField.Field.Type,
+                    writable: !staticField.Field.IsReadOnly, "it is writable static state", reported);
                 break;
             case IPropertyReferenceOperation { Property.IsStatic: true } staticProperty:
-                if (staticProperty.Property.SetMethod is { IsInitOnly: false })
-                {
-                    Report(context, operation, staticProperty.Property, staticProperty.Property.Name, "it is writable static state", reported);
-                }
-                else
-                {
-                    ReportIfNotSendable(context, classifier, operation, staticProperty.Property, staticProperty.Property.Type, reported);
-                }
-
+                InspectStateRead(
+                    context, classifier, operation, staticProperty.Property, staticProperty.Property.Type,
+                    writable: IsSettable(staticProperty.Property), "it is writable static state", reported);
                 break;
 
             // A bare `this` -- the implicit receiver of a helper call (`ReadCounter()`) or an
@@ -245,6 +218,36 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
 
                 break;
         }
+    }
+
+    // The shared verdict for a state read: writable storage is flagged outright; immutable
+    // storage is held to the member TYPE's sendability.
+    private static void InspectStateRead(
+        OperationAnalysisContext context,
+        SendableSymbolClassifier classifier,
+        IOperation operation,
+        ISymbol member,
+        ITypeSymbol type,
+        bool writable,
+        string writableProblem,
+        HashSet<ISymbol> reported)
+    {
+        if (writable)
+        {
+            Report(context, operation, member, member.Name, writableProblem, reported);
+        }
+        else
+        {
+            ReportIfNotSendable(context, classifier, operation, member, type, reported);
+        }
+    }
+
+    // An init accessor surfaces as SetMethod but cannot run after construction: `{ get; init; }`
+    // is immutable state, held (like readonly fields) only to its TYPE's sendability -- the same
+    // verdict the runtime SendableChecker gives it.
+    private static bool IsSettable(IPropertySymbol property)
+    {
+        return property.SetMethod is { IsInitOnly: false };
     }
 
     // True when the reference is the receiver of a member read InspectCapture handles itself:
