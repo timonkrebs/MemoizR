@@ -57,7 +57,7 @@ jobs:
         # assemblies and control System.Threading.Lock. No --add-source here: NuGet
         # rejects it when nuget.config declares package source mapping, and the mapping
         # already routes Microsoft.Coyote* to the local packages/coyote feed.
-        dotnet tool install --global Microsoft.Coyote.CLI --version 1.8.0-net10.1
+        dotnet tool install --global Microsoft.Coyote.CLI --version 1.8.0-net10.2
         echo "$HOME/.dotnet/tools" >> $GITHUB_PATH
     - name: Coyote Rewrite
       run: |
