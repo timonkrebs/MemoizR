@@ -1595,4 +1595,136 @@ public class UseAfterTransferAnalyzerTests
 
         Assert.Empty(diagnostics);
     }
+
+    [Fact]
+    public async Task UncalledLocalFunctionBodies_AreNotUses()
+    {
+        // Declaring a local function executes nothing: with no call, the body's reference
+        // never runs.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public Sending<List<int>> M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(list);
+                    void Unused()
+                    {
+                        list.Add(1);
+                    }
+                    return sending;
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task LocalFunctionsThatReinitializeBeforeReading_AreNotUses()
+    {
+        // Calling Reset only ever touches the fresh value: the body reassigns the variable
+        // before any read, so the call is a reinitialization, not a use.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public Sending<List<int>> M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(list);
+                    void Reset()
+                    {
+                        list = new List<int>();
+                        list.Add(1);
+                    }
+                    Reset();
+                    return sending;
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task ReinitializingAssignmentEnclosingTheTransfer_EndsTracking()
+    {
+        // The assignment wrapping the transfer completes right after its RHS: by the next
+        // statement the variable already holds the fresh value.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    list = MakeFresh(Sending.Transfer(list));
+                    list.Add(1);
+                }
+
+                private static List<int> MakeFresh(Sending<List<int>> sending) => new();
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task ReadsInsideTheEnclosingReinitializationRhs_AreStillUses()
+    {
+        // The reinitialization only lands AFTER the whole RHS runs: a sibling argument
+        // evaluated after the transfer still reads the handed-off value.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    list = Combine(Sending.Transfer(list), list.Count);
+                }
+
+                private static List<int> Combine(Sending<List<int>> sending, int count) => new();
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task ArrayInitializerElements_AreTransferSources()
+    {
+        // Transfer(new[] { list }) hands off the array WITH its element: the array carries
+        // the reference exactly like a tuple does.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(new[] { list });
+                    list.Add(1);
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
 }
