@@ -141,14 +141,16 @@ public sealed class StaticStateAnalyzer : DiagnosticAnalyzer
 
     private static string? ClassifyProperty(IPropertySymbol property, SendableSymbolClassifier classifier)
     {
-        if (property.GetMethod is null)
-        {
-            return null; // set-only oddity: nothing shared can be read back
-        }
-
+        // A settable surface is the hazard by itself -- the get+set arm never required a
+        // backing slot, and a SET-ONLY property is no less writable for dropping the getter.
         if (property.SetMethod is { IsInitOnly: false })
         {
             return "a settable slot";
+        }
+
+        if (property.GetMethod is null)
+        {
+            return null; // only an init setter: nothing writable remains, nothing reads back
         }
 
         if (!SendableSymbolClassifier.HasBackingSlot(property))

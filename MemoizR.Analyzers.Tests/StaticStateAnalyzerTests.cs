@@ -611,6 +611,26 @@ public class StaticStateAnalyzerTests
     }
 
     [Fact]
+    public async Task SetOnlyStaticProperties_AreSettableSlots()
+    {
+        // A settable static property is a process-wide write surface no matter where the
+        // value lands -- the get+set arm never required a backing slot, and dropping the
+        // getter does not make the surface less writable.
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public class C
+            {
+                public static int Sink { set { _ = value; } }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR004", diagnostic.Id);
+        Assert.Contains("settable", diagnostic.GetMessage());
+    }
+
+    [Fact]
     public async Task FilesWithoutMemoizRUsing_AreOutOfScope()
     {
         var diagnostics = await AnalyzeAsync("""

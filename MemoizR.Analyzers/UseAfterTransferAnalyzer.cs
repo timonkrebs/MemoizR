@@ -530,9 +530,13 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             // off, only copied from).
             IWithOperation withOperation => WithCarriedParts(withOperation),
             IConversionOperation conversion => new[] { conversion.Operand },
-            // Tuple.Create(list) is the constructor spelling of a framework value carrier.
+            // Tuple.Create(list) is the constructor spelling of a framework value carrier,
+            // and the immutable/frozen collection factories' Create store their ARGUMENTS
+            // as elements the same way (ImmutableArray.Create(list) retains the list).
+            // CreateRange and the ToImmutable*/ToFrozen* conversions stay leaves: they copy
+            // elements OUT of their source, which is itself never retained.
             IInvocationOperation { TargetMethod: { Name: "Create", ContainingType: { } factory } } factoryCall
-                when factory.Name is "Tuple" or "ValueTuple" or "KeyValuePair" && IsFrameworkDeclared(factory) =>
+                when IsACarrierFactory(factory) =>
                 factoryCall.Arguments.Select(argument => (IOperation?)argument.Value),
             // Transfer([list]): matched by SYNTAX -- ICollectionExpressionOperation is not
             // public in the Roslyn this analyzer compiles against, but the children are
@@ -544,6 +548,17 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                         : new[] { (IOperation?)child }),
             _ => null,
         };
+    }
+
+    // Framework factories whose Create stores its arguments: the tuple family carries each
+    // argument in a field, and the immutable/frozen collection factories build a container
+    // around the argument REFERENCES -- freezing the shape shares the contents.
+    private static bool IsACarrierFactory(INamedTypeSymbol factory)
+    {
+        return (factory.Name is "Tuple" or "ValueTuple" or "KeyValuePair"
+                || factory.Name.StartsWith("Immutable", System.StringComparison.Ordinal)
+                || factory.Name.StartsWith("Frozen", System.StringComparison.Ordinal))
+            && IsFrameworkDeclared(factory);
     }
 
     // Where the sender-side scan looks. Normally the whole scope; a transfer the flow

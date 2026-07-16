@@ -5448,6 +5448,57 @@ public class UseAfterTransferAnalyzerTests
     }
 
     [Fact]
+    public async Task ImmutableCollectionFactories_AreTransferSources()
+    {
+        // ImmutableArray.Create(list) stores its ARGUMENTS as elements: the receiver owns
+        // an immutable container that still holds the same mutable list.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using System.Collections.Immutable;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(ImmutableArray.Create(list));
+                    list.Add(1);
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task CopyingCollectionConversions_StayLeaves()
+    {
+        // list.ToImmutableArray() copies the elements OUT of the source: the source
+        // collection itself is not retained, so later sender-side mutation of it does not
+        // reach the receiver's container.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using System.Collections.Immutable;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(list.ToImmutableArray());
+                    list.Add(1);
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
     public async Task LockEntries_AreThrowCapable_AndKeepTheirCatchesReachable()
     {
         // The hidden Monitor.Enter can throw (a null gate) after the handoff: the catch
