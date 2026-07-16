@@ -28,7 +28,7 @@ public class ActorEngineStormTests
             {
                 await v.Set(i);
             }
-        });
+        }, TestContext.Current.CancellationToken);
 
         var readers = Enumerable.Range(0, 4).Select(_ => Task.Run(async () =>
         {
@@ -47,7 +47,7 @@ public class ActorEngineStormTests
         var sw = System.Diagnostics.Stopwatch.StartNew();
         while (await m2.Get() != writes * 2 + 1 && sw.ElapsedMilliseconds < 5000)
         {
-            await Task.Delay(10);
+            await Task.Delay(10, TestContext.Current.CancellationToken);
         }
 
         Assert.Equal(writes * 2 + 1, await m2.Get());

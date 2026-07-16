@@ -73,14 +73,15 @@ public class CoyoteTests
             return;
         }
 
-        // Potential-deadlock reporting is disabled because CacheStateCell's gate is the .NET 9
-        // System.Threading.Lock, which this Coyote version cannot rewrite/control; with that
-        // uncontrolled lock in play Coyote falls back to its periodic heuristic monitor, which
-        // fires spuriously under the heavy interleaving of this chain workload (the bug this
-        // test hunts -- a node cached-stale after the race -- is caught by the value assertion
-        // in the iteration, and real hangs still fail the suite via the CI job timeout). The
-        // deadlock timeout only controls how long a spuriously-"hung" iteration waits before
-        // being abandoned; the default 5s made those iterations dominate the runtime.
+        // Potential-deadlock reporting stays disabled: the Coyote fork in use models
+        // System.Threading.Lock (CacheStateCell's gate), which is now fully scheduler
+        // controlled, but MemoHandlR's mutex is Nito.AsyncEx's AsyncLock, whose async
+        // coordination lives in an unrewritten third-party assembly. With that machinery
+        // uncontrolled, Coyote's periodic heuristic monitor still engages and fires
+        // spuriously under the heavy interleaving of this chain workload (rewriting the
+        // Nito assemblies as well was tried and breaks their semantics). The bug this test
+        // hunts -- a node cached-stale after the race -- is caught by the value assertion
+        // in the iteration, and real hangs still fail the suite via the CI job timeout.
         var configuration = Configuration.Create()
             .WithTestingIterations(100)
             .WithDeadlockTimeout(100)
@@ -129,7 +130,7 @@ public class CoyoteTests
             return;
         }
 
-        // Same uncontrolled-Lock caveat as TestChainLostUpdateWithCoyote (CacheStateCell's gate).
+        // Same uncontrolled Nito.AsyncEx caveat as TestChainLostUpdateWithCoyote.
         var configuration = Configuration.Create()
             .WithTestingIterations(100)
             .WithDeadlockTimeout(100)

@@ -16,13 +16,17 @@ jobs:
   build:
 
     strategy:
+      # Let every OS leg run to completion: one leg's failure cancelling the others
+      # hides whether a problem is platform-specific and slows the diagnosis loop.
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, ubuntu-24.04-arm, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
-    # Generous ceiling: restore + build + Coyote install/rewrite plus the concurrency stress
-    # tests (individual budgets up to 20s, convergence polls up to 5s) can exceed a tight limit
-    # on the slow matrix legs (ubuntu-24.04-arm, macos-latest) even when every test passes.
-    timeout-minutes: 10
+    # Generous ceiling: packing the Coyote fork from source alone takes 2-9 minutes depending
+    # on the leg (windows is slowest), before restore + build + tests + rewrite + systematic
+    # tests even start. The windows leg reached the 9th minute before the rewrite step, so a
+    # 10-minute ceiling kills healthy runs.
+    timeout-minutes: 20
 
     steps:
     - uses: actions/checkout@v7
@@ -30,6 +34,13 @@ jobs:
       uses: actions/setup-dotnet@v5
       with:
         dotnet-version: 10.0.x
+    - name: Build Coyote fork packages
+      # Packs Microsoft.Coyote from the timonkrebs/coyote fork (pinned commit) into
+      # the local feed that nuget.config maps 'Microsoft.Coyote*' to. The fork adds
+      # .NET 10 support and models System.Threading.Lock, which MemoizR's systematic
+      # tests require; no published feed carries those changes yet.
+      shell: bash
+      run: bash eng/build-coyote-packages.sh
     - name: Restore dependencies
       run: dotnet restore
     - name: Build
@@ -42,12 +53,17 @@ jobs:
       run: dotnet test --no-build --verbosity normal --filter "FullyQualifiedName!~CoyoteTests"
     - name: Install Coyote CLI
       run: |
-        dotnet tool install --global Microsoft.Coyote.CLI
+        # The CLI comes from the timonkrebs/coyote fork, which can rewrite net10.0
+        # assemblies and control System.Threading.Lock. No --add-source here: NuGet
+        # rejects it when nuget.config declares package source mapping, and the mapping
+        # already routes Microsoft.Coyote* to the local packages/coyote feed.
+        dotnet tool install --global Microsoft.Coyote.CLI --version 1.8.0-net10.1
         echo "$HOME/.dotnet/tools" >> $GITHUB_PATH
     - name: Coyote Rewrite
       run: |
-        # Use net10.0 as targeted in the project file. Rewrite in dependency order.
-        cd MemoizR.Tests/bin/Debug/net10.0/
+        # Build output follows the artifacts layout (UseArtifactsOutput in
+        # Directory.Build.props). Rewrite in dependency order.
+        cd artifacts/bin/MemoizR.Tests/debug/
         coyote rewrite MemoizR.StructuredAsyncLock.dll
         coyote rewrite MemoizR.dll
         coyote rewrite MemoizR.Reactive.dll
@@ -73,6 +89,9 @@ jobs:
       uses: actions/setup-dotnet@v5
       with:
         dotnet-version: 10.0.x
+    - name: Build Coyote fork packages
+      shell: bash
+      run: bash eng/build-coyote-packages.sh
     - name: Cognitive Complexity gate (S3776 <= 15)
       run: dotnet build -p:MeasureCognitiveComplexity=true -p:WarningsAsErrors=S3776
 
