@@ -1551,23 +1551,32 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                 continue;
             }
 
-            foreach (var item in Callables(value))
+            foreach (var resolved in ResolvedCallables(value, site, scope, transferPosition, visited))
             {
-                // Action use = use2 (alone or inside a combine): the copy SNAPSHOTS what the
-                // source holds AT THE COPY -- stores landing in the source afterwards are
-                // not in use's invocation list.
-                if (ReferencedVariable(item) is { } alias)
-                {
-                    foreach (var carried in StoredCallables(alias, scope, site, transferPosition, visited))
-                    {
-                        yield return carried;
-                    }
+                yield return resolved;
+            }
+        }
+    }
 
-                    continue;
+    private static System.Collections.Generic.IEnumerable<IOperation> ResolvedCallables(
+        IOperation value, IOperation site, IOperation scope, int transferPosition, HashSet<ISymbol> visited)
+    {
+        foreach (var item in Callables(value))
+        {
+            // Action use = use2 (alone or inside a combine): the copy SNAPSHOTS what the
+            // source holds AT THE COPY -- stores landing in the source afterwards are not
+            // in use's invocation list.
+            if (ReferencedVariable(item) is { } alias)
+            {
+                foreach (var carried in StoredCallables(alias, scope, site, transferPosition, visited))
+                {
+                    yield return carried;
                 }
 
-                yield return item;
+                continue;
             }
+
+            yield return item;
         }
     }
 
