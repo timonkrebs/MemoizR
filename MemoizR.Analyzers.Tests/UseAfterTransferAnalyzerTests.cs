@@ -4783,6 +4783,188 @@ public class UseAfterTransferAnalyzerTests
     }
 
     [Fact]
+    public async Task CarrierFactoryCalls_CarryTheirArguments()
+    {
+        // Tuple.Create stores its arguments exactly like the constructor spelling.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(Tuple.Create(list));
+                    list.Add(1);
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task ThrowingResetBodies_AreNotDefinite_ForCatchingCallers()
+    {
+        // Reset can fail before its reset; the caller's catch resumes with the ORIGINAL
+        // transferred value still in the variable.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    void Reset()
+                    {
+                        MayThrow();
+                        list = new List<int>();
+                    }
+                    try
+                    {
+                        _ = Sending.Transfer(list);
+                        Reset();
+                    }
+                    catch
+                    {
+                    }
+
+                    list.Add(1);
+                }
+
+                private static void MayThrow()
+                {
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+    }
+
+    [Fact]
+    public async Task TypedThrowFailures_OnlyReachMatchingCatches()
+    {
+        // The only failure after the handoff is an InvalidOperationException: the
+        // ArgumentException handler can never observe the transferred list.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M(bool flag)
+                {
+                    var list = new List<int> { 1 };
+                    var fresh = new List<int>();
+                    try
+                    {
+                        _ = Sending.Transfer(list);
+                        list = flag ? fresh : throw new System.InvalidOperationException();
+                    }
+                    catch (System.ArgumentException)
+                    {
+                        list.Add(1);
+                    }
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task CombinedDelegateInitializers_ExpandTheirOperands()
+    {
+        // read + noop puts BOTH callables in the invocation list: the call runs the reader
+        // after the handoff.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    Action read = () => list.Add(1);
+                    Action use = read + (Action)(() => { });
+                    var sending = Sending.Transfer(list);
+                    use();
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+    }
+
+    [Fact]
+    public async Task OverwrittenPositionalArguments_AreNotRetained()
+    {
+        // The initializer definitely replaces Value: the transferred Box never keeps the
+        // constructor's list.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public record Box(List<int> Value);
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(new Box(list) { Value = new List<int>() });
+                    list.Add(1);
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task SiblingArmLambdaStores_DoNotPropagateToTheOtherArm()
+    {
+        // The transferring lambda lands in use only on the arm that did NOT call it: no
+        // path stores and then invokes before the later Add.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M(bool move)
+                {
+                    var list = new List<int> { 1 };
+                    Action use = () => { };
+                    if (move)
+                    {
+                        use = () => { _ = Sending.Transfer(list); };
+                    }
+                    else
+                    {
+                        use();
+                    }
+
+                    list.Add(1);
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
     public async Task AnonymousObjectInitializers_AreTransferSources()
     {
         // Transfer(new { Value = list }) hands off an object graph containing the same list:
