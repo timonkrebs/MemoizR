@@ -115,7 +115,9 @@ public sealed class RemoteSignal<T>
     /// deliberately the READ-ONLY surface -- only the adoption protocol writes the mirror; a
     /// consumer-side Set would desynchronize the graph value from the publication evidence and
     /// the sequence order. Its own causality stamp is LOCAL (peer B's incarnation); the
-    /// foreign evidence lives in <see cref="Publication"/> until wire-format v3 lets it splice.
+    /// foreign evidence lives in <see cref="Publication"/> until wire-format v3 lets it
+    /// splice -- which is also why re-exporting this signal is refused: its local stamps
+    /// carry none of the origin's evidence.
     /// </summary>
     public IStampedGetR<T> Local => local;
 

@@ -50,6 +50,15 @@ public static class DistributedMemoFactoryExtensions
             throw new InvalidOperationException(
                 "This context was created with MemoFactoryOptions.DisableCausalityStamps; its nodes cannot be exported to peers.");
         }
+        if (MirrorLocals.IsMirrorLocal(handle))
+        {
+            // Re-exporting a mirror would advertise its LOCAL adoption stamps as evidence --
+            // the foreign evidence lives beside the graph in RemoteSignal.Publication, and two
+            // re-exported mirrors of one origin host carry disjoint local stamps, so a
+            // downstream barrier would render torn origin snapshots as consistent.
+            throw new InvalidOperationException(
+                "A remote mirror's local signal cannot be re-exported: its local stamps do not carry the origin's evidence. Multi-hop bridging needs the wire-v3 evidence splicing planned in issue #148.");
+        }
 
         var exported = new ExportedNode<T>(handle, publishStale);
         var reaction = wireReaction(factory.BuildReaction($"export {handle.Label}"), exported.NotifyStale);
@@ -76,7 +85,9 @@ public static class DistributedMemoFactoryExtensions
     {
         ArgumentNullException.ThrowIfNull(factory);
         ArgumentNullException.ThrowIfNull(pull);
-        return new RemoteSignal<T>(factory.CreateEagerRelativeSignal(label, initialValue), pull, nodeId)
+        var local = factory.CreateEagerRelativeSignal(label, initialValue);
+        MirrorLocals.Register(local); // re-exporting a mirror is refused (see ExportCore)
+        return new RemoteSignal<T>(local, pull, nodeId)
         {
             OnPeerReset = onPeerReset,
         };

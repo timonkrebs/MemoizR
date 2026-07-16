@@ -65,6 +65,25 @@ public class DistributedPackageTests
     }
 
     [Fact]
+    public void Export_OfAMirrorsLocalSignal_Throws()
+    {
+        // Re-exporting a mirror would advertise its LOCAL adoption stamps as evidence (the
+        // origin's evidence lives beside the graph in Publication): two re-exported mirrors
+        // of one origin host carry disjoint local stamps, so a downstream barrier would
+        // render torn origin snapshots as consistent. Multi-hop bridging is wire-v3 work.
+        var consumer = new MemoFactory();
+        var mirror = consumer.CreateRemoteSignal<int>("mirror", 0,
+            () => throw new InvalidOperationException("no pull in this test"));
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => consumer.Export(mirror.Local, _ => Task.CompletedTask));
+        Assert.Contains("re-exported", ex.Message);
+
+        // An ordinary eager signal of the same runtime type still exports.
+        var plain = consumer.CreateEagerRelativeSignal("plain", 0);
+        using var export = consumer.Export(plain, _ => Task.CompletedTask);
+    }
+
+    [Fact]
     public void Export_NodeOfAnotherContext_Throws()
     {
         var f1 = new MemoFactory();
