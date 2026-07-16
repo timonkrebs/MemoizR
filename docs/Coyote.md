@@ -39,7 +39,7 @@ The whole suite runs against normal assemblies; the systematic tests skip themse
 ### 1. Install the Coyote CLI (once)
 
 ```bash
-dotnet tool install --global Microsoft.Coyote.CLI --version 1.8.0-net10.1
+dotnet tool install --global Microsoft.Coyote.CLI --version 1.8.0-net10.2
 ```
 
 Run this from the repository root: the version comes from the local feed bootstrapped in

@@ -9,9 +9,9 @@
 set -euo pipefail
 
 COYOTE_REPO="https://github.com/timonkrebs/coyote"
-COYOTE_COMMIT="7143589c54b1310d0fde0cb7dca208875a79df69"
+COYOTE_COMMIT="f00c3ce6b4235292d7c159bf0883980f1a2bfd10"
 COYOTE_VERSION_PREFIX="1.8.0"
-COYOTE_VERSION_SUFFIX="net10.1"
+COYOTE_VERSION_SUFFIX="net10.2"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FEED_DIR="$REPO_ROOT/packages/coyote"
