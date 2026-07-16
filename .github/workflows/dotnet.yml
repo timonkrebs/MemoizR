@@ -22,10 +22,11 @@ jobs:
       matrix:
         os: [ubuntu-latest, ubuntu-24.04-arm, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
-    # Generous ceiling: restore + build + Coyote install/rewrite plus the concurrency stress
-    # tests (individual budgets up to 20s, convergence polls up to 5s) can exceed a tight limit
-    # on the slow matrix legs (ubuntu-24.04-arm, macos-latest) even when every test passes.
-    timeout-minutes: 10
+    # Generous ceiling: packing the Coyote fork from source alone takes 2-9 minutes depending
+    # on the leg (windows is slowest), before restore + build + tests + rewrite + systematic
+    # tests even start. The windows leg reached the 9th minute before the rewrite step, so a
+    # 10-minute ceiling kills healthy runs.
+    timeout-minutes: 20
 
     steps:
     - uses: actions/checkout@v7
