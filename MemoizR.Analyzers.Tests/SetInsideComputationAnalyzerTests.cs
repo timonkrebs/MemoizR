@@ -493,4 +493,33 @@ public class SetInsideComputationAnalyzerTests
         Assert.Equal("MZR003", diagnostic.Id);
         Assert.Contains("Signal<int>.Set", diagnostic.GetMessage());
     }
+
+    [Fact]
+    public async Task ProvablyCrossFactorySetInsidePatch_IsNotFlagged()
+    {
+        // A patch's flow locks the context of the factory that created the OPTIMISTIC STATE
+        // (the Apply receiver is the action context, which belongs to no factory), so the
+        // cross-factory suppression must resolve the host from the state argument: the Set
+        // targets f2's context while the patch evaluates under f1's.
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f1 = new MemoFactory();
+                    var f2 = new MemoFactory();
+                    var state = f1.CreateOptimistic<int>(f1.CreateSignal(1));
+                    var other = f2.CreateSignal(1);
+                    f1.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x => { _ = other.Set(2); return x; });
+                    });
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
 }

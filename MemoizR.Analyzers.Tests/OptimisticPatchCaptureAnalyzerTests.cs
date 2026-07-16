@@ -101,7 +101,7 @@ public class OptimisticPatchCaptureAnalyzerTests
     }
 
     [Fact]
-    public async Task EnclosingProperties_SettableIsFlagged_GetOnlySendableIsNot()
+    public async Task EnclosingProperties_SettableIsFlagged_GetOnlyAndInitOnlySendableAreNot()
     {
         var diagnostics = await AnalyzeAsync("""
             using MemoizR;
@@ -109,6 +109,7 @@ public class OptimisticPatchCaptureAnalyzerTests
             public class C
             {
                 public int Threshold { get; set; }   // settable: flagged
+                public int Limit { get; init; }      // init-only is immutable state: held to its (Sendable) type
                 public string Tag => "t";            // computed get-only, Sendable type: fine
 
                 public void M()
@@ -117,7 +118,7 @@ public class OptimisticPatchCaptureAnalyzerTests
                     var state = f.CreateOptimistic<int>(f.CreateSignal(1));
                     f.CreateAction<int>(async (p, ctx) =>
                     {
-                        await ctx.Apply(state, x => x + Threshold + Tag.Length);
+                        await ctx.Apply(state, x => x + Threshold + Limit + Tag.Length);
                     });
                 }
             }
@@ -127,6 +128,72 @@ public class OptimisticPatchCaptureAnalyzerTests
         Assert.Equal("MZR004", diagnostic.Id);
         Assert.Contains("Threshold", diagnostic.GetMessage());
         Assert.Contains("writable state", diagnostic.GetMessage());
+    }
+
+    // A method-group patch captures its RECEIVER into the stored delegate; the receiver is
+    // shared across pull flows even when the method body cannot be walked.
+    [Fact]
+    public async Task MethodGroupPatch_MutableReceiver_IsFlagged()
+    {
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public class Helper
+            {
+                public int Count;
+
+                public int Patch(int x) => x + Count;
+            }
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    var helper = new Helper();
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, helper.Patch);
+                    });
+                }
+            }
+            """);
+
+        Assert.All(diagnostics, d => Assert.Equal("MZR004", d.Id));
+        Assert.Contains(diagnostics, d => d.GetMessage().Contains("'helper'") && d.GetMessage().Contains("not Sendable"));
+    }
+
+    [Fact]
+    public async Task MethodGroupPatch_ImmutableOrStaticReceiver_IsNotFlagged()
+    {
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public sealed record Calm(int Bias)
+            {
+                public int Patch(int x) => x + Bias;
+            }
+
+            public class C
+            {
+                private static int StaticPatch(int x) => x;
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    var calm = new Calm(1);
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, calm.Patch);
+                        await ctx.Apply(state, StaticPatch);
+                    });
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
     }
 
     [Fact]

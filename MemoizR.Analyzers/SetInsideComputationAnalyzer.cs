@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using System.Linq;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.Diagnostics;
 using Microsoft.CodeAnalysis.Operations;
@@ -70,7 +71,7 @@ public sealed class SetInsideComputationAnalyzer : DiagnosticAnalyzer
             return false;
         }
 
-        var hostFactory = ReceiverChains.ResolveFactorySymbol(host, host.SemanticModel);
+        var hostFactory = ResolveHostFactory(host);
         var targetFactory = ReceiverChains.ResolveCreatingFactorySymbol(setInvocation.Instance, setInvocation.SemanticModel);
         if (hostFactory is null
             || targetFactory is null
@@ -91,6 +92,21 @@ public sealed class SetInsideComputationAnalyzer : DiagnosticAnalyzer
         return hostContext.ContextKey is null
             || targetContext.ContextKey is null
             || !Equals(hostContext.ContextKey, targetContext.ContextKey);
+    }
+
+    // The factory whose context the HOST's evaluation flow locks. For an optimistic patch the
+    // Apply receiver is the action context, which resolves to nothing -- the patch runs inside
+    // the STATE's view computation, so its host factory is whatever created the OptimisticState
+    // argument (resolved like any node reference, through same-tree initializers).
+    private static ISymbol? ResolveHostFactory(IInvocationOperation host)
+    {
+        if (FactoryMethods.IsOptimisticPatchHost(host.TargetMethod))
+        {
+            var stateArgument = host.Arguments.FirstOrDefault(a => a.Parameter?.Ordinal == 0)?.Value;
+            return ReceiverChains.ResolveCreatingFactorySymbol(stateArgument, host.SemanticModel);
+        }
+
+        return ReceiverChains.ResolveFactorySymbol(host, host.SemanticModel);
     }
 
     // A write API that throws in THIS host's engine: ActorSignal.Set inside an actor

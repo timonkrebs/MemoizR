@@ -46,16 +46,71 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
             return;
         }
 
+        // One report per captured symbol: a capture is a property of the closure, not of each
+        // of its reads.
+        var reported = new HashSet<ISymbol>(SymbolEqualityComparer.Default);
+
+        // A method-group patch (`ctx.Apply(state, helper.Patch)`) captures its RECEIVER into
+        // the stored delegate -- shared across pull flows even when the method body lives in
+        // metadata or another file and cannot be walked.
+        foreach (var argument in invocation.Arguments)
+        {
+            InspectMethodGroupReceiver(context, classifier, argument.Value, reported);
+        }
+
         foreach (var patch in ComputationLambdas.OfInvocation(invocation))
         {
-            // One report per captured symbol per patch: a capture is a property of the closure,
-            // not of each of its reads.
-            var reported = new HashSet<ISymbol>(SymbolEqualityComparer.Default);
             foreach (var operation in ComputationLambdas.Descend(patch.Body))
             {
                 InspectCapture(context, classifier, operation, patch.Scope, reported);
             }
         }
+    }
+
+    private static void InspectMethodGroupReceiver(
+        OperationAnalysisContext context,
+        SendableSymbolClassifier classifier,
+        IOperation value,
+        HashSet<ISymbol> reported)
+    {
+        while (value is IConversionOperation conversion)
+        {
+            value = conversion.Operand;
+        }
+
+        if (value is not IDelegateCreationOperation { Target: IMethodReferenceOperation { Instance: { } receiver } }
+            || receiver.Type is not { } receiverType)
+        {
+            return;
+        }
+
+        var reason = classifier.GetNotSendableReason(receiverType);
+        if (reason is null)
+        {
+            return;
+        }
+
+        var symbol = ReceiverSymbol(receiver);
+        var name = receiver is IInstanceReferenceOperation ? "this" : symbol?.Name ?? SendableSymbolClassifier.Display(receiverType);
+        Report(
+            context,
+            receiver,
+            symbol ?? receiverType,
+            name,
+            $"its type '{SendableSymbolClassifier.Display(receiverType)}' is not Sendable ({reason})",
+            reported);
+    }
+
+    private static ISymbol? ReceiverSymbol(IOperation receiver)
+    {
+        return receiver switch
+        {
+            ILocalReferenceOperation local => local.Local,
+            IParameterReferenceOperation parameter => parameter.Parameter,
+            IFieldReferenceOperation field => field.Field,
+            IPropertyReferenceOperation property => property.Property,
+            _ => null,
+        };
     }
 
     private static void InspectCapture(
@@ -82,7 +137,7 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
             case IFieldReferenceOperation { Field.IsStatic: false } field when IsOnEnclosingInstance(field.Instance):
                 if (!field.Field.IsReadOnly)
                 {
-                    Report(context, operation, field.Field, "it is writable state of the enclosing object", reported);
+                    Report(context, operation, field.Field, field.Field.Name, "it is writable state of the enclosing object", reported);
                 }
                 else
                 {
@@ -91,9 +146,12 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
 
                 break;
             case IPropertyReferenceOperation { Property.IsStatic: false } property when IsOnEnclosingInstance(property.Instance):
-                if (property.Property.SetMethod is not null)
+                // An init accessor surfaces as SetMethod but cannot run after construction:
+                // `{ get; init; }` is immutable state, held (like readonly fields) only to its
+                // TYPE's sendability -- the same verdict the runtime SendableChecker gives it.
+                if (property.Property.SetMethod is { IsInitOnly: false })
                 {
-                    Report(context, operation, property.Property, "it is writable state of the enclosing object", reported);
+                    Report(context, operation, property.Property, property.Property.Name, "it is writable state of the enclosing object", reported);
                 }
                 else
                 {
@@ -127,6 +185,7 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
             context,
             operation,
             symbol,
+            symbol.Name,
             $"its type '{SendableSymbolClassifier.Display(type)}' is not Sendable ({reason})",
             reported);
     }
@@ -134,11 +193,12 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
     private static void Report(
         OperationAnalysisContext context,
         IOperation operation,
-        ISymbol symbol,
+        ISymbol dedupeKey,
+        string name,
         string problem,
         HashSet<ISymbol> reported)
     {
-        if (!reported.Add(symbol))
+        if (!reported.Add(dedupeKey))
         {
             return;
         }
@@ -146,7 +206,7 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         context.ReportDiagnostic(Diagnostic.Create(
             DiagnosticDescriptors.NonSendablePatchCapture,
             operation.Syntax.GetLocation(),
-            symbol.Name,
+            name,
             problem));
     }
 }
