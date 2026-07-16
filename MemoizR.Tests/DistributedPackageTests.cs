@@ -129,25 +129,25 @@ public class DistributedPackageTests
                 return 999; // the caught-fault fallback: published as unverifiable
             }
         });
-        using var export = host.Export(m2, _ => Task.CompletedTask);
-
         Assert.Equal(111, await m2.Get());
-        var baseline = await export.PullAsync();
-        Assert.False(baseline.Unverifiable);
 
+        // The export is created only AFTER the poisoned state is established: an export
+        // reaction chases invalidations on a detached flow, and on a loaded runner it can
+        // reach the faulting m1 first -- m1 then falls back to serve-last-good and the test's
+        // own m2 evaluation would see a healthy cached m1 instead of catching the fault.
         Volatile.Write(ref failing, true);
         await s.Set(2);       // dirties m1, whose evaluation now faults
         await trigger.Set(1); // dirties m2 directly, so its own computation runs and catches
         Assert.Equal(999, await m2.Get());
-        Volatile.Write(ref failing, false); // m1's next evaluation heals to the SAME 11
+        Assert.True(m2.Evidence.Unverifiable);
+        Volatile.Write(ref failing, false); // the dependency has healed
 
-        // The sticky shape: m2 committed its fallback CLEAN with no-claim evidence, and stays
-        // that way through quiescence -- nothing is left to re-dirty it.
-        await TestHelpers.WaitForConvergenceAsync(() => m2.Evidence.Unverifiable);
+        // The sticky shape: m2 committed its fallback CLEAN with no-claim evidence, and
+        // nothing is left to re-dirty it.
+        using var export = host.Export(m2, _ => Task.CompletedTask);
         var payload = await export.PullAsync();
         Assert.False(payload.Unverifiable);
         Assert.Equal(112, payload.Value); // trigger(1) + healed m1(11) + 100
-        Assert.True(payload.Sequence > baseline.Sequence);
         Assert.False(m2.Evidence.Unverifiable);
 
         // The consumer-side heal completes: the fresh publication has a higher sequence, so
