@@ -843,6 +843,60 @@ public class DistributedPackageTests
     }
 
     [Fact]
+    public async Task RemoteSignal_RestartAdvertisedDuringResubscription_IsVerifiedWhenTheWindowCloses()
+    {
+        // A restart ADVERTISEMENT arrives mid-window. Chasing it immediately would pull the
+        // not-yet-resubscribed channel, whose answer (the old epoch -- a harmless duplicate)
+        // sets no pending verification: the single-shot advert would be lost and the mirror
+        // pinned to the dead incarnation. The advert must be remembered and followed up by
+        // the close's verification pull on the repaired channel.
+        var epoch1 = 11L;
+        var epoch2 = 22L;
+        var epoch3 = 33L;
+        var releaseHook = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var channelRepaired = false;
+        var hookRuns = 0;
+        var pulls = 0;
+        var consumer = new MemoFactory();
+        var mirror = consumer.CreateRemoteSignal("mirror", 0,
+            () =>
+            {
+                Interlocked.Increment(ref pulls);
+                // The un-resubscribed channel answers the CURRENT epoch; the repaired channel
+                // answers the live restarted incarnation.
+                return Task.FromResult(Volatile.Read(ref channelRepaired)
+                    ? new ValuePayload<int>(1000, epoch3, 1, 333, CausalityStamp.ForSignal(1000, 1, epoch3).Serialize(), false)
+                    : new ValuePayload<int>(1000, epoch2, 1, 222, CausalityStamp.ForSignal(1000, 1, epoch2).Serialize(), false));
+            },
+            onPeerReset: async () =>
+            {
+                if (Interlocked.Increment(ref hookRuns) == 1)
+                {
+                    await releaseHook.Task;
+                    Volatile.Write(ref channelRepaired, true); // resubscription repairs the channel
+                }
+            });
+
+        await mirror.OnValueAsync(new ValuePayload<int>(1000, epoch1, 5, 111, CausalityStamp.ForSignal(1000, 5, epoch1).Serialize(), false));
+
+        // First restart: the verification pull commits epoch2, hook 1 blocks (window open).
+        var delivery = mirror.OnValueAsync(new ValuePayload<int>(1000, epoch2, 1, 222, CausalityStamp.ForSignal(1000, 1, epoch2).Serialize(), false));
+        await TestHelpers.WaitForConvergenceAsync(() => Volatile.Read(ref hookRuns) == 1);
+        var pullsBeforeAdvert = Volatile.Read(ref pulls);
+
+        // The second restart's single-shot advertisement mid-window: remembered, NOT chased.
+        await mirror.OnStaleAsync(new StaleNotification(1000, epoch3, 1, CausalityStamp.Empty.Serialize()));
+        Assert.Equal(pullsBeforeAdvert, Volatile.Read(ref pulls));
+
+        releaseHook.SetResult();
+        await delivery.WaitAsync(TimeSpan.FromSeconds(10));
+
+        // The close's verification pull runs on the repaired channel and adopts the live epoch.
+        await TestHelpers.WaitForConvergenceAsync(() => mirror.Publication?.Epoch == epoch3);
+        Assert.Equal(333, await mirror.Local.Get());
+    }
+
+    [Fact]
     public async Task RemoteSignal_QueuedVerificationHookFailure_IsRecorded()
     {
         // The queued verification pull after a window close can commit ANOTHER reset; if

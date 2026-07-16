@@ -79,9 +79,10 @@ public sealed class RemoteSignal<T>
     // pull's answer always reflects whoever is actually alive.
     private bool resettling;
 
-    // Gate-guarded: an epoch change was refused while the window was open (the peer restarted
-    // again mid-resubscription). Closing the window answers it with one verification pull --
-    // the refused delivery may have been that incarnation's only advertisement.
+    // Gate-guarded: an epoch change was refused -- or a foreign-epoch restart was ADVERTISED
+    // -- while the window was open (the peer restarted again mid-resubscription). Closing the
+    // window answers it with one verification pull; the refused delivery or advertisement may
+    // have been that incarnation's only announcement.
     private bool pendingEpochVerification;
 
     // Gate-guarded: the last resubscription window closed on a FAILED hook, so the pull
@@ -181,6 +182,10 @@ public sealed class RemoteSignal<T>
     /// last adopted one, or any advertisement at all while the mirror is unverifiable. An
     /// advertisement for a different node than this mirror is bound to is ignored (a fan-out
     /// bus may broadcast advertisements; only value adoption treats misrouting as an error).
+    /// A restart advertised while a resubscription window is open is remembered instead of
+    /// chased: a mid-window pull may still travel the not-yet-resubscribed channel and answer
+    /// with the old epoch (or fault), silently discarding a single-shot advertisement -- the
+    /// window's closing verification pull follows it up on the repaired channel.
     /// </summary>
     public async Task OnStaleAsync(StaleNotification notification)
     {
@@ -189,10 +194,24 @@ public sealed class RemoteSignal<T>
         await adoptionGate.WaitAsync();
         try
         {
-            shouldPull = (!nodeIdPinned || notification.NodeId == expectedNodeId)
-                && ((publication?.Unverifiable ?? false)
+            if (nodeIdPinned && notification.NodeId != expectedNodeId)
+            {
+                shouldPull = false;
+            }
+            else if (resettling
+                && !abandonedEpochs.Contains(notification.Epoch)
+                && notification.Epoch != currentEpoch)
+            {
+                // The advertisement itself is the restart evidence; keep it for the close.
+                pendingEpochVerification = true;
+                shouldPull = false;
+            }
+            else
+            {
+                shouldPull = (publication?.Unverifiable ?? false)
                     || (!abandonedEpochs.Contains(notification.Epoch)
-                        && (notification.Epoch != currentEpoch || notification.Sequence > lastSequence)));
+                        && (notification.Epoch != currentEpoch || notification.Sequence > lastSequence));
+            }
         }
         finally
         {
