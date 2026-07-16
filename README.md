@@ -315,6 +315,15 @@ Example From: [Khalid Abuhakmeh](https://khalidabuhakmeh.com/memoizr-declarative
 
 ## Testing
 
-Run the test suite with `dotnet test`. Thread interleavings of the locking code are explored
-systematically with [Microsoft Coyote](https://microsoft.github.io/coyote/); see
-[docs/Coyote.md](docs/Coyote.md) for how to rewrite the assemblies and run the Coyote test.
+The `Microsoft.Coyote*` packages come from the
+[timonkrebs/coyote](https://github.com/timonkrebs/coyote) fork (upgraded to .NET 10 and able
+to control `System.Threading.Lock`) and are built from source into a gitignored local feed,
+so a fresh clone needs one bootstrap step before the first restore:
+
+```bash
+bash eng/build-coyote-packages.sh
+```
+
+After that, run the test suite with `dotnet test`. Thread interleavings of the locking code
+are explored systematically with [Microsoft Coyote](https://microsoft.github.io/coyote/); see
+[docs/Coyote.md](docs/Coyote.md) for how to rewrite the assemblies and run the Coyote tests.
