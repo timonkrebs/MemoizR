@@ -1818,6 +1818,170 @@ public class UseAfterTransferAnalyzerTests
     }
 
     [Fact]
+    public async Task ResettingLocalFunctionCalls_AreReinitializers()
+    {
+        // Reset() rewrites the variable on every path through it: after the call the later
+        // Add only ever touches the fresh value.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public Sending<List<int>> M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(list);
+                    void Reset()
+                    {
+                        list = new List<int>();
+                    }
+                    Reset();
+                    list.Add(1);
+                    return sending;
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task ConditionallyCalledResets_DoNotSilenceTheLaterUse()
+    {
+        // The resetting call may be skipped: the path around it still reads the transferred
+        // value at the Add.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public Sending<List<int>> M(bool keep)
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(list);
+                    void Reset()
+                    {
+                        list = new List<int>();
+                    }
+                    if (!keep) Reset();
+                    list.Add(1);
+                    return sending;
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+    }
+
+    [Fact]
+    public async Task HandlerResets_BeforeAnyRead_KeepTheCatchClean()
+    {
+        // The recovery path overwrites the variable before touching it: the catch never
+        // reads the transferred object, however the reinitializing RHS throws.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    try
+                    {
+                        _ = Sending.Transfer(list);
+                        list = MayThrow();
+                    }
+                    catch
+                    {
+                        list = new List<int>();
+                        list.Add(1);
+                    }
+                }
+
+                private static List<int> MayThrow() => new();
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task HandlerRhsReads_AreStillWindowUses()
+    {
+        // The handler's replacement is BUILT FROM the transferred value: that read runs
+        // exactly in the window where the receiver may already own it.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    try
+                    {
+                        _ = Sending.Transfer(list);
+                        list = MayThrow();
+                    }
+                    catch
+                    {
+                        list = new List<int>(list);
+                    }
+                }
+
+                private static List<int> MayThrow() => new();
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+    }
+
+    [Fact]
+    public async Task LocalFunctionResets_InsideATry_KeepTheCatchWindowVisible()
+    {
+        // The body's reset can throw before storing: its catch reads the transferred value,
+        // so calling the function is a use -- the try-nested reset is CONDITIONAL, not a
+        // definite rewrite.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public Sending<List<int>> M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(list);
+                    void Call()
+                    {
+                        try
+                        {
+                            list = MayThrow();
+                        }
+                        catch
+                        {
+                            list.Add(1);
+                        }
+                    }
+                    Call();
+                    return sending;
+                }
+
+                private static List<int> MayThrow() => new();
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+    }
+
+    [Fact]
     public async Task AnonymousObjectInitializers_AreTransferSources()
     {
         // Transfer(new { Value = list }) hands off an object graph containing the same list:

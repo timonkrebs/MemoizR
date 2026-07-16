@@ -376,20 +376,22 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                 && !IsWithinALocalFunctionBody(operation, scanRoots)
                 && !IsInASiblingArmOfTheTransfer(operation, transferPosition)
                 && (escaped || !IsInAnUnreachableCatch(operation, transferPosition)))
-            .Select(operation => (Operation: operation, IsLocalFunctionCall: false));
+            .Select(operation => (Operation: operation, CallEffect: default(BodyEffect?)));
 
-        // A call to a local function whose body reads the variable is a use AT THE CALL: the
+        // A call to a local function whose body reads the variable is a use AT THE CALL (the
         // body's reference sits source-BEFORE the transfer when the function is declared
-        // earlier, so the position filter alone would hide it.
+        // earlier, so the position filter alone would hide it) -- and a call whose body
+        // definitely REWRITES it is a reinitialization at the call site.
         var localFunctionCalls = scanRoots
             .SelectMany(root => root.DescendantsAndSelf())
             .OfType<IInvocationOperation>()
             .Where(invocation => invocation.TargetMethod.MethodKind == MethodKind.LocalFunction
                 && invocation.Syntax.SpanStart >= transferPosition
                 && !IsInASiblingArmOfTheTransfer(invocation, transferPosition)
-                && (escaped || !IsInAnUnreachableCatch(invocation, transferPosition))
-                && LocalFunctionReads(invocation.TargetMethod, variable, scope))
-            .Select(invocation => (Operation: (IOperation)invocation, IsLocalFunctionCall: true));
+                && (escaped || !IsInAnUnreachableCatch(invocation, transferPosition)))
+            .Select(invocation => (Operation: (IOperation)invocation,
+                CallEffect: (BodyEffect?)LocalFunctionCallEffect(invocation.TargetMethod, variable, scope)))
+            .Where(call => call.CallEffect != BodyEffect.None);
 
         var orderedUses = laterReferences.Concat(localFunctionCalls)
             .OrderBy(use => use.Operation.Syntax.SpanStart);
@@ -400,17 +402,21 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         // list), so such references are clean while the scan continues past the arm.
         List<(Microsoft.CodeAnalysis.Text.TextSpan Region, int Position)>? dominated = null;
 
-        foreach (var (reference, isLocalFunctionCall) in orderedUses)
+        foreach (var (reference, callEffect) in orderedUses)
         {
             if (IsDominatedByASkippedReinitialization(dominated, reference))
             {
                 continue;
             }
 
-            if (isLocalFunctionCall)
+            if (callEffect is { } effect)
             {
-                Report(context, reference, variable);
-                return true;
+                if (LocalFunctionCallOutcome(context, reference, variable, effect, transferPosition, scope, ref dominated) is { } outcome)
+                {
+                    return outcome;
+                }
+
+                continue;
             }
 
             switch (Classify(reference, variable, transferPosition, scope, out var rhsUse))
@@ -434,6 +440,36 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                     Report(context, rhsUse ?? reference, variable);
                     return true; // one report per transfer keeps the noise proportional
             }
+        }
+
+        return false;
+    }
+
+    // A reading call is the use itself. A resetting call ends tracking exactly like an inline
+    // reinitialization -- when the CALL definitely runs; a conditional one dominates only its
+    // own arm -- minus the throw window: the callee can throw into an enclosing catch before
+    // its reset landed, and the handler then still observes the transferred value. Null: the
+    // scan continues.
+    private static bool? LocalFunctionCallOutcome(OperationBlockAnalysisContext context, IOperation call, ISymbol variable, BodyEffect effect,
+        int transferPosition, IOperation scope, ref List<(Microsoft.CodeAnalysis.Text.TextSpan Region, int Position)>? dominated)
+    {
+        if (effect == BodyEffect.Reads)
+        {
+            Report(context, call, variable);
+            return true;
+        }
+
+        if (ReinitializationRole(call, transferPosition, scope) != ReferenceRole.FreshValueFromHere)
+        {
+            (dominated ??= new List<(Microsoft.CodeAnalysis.Text.TextSpan, int)>())
+                .Add((DominatingRegion(call).Syntax.Span, call.Syntax.Span.End));
+            return null;
+        }
+
+        if (CatchUseDuringReinitialization(call, variable, scope) is { } windowUse)
+        {
+            Report(context, windowUse, variable);
+            return true;
         }
 
         return false;
@@ -498,21 +534,18 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         return false;
     }
 
-    // Whether CALLING the local function reads the transferred value: the body is scanned in
-    // source order. A reassignment (with a non-reading RHS) that DEFINITELY runs before any
-    // read means the call only ever touches the fresh value; a CONDITIONAL one
-    // (`if (reset) list = new();`) may be skipped, so later reads still count -- except the
-    // ones it dominates (same arm, after it), which read the value it wrote.
-    private static bool LocalFunctionReads(IMethodSymbol localFunction, ISymbol variable, IOperation scope)
-    {
-        var declaration = scope.DescendantsAndSelf().OfType<ILocalFunctionOperation>()
-            .FirstOrDefault(operation => SymbolEqualityComparer.Default.Equals(operation.Symbol, localFunction));
-        if (declaration is null)
-        {
-            return false;
-        }
+    private enum BodyEffect { None, Reads, Resets }
 
-        var references = declaration.DescendantsAndSelf()
+    // What ENTERING the region does to the variable, scanned in source order from the top.
+    // Reads: some path reads the transferred value (`read` is that reference -- possibly the
+    // RHS of a reassignment built FROM it). Resets: a non-reading reassignment that runs
+    // before any read on every path (not nested in a conditional/loop/try, no branch able to
+    // skip it) rewrites the variable. None: the region never touches the transferred value --
+    // reads a skipped conditional reset dominates (same arm, after it) see the fresh value.
+    private static BodyEffect EffectOf(IOperation region, ISymbol variable, out IOperation? read)
+    {
+        read = null;
+        var references = region.DescendantsAndSelf()
             .Where(operation => SymbolEqualityComparer.Default.Equals(ReferencedVariable(operation), variable)
                 && !IsInsideNameOf(operation))
             .OrderBy(operation => operation.Syntax.SpanStart);
@@ -528,34 +561,47 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             if (reference.Parent is not ISimpleAssignmentOperation assignment
                 || !ReferenceEquals(assignment.Target, reference))
             {
-                return true; // a plain read of the transferred value
+                read = reference; // a plain read of the transferred value
+                return BodyEffect.Reads;
             }
 
-            if (assignment.Value.DescendantsAndSelf().Any(operation =>
-                    SymbolEqualityComparer.Default.Equals(ReferencedVariable(operation), variable)))
+            read = assignment.Value.DescendantsAndSelf().FirstOrDefault(operation =>
+                SymbolEqualityComparer.Default.Equals(ReferencedVariable(operation), variable)
+                && !IsInsideNameOf(operation));
+            if (read is not null)
             {
-                return true; // the RHS builds the replacement FROM the transferred value
+                return BodyEffect.Reads; // the RHS builds the replacement FROM the transferred value
             }
 
-            if (!IsConditionalWithin(assignment, declaration)
-                && !ABranchCanSkip(assignment, declaration.Syntax.SpanStart, declaration))
+            if (!IsConditionalWithin(assignment, region)
+                && !ABranchCanSkip(assignment, region.Syntax.SpanStart, region))
             {
-                return false; // a definite reset: every call rewrites before any read
+                return BodyEffect.Resets; // rewrites before any read on every path
             }
 
             (dominated ??= new List<(Microsoft.CodeAnalysis.Text.TextSpan, int)>())
                 .Add((DominatingRegion(assignment).Syntax.Span, reference.Syntax.Span.End));
         }
 
-        return false;
+        return BodyEffect.None;
+    }
+
+    // Whether CALLING the local function reads the transferred value -- or definitely
+    // rewrites it, making the call act as a reinitialization at the call site.
+    private static BodyEffect LocalFunctionCallEffect(IMethodSymbol localFunction, ISymbol variable, IOperation scope)
+    {
+        var declaration = scope.DescendantsAndSelf().OfType<ILocalFunctionOperation>()
+            .FirstOrDefault(operation => SymbolEqualityComparer.Default.Equals(operation.Symbol, localFunction));
+
+        return declaration is null ? BodyEffect.None : EffectOf(declaration, variable, out _);
     }
 
     // Whether control can reach past the operation without executing it, judged within the
-    // local function's body: any conditional/loop/switch/try ancestor below the declaration
-    // makes it skippable -- and a nested function's body is deferred entirely.
-    private static bool IsConditionalWithin(IOperation operation, ILocalFunctionOperation declaration)
+    // region entered at its top: any conditional/loop/switch/try ancestor below the region
+    // root makes it skippable -- and a nested function's body is deferred entirely.
+    private static bool IsConditionalWithin(IOperation operation, IOperation region)
     {
-        for (var parent = operation.Parent; parent is not null && !ReferenceEquals(parent, declaration); parent = parent.Parent)
+        for (var parent = operation.Parent; parent is not null && !ReferenceEquals(parent, region); parent = parent.Parent)
         {
             if (parent is IConditionalOperation or ISwitchOperation or ISwitchExpressionOperation
                 or ILoopOperation or ITryOperation or IConditionalAccessOperation
@@ -709,16 +755,26 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                 break;
             }
 
-            if (parent is ITryOperation tryOperation && ReferenceEquals(child, tryOperation.Body))
+            if (parent is ITryOperation tryOperation && ReferenceEquals(child, tryOperation.Body)
+                && WindowUseIn(tryOperation, variable) is { } use)
             {
-                var use = WindowRegionsOf(tryOperation)
-                    .SelectMany(region => region.DescendantsAndSelf())
-                    .FirstOrDefault(operation => SymbolEqualityComparer.Default.Equals(ReferencedVariable(operation), variable)
-                        && !IsInsideNameOf(operation));
-                if (use is not null)
-                {
-                    return use;
-                }
+                return use;
+            }
+        }
+
+        return null;
+    }
+
+    // The first window region that actually READS the transferred value. A handler that
+    // REWRITES the variable before touching it (catch { list = new(); ... }) is a recovery,
+    // not a use -- the reinitialization classification applies inside the window too.
+    private static IOperation? WindowUseIn(ITryOperation tryOperation, ISymbol variable)
+    {
+        foreach (var region in WindowRegionsOf(tryOperation))
+        {
+            if (EffectOf(region, variable, out var read) == BodyEffect.Reads)
+            {
+                return read;
             }
         }
 

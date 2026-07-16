@@ -247,6 +247,26 @@ public class ValidateWrittenValuesTests
     }
 
     [Fact]
+    public async Task AsyncReturnedTasks_KeepTheGreenListVerdict()
+    {
+        // A suspended async method returns an AsyncStateMachineBox: an internal Task subtype
+        // whose generic arguments carry the compiler-generated state machine -- captured
+        // mutable locals included. The instance is still the green-listed Task: its arguments
+        // are runtime plumbing, not the declared surface the creation check vetted.
+        var f = new MemoFactory(options: MemoFactoryOptions.StrictSendableChecks | MemoFactoryOptions.ValidateWrittenValues);
+        var signal = f.CreateSignal(ComputeAsync());
+        var task = await signal.Get();
+        Assert.Equal(1, await task!);
+
+        static async Task<int> ComputeAsync()
+        {
+            var buffer = new List<int> { 1 }; // lives on in the state machine across the await
+            await Task.Yield();
+            return buffer.Count;
+        }
+    }
+
+    [Fact]
     public void FrameworkImplementations_OfGreenListedTypes_AreSendable()
     {
         // The green-list trust covers same-assembly framework implementations only: a USER
