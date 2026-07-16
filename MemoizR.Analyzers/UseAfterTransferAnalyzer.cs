@@ -119,7 +119,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         // A transfer inside a CALLED local function is sequenced before the caller's
         // continuation: every call site acts as a transfer of its own. Lambdas stay
         // deferred-scoped (they may run later or never).
-        foreach (var propagated in CallSiteTransfers(enclosingBody, variable, block,
+        foreach (var propagated in CallSiteTransfers(enclosingBody, variable, transfer, block,
             new HashSet<IMethodSymbol>(SymbolEqualityComparer.Default)))
         {
             yield return propagated;
@@ -131,9 +131,18 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     // through that declaration's own callers. A transferred PARAMETER remaps to the caller's
     // argument at each site.
     private static IEnumerable<(ISymbol Variable, int Position, List<IOperation> ScanRoots, bool Escaped, IOperation Transfer, IOperation Scope)> CallSiteTransfers(
-        IOperation transferBody, ISymbol variable, IOperation block, HashSet<IMethodSymbol> visited)
+        IOperation transferBody, ISymbol variable, IOperation anchor, IOperation block, HashSet<IMethodSymbol> visited)
     {
         if (transferBody is not ILocalFunctionOperation declaration || !visited.Add(declaration.Symbol))
+        {
+            yield break;
+        }
+
+        // A by-value parameter definitely reassigned before the handoff no longer aliases
+        // ANY caller argument: the callee transferred its own fresh value.
+        if (variable is IParameterSymbol parameterVariable
+            && SymbolEqualityComparer.Default.Equals(parameterVariable.ContainingSymbol.OriginalDefinition, declaration.Symbol)
+            && DefinitelyReassignedBefore(declaration, variable, anchor))
         {
             yield break;
         }
@@ -165,7 +174,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         {
             if (callBody is ILocalFunctionOperation)
             {
-                foreach (var nested in CallSiteTransfers(callBody, callVariable, block, visited))
+                foreach (var nested in CallSiteTransfers(callBody, callVariable, invocation, block, visited))
                 {
                     yield return nested;
                 }
@@ -547,6 +556,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         }
 
         return tryOperation.Catches.Any(catchClause => catchClause.Filter is null
+            && CanResume(catchClause)
             && (catchClause.ExceptionType is not { } caughtType || CatchesEverything(caughtType)));
     }
 
@@ -576,6 +586,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         }
 
         return tryOperation.Catches.Any(catchClause => catchClause.Filter is null
+            && CanResume(catchClause)
             && (catchClause.ExceptionType is not { } caughtType
                 || SelfAndBases(thrownType).Contains(caughtType, SymbolEqualityComparer.Default)));
     }
@@ -1042,7 +1053,12 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             }
         }
 
-        if (creation.Constructor is not { ContainingType: { IsRecord: true } recordType })
+        // Only the PRIMARY constructor's parameters deterministically store (its declaring
+        // syntax IS the record declaration); a hand-written constructor with a matching
+        // parameter name promises nothing.
+        if (creation.Constructor is not { ContainingType: { IsRecord: true } recordType } constructor
+            || !constructor.DeclaringSyntaxReferences.Any(reference =>
+                reference.GetSyntax() is Microsoft.CodeAnalysis.CSharp.Syntax.RecordDeclarationSyntax))
         {
             yield break;
         }
@@ -1070,26 +1086,30 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                 when IsFrameworkDeclared(indexer.Property.ContainingType) =>
                 indexer.Arguments.Select(argument => (IOperation?)argument.Value).Concat(new[] { (IOperation?)member.Value }),
             ISimpleAssignmentOperation member when StoresIntoACompilerKnownSlot(member) => new[] { (IOperation?)member.Value },
+            // Child = { Value = list }: writes INTO the object the transferred payload
+            // already reaches -- the nested initializer carries by the same rules.
+            IMemberInitializerOperation { Initializer: { } nested } => InitializerCarriedParts(nested),
             IInvocationOperation add when IsFrameworkDeclared(add.TargetMethod.ContainingType) =>
                 add.Arguments.Select(argument => (IOperation?)argument.Value),
             _ => System.Linq.Enumerable.Empty<IOperation?>(),
         });
     }
 
-    // Metadata types under the System root: their collection contracts store what they are
-    // handed. Source-declared types make no such promise.
+    // Types living in the SAME ASSEMBLY as System.Object (the core library): their
+    // collection contracts store what they are handed. A System.* NAMESPACE proves nothing --
+    // any referenced assembly can declare one.
     private static bool IsFrameworkDeclared(INamedTypeSymbol? type)
     {
-        if (type is null || type.Locations.Any(location => location.IsInSource))
+        if (type is null)
         {
             return false;
         }
 
-        for (var current = type.ContainingNamespace; current is { IsGlobalNamespace: false }; current = current.ContainingNamespace)
+        for (ITypeSymbol? current = type; current is not null; current = current.BaseType)
         {
-            if (current.ContainingNamespace is { IsGlobalNamespace: true })
+            if (current.SpecialType == SpecialType.System_Object)
             {
-                return current.Name == "System";
+                return SymbolEqualityComparer.Default.Equals(type.ContainingAssembly, current.ContainingAssembly);
             }
         }
 
@@ -1419,13 +1439,17 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     {
         return operation switch
         {
-            IFieldReferenceOperation field => field.Instance is not null and not IInstanceReferenceOperation,
+            // Instance fields dereference their receiver (`this` cannot be null); a STATIC
+            // field's first touch can run a throwing type initializer.
+            IFieldReferenceOperation field => field.Instance is not IInstanceReferenceOperation,
             IConversionOperation conversion => conversion.OperatorMethod is not null
                 || (conversion.Conversion is { IsReference: true, IsImplicit: false } && !conversion.IsTryCast),
             IUnaryOperation unary => unary.OperatorMethod is not null,
             IBinaryOperation binary => binary.OperatorMethod is not null,
             _ => operation is IInvocationOperation or IObjectCreationOperation or IAwaitOperation
-                or IPropertyReferenceOperation or IArrayElementReferenceOperation or IThrowOperation,
+                or IPropertyReferenceOperation or IArrayElementReferenceOperation or IThrowOperation
+                or IDynamicInvocationOperation or IDynamicMemberReferenceOperation
+                or IDynamicIndexerAccessOperation or IDynamicObjectCreationOperation,
         };
     }
 
@@ -1734,13 +1758,27 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             }
 
             if (parent is ITryOperation tryOperation && ReferenceEquals(child, tryOperation.Body)
-                && tryOperation.Catches.Length > 0)
+                && tryOperation.Catches.Any(CanResume))
             {
                 return tryOperation;
             }
         }
 
         return null;
+    }
+
+    // A handler that ends in an unconditional throw/return never completes normally:
+    // control does not resume after its try on that path (catch { throw; } re-escapes).
+    private static bool CanResume(ICatchClauseOperation catchClause)
+    {
+        var last = catchClause.Handler.Operations.LastOrDefault();
+        if (last is IExpressionStatementOperation expressionStatement)
+        {
+            last = expressionStatement.Operation;
+        }
+
+        return last is not IThrowOperation
+            && last is not IReturnOperation { Kind: not OperationKind.YieldReturn };
     }
 
     // True when the reassignment DEFINITELY executes on the path that transferred: walking up

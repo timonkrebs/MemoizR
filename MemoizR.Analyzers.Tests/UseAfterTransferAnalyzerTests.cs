@@ -3696,6 +3696,204 @@ public class UseAfterTransferAnalyzerTests
     }
 
     [Fact]
+    public async Task ParametersReassignedBeforeTheTransfer_NoLongerAliasTheArgument()
+    {
+        // Move transfers its own fresh list: the caller's original was never handed off.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    void Move(List<int> x)
+                    {
+                        x = new List<int>();
+                        _ = Sending.Transfer(x);
+                    }
+                    Move(list);
+                    list.Add(1);
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task StaticFieldReads_MayRunTypeInitializers_AndKeepCatchesAlive()
+    {
+        // The first touch of Holder can run its type initializer, which may throw after the
+        // completed handoff: the catch then observes the transferred list.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public static class Holder
+            {
+                public static int Value;
+            }
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    try
+                    {
+                        var sent = Sending.Transfer(list);
+                        _ = Holder.Value;
+                    }
+                    catch
+                    {
+                        list.Add(1);
+                    }
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+    }
+
+    [Fact]
+    public async Task NonResumingCatches_CannotSkipResets()
+    {
+        // The handler rethrows: either the reset ran, or the method exited -- no path
+        // reaches the Add with the old list.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    try
+                    {
+                        _ = Sending.Transfer(list);
+                        MayThrow();
+                        list = new List<int>();
+                    }
+                    catch
+                    {
+                        throw;
+                    }
+
+                    list.Add(1);
+                }
+
+                private static void MayThrow()
+                {
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task DynamicOperations_AreThrowCapable()
+    {
+        // A dynamic dispatch can fail at runtime after the completed handoff: the catch
+        // then observes the transferred list.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M(dynamic dyn)
+                {
+                    var list = new List<int> { 1 };
+                    try
+                    {
+                        var sent = Sending.Transfer(list);
+                        dyn.Foo();
+                    }
+                    catch
+                    {
+                        list.Add(1);
+                    }
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+    }
+
+    [Fact]
+    public async Task CustomRecordConstructors_DoNotCarryByNameAlone()
+    {
+        // The hand-written constructor ignores its parameter: a matching name proves no
+        // storage -- only the PRIMARY constructor's parameters deterministically store.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public record Box
+            {
+                public List<int>? Value { get; init; }
+
+                public Box(List<int> Value)
+                {
+                }
+            }
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(new Box(list));
+                    list.Add(1);
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task NestedMemberInitializers_AreTransferSources()
+    {
+        // Child = { Value = list } writes into the object the transferred Box already
+        // reaches: the receiver owns a graph containing the same list.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class Inner
+            {
+                public List<int>? Value { get; set; }
+            }
+
+            public class Box
+            {
+                public Inner Child { get; } = new Inner();
+            }
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(new Box { Child = { Value = list } });
+                    list.Add(1);
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
     public async Task AnonymousObjectInitializers_AreTransferSources()
     {
         // Transfer(new { Value = list }) hands off an object graph containing the same list:
