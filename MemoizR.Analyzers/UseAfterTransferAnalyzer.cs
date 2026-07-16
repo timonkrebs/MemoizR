@@ -451,7 +451,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             IArrayCreationOperation { Initializer: { } initializer } => initializer.ElementValues,
             IAnonymousObjectCreationOperation anonymous => anonymous.Initializers.Select(initializer =>
                 (IOperation?)(initializer is ISimpleAssignmentOperation member ? member.Value : initializer)),
-            IObjectCreationOperation { Initializer: { } objectInitializer } => InitializerCarriedParts(objectInitializer),
+            IObjectCreationOperation creation => ObjectCreationCarriedParts(creation),
             // box with { Value = list }: the receiver's CLONE carries the same reference in
             // its slot. The operand itself stays a leaf like a spread's: the original object
             // is not handed off, only its contents are copied into the clone.
@@ -670,7 +670,9 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             .SelectMany(root => root.DescendantsAndSelf())
             .OfType<IInvocationOperation>()
             .Where(invocation => invocation.TargetMethod.MethodKind is MethodKind.LocalFunction or MethodKind.DelegateInvoke
-                && invocation.Syntax.SpanStart >= transferPosition
+                // A call WRAPPING the transfer (Use(Sending.Transfer(list))) starts before it,
+                // but its body runs only after all arguments -- the handoff included.
+                && (invocation.Syntax.SpanStart >= transferPosition || Covers(invocation, transferPosition))
                 && !IsInASiblingArmOfTheTransfer(invocation, transferPosition)
                 && (escaped || !IsInAnUnreachableCatch(invocation, transferPosition))
                 && !IsWithinALocalFunctionBody(invocation, scanRoots))
@@ -1010,6 +1012,34 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         return null;
     }
 
+    // Everything an object creation deterministically stores: its initializer's
+    // compiler-known slots -- and, for a POSITIONAL RECORD, the primary constructor's
+    // arguments, each stored in its same-named auto-property.
+    private static System.Collections.Generic.IEnumerable<IOperation?> ObjectCreationCarriedParts(IObjectCreationOperation creation)
+    {
+        if (creation.Initializer is { } initializer)
+        {
+            foreach (var part in InitializerCarriedParts(initializer))
+            {
+                yield return part;
+            }
+        }
+
+        if (creation.Constructor is not { ContainingType: { IsRecord: true } recordType })
+        {
+            yield break;
+        }
+
+        foreach (var argument in creation.Arguments)
+        {
+            if (argument.Parameter is { } parameter
+                && recordType.GetMembers(parameter.Name).OfType<IPropertySymbol>().Any(SendableSymbolClassifier.HasBackingSlot))
+            {
+                yield return argument.Value;
+            }
+        }
+    }
+
     // Member writes carry through compiler-known slots only; an INDEXER initializer
     // (["x"] = list) stores value AND keys into the collection; a collection initializer's
     // Add elements carry like collection expressions.
@@ -1160,14 +1190,14 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     // back around), a definite `=` overwrite KILLS every earlier target, `-=` never adds
     // one, and a plain delegate-to-delegate copy carries the SOURCE local's candidates.
     private static System.Collections.Generic.IEnumerable<IOperation> StoredCallables(
-        ISymbol delegateLocal, IOperation scope, IInvocationOperation call, int transferPosition, HashSet<ISymbol> visited)
+        ISymbol delegateLocal, IOperation scope, IOperation consumer, int transferPosition, HashSet<ISymbol> visited)
     {
         if (!visited.Add(delegateLocal))
         {
             yield break;
         }
 
-        var stores = DelegateStores(delegateLocal, scope, call, transferPosition);
+        var stores = DelegateStores(delegateLocal, scope, consumer, transferPosition);
 
         // A definite overwrite replaces the whole invocation list: candidates begin at the
         // LAST replace that runs on every path to the call.
@@ -1190,8 +1220,9 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             }
             else if (ReferencedVariable(value) is { } alias)
             {
-                // Action use = use2: the copy carries whatever the SOURCE could hold.
-                foreach (var carried in StoredCallables(alias, scope, call, transferPosition, visited))
+                // Action use = use2: the copy SNAPSHOTS what the source holds AT THE COPY --
+                // stores landing in the source afterwards are not in use's invocation list.
+                foreach (var carried in StoredCallables(alias, scope, site, transferPosition, visited))
                 {
                     yield return carried;
                 }
@@ -1200,7 +1231,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     }
 
     private static List<(IOperation Site, IOperation Value, bool Replaces)> DelegateStores(
-        ISymbol delegateLocal, IOperation scope, IInvocationOperation call, int transferPosition)
+        ISymbol delegateLocal, IOperation scope, IOperation consumer, int transferPosition)
     {
         var stores = new List<(IOperation Site, IOperation Value, bool Replaces)>();
         foreach (var operation in scope.DescendantsAndSelf())
@@ -1223,7 +1254,9 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
 
             if (matched is { } store
                 && !IsInASiblingArmOfTheTransfer(operation, transferPosition)
-                && (operation.Syntax.SpanStart < call.Syntax.Span.End || SharesALoopWith(operation, call)))
+                && (operation.Syntax.SpanStart < consumer.Syntax.Span.End || SharesALoopWith(operation, consumer))
+                // A store inside a local function nothing ever invokes never executed.
+                && !IsInAnUnreferencedNestedFunction(operation, scope))
             {
                 stores.Add((operation, store.Value, store.Replaces));
             }
@@ -1232,9 +1265,9 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         return stores;
     }
 
-    private static bool SharesALoopWith(IOperation store, IOperation call)
+    private static bool SharesALoopWith(IOperation store, IOperation consumer)
     {
-        for (var parent = call.Parent; parent is not null; parent = parent.Parent)
+        for (var parent = consumer.Parent; parent is not null; parent = parent.Parent)
         {
             if (parent is ILoopOperation && parent.Syntax.Span.Contains(store.Syntax.SpanStart))
             {
@@ -1609,8 +1642,9 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
 
     private static bool CanSkipPast(IOperation operation, int reinitPosition, IOperation scope)
     {
-        // A caught throw resumes AFTER its try: it skips a reset that try still contains.
-        if (operation is IThrowOperation)
+        // A caught FAILURE resumes AFTER its try: any throw-capable operation (an explicit
+        // throw, a call that may fail, ...) skips a reset that try still contains.
+        if (CanThrow(operation))
         {
             return NearestCatchingTry(operation) is { } catchingTry
                 && catchingTry.Syntax.Span.Contains(reinitPosition);

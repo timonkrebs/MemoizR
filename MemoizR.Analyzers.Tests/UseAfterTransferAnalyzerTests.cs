@@ -3431,6 +3431,151 @@ public class UseAfterTransferAnalyzerTests
     }
 
     [Fact]
+    public async Task CallsWhoseArgumentsContainTheTransfer_RunTheirBodyAfterIt()
+    {
+        // The callee body runs only after all arguments evaluated -- the handoff included.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    void Use(Sending<List<int>> unused)
+                    {
+                        list.Add(1);
+                    }
+                    Use(Sending.Transfer(list));
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+    }
+
+    [Fact]
+    public async Task DelegateStoresInsideUncalledFunctions_NeverRan()
+    {
+        // Configure is never invoked: its store cannot be the delegate's value at the call.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    Action use = () => { };
+                    void Configure()
+                    {
+                        use = () => list.Add(1);
+                    }
+                    var sending = Sending.Transfer(list);
+                    use();
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task DelegateAliases_SnapshotTheSourceAtTheCopy()
+    {
+        // use copied src BEFORE the reading lambda landed in src: the copy keeps the old
+        // invocation list, so the call runs only the no-op.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    Action src = () => { };
+                    Action use = src;
+                    src = () => list.Add(1);
+                    var sending = Sending.Transfer(list);
+                    use();
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task ThrowingCallsBeforeResets_KeepThePathOpen()
+    {
+        // The caught MayThrow() path skips the reset and resumes after the try: the final
+        // Add still touches the transferred list on that path.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    try
+                    {
+                        _ = Sending.Transfer(list);
+                        MayThrow();
+                        list = new List<int>();
+                    }
+                    catch
+                    {
+                    }
+
+                    list.Add(1);
+                }
+
+                private static void MayThrow()
+                {
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+    }
+
+    [Fact]
+    public async Task RecordConstructorArguments_AreTransferSources()
+    {
+        // A positional record's primary constructor deterministically stores each parameter
+        // in its same-named slot: the receiver owns a Box carrying the same list.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public record Box(List<int> Value);
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(new Box(list));
+                    list.Add(1);
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
     public async Task AnonymousObjectInitializers_AreTransferSources()
     {
         // Transfer(new { Value = list }) hands off an object graph containing the same list:
