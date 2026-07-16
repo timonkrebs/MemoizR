@@ -1,0 +1,13 @@
+@page "/"
+
+<main>
+    <h1>MemoizR optimistic todos</h1>
+    <p>
+        The list below is an <strong>optimistic view</strong> (ADR 0007): adding a todo projects
+        it instantly while the "server" (1.5&#160;s latency) decides. Include the word
+        <code>fail</code> and the server rejects it &mdash; the projection rolls back
+        structurally, the source of truth untouched. The button is driven by the action's
+        reactive <code>IsPending</code> flag.
+    </p>
+    <TodoList />
+</main>
