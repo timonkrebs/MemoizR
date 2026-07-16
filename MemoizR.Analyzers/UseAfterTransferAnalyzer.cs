@@ -218,9 +218,16 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     {
         // yield return only SUSPENDS the iterator: the next MoveNext resumes inside the loop,
         // so the foreach keeps iterating (yield break, like return, ends it for good).
-        if (operation is IReturnOperation { Kind: not OperationKind.YieldReturn } or IThrowOperation)
+        if (operation is IReturnOperation { Kind: not OperationKind.YieldReturn })
         {
             return true;
+        }
+
+        // A throw absorbed by a catch INSIDE the loop resumes there: only one no handler on
+        // the way out can swallow definitely ends the iteration.
+        if (operation is IThrowOperation)
+        {
+            return !MayBeCaughtWithin(operation, loop);
         }
 
         if (operation is not IBranchOperation { BranchKind: BranchKind.Break } branch)
@@ -293,12 +300,12 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             IConversionOperation conversion => new[] { conversion.Operand },
             // Transfer([list]): matched by SYNTAX -- ICollectionExpressionOperation is not
             // public in the Roslyn this analyzer compiles against, but the children are
-            // walkable regardless. Spread elements are skipped: `[..source]` enumerates the
-            // operand INTO the new collection, so the operand object itself is never carried.
+            // walkable regardless.
             { } collection when collection.Syntax is Microsoft.CodeAnalysis.CSharp.Syntax.CollectionExpressionSyntax =>
-                collection.ChildOperations
-                    .Where(child => child.Syntax is not Microsoft.CodeAnalysis.CSharp.Syntax.SpreadElementSyntax)
-                    .Select(child => (IOperation?)child),
+                collection.ChildOperations.SelectMany(child =>
+                    child.Syntax is Microsoft.CodeAnalysis.CSharp.Syntax.SpreadElementSyntax
+                        ? SpreadCarriedParts(child)
+                        : new[] { (IOperation?)child }),
             _ => null,
         };
     }
@@ -335,12 +342,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             }
             else if (escape is not null && parent is ITryOperation tryOperation)
             {
-                // A return whose expression can throw AFTER building the wrapper
-                // (return MayThrow(Sending.Transfer(list));) reaches the handlers like a
-                // thrown transfer does.
-                var reachesHandlers = escape is IThrowOperation
-                    || CanThrowAfterTheTransfer(escape, transfer.Syntax.Span.End);
-                AddHandlerRoots(roots, tryOperation, child, escapedByThrow: reachesHandlers);
+                escape = CrossTryTowardScope(roots, tryOperation, child, escape, transfer.Syntax.Span.End);
             }
         }
 
@@ -350,6 +352,76 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         }
 
         return (roots, escape is not null);
+    }
+
+    // Crossing a try on the way out: the handlers/finally that observe the escape become
+    // scan roots, and the escape itself survives -- unless it is a throw this try's own
+    // catches ABSORB, which never leaves the method: control resumes right after the try,
+    // and the sender-side scan must too (null ends the escape).
+    private static IOperation? CrossTryTowardScope(List<IOperation> roots, ITryOperation tryOperation, IOperation child, IOperation escape, int transferPosition)
+    {
+        // A return whose expression can throw AFTER building the wrapper
+        // (return MayThrow(Sending.Transfer(list));) reaches the handlers like a thrown
+        // transfer does.
+        var reachesHandlers = escape is IThrowOperation
+            || CanThrowAfterTheTransfer(escape, transferPosition);
+        AddHandlerRoots(roots, tryOperation, child, escapedByThrow: reachesHandlers);
+
+        if (escape is IThrowOperation thrown && ReferenceEquals(child, tryOperation.Body)
+            && CatchesTheThrow(tryOperation, thrown))
+        {
+            return null;
+        }
+
+        return escape;
+    }
+
+    // Whether the throw DEFINITELY lands in one of the try's handlers: an unfiltered catch
+    // whose type the thrown exception inherits (or a bare catch-all). Filters and unrelated
+    // types stay escapes -- neutralizing an escape that actually leaves would scan code the
+    // transferred path never runs.
+    private static bool CatchesTheThrow(ITryOperation tryOperation, IThrowOperation thrown)
+    {
+        // The thrown operand hides behind the implicit conversion to System.Exception: the
+        // CONVERTED type would never match a derived catch.
+        var exception = thrown.Exception;
+        while (exception is IConversionOperation conversion)
+        {
+            exception = conversion.Operand;
+        }
+
+        if (exception?.Type is not INamedTypeSymbol thrownType)
+        {
+            return false;
+        }
+
+        return tryOperation.Catches.Any(catchClause => catchClause.Filter is null
+            && (catchClause.ExceptionType is not { } caughtType
+                || SelfAndBases(thrownType).Contains(caughtType, SymbolEqualityComparer.Default)));
+    }
+
+    private static System.Collections.Generic.IEnumerable<ITypeSymbol> SelfAndBases(ITypeSymbol type)
+    {
+        for (ITypeSymbol? current = type; current is not null; current = current.BaseType)
+        {
+            yield return current;
+        }
+    }
+
+    // Whether ANY handler between the operation and the boundary could swallow the throw --
+    // filters and types unknown, so possibility suffices.
+    private static bool MayBeCaughtWithin(IOperation thrown, IOperation boundary)
+    {
+        for (IOperation child = thrown; child.Parent is { } parent && !ReferenceEquals(child, boundary); child = parent)
+        {
+            if (parent is ITryOperation tryOperation && ReferenceEquals(child, tryOperation.Body)
+                && tryOperation.Catches.Length > 0)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     // A THROWN transfer lands in the try's handlers -- when the throw came from the try BODY
@@ -424,7 +496,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                 && (escaped || !IsInAnUnreachableCatch(invocation, transferPosition))
                 && !IsWithinALocalFunctionBody(invocation, scanRoots))
             .Select(invocation => (Operation: (IOperation)invocation,
-                CallEffect: (BodyEffect?)CallEffectOf(invocation, variable, scope)))
+                CallEffect: (BodyEffect?)CallEffectOf(invocation, variable, transferPosition, scope)))
             .Where(call => call.CallEffect != BodyEffect.None);
 
         var orderedUses = laterReferences.Concat(callableCalls)
@@ -479,32 +551,36 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         return false;
     }
 
-    private static BodyEffect CallEffectOf(IInvocationOperation invocation, ISymbol variable, IOperation scope)
+    private static BodyEffect CallEffectOf(IInvocationOperation invocation, ISymbol variable, int transferPosition, IOperation scope)
     {
         return invocation.TargetMethod.MethodKind == MethodKind.LocalFunction
             ? LocalFunctionCallEffect(invocation.TargetMethod, variable, scope, new HashSet<IMethodSymbol>(SymbolEqualityComparer.Default))
-            : DelegateCallEffect(invocation, variable, scope);
+            : DelegateCallEffect(invocation, variable, transferPosition, scope);
     }
 
-    // A reading call is the use itself. A resetting call ends tracking exactly like an inline
-    // reinitialization -- when the CALL definitely runs; a conditional one dominates only its
-    // own arm -- minus the throw window: the callee can throw into an enclosing catch before
-    // its reset landed, and the handler then still observes the transferred value. Null: the
-    // scan continues.
+    // A reading call is the use itself -- unless its own ARGUMENTS definitely reset the
+    // variable first, feeding the body the fresh value. A resetting call (by body or by
+    // argument) ends tracking exactly like an inline reinitialization -- when the CALL
+    // definitely runs; a conditional one dominates only its own arm -- minus the throw
+    // window: the callee can throw into an enclosing catch before its reset landed, and the
+    // handler then still observes the transferred value. Null: the scan continues.
     private static bool? LocalFunctionCallOutcome(OperationBlockAnalysisContext context, IOperation call, ISymbol variable, BodyEffect effect,
         int transferPosition, IOperation scope, ref List<(Microsoft.CodeAnalysis.Text.TextSpan Region, int Position)>? dominated)
     {
-        if (effect == BodyEffect.Reads)
+        var argumentsEffect = BodyEffect.None;
+        if (call is IInvocationOperation invocation)
         {
-            Report(context, call, variable);
-            return true;
+            argumentsEffect = ArgumentsEffect(invocation, variable, transferPosition, out var argumentRead);
+            if (argumentRead is not null)
+            {
+                Report(context, argumentRead, variable);
+                return true;
+            }
         }
 
-        // Arguments run BEFORE the body's reset: Reset(list.Count) reads the transferred
-        // value first, and the reset cannot retroactively excuse it.
-        if (call is IInvocationOperation invocation && SiblingArgumentRead(invocation.Arguments, variable, transferPosition) is { } argumentRead)
+        if (effect == BodyEffect.Reads && argumentsEffect != BodyEffect.Resets)
         {
-            Report(context, argumentRead, variable);
+            Report(context, call, variable);
             return true;
         }
 
@@ -522,6 +598,42 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         }
 
         return false;
+    }
+
+    // Arguments evaluate BEFORE the callee runs: a read among them is a use no body effect
+    // can excuse, and a definite reset among them hands every later evaluation -- the body
+    // included -- the fresh value.
+    private static BodyEffect ArgumentsEffect(IInvocationOperation invocation, ISymbol variable, int floorPosition, out IOperation? read)
+    {
+        read = null;
+        var references = invocation.Arguments
+            .SelectMany(argument => argument.Value.DescendantsAndSelf())
+            .Where(operation => SymbolEqualityComparer.Default.Equals(ReferencedVariable(operation), variable)
+                && operation.Syntax.SpanStart >= floorPosition
+                && !IsInsideNameOf(operation))
+            .OrderBy(operation => operation.Syntax.SpanStart);
+
+        foreach (var reference in references)
+        {
+            var reset = ResetShapeOf(reference, variable, invocation, out read);
+            if (reset is null)
+            {
+                read = reference;
+                return BodyEffect.Reads;
+            }
+
+            if (read is not null)
+            {
+                return BodyEffect.Reads; // the replacement is built FROM the transferred value
+            }
+
+            if (!IsConditionalWithin(reset, invocation))
+            {
+                return BodyEffect.Resets;
+            }
+        }
+
+        return BodyEffect.None;
     }
 
     private static bool IsDominatedByASkippedReinitialization(List<(Microsoft.CodeAnalysis.Text.TextSpan Region, int Position)>? dominated, IOperation reference)
@@ -654,11 +766,18 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     {
         if (current is IInvocationOperation invocation)
         {
-            var callEffect = LocalFunctionCallEffect(invocation.TargetMethod, variable, scope, inProgress);
-            if (callEffect == BodyEffect.Resets
-                && SiblingArgumentRead(invocation.Arguments, variable, region.Syntax.SpanStart) is { } argumentRead)
+            // Arguments run BEFORE the body: their reads report and their definite resets
+            // feed the body the fresh value.
+            var argumentsEffect = ArgumentsEffect(invocation, variable, region.Syntax.SpanStart, out var argumentRead);
+            if (argumentRead is not null)
             {
-                return (BodyEffect.Reads, argumentRead, null); // arguments run before the body's reset
+                return (BodyEffect.Reads, argumentRead, null);
+            }
+
+            var callEffect = LocalFunctionCallEffect(invocation.TargetMethod, variable, scope, inProgress);
+            if (argumentsEffect == BodyEffect.Resets)
+            {
+                return (BodyEffect.Resets, null, invocation);
             }
 
             return callEffect == BodyEffect.Reads
@@ -705,6 +824,23 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         }
 
         return null;
+    }
+
+    // `[..operand]` enumerates the operand INTO the new collection: the operand OBJECT is
+    // never carried, but an inline container's elements are -- [.. new[] { list }] delivers
+    // the same list reference to the receiver. So only the operand's own carried parts
+    // unfold; a plain variable operand contributes nothing.
+    private static System.Collections.Generic.IEnumerable<IOperation?> SpreadCarriedParts(IOperation spread)
+    {
+        var operand = spread.ChildOperations.FirstOrDefault();
+        while (operand is IConversionOperation conversion)
+        {
+            operand = conversion.Operand;
+        }
+
+        return operand is not null && CarriedParts(operand) is { } parts
+            ? parts
+            : System.Linq.Enumerable.Empty<IOperation?>();
     }
 
     private static IOperation? ReadWithin(IOperation expression, ISymbol variable)
@@ -765,17 +901,18 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     }
 
     // What invoking the delegate held by a LOCAL does: any lambda (or local function lifted
-    // into the delegate) ever stored in it that reads the transferred value makes the call a
-    // use -- `Action use = () => list.Add(1);` declared before the handoff runs after it.
-    // Never a reset: which stored callable actually runs is dynamic.
-    private static BodyEffect DelegateCallEffect(IInvocationOperation invocation, ISymbol variable, IOperation scope)
+    // into the delegate) that can be stored in it when the call runs and reads the
+    // transferred value makes the call a use -- `Action use = () => list.Add(1);` declared
+    // before the handoff runs after it. Never a reset: which stored callable actually runs
+    // is dynamic.
+    private static BodyEffect DelegateCallEffect(IInvocationOperation invocation, ISymbol variable, int transferPosition, IOperation scope)
     {
-        if (invocation.Instance is not ILocalReferenceOperation delegateLocal)
+        if (DelegateReceiver(invocation) is not { } delegateLocal)
         {
             return BodyEffect.None;
         }
 
-        var reads = StoredCallables(delegateLocal.Local, scope).Any(callable => callable switch
+        var reads = StoredCallables(delegateLocal, scope, invocation, transferPosition).Any(callable => callable switch
         {
             IAnonymousFunctionOperation lambda =>
                 EffectOf(lambda, variable, scope, new HashSet<IMethodSymbol>(SymbolEqualityComparer.Default), out _) == BodyEffect.Reads,
@@ -787,9 +924,32 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         return reads ? BodyEffect.Reads : BodyEffect.None;
     }
 
-    // Every callable ever stored in the delegate local within the scope: its initializer and
-    // all reassignments, unwrapped from the delegate-creation/conversion shells.
-    private static System.Collections.Generic.IEnumerable<IOperation> StoredCallables(ISymbol delegateLocal, IOperation scope)
+    // The local the invocation calls through -- behind a ?. receiver too: use?.Invoke() puts
+    // a placeholder in Instance, and the real receiver hangs off the enclosing conditional
+    // access.
+    private static ISymbol? DelegateReceiver(IInvocationOperation invocation)
+    {
+        var receiver = invocation.Instance;
+        if (receiver is IConditionalAccessInstanceOperation)
+        {
+            for (var parent = invocation.Parent; parent is not null; parent = parent.Parent)
+            {
+                if (parent is IConditionalAccessOperation conditionalAccess)
+                {
+                    receiver = conditionalAccess.Operation;
+                    break;
+                }
+            }
+        }
+
+        return ReferencedVariable(receiver);
+    }
+
+    // Every callable stored in the delegate local that can still be its value AT THE CALL:
+    // stores in a sibling arm of the transfer never run on the transferred path, and a store
+    // that only happens after the call cannot be what it invoked -- unless a loop carries it
+    // back around.
+    private static System.Collections.Generic.IEnumerable<IOperation> StoredCallables(ISymbol delegateLocal, IOperation scope, IInvocationOperation call, int transferPosition)
     {
         foreach (var operation in scope.DescendantsAndSelf())
         {
@@ -804,11 +964,31 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                 _ => null,
             };
 
+            if (stored is null
+                || IsInASiblingArmOfTheTransfer(operation, transferPosition)
+                || (operation.Syntax.SpanStart >= call.Syntax.Span.End && !SharesALoopWith(operation, call)))
+            {
+                continue;
+            }
+
             if (Callable(stored) is { } callable)
             {
                 yield return callable;
             }
         }
+    }
+
+    private static bool SharesALoopWith(IOperation store, IOperation call)
+    {
+        for (var parent = call.Parent; parent is not null; parent = parent.Parent)
+        {
+            if (parent is ILoopOperation && parent.Syntax.Span.Contains(store.Syntax.SpanStart))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static IOperation? Callable(IOperation? stored)
@@ -832,14 +1012,25 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     }
 
     // Whether control can reach past the operation without executing it, judged within the
-    // region entered at its top: any conditional/loop/switch/try ancestor below the region
-    // root makes it skippable -- and a nested function's body is deferred entirely.
+    // region entered at its top: any conditional/loop/switch ancestor below the region root
+    // makes it skippable, a nested function's body is deferred entirely, and a try counts
+    // only where a path can resume past a failure (catch regions, bodies WITH catches).
     private static bool IsConditionalWithin(IOperation operation, IOperation region)
     {
-        for (var parent = operation.Parent; parent is not null && !ReferenceEquals(parent, region); parent = parent.Parent)
+        for (IOperation child = operation; child.Parent is { } parent && !ReferenceEquals(parent, region); child = parent)
         {
+            if (parent is ITryOperation tryOperation)
+            {
+                if (!RunsToCompletionOrExits(tryOperation, child))
+                {
+                    return true;
+                }
+
+                continue;
+            }
+
             if (parent is IConditionalOperation or ISwitchOperation or ISwitchExpressionOperation
-                or ILoopOperation or ITryOperation or IConditionalAccessOperation
+                or ILoopOperation or IConditionalAccessOperation
                 or IAnonymousFunctionOperation or ILocalFunctionOperation)
             {
                 return true;
@@ -1180,7 +1371,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         {
             var branches = parent is IConditionalOperation or ISwitchOperation or ISwitchExpressionOperation
                 or ILoopOperation or ITryOperation or IConditionalAccessOperation;
-            if (!branches || (parent is ITryOperation tryOperation && ReferenceEquals(child, tryOperation.Finally)))
+            if (!branches || (parent is ITryOperation tryOperation && RunsToCompletionOrExits(tryOperation, child)))
             {
                 continue;
             }
@@ -1192,6 +1383,16 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         }
 
         return true;
+    }
+
+    // A finally always runs, and a CATCHLESS try body either completes or leaves the scope
+    // entirely -- no path resumes past a failed reset inside them, so neither makes the reset
+    // conditional. A try body with catches CAN be resumed past (the handler swallows the
+    // failure), and a catch region itself runs only on exception.
+    private static bool RunsToCompletionOrExits(ITryOperation tryOperation, IOperation child)
+    {
+        return ReferenceEquals(child, tryOperation.Finally)
+            || (ReferenceEquals(child, tryOperation.Body) && tryOperation.Catches.IsEmpty);
     }
 
     private static void Report(OperationBlockAnalysisContext context, IOperation reference, ISymbol variable)
