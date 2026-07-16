@@ -3576,6 +3576,126 @@ public class UseAfterTransferAnalyzerTests
     }
 
     [Fact]
+    public async Task UserDefinedInitializerAdds_AreNotKnownStores()
+    {
+        // Sink.Add ignores its argument: nothing moved to the receiver, so the later Add on
+        // the list is sender-local.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class Sink : System.Collections.IEnumerable
+            {
+                public void Add(List<int> item)
+                {
+                }
+
+                public System.Collections.IEnumerator GetEnumerator() => throw new System.NotImplementedException();
+            }
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(new Sink { list });
+                    list.Add(1);
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task UserDefinedIndexerInitializers_AreNotKnownStores()
+    {
+        // A custom indexer setter may drop what it was handed: only framework collections
+        // count as deterministic stores.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class Sink
+            {
+                public List<int>? this[int index]
+                {
+                    get => null;
+                    set { }
+                }
+            }
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(new Sink { [0] = list });
+                    list.Add(1);
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task LocalFunctionMethodGroups_EscapeLikeLambdas()
+    {
+        // Returning Use hands the caller a delegate over the retained alias: it can run
+        // after the method exits, exactly like the equivalent lambda.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public Action M()
+                {
+                    var list = new List<int> { 1 };
+                    _ = Sending.Transfer(list);
+                    return Use;
+
+                    void Use()
+                    {
+                        list.Add(1);
+                    }
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+    }
+
+    [Fact]
+    public async Task SynthesizedTransferCalls_AreNotTheirOwnUses()
+    {
+        // Move() IS the propagated handoff: with nothing after it, the sender never touches
+        // the list again.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    void Move()
+                    {
+                        _ = Sending.Transfer(list);
+                    }
+                    Move();
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
     public async Task AnonymousObjectInitializers_AreTransferSources()
     {
         // Transfer(new { Value = list }) hands off an object graph containing the same list:

@@ -53,7 +53,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                 // reads still inside the RHS (after the transfer) and the throw window count.
                 if (EnclosingReinitializingAssignment(transfer, variable) is { } enclosingReinit)
                 {
-                    if (!ReportUsesAfter(context, new List<IOperation> { enclosingReinit }, escaped, variable, transferPosition, scope)
+                    if (!ReportUsesAfter(context, new List<IOperation> { enclosingReinit }, escaped, variable, transferPosition, transfer, scope)
                         && CatchUseDuringReinitialization(enclosingReinit, variable, scope) is { } windowUse)
                     {
                         Report(context, windowUse, variable);
@@ -62,7 +62,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                     continue;
                 }
 
-                ReportUsesAfter(context, scanRoots, escaped, variable, transferPosition, scope);
+                ReportUsesAfter(context, scanRoots, escaped, variable, transferPosition, transfer, scope);
             }
         }
     }
@@ -638,7 +638,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         return block;
     }
 
-    private static bool ReportUsesAfter(OperationBlockAnalysisContext context, List<IOperation> scanRoots, bool escaped, ISymbol variable, int transferPosition, IOperation scope)
+    private static bool ReportUsesAfter(OperationBlockAnalysisContext context, List<IOperation> scanRoots, bool escaped, ISymbol variable, int transferPosition, IOperation transfer, IOperation scope)
     {
 
         // Source-ordered walk of every later reference. References in a MUTUALLY EXCLUSIVE
@@ -673,6 +673,8 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                 // A call WRAPPING the transfer (Use(Sending.Transfer(list))) starts before it,
                 // but its body runs only after all arguments -- the handoff included.
                 && (invocation.Syntax.SpanStart >= transferPosition || Covers(invocation, transferPosition))
+                // A PROPAGATED transfer's own call site is the handoff, not a use of it.
+                && !ReferenceEquals(invocation, transfer)
                 && !IsInASiblingArmOfTheTransfer(invocation, transferPosition)
                 && (escaped || !IsInAnUnreachableCatch(invocation, transferPosition))
                 && !IsWithinALocalFunctionBody(invocation, scanRoots))
@@ -680,7 +682,22 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                 CallEffect: (BodyEffect?)CallEffectOf(invocation, variable, transferPosition, scope)))
             .Where(call => call.CallEffect != BodyEffect.None);
 
-        var orderedUses = laterReferences.Concat(callableCalls)
+        // Converting a READING local function to a delegate after the handoff escapes like a
+        // lambda: the delegate can run later with the retained alias (a resetting body makes
+        // no such promise -- it may never run).
+        var methodGroupEscapes = scanRoots
+            .SelectMany(root => root.DescendantsAndSelf())
+            .OfType<IMethodReferenceOperation>()
+            .Where(reference => reference.Method.MethodKind == MethodKind.LocalFunction
+                && reference.Syntax.SpanStart >= transferPosition
+                && !IsInASiblingArmOfTheTransfer(reference, transferPosition)
+                && (escaped || !IsInAnUnreachableCatch(reference, transferPosition))
+                && !IsWithinALocalFunctionBody(reference, scanRoots)
+                && LocalFunctionCallEffect(reference.Method, variable, scope,
+                    new HashSet<IMethodSymbol>(SymbolEqualityComparer.Default)) == BodyEffect.Reads)
+            .Select(reference => (Operation: (IOperation)reference, CallEffect: (BodyEffect?)BodyEffect.Reads));
+
+        var orderedUses = laterReferences.Concat(callableCalls).Concat(methodGroupEscapes)
             .OrderBy(use => use.Operation.Syntax.SpanStart);
 
         // Regions where a SKIPPED conditional reinitialization dominates: inside its own arm,
@@ -1047,12 +1064,36 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     {
         return initializer.Initializers.SelectMany(element => element switch
         {
-            ISimpleAssignmentOperation { Target: IPropertyReferenceOperation { Property.IsIndexer: true } indexer } member =>
+            // Indexer sets and Add calls are KNOWN stores only on framework collections: a
+            // user-defined Add/setter may drop what it was handed, like a custom setter.
+            ISimpleAssignmentOperation { Target: IPropertyReferenceOperation { Property.IsIndexer: true } indexer } member
+                when IsFrameworkDeclared(indexer.Property.ContainingType) =>
                 indexer.Arguments.Select(argument => (IOperation?)argument.Value).Concat(new[] { (IOperation?)member.Value }),
             ISimpleAssignmentOperation member when StoresIntoACompilerKnownSlot(member) => new[] { (IOperation?)member.Value },
-            IInvocationOperation add => add.Arguments.Select(argument => (IOperation?)argument.Value),
+            IInvocationOperation add when IsFrameworkDeclared(add.TargetMethod.ContainingType) =>
+                add.Arguments.Select(argument => (IOperation?)argument.Value),
             _ => System.Linq.Enumerable.Empty<IOperation?>(),
         });
+    }
+
+    // Metadata types under the System root: their collection contracts store what they are
+    // handed. Source-declared types make no such promise.
+    private static bool IsFrameworkDeclared(INamedTypeSymbol? type)
+    {
+        if (type is null || type.Locations.Any(location => location.IsInSource))
+        {
+            return false;
+        }
+
+        for (var current = type.ContainingNamespace; current is { IsGlobalNamespace: false }; current = current.ContainingNamespace)
+        {
+            if (current.ContainingNamespace is { IsGlobalNamespace: true })
+            {
+                return current.Name == "System";
+            }
+        }
+
+        return false;
     }
 
     private static bool StoresIntoACompilerKnownSlot(ISimpleAssignmentOperation member)
