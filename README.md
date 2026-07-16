@@ -295,7 +295,10 @@ protected override void OnInitialized()
 ```
 
 Reactions owned by services rather than components can target a renderer dispatcher directly
-with `f.AddBlazorDispatcher(dispatcher)`.
+with `f.AddBlazorDispatcher(dispatcher)`. A runnable end-to-end demo — optimistic todo list
+with instant projection, a pending-driven submit button, and live rollback on server rejection
+— lives in [samples/OptimisticTodoSample](samples/OptimisticTodoSample), with bUnit component
+tests covering the whole lifecycle.
 
 ### WPF / UI threads
 

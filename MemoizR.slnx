@@ -9,6 +9,8 @@
   </Folder>
   <Folder Name="/samples/">
     <Project Path="samples/DistributedGraphSample/DistributedGraphSample.csproj" />
+    <Project Path="samples/OptimisticTodoSample.Tests/OptimisticTodoSample.Tests.csproj" />
+    <Project Path="samples/OptimisticTodoSample/OptimisticTodoSample.csproj" />
   </Folder>
   <Project Path="MemoizR.Analyzers.Tests/MemoizR.Analyzers.Tests.csproj" />
   <Project Path="MemoizR.Analyzers/MemoizR.Analyzers.csproj" />

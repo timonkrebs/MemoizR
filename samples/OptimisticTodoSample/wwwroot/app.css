@@ -1,0 +1,41 @@
+body {
+    font-family: system-ui, sans-serif;
+    max-width: 40rem;
+    margin: 2rem auto;
+    padding: 0 1rem;
+    line-height: 1.5;
+}
+
+.todo-container form {
+    display: flex;
+    gap: 0.5rem;
+}
+
+.todo-container input {
+    flex: 1;
+    padding: 0.4rem 0.6rem;
+}
+
+.todo-container button {
+    padding: 0.4rem 1rem;
+}
+
+.todo-container ul {
+    list-style: none;
+    padding: 0;
+}
+
+.todo-container li {
+    padding: 0.4rem 0.6rem;
+    border-bottom: 1px solid #ddd;
+}
+
+/* The optimistic projection: visible immediately, muted until the server confirms. */
+.todo-container li.pending {
+    opacity: 0.5;
+    font-style: italic;
+}
+
+.error {
+    color: #b00020;
+}
