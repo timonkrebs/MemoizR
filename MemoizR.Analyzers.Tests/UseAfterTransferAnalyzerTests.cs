@@ -2247,6 +2247,123 @@ public class UseAfterTransferAnalyzerTests
     }
 
     [Fact]
+    public async Task DelegateCalls_AfterTheTransfer_AreUses()
+    {
+        // The lambda body sits source-BEFORE the transfer, but invoking the delegate runs it
+        // after: the sender still touches the handed-off list.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public Sending<List<int>> M()
+                {
+                    var list = new List<int> { 1 };
+                    Action use = () => list.Add(1);
+                    var sending = Sending.Transfer(list);
+                    use();
+                    return sending;
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+    }
+
+    [Fact]
+    public async Task SiblingLocalFunctionChains_DeclaredBeforeTheTransfer_StillReport()
+    {
+        // Outer() -> Use() -> the read: both declarations sit before the handoff, but the
+        // post-transfer call still reaches the transferred value through the chain.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public Sending<List<int>> M()
+                {
+                    var list = new List<int> { 1 };
+                    void Outer()
+                    {
+                        Use();
+                    }
+                    void Use()
+                    {
+                        list.Add(1);
+                    }
+                    var sending = Sending.Transfer(list);
+                    Outer();
+                    return sending;
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+    }
+
+    [Fact]
+    public async Task CallsThatOnlyRanBeforeTheTransfer_AreNotUses()
+    {
+        // Outer() ran before the handoff: nothing in its declaration executes afterwards,
+        // wherever the declaration happens to sit in source.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public Sending<List<int>> M()
+                {
+                    var list = new List<int> { 1 };
+                    Outer();
+                    var sending = Sending.Transfer(list);
+                    void Outer()
+                    {
+                        Use();
+                    }
+                    void Use()
+                    {
+                        list.Add(1);
+                    }
+                    return sending;
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task CollectionExpressionElements_AreTransferSources()
+    {
+        // Transfer([list]) hands off a collection carrying the same element reference,
+        // exactly like an explicit array creation.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer<List<int>[]>([list]);
+                    list.Add(1);
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
     public async Task AnonymousObjectInitializers_AreTransferSources()
     {
         // Transfer(new { Value = list }) hands off an object graph containing the same list:

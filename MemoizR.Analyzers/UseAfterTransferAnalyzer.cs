@@ -291,6 +291,14 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             IAnonymousObjectCreationOperation anonymous => anonymous.Initializers.Select(initializer =>
                 (IOperation?)(initializer is ISimpleAssignmentOperation member ? member.Value : initializer)),
             IConversionOperation conversion => new[] { conversion.Operand },
+            // Transfer([list]): matched by SYNTAX -- ICollectionExpressionOperation is not
+            // public in the Roslyn this analyzer compiles against, but the children are
+            // walkable regardless. Spread elements are skipped: `[..source]` enumerates the
+            // operand INTO the new collection, so the operand object itself is never carried.
+            { } collection when collection.Syntax is Microsoft.CodeAnalysis.CSharp.Syntax.CollectionExpressionSyntax =>
+                collection.ChildOperations
+                    .Where(child => child.Syntax is not Microsoft.CodeAnalysis.CSharp.Syntax.SpreadElementSyntax)
+                    .Select(child => (IOperation?)child),
             _ => null,
         };
     }
@@ -401,25 +409,25 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                 && (escaped || !IsInAnUnreachableCatch(operation, transferPosition)))
             .Select(operation => (Operation: operation, CallEffect: default(BodyEffect?)));
 
-        // A call to a local function whose body reads the variable is a use AT THE CALL (the
-        // body's reference sits source-BEFORE the transfer when the function is declared
-        // earlier, so the position filter alone would hide it) -- and a call whose body
-        // definitely REWRITES it is a reinitialization at the call site.
-        var localFunctionCalls = scanRoots
+        // A call to a local function (or through a delegate local) whose body reads the
+        // variable is a use AT THE CALL: the body's reference sits source-BEFORE the transfer
+        // when declared earlier, so the position filter alone would hide it. A body that
+        // definitely REWRITES makes the call a reinitialization instead. Calls written inside
+        // declarations run only through a call TO the declaration -- the call-site effect
+        // resolves the chain transitively, so they are pruned here.
+        var callableCalls = scanRoots
             .SelectMany(root => root.DescendantsAndSelf())
             .OfType<IInvocationOperation>()
-            .Where(invocation => invocation.TargetMethod.MethodKind == MethodKind.LocalFunction
+            .Where(invocation => invocation.TargetMethod.MethodKind is MethodKind.LocalFunction or MethodKind.DelegateInvoke
                 && invocation.Syntax.SpanStart >= transferPosition
                 && !IsInASiblingArmOfTheTransfer(invocation, transferPosition)
                 && (escaped || !IsInAnUnreachableCatch(invocation, transferPosition))
-                // A call written inside a local function that nothing ever invokes runs no
-                // more than the declaration around it does.
-                && !IsWithinAnUncalledLocalFunction(invocation, scanRoots, scope))
+                && !IsWithinALocalFunctionBody(invocation, scanRoots))
             .Select(invocation => (Operation: (IOperation)invocation,
-                CallEffect: (BodyEffect?)LocalFunctionCallEffect(invocation.TargetMethod, variable, scope)))
+                CallEffect: (BodyEffect?)CallEffectOf(invocation, variable, scope)))
             .Where(call => call.CallEffect != BodyEffect.None);
 
-        var orderedUses = laterReferences.Concat(localFunctionCalls)
+        var orderedUses = laterReferences.Concat(callableCalls)
             .OrderBy(use => use.Operation.Syntax.SpanStart);
 
         // Regions where a SKIPPED conditional reinitialization dominates: inside its own arm,
@@ -469,6 +477,13 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         }
 
         return false;
+    }
+
+    private static BodyEffect CallEffectOf(IInvocationOperation invocation, ISymbol variable, IOperation scope)
+    {
+        return invocation.TargetMethod.MethodKind == MethodKind.LocalFunction
+            ? LocalFunctionCallEffect(invocation.TargetMethod, variable, scope, new HashSet<IMethodSymbol>(SymbolEqualityComparer.Default))
+            : DelegateCallEffect(invocation, variable, scope);
     }
 
     // A reading call is the use itself. A resetting call ends tracking exactly like an inline
@@ -571,52 +586,95 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
 
     // What ENTERING the region does to the variable, scanned in source order from the top.
     // Reads: some path reads the transferred value (`read` is that reference -- possibly the
-    // RHS/sibling argument of a reset built FROM it). Resets: a non-reading reset (simple
-    // assignment, out argument, deconstruction target) that runs before any read on every
-    // path (not nested in a conditional/loop/try, no branch able to skip it) rewrites the
-    // variable. None: the region never touches the transferred value -- reads a skipped
-    // conditional reset dominates (same arm, after it) see the fresh value, and references
-    // inside nested local functions the region never invokes cannot run at all.
-    private static BodyEffect EffectOf(IOperation region, ISymbol variable, out IOperation? read)
+    // RHS/sibling argument of a reset built FROM it, or a call that reads transitively).
+    // Resets: a non-reading reset (simple assignment, out argument, deconstruction target, or
+    // a call whose body definitely rewrites) that runs before any read on every path (not
+    // nested in a conditional/loop/try, no branch able to skip it) rewrites the variable.
+    // None: the region never touches the transferred value -- reads a skipped conditional
+    // reset dominates (same arm, after it) see the fresh value, and references inside nested
+    // local functions the region never invokes cannot run at all. Calls to sibling local
+    // functions resolve against `scope`; `inProgress` breaks recursion cycles.
+    private static BodyEffect EffectOf(IOperation region, ISymbol variable, IOperation scope, HashSet<IMethodSymbol> inProgress, out IOperation? read)
     {
         read = null;
-        var references = region.DescendantsAndSelf()
-            .Where(operation => SymbolEqualityComparer.Default.Equals(ReferencedVariable(operation), variable)
-                && !IsInsideNameOf(operation)
-                && !IsInAnUnreferencedNestedFunction(operation, region))
+        var events = region.DescendantsAndSelf()
+            .Where(operation => IsABodyEvent(operation, variable, region))
             .OrderBy(operation => operation.Syntax.SpanStart);
 
         var dominated = default(List<(Microsoft.CodeAnalysis.Text.TextSpan Region, int Position)>);
-        foreach (var reference in references)
+        foreach (var current in events)
         {
-            if (IsDominatedByASkippedReinitialization(dominated, reference))
+            if (IsDominatedByASkippedReinitialization(dominated, current))
             {
                 continue;
             }
 
-            var reset = ResetShapeOf(reference, variable, region, out read);
-            if (reset is null)
+            var (effect, evidence, reset) = ClassifyBodyEvent(current, variable, region, scope, inProgress);
+            if (effect == BodyEffect.Reads)
             {
-                read = reference; // a plain read of the transferred value
+                read = evidence;
                 return BodyEffect.Reads;
             }
 
-            if (read is not null)
+            if (effect != BodyEffect.Resets)
             {
-                return BodyEffect.Reads; // the replacement is built FROM the transferred value
+                continue;
             }
 
-            if (!IsConditionalWithin(reset, region)
-                && !ABranchCanSkip(reset, region.Syntax.SpanStart, region))
+            if (!IsConditionalWithin(reset!, region)
+                && !ABranchCanSkip(reset!, region.Syntax.SpanStart, region))
             {
                 return BodyEffect.Resets; // rewrites before any read on every path
             }
 
             (dominated ??= new List<(Microsoft.CodeAnalysis.Text.TextSpan, int)>())
-                .Add((DominatingRegion(reset).Syntax.Span, reference.Syntax.Span.End));
+                .Add((DominatingRegion(reset!).Syntax.Span, current.Syntax.Span.End));
         }
 
         return BodyEffect.None;
+    }
+
+    // The operations EffectOf walks: references to the variable, plus LOCAL-FUNCTION calls,
+    // whose bodies read or reset transitively (`void Outer() { Use(); }` -- the sibling's
+    // reference sits source-before the transfer, so only the call chain surfaces it).
+    private static bool IsABodyEvent(IOperation operation, ISymbol variable, IOperation region)
+    {
+        if (operation is IInvocationOperation { TargetMethod.MethodKind: MethodKind.LocalFunction })
+        {
+            return !IsInAnUnreferencedNestedFunction(operation, region);
+        }
+
+        return SymbolEqualityComparer.Default.Equals(ReferencedVariable(operation), variable)
+            && !IsInsideNameOf(operation)
+            && !IsInAnUnreferencedNestedFunction(operation, region);
+    }
+
+    private static (BodyEffect Effect, IOperation? Evidence, IOperation? Reset) ClassifyBodyEvent(
+        IOperation current, ISymbol variable, IOperation region, IOperation scope, HashSet<IMethodSymbol> inProgress)
+    {
+        if (current is IInvocationOperation invocation)
+        {
+            var callEffect = LocalFunctionCallEffect(invocation.TargetMethod, variable, scope, inProgress);
+            if (callEffect == BodyEffect.Resets
+                && SiblingArgumentRead(invocation.Arguments, variable, region.Syntax.SpanStart) is { } argumentRead)
+            {
+                return (BodyEffect.Reads, argumentRead, null); // arguments run before the body's reset
+            }
+
+            return callEffect == BodyEffect.Reads
+                ? (BodyEffect.Reads, invocation, null)
+                : (callEffect, null, invocation);
+        }
+
+        var reset = ResetShapeOf(current, variable, region, out var resetRead);
+        if (reset is null)
+        {
+            return (BodyEffect.Reads, current, null); // a plain read of the transferred value
+        }
+
+        return resetRead is not null
+            ? (BodyEffect.Reads, resetRead, null) // the replacement is built FROM the transferred value
+            : (BodyEffect.Resets, null, reset);
     }
 
     // The reset operation the reference belongs to (null when it is an ordinary read),
@@ -683,33 +741,94 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         });
     }
 
-    // The outer-scan variant: the boundary is the scan-root set instead of a single region.
-    private static bool IsWithinAnUncalledLocalFunction(IOperation operation, List<IOperation> scanRoots, IOperation scope)
-    {
-        for (var current = operation.Parent; current is not null; current = current.Parent)
-        {
-            if (current is ILocalFunctionOperation nested && !IsReferencedWithin(scope, nested.Symbol))
-            {
-                return true;
-            }
-
-            if (scanRoots.Contains(current))
-            {
-                return false;
-            }
-        }
-
-        return false;
-    }
-
     // Whether CALLING the local function reads the transferred value -- or definitely
-    // rewrites it, making the call act as a reinitialization at the call site.
-    private static BodyEffect LocalFunctionCallEffect(IMethodSymbol localFunction, ISymbol variable, IOperation scope)
+    // rewrites it, making the call act as a reinitialization at the call site. A recursive
+    // chain re-entering a body already on the walk contributes nothing new: mutation is
+    // detected at the reference where it occurs.
+    private static BodyEffect LocalFunctionCallEffect(IMethodSymbol localFunction, ISymbol variable, IOperation scope, HashSet<IMethodSymbol> inProgress)
     {
         var declaration = scope.DescendantsAndSelf().OfType<ILocalFunctionOperation>()
             .FirstOrDefault(operation => SymbolEqualityComparer.Default.Equals(operation.Symbol, localFunction));
+        if (declaration is null || !inProgress.Add(localFunction))
+        {
+            return BodyEffect.None;
+        }
 
-        return declaration is null ? BodyEffect.None : EffectOf(declaration, variable, out _);
+        try
+        {
+            return EffectOf(declaration, variable, scope, inProgress, out _);
+        }
+        finally
+        {
+            inProgress.Remove(localFunction);
+        }
+    }
+
+    // What invoking the delegate held by a LOCAL does: any lambda (or local function lifted
+    // into the delegate) ever stored in it that reads the transferred value makes the call a
+    // use -- `Action use = () => list.Add(1);` declared before the handoff runs after it.
+    // Never a reset: which stored callable actually runs is dynamic.
+    private static BodyEffect DelegateCallEffect(IInvocationOperation invocation, ISymbol variable, IOperation scope)
+    {
+        if (invocation.Instance is not ILocalReferenceOperation delegateLocal)
+        {
+            return BodyEffect.None;
+        }
+
+        var reads = StoredCallables(delegateLocal.Local, scope).Any(callable => callable switch
+        {
+            IAnonymousFunctionOperation lambda =>
+                EffectOf(lambda, variable, scope, new HashSet<IMethodSymbol>(SymbolEqualityComparer.Default), out _) == BodyEffect.Reads,
+            IMethodReferenceOperation { Method: { MethodKind: MethodKind.LocalFunction } method } =>
+                LocalFunctionCallEffect(method, variable, scope, new HashSet<IMethodSymbol>(SymbolEqualityComparer.Default)) == BodyEffect.Reads,
+            _ => false,
+        });
+
+        return reads ? BodyEffect.Reads : BodyEffect.None;
+    }
+
+    // Every callable ever stored in the delegate local within the scope: its initializer and
+    // all reassignments, unwrapped from the delegate-creation/conversion shells.
+    private static System.Collections.Generic.IEnumerable<IOperation> StoredCallables(ISymbol delegateLocal, IOperation scope)
+    {
+        foreach (var operation in scope.DescendantsAndSelf())
+        {
+            var stored = operation switch
+            {
+                IVariableDeclaratorOperation declarator
+                    when SymbolEqualityComparer.Default.Equals(declarator.Symbol, delegateLocal)
+                    => declarator.Initializer?.Value,
+                ISimpleAssignmentOperation assignment
+                    when SymbolEqualityComparer.Default.Equals(ReferencedVariable(assignment.Target), delegateLocal)
+                    => assignment.Value,
+                _ => null,
+            };
+
+            if (Callable(stored) is { } callable)
+            {
+                yield return callable;
+            }
+        }
+    }
+
+    private static IOperation? Callable(IOperation? stored)
+    {
+        while (true)
+        {
+            switch (stored)
+            {
+                case IDelegateCreationOperation creation:
+                    stored = creation.Target;
+                    break;
+                case IConversionOperation conversion:
+                    stored = conversion.Operand;
+                    break;
+                case IAnonymousFunctionOperation or IMethodReferenceOperation:
+                    return stored;
+                default:
+                    return null;
+            }
+        }
     }
 
     // Whether control can reach past the operation without executing it, judged within the
@@ -872,7 +991,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             }
 
             if (parent is ITryOperation tryOperation && ReferenceEquals(child, tryOperation.Body)
-                && WindowUseIn(tryOperation, variable) is { } use)
+                && WindowUseIn(tryOperation, variable, scope) is { } use)
             {
                 return use;
             }
@@ -884,11 +1003,11 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     // The first window region that actually READS the transferred value. A handler that
     // REWRITES the variable before touching it (catch { list = new(); ... }) is a recovery,
     // not a use -- the reinitialization classification applies inside the window too.
-    private static IOperation? WindowUseIn(ITryOperation tryOperation, ISymbol variable)
+    private static IOperation? WindowUseIn(ITryOperation tryOperation, ISymbol variable, IOperation scope)
     {
         foreach (var region in WindowRegionsOf(tryOperation))
         {
-            if (EffectOf(region, variable, out var read) == BodyEffect.Reads)
+            if (EffectOf(region, variable, scope, new HashSet<IMethodSymbol>(SymbolEqualityComparer.Default), out var read) == BodyEffect.Reads)
             {
                 return read;
             }
