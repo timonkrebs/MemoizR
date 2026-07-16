@@ -4440,6 +4440,211 @@ public class UseAfterTransferAnalyzerTests
     }
 
     [Fact]
+    public async Task UsingDisposal_IsThrowCapable()
+    {
+        // The scope's Dispose runs after the handoff and can throw into the catch, which
+        // then reads the transferred list.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using System.IO;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    try
+                    {
+                        using (var scope = new MemoryStream())
+                        {
+                            _ = Sending.Transfer(list);
+                        }
+                    }
+                    catch
+                    {
+                        list.Add(1);
+                    }
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+    }
+
+    [Fact]
+    public async Task UnconstrainedGenericSources_AreTracked()
+    {
+        // T can be any mutable type at the call site: the generic helper's post-transfer
+        // read is exactly the hazard MZR005 exists for.
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public class C
+            {
+                public void M<T>(T value)
+                {
+                    _ = Sending.Transfer(value);
+                    _ = value;
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+    }
+
+    [Fact]
+    public async Task StructFieldReads_CannotThrow()
+    {
+        // Reading a field off a struct local dereferences nothing: no exception path can
+        // carry the wrapper into the handler.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public struct Point
+            {
+                public int X;
+            }
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    var point = new Point();
+                    try
+                    {
+                        var sent = Sending.Transfer(list);
+                        _ = point.X;
+                    }
+                    catch
+                    {
+                        list.Add(1);
+                    }
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task SiblingArmDelegateStores_CannotEscapeOnTheTransferPath()
+    {
+        // The reading lambda lands in use only on the arm that did NOT transfer: no path
+        // both hands off the list and returns that callable.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public Action? M(bool move)
+                {
+                    var list = new List<int> { 1 };
+                    Action? use = null;
+                    if (move)
+                    {
+                        _ = Sending.Transfer(list);
+                    }
+                    else
+                    {
+                        use = () => list.Add(1);
+                    }
+
+                    return use;
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task DuplicateMulticastTargets_SurviveOneRemoval()
+    {
+        // Touch was added twice and removed once: one target remains and reads the
+        // transferred list at the call.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    void Touch() => list.Add(1);
+                    Action? use = Touch;
+                    use += Touch;
+                    use -= Touch;
+                    var sending = Sending.Transfer(list);
+                    use?.Invoke();
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+    }
+
+    [Fact]
+    public async Task DelegateParameters_EscapeLikeLocals()
+    {
+        // The parameter holds the reading lambda and is returned after the handoff: the
+        // caller can run it against the receiver-owned object.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public Action M(Action use)
+                {
+                    var list = new List<int> { 1 };
+                    use = () => list.Add(1);
+                    var sending = Sending.Transfer(list);
+                    return use;
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+    }
+
+    [Fact]
+    public async Task FrameworkValueCarrierConstructors_CarryTheirArguments()
+    {
+        // KeyValuePair's constructor deterministically stores both arguments: the receiver
+        // owns a pair containing the same list.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(new KeyValuePair<string, List<int>>("k", list));
+                    list.Add(1);
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
     public async Task AnonymousObjectInitializers_AreTransferSources()
     {
         // Transfer(new { Value = list }) hands off an object graph containing the same list:

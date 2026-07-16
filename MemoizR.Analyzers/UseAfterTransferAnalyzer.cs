@@ -122,6 +122,14 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             return null;
         }
 
+        // A TYPE PARAMETER passes the classifier by design (creation sites check the closed
+        // type), but no closed check exists for a generic transfer helper: track it unless
+        // its constraints prove it harmless.
+        if (source.Type is ITypeParameterSymbol typeParameter)
+        {
+            return typeParameter.HasUnmanagedTypeConstraint ? null : variable;
+        }
+
         return source.Type is { } sourceType && classifier.GetNotSendableReason(sourceType) is null
             ? null
             : variable;
@@ -802,15 +810,15 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
 
         var delegateEscapes = scanRoots
             .SelectMany(root => root.DescendantsAndSelf())
-            .OfType<ILocalReferenceOperation>()
-            .Where(reference => reference.Local.Type is { TypeKind: TypeKind.Delegate }
+            .Where(reference => reference is ILocalReferenceOperation or IParameterReferenceOperation
+                && DelegateSymbolOf(reference) is { } delegateSymbol
                 && reference.Syntax.SpanStart >= transferPosition
                 && EscapesTheScope(reference)
                 && !IsInASiblingArmOfTheTransfer(reference, transferPosition)
                 && (escaped || !IsInAnUnreachableCatch(reference, transferPosition))
                 && !IsWithinALocalFunctionBody(reference, scanRoots)
-                && AnyStoredCallableReads(reference.Local, variable, reference, 0, scope))
-            .Select(reference => (Operation: (IOperation)reference, CallEffect: (BodyEffect?)BodyEffect.Reads));
+                && AnyStoredCallableReads(delegateSymbol, variable, reference, transferPosition, scope))
+            .Select(reference => (Operation: reference, CallEffect: (BodyEffect?)BodyEffect.Reads));
 
         return methodGroupEscapes.Concat(delegateEscapes);
     }
@@ -1115,6 +1123,20 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         // Only the PRIMARY constructor's parameters deterministically store (its declaring
         // syntax IS the record declaration); a hand-written constructor with a matching
         // parameter name promises nothing.
+        // Known framework VALUE CARRIERS store every constructor argument by contract:
+        // KeyValuePair/Tuple/ValueTuple are tuple syntax in another spelling.
+        if (creation.Constructor is { ContainingType: { } carrierType }
+            && carrierType.Name is "KeyValuePair" or "ValueTuple" or "Tuple"
+            && IsFrameworkDeclared(carrierType))
+        {
+            foreach (var argument in creation.Arguments)
+            {
+                yield return argument.Value;
+            }
+
+            yield break;
+        }
+
         if (creation.Constructor is not { ContainingType: { IsRecord: true } recordType } constructor
             || !constructor.DeclaringSyntaxReferences.Any(reference =>
                 reference.GetSyntax() is Microsoft.CodeAnalysis.CSharp.Syntax.RecordDeclarationSyntax))
@@ -1330,10 +1352,24 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     // The local the invocation calls through -- behind a ?. receiver too: use?.Invoke() puts
     // a placeholder in Instance, and the real receiver hangs off the enclosing conditional
     // access.
+    // The delegate-typed local or parameter a reference names.
+    private static ISymbol? DelegateSymbolOf(IOperation reference)
+    {
+        var symbol = ReferencedVariable(reference);
+        var type = symbol switch
+        {
+            ILocalSymbol local => local.Type,
+            IParameterSymbol parameter => parameter.Type,
+            _ => null,
+        };
+
+        return type is { TypeKind: TypeKind.Delegate } ? symbol : null;
+    }
+
     // A delegate reference ESCAPES when it is returned, passed as an argument, or stored
     // into a non-local slot -- merely inspecting it (use != null) runs nothing, a local
     // copy is an alias resolved at ITS uses, and calls/stores are classified separately.
-    private static bool EscapesTheScope(ILocalReferenceOperation reference)
+    private static bool EscapesTheScope(IOperation reference)
     {
         for (IOperation child = reference; child.Parent is { } parent; child = parent)
         {
@@ -1400,26 +1436,18 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             .DefaultIfEmpty(int.MinValue)
             .Max();
 
-        var removals = DelegateRemovals(delegateLocal, scope, consumer);
+        var survivors = SurvivingStoreIndices(stores, delegateLocal, scope, consumer);
 
-        foreach (var (site, value, _) in stores)
+        for (var index = 0; index < stores.Count; index++)
         {
-            if (site.Syntax.SpanStart < killPoint)
+            var (site, value, _) = stores[index];
+            if (site.Syntax.SpanStart < killPoint || !survivors.Contains(index))
             {
                 continue;
             }
 
             if (Callable(value) is { } callable)
             {
-                // A definite `-= M` after the store strips that target: only METHOD GROUPS
-                // are identifiable (removing a fresh lambda instance removes nothing).
-                if (callable is IMethodReferenceOperation storedGroup
-                    && removals.Any(removal => removal.Position > site.Syntax.SpanStart
-                        && SymbolEqualityComparer.Default.Equals(removal.Method, storedGroup.Method.OriginalDefinition)))
-                {
-                    continue;
-                }
-
                 yield return callable;
             }
             else if (ReferencedVariable(value) is { } alias)
@@ -1432,6 +1460,31 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                 }
             }
         }
+    }
+
+    // A definite `-= M` strips ONE matching target -- the last prior add/assignment of M
+    // (only method groups are identifiable; removing a fresh lambda instance removes
+    // nothing). Duplicate subscriptions survive their single removal.
+    private static HashSet<int> SurvivingStoreIndices(
+        List<(IOperation Site, IOperation Value, bool Replaces)> stores, ISymbol delegateLocal, IOperation scope, IOperation consumer)
+    {
+        var survivors = new HashSet<int>(Enumerable.Range(0, stores.Count));
+        foreach (var removal in DelegateRemovals(delegateLocal, scope, consumer).OrderBy(removal => removal.Position))
+        {
+            for (var index = stores.Count - 1; index >= 0; index--)
+            {
+                if (survivors.Contains(index)
+                    && stores[index].Site.Syntax.SpanStart < removal.Position
+                    && Callable(stores[index].Value) is IMethodReferenceOperation storedGroup
+                    && SymbolEqualityComparer.Default.Equals(removal.Method, storedGroup.Method.OriginalDefinition))
+                {
+                    survivors.Remove(index);
+                    break;
+                }
+            }
+        }
+
+        return survivors;
     }
 
     private static List<(int Position, IMethodSymbol Method)> DelegateRemovals(ISymbol delegateLocal, IOperation scope, IOperation consumer)
@@ -1602,9 +1655,16 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     {
         return operation switch
         {
-            // Instance fields dereference their receiver (`this` cannot be null); a STATIC
+            // Instance fields dereference REFERENCE-type receivers (`this` and struct locals
+            // cannot be null; the receiver expression is modeled on its own); a STATIC
             // field's first touch can run a throwing type initializer.
-            IFieldReferenceOperation field => field.Instance is not IInstanceReferenceOperation,
+            IFieldReferenceOperation field => field.Instance switch
+            {
+                null => true,
+                IInstanceReferenceOperation => false,
+                { Type.IsValueType: true } => false,
+                _ => true,
+            },
             IConversionOperation conversion => conversion.OperatorMethod is not null
                 || (conversion.Conversion is { IsReference: true, IsImplicit: false } && !conversion.IsTryCast),
             IUnaryOperation unary => unary.OperatorMethod is not null,
@@ -1613,7 +1673,9 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                 or IPropertyReferenceOperation or IArrayElementReferenceOperation or IThrowOperation
                 or IDynamicInvocationOperation or IDynamicMemberReferenceOperation
                 or IDynamicIndexerAccessOperation or IDynamicObjectCreationOperation
-                or IEventAssignmentOperation,
+                or IEventAssignmentOperation
+                // scope exits dispose: Dispose/DisposeAsync is user code and can throw
+                or IUsingOperation or IUsingDeclarationOperation,
         };
     }
 
