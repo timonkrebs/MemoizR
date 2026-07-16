@@ -15,7 +15,18 @@ COYOTE_VERSION_SUFFIX="net10.1"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FEED_DIR="$REPO_ROOT/packages/coyote"
-SRC_DIR="${COYOTE_SRC_DIR:-$(mktemp -d)/coyote-src}"
+# Where the clone lives matters twice over:
+#  - NOT inside this repository: MSBuild's upward directory walk would impose
+#    MemoizR's Directory.Build.props/Directory.Packages.props (central package
+#    management) onto Coyote's projects, which fails their restore with NU1008.
+#  - NOT under macOS's $TMPDIR (what plain mktemp returns there): that path is
+#    under /var, a symlink to /private/var, and MSBuild's publish/pack pipeline
+#    mixes the raw and canonicalized spellings -- the packed Coyote CLI tool then
+#    ships without its Mono.Cecil dependencies and `coyote rewrite` dies at startup.
+# On CI, RUNNER_TEMP is a real (non-symlinked) per-job directory outside the
+# workspace on every OS. The mktemp fallback covers local runs (on Linux /tmp is a
+# real path; on a macOS dev machine, export COYOTE_SRC_DIR to a non-/var path).
+SRC_DIR="${COYOTE_SRC_DIR:-${RUNNER_TEMP:-$(mktemp -d)}/coyote-src}"
 
 if ls "$FEED_DIR"/Microsoft.Coyote."$COYOTE_VERSION_PREFIX-$COYOTE_VERSION_SUFFIX".nupkg >/dev/null 2>&1; then
     echo "Coyote packages already present in $FEED_DIR; skipping."
@@ -23,6 +34,7 @@ if ls "$FEED_DIR"/Microsoft.Coyote."$COYOTE_VERSION_PREFIX-$COYOTE_VERSION_SUFFI
 fi
 
 echo "Cloning $COYOTE_REPO at $COYOTE_COMMIT"
+rm -rf "$SRC_DIR"
 git clone --no-checkout --filter=blob:none "$COYOTE_REPO" "$SRC_DIR"
 git -C "$SRC_DIR" checkout --quiet "$COYOTE_COMMIT"
 
