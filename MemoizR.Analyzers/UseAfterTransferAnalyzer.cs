@@ -98,17 +98,76 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                     continue;
                 }
 
-                var enclosingBody = EnclosingFunctionBody(operation, block);
-                var (scanRoots, escaped) = ScanRootsFor(operation, enclosingBody);
-                if (scanRoots.Count > 0)
+                foreach (var entry in EntriesFor(operation, variable, block))
                 {
-                    yield return (variable, operation.Syntax.Span.End, scanRoots, escaped, operation, enclosingBody);
+                    yield return entry;
                 }
             }
         }
     }
 
-    private static ISimpleAssignmentOperation? EnclosingReinitializingAssignment(IOperation transfer, ISymbol variable)
+    private static IEnumerable<(ISymbol Variable, int Position, List<IOperation> ScanRoots, bool Escaped, IOperation Transfer, IOperation Scope)> EntriesFor(
+        IOperation transfer, ISymbol variable, IOperation block)
+    {
+        var enclosingBody = EnclosingFunctionBody(transfer, block);
+        var (scanRoots, escaped) = ScanRootsFor(transfer, enclosingBody);
+        if (scanRoots.Count > 0)
+        {
+            yield return (variable, transfer.Syntax.Span.End, scanRoots, escaped, transfer, enclosingBody);
+        }
+
+        // A transfer inside a CALLED local function is sequenced before the caller's
+        // continuation: every call site acts as a transfer of its own. Lambdas stay
+        // deferred-scoped (they may run later or never).
+        foreach (var propagated in CallSiteTransfers(enclosingBody, block,
+            new HashSet<IMethodSymbol>(SymbolEqualityComparer.Default)))
+        {
+            yield return (variable, propagated.Position, propagated.Roots, propagated.Escaped, propagated.Site, propagated.Scope);
+        }
+    }
+
+    // Call sites of the local function whose body contains the transfer -- transitively:
+    // a call inside ANOTHER declaration only runs through that declaration's own callers.
+    private static IEnumerable<(int Position, List<IOperation> Roots, bool Escaped, IOperation Site, IOperation Scope)> CallSiteTransfers(
+        IOperation transferBody, IOperation block, HashSet<IMethodSymbol> visited)
+    {
+        if (transferBody is not ILocalFunctionOperation declaration || !visited.Add(declaration.Symbol))
+        {
+            yield break;
+        }
+
+        foreach (var invocation in block.DescendantsAndSelf().OfType<IInvocationOperation>())
+        {
+            if (!SymbolEqualityComparer.Default.Equals(invocation.TargetMethod.OriginalDefinition, declaration.Symbol))
+            {
+                continue;
+            }
+
+            var callBody = EnclosingFunctionBody(invocation, block);
+            if (ReferenceEquals(callBody, transferBody))
+            {
+                continue; // self-recursion: the body scan already covers it
+            }
+
+            if (callBody is ILocalFunctionOperation)
+            {
+                foreach (var nested in CallSiteTransfers(callBody, block, visited))
+                {
+                    yield return nested;
+                }
+
+                continue;
+            }
+
+            var (roots, escaped) = ScanRootsFor(invocation, callBody);
+            if (roots.Count > 0)
+            {
+                yield return (invocation.Syntax.Span.End, roots, escaped, invocation, callBody);
+            }
+        }
+    }
+
+    private static IOperation? EnclosingReinitializingAssignment(IOperation transfer, ISymbol variable)
     {
         for (IOperation child = transfer; child.Parent is { } parent; child = parent)
         {
@@ -122,6 +181,16 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                 && SymbolEqualityComparer.Default.Equals(ReferencedVariable(assignment.Target), variable))
             {
                 return assignment;
+            }
+
+            // (list, _) = (new List<int>(), Sending.Transfer(list)): the deconstruction
+            // assigns the fresh element to the variable right after its RHS evaluated.
+            if (parent is IDeconstructionAssignmentOperation deconstruction
+                && !ReferenceEquals(child, deconstruction.Target)
+                && deconstruction.Target.DescendantsAndSelf()
+                    .Any(element => SymbolEqualityComparer.Default.Equals(ReferencedVariable(element), variable)))
+            {
+                return deconstruction;
             }
         }
 
@@ -962,7 +1031,9 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             return BodyEffect.None;
         }
 
-        var reads = StoredCallables(delegateLocal, scope, invocation, transferPosition).Any(callable => callable switch
+        var candidates = StoredCallables(delegateLocal, scope, invocation, transferPosition,
+            new HashSet<ISymbol>(SymbolEqualityComparer.Default));
+        var reads = candidates.Any(callable => callable switch
         {
             IAnonymousFunctionOperation lambda =>
                 EffectOf(lambda, variable, scope, new HashSet<IMethodSymbol>(SymbolEqualityComparer.Default), out _) == BodyEffect.Reads,
@@ -996,40 +1067,81 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     }
 
     // Every callable stored in the delegate local that can still be its value AT THE CALL:
-    // stores in a sibling arm of the transfer never run on the transferred path, and a store
-    // that only happens after the call cannot be what it invoked -- unless a loop carries it
-    // back around.
-    private static System.Collections.Generic.IEnumerable<IOperation> StoredCallables(ISymbol delegateLocal, IOperation scope, IInvocationOperation call, int transferPosition)
+    // stores in a sibling arm of the transfer never run on the transferred path, a store
+    // that only happens after the call cannot be what it invoked (unless a loop carries it
+    // back around), a definite `=` overwrite KILLS every earlier target, `-=` never adds
+    // one, and a plain delegate-to-delegate copy carries the SOURCE local's candidates.
+    private static System.Collections.Generic.IEnumerable<IOperation> StoredCallables(
+        ISymbol delegateLocal, IOperation scope, IInvocationOperation call, int transferPosition, HashSet<ISymbol> visited)
     {
-        foreach (var operation in scope.DescendantsAndSelf())
+        if (!visited.Add(delegateLocal))
         {
-            var stored = operation switch
-            {
-                IVariableDeclaratorOperation declarator
-                    when SymbolEqualityComparer.Default.Equals(declarator.Symbol, delegateLocal)
-                    => declarator.Initializer?.Value,
-                ISimpleAssignmentOperation assignment
-                    when SymbolEqualityComparer.Default.Equals(ReferencedVariable(assignment.Target), delegateLocal)
-                    => assignment.Value,
-                // use += () => ...: the combine keeps every previous target AND adds this one.
-                ICompoundAssignmentOperation combined
-                    when SymbolEqualityComparer.Default.Equals(ReferencedVariable(combined.Target), delegateLocal)
-                    => combined.Value,
-                _ => null,
-            };
+            yield break;
+        }
 
-            if (stored is null
-                || IsInASiblingArmOfTheTransfer(operation, transferPosition)
-                || (operation.Syntax.SpanStart >= call.Syntax.Span.End && !SharesALoopWith(operation, call)))
+        var stores = DelegateStores(delegateLocal, scope, call, transferPosition);
+
+        // A definite overwrite replaces the whole invocation list: candidates begin at the
+        // LAST replace that runs on every path to the call.
+        var killPoint = stores
+            .Where(store => store.Replaces && !IsConditionalWithin(store.Site, scope))
+            .Select(store => store.Site.Syntax.SpanStart)
+            .DefaultIfEmpty(int.MinValue)
+            .Max();
+
+        foreach (var (site, value, _) in stores)
+        {
+            if (site.Syntax.SpanStart < killPoint)
             {
                 continue;
             }
 
-            if (Callable(stored) is { } callable)
+            if (Callable(value) is { } callable)
             {
                 yield return callable;
             }
+            else if (ReferencedVariable(value) is { } alias)
+            {
+                // Action use = use2: the copy carries whatever the SOURCE could hold.
+                foreach (var carried in StoredCallables(alias, scope, call, transferPosition, visited))
+                {
+                    yield return carried;
+                }
+            }
         }
+    }
+
+    private static List<(IOperation Site, IOperation Value, bool Replaces)> DelegateStores(
+        ISymbol delegateLocal, IOperation scope, IInvocationOperation call, int transferPosition)
+    {
+        var stores = new List<(IOperation Site, IOperation Value, bool Replaces)>();
+        foreach (var operation in scope.DescendantsAndSelf())
+        {
+            (IOperation Value, bool Replaces)? matched = operation switch
+            {
+                IVariableDeclaratorOperation declarator
+                    when SymbolEqualityComparer.Default.Equals(declarator.Symbol, delegateLocal)
+                        && declarator.Initializer is { } initializer
+                    => (initializer.Value, true),
+                ISimpleAssignmentOperation assignment
+                    when SymbolEqualityComparer.Default.Equals(ReferencedVariable(assignment.Target), delegateLocal)
+                    => (assignment.Value, true),
+                // use += adds a target; -= only removes, storing nothing.
+                ICompoundAssignmentOperation { OperatorKind: BinaryOperatorKind.Add } combined
+                    when SymbolEqualityComparer.Default.Equals(ReferencedVariable(combined.Target), delegateLocal)
+                    => (combined.Value, false),
+                _ => null,
+            };
+
+            if (matched is { } store
+                && !IsInASiblingArmOfTheTransfer(operation, transferPosition)
+                && (operation.Syntax.SpanStart < call.Syntax.Span.End || SharesALoopWith(operation, call)))
+            {
+                stores.Add((operation, store.Value, store.Replaces));
+            }
+        }
+
+        return stores;
     }
 
     private static bool SharesALoopWith(IOperation store, IOperation call)
@@ -1134,8 +1246,25 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         return region.DescendantsAndSelf().Any(operation =>
             operation.Syntax.Span.End > transferPosition
             && !IsWithinANestedFunction(operation, region)
-            && operation is IInvocationOperation or IObjectCreationOperation or IAwaitOperation
-                or IPropertyReferenceOperation or IArrayElementReferenceOperation or IFieldReferenceOperation);
+            && CanThrow(operation));
+    }
+
+    // The heuristic throw model shared by catch reachability and the reinitialization
+    // windows: calls, allocations, awaits and member/element accesses that dereference --
+    // a FIELD read only through a possibly-null receiver (`this` cannot be null) -- plus
+    // user-defined conversions/operators and explicit reference downcasts.
+    private static bool CanThrow(IOperation operation)
+    {
+        return operation switch
+        {
+            IFieldReferenceOperation field => field.Instance is not null and not IInstanceReferenceOperation,
+            IConversionOperation conversion => conversion.OperatorMethod is not null
+                || (conversion.Conversion is { IsReference: true, IsImplicit: false } && !conversion.IsTryCast),
+            IUnaryOperation unary => unary.OperatorMethod is not null,
+            IBinaryOperation binary => binary.OperatorMethod is not null,
+            _ => operation is IInvocationOperation or IObjectCreationOperation or IAwaitOperation
+                or IPropertyReferenceOperation or IArrayElementReferenceOperation,
+        };
     }
 
     // The use is in an arm of an if/switch/?. whose SIBLING arm holds the transfer: the arms
@@ -1220,9 +1349,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     private static IOperation? CatchUseDuringReinitialization(IOperation reinitialization, ISymbol variable, IOperation scope)
     {
         var reinitRoot = reinitialization is IArgumentOperation { Parent: { } call } ? call : reinitialization;
-        var canThrow = reinitRoot.DescendantsAndSelf()
-            .Any(operation => operation is IInvocationOperation or IObjectCreationOperation or IAwaitOperation
-                or IPropertyReferenceOperation or IArrayElementReferenceOperation or IFieldReferenceOperation);
+        var canThrow = reinitRoot.DescendantsAndSelf().Any(CanThrow);
         if (!canThrow)
         {
             return null;
