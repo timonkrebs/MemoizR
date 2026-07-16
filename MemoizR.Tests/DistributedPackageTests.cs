@@ -602,6 +602,99 @@ public class DistributedPackageTests
     }
 
     [Fact]
+    public async Task RemoteSignal_SupersededNewerRestartAnswer_IsReverified_NotDropped()
+    {
+        // Two racing verification pulls under one generation: the OLDER restart's answer
+        // commits first (it was live when it answered), superseding the newer restart's
+        // answer. Dropping that answer silently would pin the mirror to the now-dead epoch
+        // when its delivery was a one-shot -- it must re-enter the verification path instead.
+        var epoch1 = 11L;
+        var epoch2 = 22L;
+        var epoch3 = 33L;
+        var firstAnswer = new TaskCompletionSource<ValuePayload<int>>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var secondAnswer = new TaskCompletionSource<ValuePayload<int>>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var pulls = 0;
+        var consumer = new MemoFactory();
+        var mirror = consumer.CreateRemoteSignal("mirror", 0, () =>
+            Interlocked.Increment(ref pulls) switch
+            {
+                1 => firstAnswer.Task,
+                2 => secondAnswer.Task,
+                // The re-verification and anything later answers the live incarnation.
+                _ => Task.FromResult(new ValuePayload<int>(1000, epoch3, 2, 333, CausalityStamp.ForSignal(1000, 2, epoch3).Serialize(), false)),
+            });
+
+        await mirror.OnValueAsync(new ValuePayload<int>(1000, epoch1, 5, 111, CausalityStamp.ForSignal(1000, 5, epoch1).Serialize(), false));
+
+        // Two one-shot deliveries from two successive restarts, each triggering a pull.
+        var delivery2 = mirror.OnValueAsync(new ValuePayload<int>(1000, epoch2, 1, 222, CausalityStamp.ForSignal(1000, 1, epoch2).Serialize(), false));
+        var delivery3 = mirror.OnValueAsync(new ValuePayload<int>(1000, epoch3, 1, 333, CausalityStamp.ForSignal(1000, 1, epoch3).Serialize(), false));
+
+        // The older restart's answer arrives first and commits (it was live at answer time)...
+        firstAnswer.SetResult(new ValuePayload<int>(1000, epoch2, 1, 222, CausalityStamp.ForSignal(1000, 1, epoch2).Serialize(), false));
+        await delivery2.WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.Equal(epoch2, mirror.Publication!.Epoch);
+
+        // ... superseding the newer restart's answer, which must be re-verified, not dropped.
+        secondAnswer.SetResult(new ValuePayload<int>(1000, epoch3, 1, 333, CausalityStamp.ForSignal(1000, 1, epoch3).Serialize(), false));
+        await delivery3.WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.Equal(epoch3, mirror.Publication!.Epoch);
+        Assert.Equal(333, await mirror.Local.Get());
+    }
+
+    [Fact]
+    public async Task RemoteSignal_FailedResubscription_DoesNotSolicitTheBrokenChannel()
+    {
+        // The peer restarts again mid-resubscription AND the hook then fails: the channel was
+        // just reported broken, so closing the window must NOT actively pull it -- soliciting
+        // it could commit exactly the stale answers the window exists to refuse. Recovery is
+        // the bridge's own retry plus the next advertisement, which heals normally.
+        var epoch1 = 11L;
+        var epoch2 = 22L;
+        var epoch3 = 33L;
+        var failFirstHook = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var hookRuns = 0;
+        var pulls = 0;
+        var consumer = new MemoFactory();
+        var mirror = consumer.CreateRemoteSignal("mirror", 0,
+            () =>
+            {
+                var n = Interlocked.Increment(ref pulls);
+                return Task.FromResult(n == 1
+                    ? new ValuePayload<int>(1000, epoch2, 1, 222, CausalityStamp.ForSignal(1000, 1, epoch2).Serialize(), false)
+                    : new ValuePayload<int>(1000, epoch3, 1, 333, CausalityStamp.ForSignal(1000, 1, epoch3).Serialize(), false));
+            },
+            onPeerReset: async () =>
+            {
+                if (Interlocked.Increment(ref hookRuns) == 1)
+                {
+                    await failFirstHook.Task;
+                    throw new InvalidOperationException("resubscribe transport down");
+                }
+            });
+
+        await mirror.OnValueAsync(new ValuePayload<int>(1000, epoch1, 5, 111, CausalityStamp.ForSignal(1000, 5, epoch1).Serialize(), false));
+
+        var delivery = mirror.OnValueAsync(new ValuePayload<int>(1000, epoch2, 1, 222, CausalityStamp.ForSignal(1000, 1, epoch2).Serialize(), false));
+        await TestHelpers.WaitForConvergenceAsync(() => Volatile.Read(ref hookRuns) == 1);
+
+        // A second restart's one-shot delivery is refused during the window...
+        await mirror.OnValueAsync(new ValuePayload<int>(1000, epoch3, 1, 333, CausalityStamp.ForSignal(1000, 1, epoch3).Serialize(), false));
+
+        // ... and the hook then FAILS: the window closes without soliciting the broken channel.
+        failFirstHook.SetResult();
+        await Assert.ThrowsAsync<InvalidOperationException>(() => delivery.WaitAsync(TimeSpan.FromSeconds(10)));
+        await Task.Delay(100); // no detached verification pull may sneak in
+        Assert.Equal(1, Volatile.Read(ref pulls));
+        Assert.Equal(epoch2, mirror.Publication!.Epoch);
+
+        // The bridge repairs its channel; the next advertisement heals the mirror normally.
+        await mirror.OnStaleAsync(new StaleNotification(1000, epoch3, 1, CausalityStamp.Empty.Serialize()));
+        Assert.Equal(epoch3, mirror.Publication!.Epoch);
+        Assert.Equal(333, await mirror.Local.Get());
+    }
+
+    [Fact]
     public async Task RemoteSignal_DelayedPayloadFromASkippedIncarnation_CannotAbandonTheLiveEpoch()
     {
         // The host restarted twice and the mirror never saw the middle incarnation, so that

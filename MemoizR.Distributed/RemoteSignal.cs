@@ -233,13 +233,15 @@ public sealed class RemoteSignal<T>
         // local signal never published.
         if (verdict == AdoptionVerdict.AdoptReset && OnPeerReset != null)
         {
+            var resubscribed = false;
             try
             {
                 await OnPeerReset();
+                resubscribed = true;
             }
             finally
             {
-                await CloseResettlingWindowAsync();
+                await CloseResettlingWindowAsync(resubscribed);
             }
         }
     }
@@ -252,15 +254,18 @@ public sealed class RemoteSignal<T>
     // that opened the window (no per-reset window identity needed). If an epoch change was
     // refused while the window was open, verify it now on a detached best-effort pull: that
     // refusal may have been the dead-epoch delivery's ONLY advertisement (no heartbeat), and
-    // dropping it silently would pin the mirror to a dead incarnation.
-    private async Task CloseResettlingWindowAsync()
+    // dropping it silently would pin the mirror to a dead incarnation. Only after a SUCCESSFUL
+    // resubscription, though: a failed hook just reported the channel broken, and actively
+    // pulling it would solicit exactly the stale answers the window exists to refuse --
+    // recovery is then the bridge's own retry plus the next advertisement or heartbeat.
+    private async Task CloseResettlingWindowAsync(bool resubscribed)
     {
         bool verify;
         await adoptionGate.WaitAsync();
         try
         {
             resettling = false;
-            verify = pendingEpochVerification;
+            verify = pendingEpochVerification && resubscribed;
             pendingEpochVerification = false;
             Interlocked.Increment(ref epochGeneration);
         }
@@ -338,9 +343,13 @@ public sealed class RemoteSignal<T>
         // remembered and answered with a verification pull when the window closes: the peer
         // may have restarted AGAIN mid-resubscription, and this delivery may have been the new
         // incarnation's only advertisement. Otherwise an unsolicited payload gets a
-        // verification pull directly; a superseded pull answer (an epoch change committed
-        // since it was issued) is just dropped -- whatever committed is newer knowledge, and
-        // the live incarnation keeps advertising.
+        // verification pull directly -- and so does a SUPERSEDED pull answer (an epoch change
+        // committed since it was issued) that still claims a different epoch than the one
+        // committed: with racing verification pulls under one generation, the older restart's
+        // answer can commit first, and silently dropping the newer restart's answer would pin
+        // the mirror to a dead epoch when its delivery was a one-shot. Each such re-verify
+        // costs one pull and requires a real interleaved commit, so the chain terminates; late
+        // answers from epochs this mirror ABANDONED never reach this branch.
         if (resettling)
         {
             pendingEpochVerification = true;
@@ -350,7 +359,7 @@ public sealed class RemoteSignal<T>
         {
             return AdoptionVerdict.AdoptReset;
         }
-        return pulledAtGeneration is null ? AdoptionVerdict.VerifyByPull : AdoptionVerdict.Drop;
+        return AdoptionVerdict.VerifyByPull;
     }
 
     // Must be called under the adoption gate. Commits the ordering state and builds the new
