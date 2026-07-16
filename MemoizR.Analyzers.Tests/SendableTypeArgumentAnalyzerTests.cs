@@ -619,6 +619,26 @@ public class SendableTypeArgumentAnalyzerTests
     }
 
     [Fact]
+    public async Task ParenthesizedOptOutReceivers_KeepTheOptOut()
+    {
+        // Parentheses are pure syntax: the receiver operation is the creation itself.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    (new MemoFactory(options: MemoFactoryOptions.DisableSendableChecks)).CreateSignal(new List<int>());
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
     public async Task BlazorFluentOptOutFactory_IsStillExempt()
     {
         // AddBlazorDispatcher mirrors AddWpfDispatcher: it returns the SAME factory via

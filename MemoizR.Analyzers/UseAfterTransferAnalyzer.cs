@@ -58,10 +58,20 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                 // reads still inside the RHS (after the transfer) and the throw window count.
                 if (EnclosingReinitializingAssignment(transfer, variable) is { } enclosingReinit)
                 {
-                    if (!ReportUsesAfter(context, new List<IOperation> { enclosingReinit }, escaped, variable, transferPosition, transfer, scope)
-                        && CatchUseDuringReinitialization(enclosingReinit, variable, scope) is { } windowUse)
+                    var reported = ReportUsesAfter(context, new List<IOperation> { enclosingReinit }, escaped, variable, transferPosition, transfer, scope);
+                    if (!reported && CatchUseDuringReinitialization(enclosingReinit, variable, scope) is { } windowUse)
                     {
                         Report(context, windowUse, variable);
+                        reported = true;
+                    }
+
+                    // The RHS can throw into a RESUMING catch before the assignment
+                    // completes: after the try the variable may still hold the transferred
+                    // value, so later uses stay reportable.
+                    if (!reported && CanThrowAfterTheTransfer(enclosingReinit, transferPosition)
+                        && ACaughtFailureCanResumePast(enclosingReinit, enclosingReinit.Syntax.Span.End))
+                    {
+                        ReportUsesAfter(context, scanRoots, escaped, variable, transferPosition, transfer, scope);
                     }
 
                     continue;
@@ -1899,7 +1909,28 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     {
         var transferCase = switchOperation.Cases.FirstOrDefault(switchCase => Covers(switchCase, transferPosition));
         return transferCase is not null
-            && transferCase.Descendants().Any(operation => operation is IBranchOperation { BranchKind: BranchKind.GoTo });
+            && transferCase.Descendants().Any(operation =>
+                operation is IBranchOperation { BranchKind: BranchKind.GoTo }
+                // only `goto case`/`goto default` re-enters an arm -- a plain goto label
+                // leaves the switch -- and only when it belongs to THIS switch and can run
+                // after the handoff.
+                && operation.Syntax is Microsoft.CodeAnalysis.CSharp.Syntax.GotoStatementSyntax gotoSyntax
+                && gotoSyntax.CaseOrDefaultKeyword.RawKind != 0
+                && operation.Syntax.SpanStart >= transferPosition
+                && ReferenceEquals(NearestSwitch(operation), switchOperation));
+    }
+
+    private static ISwitchOperation? NearestSwitch(IOperation operation)
+    {
+        for (var parent = operation.Parent; parent is not null; parent = parent.Parent)
+        {
+            if (parent is ISwitchOperation nearest)
+            {
+                return nearest;
+            }
+        }
+
+        return null;
     }
 
     // A `when` guard is arm-SELECTION machinery, not an arm: a failing guard falls through to

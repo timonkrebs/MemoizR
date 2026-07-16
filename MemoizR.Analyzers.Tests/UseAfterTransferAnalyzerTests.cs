@@ -5045,6 +5045,95 @@ public class UseAfterTransferAnalyzerTests
     }
 
     [Fact]
+    public async Task ParenthesizedTransferOperands_AreStillTransfers()
+    {
+        // Parentheses are pure syntax: the argument operation is the local reference.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer((list));
+                    list.Add(1);
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+    }
+
+    [Fact]
+    public async Task CaughtEnclosingResetFailures_KeepTracking()
+    {
+        // The RHS can throw into the resuming catch BEFORE the assignment completes: after
+        // the try the variable may still hold the transferred value.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    try
+                    {
+                        list = MayThrow(Sending.Transfer(list));
+                    }
+                    catch
+                    {
+                    }
+
+                    list.Add(1);
+                }
+
+                private static List<int> MayThrow(Sending<List<int>> sending) => new List<int>();
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+    }
+
+    [Fact]
+    public async Task GotosLeavingTheSwitch_KeepSiblingArmsExclusive()
+    {
+        // goto after exits the switch entirely: the default arm never runs on the
+        // transferred path.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M(int n)
+                {
+                    var list = new List<int> { 1 };
+                    switch (n)
+                    {
+                        case 0:
+                            _ = Sending.Transfer(list);
+                            goto after;
+                        default:
+                            list.Add(1);
+                            break;
+                    }
+
+                    after:
+                    _ = n;
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
     public async Task AnonymousObjectInitializers_AreTransferSources()
     {
         // Transfer(new { Value = list }) hands off an object graph containing the same list:
