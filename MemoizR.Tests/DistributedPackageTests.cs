@@ -160,6 +160,53 @@ public class DistributedPackageTests
     }
 
     [Fact]
+    public async Task Export_Pull_NeverServesFaultParkedStateAsCurrentTruth()
+    {
+        // An already-published export goes CacheCheck and a dependency faults during the
+        // parent scan: the read serves the last good VERIFIED box and parks non-clean.
+        // Shipping that as current truth would let a new mirror adopt stale state as trusted
+        // while the host cannot actually compute a current value -- the pull must force a
+        // real re-evaluation instead: a FAULTED pull while broken (the wire contract's
+        // honest answer), the fresh verified truth once healed.
+        var host = new MemoFactory();
+        var s = host.CreateSignal(1);
+        var failing = false;
+        var m1 = host.CreateMemoizR("m1", async () =>
+        {
+            var v = await s.Get();
+            if (Volatile.Read(ref failing))
+            {
+                throw new InvalidOperationException("m1 source down");
+            }
+            return v + 10;
+        });
+        var m2 = host.CreateMemoizR("m2", async () => await m1.Get() + 100); // no catch: faults propagate
+
+        Assert.Equal(111, await m2.Get()); // published verified, seq 1
+        var export = host.Export(m2, _ => Task.CompletedTask);
+
+        // Stop the export's own staleness chase: the pull below models a transport request
+        // racing AHEAD of any local read after the write -- the only window in which the
+        // fault-park is still observable (a second read's scan launders it to clean-serving-
+        // last-good, which the payload then honestly stamps as old).
+        export.Dispose();
+        Volatile.Write(ref failing, true);
+        await s.Set(2); // the chain is dirty; every re-evaluation now faults
+
+        // The pull's own scan suppresses m1's fault and would serve the stale verified 111 as
+        // current truth; the refresh detects the non-clean park and forces a REAL
+        // re-evaluation, whose fault propagates -- the wire contract's honest answer.
+        await Assert.ThrowsAsync<InvalidOperationException>(() => export.PullAsync());
+
+        // Healed and re-published: the pull answers the fresh current truth.
+        Volatile.Write(ref failing, false);
+        await s.Set(3);
+        var healed = await export.PullAsync();
+        Assert.False(healed.Unverifiable);
+        Assert.Equal(113, healed.Value); // m1 = 3 + 10, m2 = 13 + 100
+    }
+
+    [Fact]
     public async Task Export_Pull_ReattemptsFaultParkedDependencies()
     {
         // A dependency that FAULTED keeps its previous verified evidence and parks at

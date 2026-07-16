@@ -48,18 +48,31 @@ public sealed class ExportedNode<T> : IDisposable
     {
         await node.ReadWithEvidence();
         var (value, evidence, sequence) = node.ValueEvidenceAndSequence;
-        if (evidence.Unverifiable)
+        if (evidence.Unverifiable || node.stateCell.State != CacheState.CacheClean)
         {
-            // An unverifiable publication can be STICKY while the node is lazily clean:
-            // contagion from a since-healed source survives an equal-value parent scan (the
-            // scan proves the inputs did not change, not that the cached value was ever
-            // vouched for), so the node would answer every heartbeat-driven pull with the same
-            // no-claim publication and sequence -- which the consumer's mirror drops as a
-            // duplicate, leaving it unverifiable forever. A pull is the express request for
-            // the host's current best claim: force ONE fresh evaluation of the unverifiable
-            // chain through the ordinary invalidation entry (exactly what an upstream write
-            // would do) and answer with its outcome -- verified now, or honestly still
-            // unverifiable (a live torn spell; no retry loop, the next heartbeat tries again).
+            // Two shapes the plain read cannot answer honestly, both cured by ONE fresh
+            // evaluation of the suspect chain (through the ordinary invalidation entry --
+            // exactly what an upstream write would do):
+            //
+            //  - An UNVERIFIABLE publication can be sticky while the node is lazily clean:
+            //    contagion from a since-healed source survives an equal-value parent scan, so
+            //    every heartbeat-driven pull would answer the same no-claim publication and
+            //    sequence, which the mirror drops as a duplicate -- unverifiable forever.
+            //  - A FAULT-PARKED read: a dependency faulted during the parent scan, so the
+            //    read served the last good VERIFIED box and left the node non-clean. Shipping
+            //    that as the current truth would let a new mirror adopt stale state as
+            //    trusted while the host cannot actually compute a current value.
+            //
+            // The refreshed read answers with the chain's real current state: fresh and
+            // verified when it healed, honestly unverifiable for a live torn spell, or -- when
+            // the fault persists uncaught -- a FAULTED pull, which the wire contract already
+            // defines (the transport decides retry policy; the mirror is left unchanged).
+            //
+            // A chain an earlier read already resolved to clean-serving-last-good is not
+            // detectable here (the park launders on the second scan) -- but it degrades
+            // SAFELY: the payload's stamp claims the old triggers it genuinely reflects, so
+            // mirrors and the barrier converge on that honest older snapshot, and freshness
+            // returns with the next value-changing publication.
             await RefreshUnverifiableChainAsync(node);
             await node.ReadWithEvidence();
             (value, evidence, sequence) = node.ValueEvidenceAndSequence;
