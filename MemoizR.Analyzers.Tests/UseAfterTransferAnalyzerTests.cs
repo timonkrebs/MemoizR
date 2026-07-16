@@ -2813,6 +2813,134 @@ public class UseAfterTransferAnalyzerTests
     }
 
     [Fact]
+    public async Task FieldReads_AreThrowCapable_AndKeepCatchesAlive()
+    {
+        // Reading an instance field off a possibly-null receiver throws after the completed
+        // handoff: the catch observes the transferred list.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class Holder
+            {
+                public int Count;
+            }
+
+            public class C
+            {
+                public void M(Holder holder)
+                {
+                    var list = new List<int> { 1 };
+                    try
+                    {
+                        var sent = Sending.Transfer(list);
+                        _ = holder.Count;
+                    }
+                    catch
+                    {
+                        list.Add(1);
+                    }
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+    }
+
+    [Fact]
+    public async Task CollectionInitializerElements_AreTransferSources()
+    {
+        // new List<List<int>> { list } stores the element exactly like a collection
+        // expression: the receiver owns a collection containing the same reference.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(new List<List<int>> { list });
+                    list.Add(1);
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task CaughtReturnExpressionFailures_KeepTheSenderScanAlive()
+    {
+        // MayThrow can fail AFTER the wrapper exists, landing in the catch-all: control then
+        // resumes after the try and the sender still touches the handed-off list.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public Sending<List<int>>? M()
+                {
+                    var list = new List<int> { 1 };
+                    try
+                    {
+                        return MayThrow(Sending.Transfer(list));
+                    }
+                    catch
+                    {
+                    }
+
+                    list.Add(1);
+                    return null;
+                }
+
+                private static Sending<List<int>> MayThrow(Sending<List<int>> sending) => sending;
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+    }
+
+    [Fact]
+    public async Task CaughtThrowsBeforeResets_KeepThePathOpen()
+    {
+        // On the throwing path the reset never runs, the catch-all resumes, and the final
+        // Add still touches the transferred list: the reset is not definite.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M(bool fail)
+                {
+                    var list = new List<int> { 1 };
+                    try
+                    {
+                        _ = Sending.Transfer(list);
+                        if (fail) throw new System.Exception();
+                        list = new List<int>();
+                    }
+                    catch
+                    {
+                    }
+
+                    list.Add(1);
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR005", diagnostic.Id);
+    }
+
+    [Fact]
     public async Task AnonymousObjectInitializers_AreTransferSources()
     {
         // Transfer(new { Value = list }) hands off an object graph containing the same list:

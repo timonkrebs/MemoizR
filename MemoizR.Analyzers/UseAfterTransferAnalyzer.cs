@@ -302,10 +302,14 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             IAnonymousObjectCreationOperation anonymous => anonymous.Initializers.Select(initializer =>
                 (IOperation?)(initializer is ISimpleAssignmentOperation member ? member.Value : initializer)),
             IObjectCreationOperation { Initializer: { } objectInitializer } => objectInitializer.Initializers
-                .OfType<ISimpleAssignmentOperation>()
-                .Where(member => member.Target is IFieldReferenceOperation
-                    || (member.Target is IPropertyReferenceOperation property && SendableSymbolClassifier.HasBackingSlot(property.Property)))
-                .Select(member => (IOperation?)member.Value),
+                .SelectMany(element => element switch
+                {
+                    // Member writes carry through compiler-known slots only; a collection
+                    // initializer's Add elements carry like collection-expression elements.
+                    ISimpleAssignmentOperation member when StoresIntoACompilerKnownSlot(member) => new[] { (IOperation?)member.Value },
+                    IInvocationOperation add => add.Arguments.Select(argument => (IOperation?)argument.Value),
+                    _ => System.Linq.Enumerable.Empty<IOperation?>(),
+                }),
             IConversionOperation conversion => new[] { conversion.Operand },
             // Transfer([list]): matched by SYNTAX -- ICollectionExpressionOperation is not
             // public in the Roslyn this analyzer compiles against, but the children are
@@ -364,9 +368,9 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     }
 
     // Crossing a try on the way out: the handlers/finally that observe the escape become
-    // scan roots, and the escape itself survives -- unless it is a throw this try's own
-    // catches ABSORB, which never leaves the method: control resumes right after the try,
-    // and the sender-side scan must too (null ends the escape).
+    // scan roots, and the escape itself survives -- unless this try's own catches ABSORB
+    // its failure path, which then never leaves the method: control resumes right after
+    // the try, and the sender-side scan must too (null ends the escape).
     private static IOperation? CrossTryTowardScope(List<IOperation> roots, ITryOperation tryOperation, IOperation child, IOperation escape, int transferPosition)
     {
         // A return whose expression can throw AFTER building the wrapper
@@ -376,13 +380,34 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             || CanThrowAfterTheTransfer(escape, transferPosition);
         AddHandlerRoots(roots, tryOperation, child, escapedByThrow: reachesHandlers);
 
-        if (escape is IThrowOperation thrown && ReferenceEquals(child, tryOperation.Body)
-            && CatchesTheThrow(tryOperation, thrown))
+        if (reachesHandlers && ReferenceEquals(child, tryOperation.Body)
+            && EscapeIsAbsorbed(tryOperation, escape))
         {
             return null;
         }
 
         return escape;
+    }
+
+    // A THROW is absorbed by an unfiltered catch matching its type. A RETURN's failure path
+    // (its expression throwing after the wrapper exists) carries an UNKNOWABLE exception
+    // type, so only a catch-everything absorbs it -- and the return may also complete
+    // normally, but the post-try code the resume path runs is reachable either way.
+    private static bool EscapeIsAbsorbed(ITryOperation tryOperation, IOperation escape)
+    {
+        if (escape is IThrowOperation thrown)
+        {
+            return CatchesTheThrow(tryOperation, thrown);
+        }
+
+        return tryOperation.Catches.Any(catchClause => catchClause.Filter is null
+            && (catchClause.ExceptionType is not { } caughtType || CatchesEverything(caughtType)));
+    }
+
+    private static bool CatchesEverything(ITypeSymbol caughtType)
+    {
+        return caughtType.SpecialType == SpecialType.System_Object
+            || caughtType is INamedTypeSymbol { Name: "Exception", ContainingNamespace: { Name: "System", ContainingNamespace.IsGlobalNamespace: true } };
     }
 
     // Whether the throw DEFINITELY lands in one of the try's handlers: an unfiltered catch
@@ -834,6 +859,12 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         return null;
     }
 
+    private static bool StoresIntoACompilerKnownSlot(ISimpleAssignmentOperation member)
+    {
+        return member.Target is IFieldReferenceOperation
+            || (member.Target is IPropertyReferenceOperation property && SendableSymbolClassifier.HasBackingSlot(property.Property));
+    }
+
     // `[..operand]` enumerates the operand INTO the new collection: the operand OBJECT is
     // never carried, but an inline container's elements are -- [.. new[] { list }] delivers
     // the same list reference to the receiver. So only the operand's own carried parts
@@ -1089,7 +1120,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             operation.Syntax.Span.End > transferPosition
             && !IsWithinANestedFunction(operation, region)
             && operation is IInvocationOperation or IObjectCreationOperation or IAwaitOperation
-                or IPropertyReferenceOperation or IArrayElementReferenceOperation);
+                or IPropertyReferenceOperation or IArrayElementReferenceOperation or IFieldReferenceOperation);
     }
 
     // The use is in an arm of an if/switch/?. whose SIBLING arm holds the transfer: the arms
@@ -1176,7 +1207,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         var reinitRoot = reinitialization is IArgumentOperation { Parent: { } call } ? call : reinitialization;
         var canThrow = reinitRoot.DescendantsAndSelf()
             .Any(operation => operation is IInvocationOperation or IObjectCreationOperation or IAwaitOperation
-                or IPropertyReferenceOperation or IArrayElementReferenceOperation);
+                or IPropertyReferenceOperation or IArrayElementReferenceOperation or IFieldReferenceOperation);
         if (!canThrow)
         {
             return null;
@@ -1329,24 +1360,37 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
 
     // `while (c) { Transfer(list); if (skip) break; list = new(); }`: the break exits the loop
     // PAST the reassignment, so the transferred value survives into the code after the loop. A
-    // reinitialization is not definite when a break/continue/goto sits between the transfer
-    // and it and jumps out of a construct that also contains it -- a break leaving a switch
-    // that closes BEFORE the reinitialization skips nothing.
+    // reinitialization is not definite when a break/continue/goto -- or a CAUGHT throw, whose
+    // handler resumes after its try -- sits between the transfer and it and jumps out of a
+    // construct that also contains it; a break leaving a switch that closes BEFORE the
+    // reinitialization skips nothing.
     private static bool ABranchCanSkip(IOperation reinitialization, int transferPosition, IOperation scope)
     {
         var reinitPosition = reinitialization.Syntax.SpanStart;
-        return scope.DescendantsAndSelf().OfType<IBranchOperation>().Any(branch =>
-            branch.Syntax.SpanStart >= transferPosition
-            && branch.Syntax.Span.End <= reinitPosition
-            // A branch in a mutually exclusive sibling arm of the transfer never runs on the
+        return scope.DescendantsAndSelf().Any(operation =>
+            operation.Syntax.SpanStart >= transferPosition
+            && operation.Syntax.Span.End <= reinitPosition
+            // A jump in a mutually exclusive sibling arm of the transfer never runs on the
             // path that transferred (`if (move) Transfer(list); else break;`): it cannot skip
             // anything on that path.
-            && !IsInASiblingArmOfTheTransfer(branch, transferPosition)
-            && CanSkipPast(branch, reinitPosition));
+            && !IsInASiblingArmOfTheTransfer(operation, transferPosition)
+            && CanSkipPast(operation, reinitPosition));
     }
 
-    private static bool CanSkipPast(IBranchOperation branch, int reinitPosition)
+    private static bool CanSkipPast(IOperation operation, int reinitPosition)
     {
+        // A caught throw resumes AFTER its try: it skips a reset that try still contains.
+        if (operation is IThrowOperation)
+        {
+            return NearestCatchingTry(operation) is { } catchingTry
+                && catchingTry.Syntax.Span.Contains(reinitPosition);
+        }
+
+        if (operation is not IBranchOperation branch)
+        {
+            return false;
+        }
+
         if (branch.BranchKind == BranchKind.GoTo)
         {
             return true; // an arbitrary target is assumed able to skip the reinitialization
@@ -1364,6 +1408,25 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         }
 
         return false;
+    }
+
+    private static ITryOperation? NearestCatchingTry(IOperation thrown)
+    {
+        for (IOperation child = thrown; child.Parent is { } parent; child = parent)
+        {
+            if (parent is IAnonymousFunctionOperation or ILocalFunctionOperation)
+            {
+                return null; // a deferred body's throw does not run on this path
+            }
+
+            if (parent is ITryOperation tryOperation && ReferenceEquals(child, tryOperation.Body)
+                && tryOperation.Catches.Length > 0)
+            {
+                return tryOperation;
+            }
+        }
+
+        return null;
     }
 
     // True when the reassignment DEFINITELY executes on the path that transferred: walking up
