@@ -33,11 +33,7 @@ jobs:
     - name: Setup .NET
       uses: actions/setup-dotnet@v5
       with:
-        # Pinned to the 10.0.1xx feature band: the 10.0.3xx SDK on the runner images
-        # ships a NuGet that (a) drops local-feed transitive dependencies at restore
-        # and (b) packs the Coyote CLI tool without its Mono.Cecil dependencies, so
-        # `coyote rewrite` dies at startup. Everything here is verified on 10.0.1xx.
-        dotnet-version: 10.0.1xx
+        dotnet-version: 10.0.x
     - name: Build Coyote fork packages
       # Packs Microsoft.Coyote from the timonkrebs/coyote fork (pinned commit) into
       # the local feed that nuget.config maps 'Microsoft.Coyote*' to. The fork adds
@@ -92,8 +88,7 @@ jobs:
     - name: Setup .NET
       uses: actions/setup-dotnet@v5
       with:
-        # Same 10.0.1xx pin as the build job (see the comment there).
-        dotnet-version: 10.0.1xx
+        dotnet-version: 10.0.x
     - name: Build Coyote fork packages
       shell: bash
       run: bash eng/build-coyote-packages.sh

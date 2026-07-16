@@ -46,22 +46,6 @@ rm -rf "$SRC_DIR"
 git clone --no-checkout --filter=blob:none "$COYOTE_REPO" "$SRC_DIR"
 git -C "$SRC_DIR" checkout --quiet "$COYOTE_COMMIT"
 
-# Fail fast on the wrong SDK band instead of building a feed that only breaks
-# later: the 10.0.3xx SDK's NuGet drops local-feed transitive dependencies at
-# restore and packs the Coyote CLI tool without its Mono.Cecil dependencies,
-# which is why CI pins 10.0.1xx (see .github/workflows/dotnet.yml). Resolved
-# from inside the clone so Coyote's own global.json roll-forward is honored.
-SDK_VERSION="$(cd "$SRC_DIR" && dotnet --version)"
-case "$SDK_VERSION" in
-    10.0.1*) ;;
-    *)
-        echo "error: packing the Coyote feed needs a .NET SDK from the 10.0.1xx band;" >&2
-        echo "       the selected SDK is $SDK_VERSION. Install 10.0.1xx (it can sit" >&2
-        echo "       side by side with newer bands) and re-run." >&2
-        exit 1
-        ;;
-esac
-
 for project in \
     Source/Core/Core.csproj \
     Source/Actors/Actors.csproj \

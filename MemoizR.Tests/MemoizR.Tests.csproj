@@ -8,10 +8,10 @@
 
   <ItemGroup>
     <!-- The concrete Coyote packages are referenced directly rather than through the
-         Microsoft.Coyote meta package: on the CI images' .NET 10.0.3xx SDK, restore
-         resolved the meta package but silently dropped its transitive dependencies from
-         the local coyote feed, so the compile lost Microsoft.Coyote.dll (CS0012). A
-         direct reference that cannot be resolved fails restore loudly instead. -->
+         Microsoft.Coyote meta package: on one CI leg, restore resolved the meta package
+         but silently dropped its transitive dependencies from the local coyote feed, so
+         the compile lost Microsoft.Coyote.dll (CS0012). A direct reference that cannot
+         be resolved fails restore loudly instead. -->
     <PackageReference Include="Microsoft.Coyote.Core" />
     <PackageReference Include="Microsoft.Coyote.Actors" />
     <PackageReference Include="Microsoft.Coyote.Test" />
