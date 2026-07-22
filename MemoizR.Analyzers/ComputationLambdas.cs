@@ -181,7 +181,45 @@ internal static class ComputationLambdas
             _ => null,
         };
 
+        // `Func<int,int> patch; patch = static x => x;` initializes by assignment: when the
+        // SOLE same-tree write is a simple assignment, its right-hand side is the initializer.
+        initializer ??= EffectiveInitializerAssignment(variable, semanticModel)?.Right;
+
         return initializer is null ? null : semanticModel.GetOperation(initializer);
+    }
+
+    // The single same-tree assignment standing in for a missing declaration initializer, or
+    // null when the declaration has one, there are several writes (ambiguous), or the one
+    // write is not a plain `x = value`. Reassignment scans EXCLUDE this node: it is the
+    // initialization, not a rebind.
+    public static AssignmentExpressionSyntax? EffectiveInitializerAssignment(ISymbol variable, SemanticModel? semanticModel)
+    {
+        if (semanticModel is null || variable.DeclaringSyntaxReferences.FirstOrDefault()?.GetSyntax()
+                is VariableDeclaratorSyntax { Initializer: not null }
+                or PropertyDeclarationSyntax { Initializer: not null }
+                or SingleVariableDesignationSyntax)
+        {
+            return null;
+        }
+
+        AssignmentExpressionSyntax? sole = null;
+        foreach (var node in semanticModel.SyntaxTree.GetRoot().DescendantNodes())
+        {
+            if (ReassignmentTargets(node) is not { } targets
+                || !targets.Any(target => SymbolEqualityComparer.Default.Equals(semanticModel.GetSymbolInfo(target).Symbol, variable)))
+            {
+                continue;
+            }
+
+            if (sole is not null || node is not AssignmentExpressionSyntax { Left: not TupleExpressionSyntax } assignment)
+            {
+                return null;
+            }
+
+            sole = assignment;
+        }
+
+        return sole;
     }
 
     private static ExpressionSyntax? DeconstructionInitializer(SingleVariableDesignationSyntax designation)
@@ -466,15 +504,18 @@ internal static class ComputationLambdas
 
     // Execution-order reasoning without dataflow: an assignment in a DIFFERENT function body
     // (a helper, a lambda, another method) runs whenever that function does -- unknowable, so
-    // it counts. In the same function, one textually before the reference obviously precedes
-    // it, and one textually after still reaches it when a loop encloses both AND the variable
-    // outlives the iteration (a loop-body local is freshly initialized each pass). Shared by
-    // MZR004's delegate-reassignment scan and the provenance checks in ReceiverChains.
-    public static bool CanExecuteBefore(SyntaxNode assignment, SyntaxNode reference, ISymbol variable)
+    // it counts, UNLESS that function is a local function never referenced in the tree (dead
+    // code cannot execute). In the same function, one textually before the reference obviously
+    // precedes it, and one textually after still reaches it when a loop encloses both AND the
+    // variable outlives the iteration (a loop-body local is freshly initialized each pass).
+    // Shared by MZR004's delegate-reassignment scan and the provenance checks in
+    // ReceiverChains.
+    public static bool CanExecuteBefore(SyntaxNode assignment, SyntaxNode reference, ISymbol variable, SemanticModel? semanticModel)
     {
-        if (!ReferenceEquals(EnclosingFunction(assignment), EnclosingFunction(reference)))
+        var assignmentFunction = EnclosingFunction(assignment);
+        if (!ReferenceEquals(assignmentFunction, EnclosingFunction(reference)))
         {
-            return true;
+            return CouldExecute(assignmentFunction, semanticModel);
         }
 
         if (assignment.SpanStart < reference.SpanStart)
@@ -507,6 +548,30 @@ internal static class ComputationLambdas
         }
 
         return null;
+    }
+
+    // A LOCAL FUNCTION with no reference outside its own body is dead code: its writes cannot
+    // execute. Anything else -- a method, accessor, or lambda, all reachable from outside this
+    // tree or through stored values -- stays unknowable and counts.
+    private static bool CouldExecute(SyntaxNode? function, SemanticModel? semanticModel)
+    {
+        if (function is not LocalFunctionStatementSyntax local || semanticModel is null
+            || semanticModel.GetDeclaredSymbol(local) is not { } symbol)
+        {
+            return true;
+        }
+
+        foreach (var identifier in semanticModel.SyntaxTree.GetRoot().DescendantNodes().OfType<IdentifierNameSyntax>())
+        {
+            if (identifier.Identifier.ValueText == symbol.Name
+                && !local.Span.Contains(identifier.Span)
+                && SymbolEqualityComparer.Default.Equals(semanticModel.GetSymbolInfo(identifier).Symbol, symbol))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     // Only the loop BODY re-declares per iteration: a variable in a for-INITIALIZER is

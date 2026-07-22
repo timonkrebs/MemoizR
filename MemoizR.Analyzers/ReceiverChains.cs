@@ -69,11 +69,16 @@ internal static class ReceiverChains
             return false;
         }
 
+        // The sole assignment standing in for a missing initializer is initialization, not a
+        // rebind (`OptimisticState<int> state; state = f1.CreateOptimistic(...);` still proves
+        // provenance -- the same assignment is what InitializerOf resolves through).
+        var effectiveInitializer = ComputationLambdas.EffectiveInitializerAssignment(variable, semanticModel);
         foreach (var node in semanticModel.SyntaxTree.GetRoot().DescendantNodes())
         {
-            if (ComputationLambdas.ReassignmentTargets(node) is { } targets
+            if (!ReferenceEquals(node, effectiveInitializer)
+                && ComputationLambdas.ReassignmentTargets(node) is { } targets
                 && targets.Any(target => ComputationLambdas.WritesVariable(target, variable, semanticModel))
-                && ComputationLambdas.CanExecuteBefore(node, reference, variable))
+                && ComputationLambdas.CanExecuteBefore(node, reference, variable, semanticModel))
             {
                 return true;
             }

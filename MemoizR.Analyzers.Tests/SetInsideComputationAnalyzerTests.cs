@@ -647,6 +647,86 @@ public class SetInsideComputationAnalyzerTests
     }
 
     [Fact]
+    public async Task FirstAssignedState_ProvesTheHostFactory()
+    {
+        // Declaration in two steps: the sole assignment is the initialization, so the
+        // cross-factory suppression still applies.
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+            using MemoizR.Reactive;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f1 = new MemoFactory();
+                    var f2 = new MemoFactory();
+                    var other = f2.CreateSignal(1);
+                    OptimisticState<int> state;
+                    state = f1.CreateOptimistic<int>(f1.CreateSignal(1));
+                    f1.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x => { _ = other.Set(2); return x; });
+                    });
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task DeadLocalFunctionRebind_KeepsTheSuppression()
+    {
+        // Rebind is declared but never referenced: dead code cannot execute, so the factory
+        // alias's initializer still proves provenance. The moment it IS invoked, execution
+        // order becomes unknowable and the diagnostic returns.
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f1 = new MemoFactory();
+                    var f2 = new MemoFactory();
+                    var host = f1;
+                    void Rebind() { host = f2; }
+                    var other = f2.CreateSignal(1);
+                    host.CreateMemoizR(async () => { await other.Set(2); return 0; });
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task InvokedLocalFunctionRebind_KeepsTheDiagnostic()
+    {
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f1 = new MemoFactory();
+                    var f2 = new MemoFactory();
+                    var host = f1;
+                    void Rebind() { host = f2; }
+                    Rebind();
+                    var other = f2.CreateSignal(1);
+                    host.CreateMemoizR(async () => { await other.Set(2); return 0; });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR003", diagnostic.Id);
+    }
+
+    [Fact]
     public async Task ReassignedFactoryAlias_KeepsTheDiagnostic()
     {
         // `host` holds f2 at the creation, not its f1 initializer: the stale alias must not

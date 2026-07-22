@@ -219,12 +219,17 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
             return false;
         }
 
+        // The sole assignment standing in for a missing initializer is initialization, not a
+        // rebind (`Func<int,int> patch; patch = static x => x;` is the declaration in two
+        // steps).
+        var effectiveInitializer = ComputationLambdas.EffectiveInitializerAssignment(variable, semanticModel);
         foreach (var node in semanticModel.SyntaxTree.GetRoot().DescendantNodes())
         {
-            if (ComputationLambdas.ReassignmentTargets(node) is { } targets
+            if (!ReferenceEquals(node, effectiveInitializer)
+                && ComputationLambdas.ReassignmentTargets(node) is { } targets
                 && targets.Any(target => ComputationLambdas.WritesVariable(target, variable, semanticModel)
                     && WritesReadInstance(target, variable, readReference, semanticModel))
-                && ComputationLambdas.CanExecuteBefore(node, readReference.Syntax, variable))
+                && ComputationLambdas.CanExecuteBefore(node, readReference.Syntax, variable, semanticModel))
             {
                 return true;
             }
@@ -331,7 +336,9 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         IOperation operation,
         SyntaxNode scope,
         SyntaxNode patchScope,
-        HashSet<ISymbol> reported)
+        SemanticModel? semanticModel,
+        HashSet<ISymbol> reported,
+        HashSet<IMethodSymbol>? visitedGetters = null)
     {
         switch (operation)
         {
@@ -349,17 +356,28 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
             // the member TYPE's sendability (the object handed out is what gets shared). An
             // enclosing type the classifier accepts ([Sendable], structurally immutable) was
             // vetted WHOLESALE -- re-walking its members would override that trust, exactly
-            // where the runtime SendableChecker trusts it. A computed get-only property's body
-            // is not chased: like type parameters elsewhere, it gets the benefit of the doubt.
+            // where the runtime SendableChecker trusts it. A COMPUTED get-only property is a
+            // helper call in disguise: its same-tree getter body is walked with these same
+            // verdicts (`int Counter => counter;` re-reads the mutable field on every replay).
             case IFieldReferenceOperation { Field.IsStatic: false } field when IsOnNonSendableEnclosingInstance(field.Instance, classifier):
                 InspectStateRead(
                     context, classifier, operation, field.Field, field.Field.Type,
                     writable: !field.Field.IsReadOnly, "it is writable state of the enclosing object", reported);
                 break;
             case IPropertyReferenceOperation { Property.IsStatic: false } property when IsOnNonSendableEnclosingInstance(property.Instance, classifier):
-                InspectStateRead(
-                    context, classifier, operation, property.Property, property.Property.Type,
-                    writable: IsSettable(property.Property), "it is writable state of the enclosing object", reported);
+                if (IsSettable(property.Property))
+                {
+                    Report(context, operation, property.Property, property.Property.Name, "it is writable state of the enclosing object", reported);
+                }
+                else if (HasBackingStorage(property.Property))
+                {
+                    ReportIfNotSendable(context, classifier, operation, property.Property, property.Property.Type, reported);
+                }
+                else
+                {
+                    InspectComputedGetter(context, classifier, property.Property, patchScope, semanticModel, reported, visitedGetters);
+                }
+
                 break;
 
             // A bare `this` -- the implicit receiver of a helper call (`ReadCounter()`) or an
@@ -383,6 +401,38 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
                 }
 
                 break;
+        }
+    }
+
+    // A computed get-only property on a non-Sendable enclosing type is a helper call in
+    // disguise: its getter body re-executes on every replay, so it is walked with the same
+    // member verdicts against the getter's own scope. The visited set bounds mutually
+    // recursive getters; metadata and auto-properties never reach here (HasBackingStorage
+    // keeps them on the type verdict).
+    private static void InspectComputedGetter(
+        OperationAnalysisContext context,
+        SendableSymbolClassifier classifier,
+        IPropertySymbol property,
+        SyntaxNode patchScope,
+        SemanticModel? semanticModel,
+        HashSet<ISymbol> reported,
+        HashSet<IMethodSymbol>? visitedGetters)
+    {
+        if (property.GetMethod is not { } getter
+            || ComputationLambdas.ResolveMethodBody(getter, semanticModel) is not { } body)
+        {
+            return;
+        }
+
+        visitedGetters ??= new HashSet<IMethodSymbol>(SymbolEqualityComparer.Default);
+        if (!visitedGetters.Add(getter))
+        {
+            return;
+        }
+
+        foreach (var inner in ComputationLambdas.Descend(body.Body))
+        {
+            InspectCapture(context, classifier, inner, body.Scope, patchScope, semanticModel, reported, visitedGetters);
         }
     }
 
@@ -467,16 +517,19 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         var visitedLocalFunctions = new HashSet<IMethodSymbol>(SymbolEqualityComparer.Default);
         foreach (var operation in ComputationLambdas.Descend(patch.Body))
         {
-            InspectCapture(context, classifier, operation, patch.Scope, patch.Scope, reported);
+            InspectCapture(context, classifier, operation, patch.Scope, patch.Scope, semanticModel, reported);
             InspectCapturedLocalFunction(context, classifier, operation, patch.Scope, semanticModel, visitedLocalFunctions, reported);
         }
 
-        // ISymbol, not IMethodSymbol: the executed chase also visits invoked delegate VARIABLES.
+        // Invoked-delegate chases are bounded per INVOCATION SITE, not per variable: the same
+        // delegate reassigned and invoked again executes a different closure and must be
+        // revisited, while a self-recursive delegate revisits the same site and stops.
         var visitedHelpers = new HashSet<ISymbol>(SymbolEqualityComparer.Default);
+        var visitedInvokes = new HashSet<SyntaxNode>();
         foreach (var operation in ComputationLambdas.DescendDirectExecution(patch.Body))
         {
             InspectStaticRead(context, classifier, operation, reported);
-            InspectExecutedHelper(context, classifier, operation, semanticModel, visitedHelpers, reported);
+            InspectExecutedHelper(context, classifier, operation, semanticModel, visitedHelpers, visitedInvokes, reported);
         }
     }
 
@@ -505,7 +558,7 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
 
         foreach (var inner in ComputationLambdas.Descend(helper.Body))
         {
-            InspectCapture(context, classifier, inner, helper.Scope, patchScope, reported);
+            InspectCapture(context, classifier, inner, helper.Scope, patchScope, semanticModel, reported);
             InspectCapturedLocalFunction(context, classifier, inner, patchScope, semanticModel, visited, reported);
         }
     }
@@ -522,11 +575,12 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         IOperation operation,
         SemanticModel? semanticModel,
         HashSet<ISymbol> visited,
+        HashSet<SyntaxNode> visitedInvokes,
         HashSet<ISymbol> reported)
     {
         if (operation is IInvocationOperation { TargetMethod.MethodKind: MethodKind.DelegateInvoke, Instance: { } callee })
         {
-            InspectInvokedDelegate(context, classifier, ResolveConditionalReceiver(callee), semanticModel, visited, reported);
+            InspectInvokedDelegate(context, classifier, ResolveConditionalReceiver(callee), semanticModel, visited, visitedInvokes, reported);
             return;
         }
 
@@ -550,7 +604,7 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
             foreach (var inner in ComputationLambdas.DescendDirectExecution(helper.Body))
             {
                 InspectStaticRead(context, classifier, inner, reported);
-                InspectExecutedHelper(context, classifier, inner, semanticModel, visited, reported);
+                InspectExecutedHelper(context, classifier, inner, semanticModel, visited, visitedInvokes, reported);
             }
         }
     }
@@ -559,26 +613,29 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
     // the built-but-deferred shape stays pruned, but `Func<int> later = () => hits; later()`
     // executes now, and unlike MZR003's identical prune there is no runtime backstop. The
     // callee resolves like a computation argument (same-tree lambda or method group, through
-    // variable initializers); the variable visited-guard bounds self-referential delegates.
+    // variable initializers). The guard is per INVOCATION SITE: a delegate reassigned between
+    // two invokes executes a different closure at each, while a self-recursive delegate
+    // re-reaches the same site inside its own body and stops there.
     private static void InspectInvokedDelegate(
         OperationAnalysisContext context,
         SendableSymbolClassifier classifier,
         IOperation callee,
         SemanticModel? semanticModel,
         HashSet<ISymbol> visited,
+        HashSet<SyntaxNode> visitedInvokes,
         HashSet<ISymbol> reported)
     {
-        var variable = ComputationLambdas.ReferencedVariable(Unwrap(callee));
-        if (variable is not null && !visited.Add(variable))
+        if (!visitedInvokes.Add(callee.Syntax))
         {
             return;
         }
 
         foreach (var body in ComputationLambdas.OfArgumentValue(callee, semanticModel))
         {
-            ChaseExecutedBody(context, classifier, body, semanticModel, visited, reported);
+            ChaseExecutedBody(context, classifier, body, semanticModel, visited, visitedInvokes, reported);
         }
 
+        var variable = ComputationLambdas.ReferencedVariable(Unwrap(callee));
         if (variable is null || semanticModel is null)
         {
             return;
@@ -586,7 +643,7 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
 
         foreach (var body in AssignedDelegateBodies(variable, callee.Syntax, semanticModel))
         {
-            ChaseExecutedBody(context, classifier, body, semanticModel, visited, reported);
+            ChaseExecutedBody(context, classifier, body, semanticModel, visited, visitedInvokes, reported);
         }
     }
 
@@ -618,7 +675,7 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         foreach (var node in semanticModel.SyntaxTree.GetRoot().DescendantNodes())
         {
             if (node is not AssignmentExpressionSyntax assignment
-                || !ComputationLambdas.CanExecuteBefore(assignment, invokeSite, variable))
+                || !ComputationLambdas.CanExecuteBefore(assignment, invokeSite, variable, semanticModel))
             {
                 continue;
             }
@@ -662,12 +719,13 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         ComputationLambdas.ComputationBody body,
         SemanticModel? semanticModel,
         HashSet<ISymbol> visited,
+        HashSet<SyntaxNode> visitedInvokes,
         HashSet<ISymbol> reported)
     {
         foreach (var inner in ComputationLambdas.DescendDirectExecution(body.Body))
         {
             InspectStaticRead(context, classifier, inner, reported);
-            InspectExecutedHelper(context, classifier, inner, semanticModel, visited, reported);
+            InspectExecutedHelper(context, classifier, inner, semanticModel, visited, visitedInvokes, reported);
         }
     }
 

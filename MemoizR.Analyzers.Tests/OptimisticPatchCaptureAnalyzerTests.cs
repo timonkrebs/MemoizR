@@ -1632,6 +1632,102 @@ public class OptimisticPatchCaptureAnalyzerTests
     }
 
     [Fact]
+    public async Task FirstAssignedDelegate_ResolvesLikeAnInitializer()
+    {
+        // Declaration in two steps: the sole assignment IS the initialization, not a rebind.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    Func<int, int> patch;
+                    patch = static x => x;
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, patch);
+                    });
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task InvokeAfterReassignment_ChasesTheNewBody()
+    {
+        // The second call executes the reassigned closure: the per-site guard must not let
+        // the first (safe) invocation swallow it.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                private static int hits;
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x =>
+                        {
+                            Func<int> later = static () => 0;
+                            _ = later();
+                            later = () => hits;
+                            return x + later();
+                        });
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR004", diagnostic.Id);
+        Assert.Contains("hits", diagnostic.GetMessage());
+        Assert.Contains("writable static state", diagnostic.GetMessage());
+    }
+
+    // A computed get-only property is a helper call in disguise: its getter re-reads the
+    // mutable field on every replay.
+    [Fact]
+    public async Task ComputedInstanceGetter_ReadingMutableField_IsFlagged()
+    {
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public class C
+            {
+                private int counter;
+
+                private int Counter => counter;
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x => x + Counter);
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR004", diagnostic.Id);
+        Assert.Contains("counter", diagnostic.GetMessage());
+        Assert.Contains("writable state", diagnostic.GetMessage());
+    }
+
+    [Fact]
     public async Task EachCapturedSymbol_IsReportedOnce_PerPatch()
     {
         var diagnostics = await AnalyzeAsync("""
