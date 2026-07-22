@@ -548,15 +548,16 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
             InspectCapturedLocalFunction(context, classifier, operation, patch.Scope, semanticModel, visitedLocalFunctions, reported);
         }
 
-        // Invoked-delegate chases are bounded per INVOCATION SITE, not per variable: the same
-        // delegate reassigned and invoked again executes a different closure and must be
-        // revisited, while a self-recursive delegate revisits the same site and stops.
-        var visitedHelpers = new HashSet<ISymbol>(SymbolEqualityComparer.Default);
+        // Both chases are bounded per SITE, not per symbol: the same delegate reassigned and
+        // invoked again executes a different closure, and the same helper called with
+        // different delegate arguments executes different bodies -- while recursion re-reaches
+        // the same site and stops.
+        var visitedCalls = new HashSet<(SyntaxNode, IMethodSymbol)>();
         var visitedInvokes = new HashSet<SyntaxNode>();
         foreach (var operation in ComputationLambdas.DescendDirectExecution(patch.Body))
         {
             InspectStaticRead(context, classifier, operation, reported);
-            InspectExecutedHelper(context, classifier, operation, semanticModel, visitedHelpers, visitedInvokes, reported);
+            InspectExecutedHelper(context, classifier, operation, semanticModel, visitedCalls, visitedInvokes, argumentMap: null, reported);
         }
     }
 
@@ -601,13 +602,17 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         SendableSymbolClassifier classifier,
         IOperation operation,
         SemanticModel? semanticModel,
-        HashSet<ISymbol> visited,
+        HashSet<(SyntaxNode, IMethodSymbol)> visitedCalls,
         HashSet<SyntaxNode> visitedInvokes,
+        Dictionary<IParameterSymbol, IOperation>? argumentMap,
         HashSet<ISymbol> reported)
     {
         if (operation is IInvocationOperation { TargetMethod.MethodKind: MethodKind.DelegateInvoke, Instance: { } callee })
         {
-            InspectInvokedDelegate(context, classifier, ResolveConditionalReceiver(callee), semanticModel, visited, visitedInvokes, reported);
+            // A delegate PARAMETER invoked by a chased helper resolves through the call-site
+            // arguments: `Run(() => hits)` with `Run(Func<int> f) => f()` executes the lambda.
+            var resolvedCallee = ComputationLambdas.SubstituteArguments(ResolveConditionalReceiver(callee), argumentMap) ?? callee;
+            InspectInvokedDelegate(context, classifier, resolvedCallee, semanticModel, visitedCalls, visitedInvokes, argumentMap, reported);
             return;
         }
 
@@ -622,16 +627,17 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         // real use.)
         foreach (var method in ComputationLambdas.ExecutedMethods(operation))
         {
-            if (ComputationLambdas.IsInsideNameOf(operation) || !visited.Add(method)
+            if (ComputationLambdas.IsInsideNameOf(operation) || !visitedCalls.Add((operation.Syntax, method))
                 || ComputationLambdas.ResolveMethodBody(method, semanticModel) is not { } helper)
             {
                 continue;
             }
 
+            var nestedMap = ComputationLambdas.BuildArgumentMap(operation, argumentMap);
             foreach (var inner in ComputationLambdas.DescendDirectExecution(helper.Body))
             {
                 InspectStaticRead(context, classifier, inner, reported);
-                InspectExecutedHelper(context, classifier, inner, semanticModel, visited, visitedInvokes, reported);
+                InspectExecutedHelper(context, classifier, inner, semanticModel, visitedCalls, visitedInvokes, nestedMap, reported);
             }
         }
     }
@@ -648,8 +654,9 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         SendableSymbolClassifier classifier,
         IOperation callee,
         SemanticModel? semanticModel,
-        HashSet<ISymbol> visited,
+        HashSet<(SyntaxNode, IMethodSymbol)> visitedCalls,
         HashSet<SyntaxNode> visitedInvokes,
+        Dictionary<IParameterSymbol, IOperation>? argumentMap,
         HashSet<ISymbol> reported)
     {
         if (!visitedInvokes.Add(callee.Syntax))
@@ -659,7 +666,7 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
 
         foreach (var body in ComputationLambdas.OfArgumentValue(callee, semanticModel))
         {
-            ChaseExecutedBody(context, classifier, body, semanticModel, visited, visitedInvokes, reported);
+            ChaseExecutedBody(context, classifier, body, semanticModel, visitedCalls, visitedInvokes, argumentMap, reported);
         }
 
         var variable = ComputationLambdas.ReferencedVariable(Unwrap(callee));
@@ -670,7 +677,7 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
 
         foreach (var body in AssignedDelegateBodies(variable, callee.Syntax, semanticModel))
         {
-            ChaseExecutedBody(context, classifier, body, semanticModel, visited, visitedInvokes, reported);
+            ChaseExecutedBody(context, classifier, body, semanticModel, visitedCalls, visitedInvokes, argumentMap, reported);
         }
     }
 
@@ -699,20 +706,78 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
     // to `later`, so `a` must not be chased.
     private static IEnumerable<ComputationLambdas.ComputationBody> AssignedDelegateBodies(ISymbol variable, SyntaxNode invokeSite, SemanticModel semanticModel)
     {
+        var writes = new List<SyntaxNode>();
         foreach (var node in semanticModel.SyntaxTree.GetRoot().DescendantNodes())
         {
-            foreach (var body in NodeAssignedBodies(node, variable, invokeSite, semanticModel))
+            if (WritesDelegateBeforeInvoke(node, variable, invokeSite, semanticModel))
+            {
+                writes.Add(node);
+            }
+        }
+
+        foreach (var node in writes)
+        {
+            // A later straight-line simple assignment on the path to the invoke REPLACES the
+            // value: the earlier write's body can never be the one invoked.
+            if (writes.Any(other => other != node && DefinitelyOverwrites(other, node, invokeSite, variable, semanticModel)))
+            {
+                continue;
+            }
+
+            foreach (var body in NodeAssignedBodies(node, variable, semanticModel))
             {
                 yield return body;
             }
         }
     }
 
-    private static IEnumerable<ComputationLambdas.ComputationBody> NodeAssignedBodies(SyntaxNode node, ISymbol variable, SyntaxNode invokeSite, SemanticModel semanticModel)
+    private static bool WritesDelegateBeforeInvoke(SyntaxNode node, ISymbol variable, SyntaxNode invokeSite, SemanticModel semanticModel)
+    {
+        return node switch
+        {
+            AssignmentExpressionSyntax assignment =>
+                ComputationLambdas.ReassignmentTargets(assignment) is { } targets
+                && targets.Any(target => ComputationLambdas.WritesVariable(target, variable, semanticModel))
+                && ComputationLambdas.CanExecuteBefore(assignment, invokeSite, variable, semanticModel),
+            ArgumentSyntax argument =>
+                argument.RefOrOutKeyword.Kind() is SyntaxKind.OutKeyword or SyntaxKind.RefKeyword
+                && semanticModel.GetSymbolInfo(argument.Expression).Symbol is { } written
+                && SymbolEqualityComparer.Default.Equals(written, variable)
+                && ComputationLambdas.CanExecuteBefore(argument, invokeSite, variable, semanticModel),
+            _ => false,
+        };
+    }
+
+    // "Straight-line" = the killer sits in plain block statements between itself and wherever
+    // the invoke lives; a killer inside an if/loop may not run, so it kills nothing.
+    private static bool DefinitelyOverwrites(SyntaxNode killer, SyntaxNode victim, SyntaxNode invokeSite, ISymbol variable, SemanticModel semanticModel)
+    {
+        if (killer is not AssignmentExpressionSyntax assignment
+            || !assignment.IsKind(SyntaxKind.SimpleAssignmentExpression)
+            || assignment.Left is TupleExpressionSyntax
+            || !ComputationLambdas.WritesVariable(assignment.Left, variable, semanticModel)
+            || killer.SpanStart <= victim.SpanStart
+            || killer.SpanStart >= invokeSite.SpanStart)
+        {
+            return false;
+        }
+
+        for (var current = killer.Parent; current is not null && !current.Span.Contains(invokeSite.Span); current = current.Parent)
+        {
+            if (current is not (BlockSyntax or ExpressionStatementSyntax))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static IEnumerable<ComputationLambdas.ComputationBody> NodeAssignedBodies(SyntaxNode node, ISymbol variable, SemanticModel semanticModel)
     {
         switch (node)
         {
-            case AssignmentExpressionSyntax assignment when ComputationLambdas.CanExecuteBefore(assignment, invokeSite, variable, semanticModel):
+            case AssignmentExpressionSyntax assignment:
                 foreach (var value in AssignedValuesFor(assignment.Left, assignment.Right, variable, semanticModel))
                 {
                     foreach (var body in ComputationLambdas.OfArgumentValue(value, semanticModel))
@@ -725,10 +790,8 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
 
             // `Provide(out later)` assembles the delegate inside the callee: the bodies come
             // from the helper's assignments to its out/ref parameter.
-            case ArgumentSyntax argument
-                when argument.RefOrOutKeyword.Kind() is SyntaxKind.OutKeyword or SyntaxKind.RefKeyword
-                    && ComputationLambdas.CanExecuteBefore(argument, invokeSite, variable, semanticModel):
-                foreach (var body in OutAssignedBodies(argument, variable, semanticModel))
+            case ArgumentSyntax argument:
+                foreach (var body in OutAssignedBodies(argument, semanticModel))
                 {
                     yield return body;
                 }
@@ -737,25 +800,17 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         }
     }
 
-    private static IEnumerable<ComputationLambdas.ComputationBody> OutAssignedBodies(ArgumentSyntax argument, ISymbol variable, SemanticModel semanticModel)
+    private static IEnumerable<ComputationLambdas.ComputationBody> OutAssignedBodies(ArgumentSyntax argument, SemanticModel semanticModel)
     {
-        if (semanticModel.GetSymbolInfo(argument.Expression).Symbol is not { } written
-            || !SymbolEqualityComparer.Default.Equals(written, variable)
-            || argument.Parent is not ArgumentListSyntax argumentList
-            || argumentList.Parent is not InvocationExpressionSyntax invocation
-            || semanticModel.GetSymbolInfo(invocation).Symbol is not IMethodSymbol method)
-        {
-            yield break;
-        }
-
-        var index = argumentList.Arguments.IndexOf(argument);
-        if (index < 0 || index >= method.Parameters.Length
+        // The SEMANTIC parameter, not the syntactic position: named arguments reorder freely
+        // (`Provide(second: out later, first: 0)`).
+        if ((semanticModel.GetOperation(argument) as IArgumentOperation)?.Parameter is not { } parameter
+            || parameter.ContainingSymbol is not IMethodSymbol method
             || ComputationLambdas.ResolveMethodBody(method, semanticModel) is not { } helper)
         {
             yield break;
         }
 
-        var parameter = method.Parameters[index];
         foreach (var node in helper.Scope.DescendantNodes())
         {
             if (node is not AssignmentExpressionSyntax assignment
@@ -802,14 +857,15 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         SendableSymbolClassifier classifier,
         ComputationLambdas.ComputationBody body,
         SemanticModel? semanticModel,
-        HashSet<ISymbol> visited,
+        HashSet<(SyntaxNode, IMethodSymbol)> visitedCalls,
         HashSet<SyntaxNode> visitedInvokes,
+        Dictionary<IParameterSymbol, IOperation>? argumentMap,
         HashSet<ISymbol> reported)
     {
         foreach (var inner in ComputationLambdas.DescendDirectExecution(body.Body))
         {
             InspectStaticRead(context, classifier, inner, reported);
-            InspectExecutedHelper(context, classifier, inner, semanticModel, visited, visitedInvokes, reported);
+            InspectExecutedHelper(context, classifier, inner, semanticModel, visitedCalls, visitedInvokes, argumentMap, reported);
         }
     }
 

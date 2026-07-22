@@ -738,6 +738,121 @@ public class SetInsideComputationAnalyzerTests
     }
 
     [Fact]
+    public async Task InterfaceDeclaredUsingResource_ChasesTheConcreteDispose()
+    {
+        // The initializer's type beats the declared interface: Writer.Dispose is what runs.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class Writer : IDisposable
+            {
+                private readonly Signal<int> target;
+
+                public Writer(Signal<int> target) { this.target = target; }
+
+                public void Dispose() { _ = target.Set(2); }
+            }
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var v = f.CreateSignal(1);
+                    f.CreateMemoizR(async () =>
+                    {
+                        using IDisposable w = new Writer(v);
+                        return 0;
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR003", diagnostic.Id);
+    }
+
+    [Fact]
+    public async Task SetterValueParameter_SubstitutesTheAssignedSignal()
+    {
+        // `P = other` runs the setter with value = other, a provably disjoint factory's
+        // signal: the suppression must survive the accessor boundary.
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public class C
+            {
+                private static Signal<int> P { get => null!; set { _ = value.Set(2); } }
+
+                public void M()
+                {
+                    var f1 = new MemoFactory();
+                    var f2 = new MemoFactory();
+                    var other = f2.CreateSignal(1);
+                    f1.CreateMemoizR(async () => { P = other; return 0; });
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task HelperRewalkedPerCallSite_CatchesTheSameFactoryCall()
+    {
+        // The first (suppressed, cross-factory) call must not cache away the second call,
+        // whose same-factory Set throws.
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f1 = new MemoFactory();
+                    var f2 = new MemoFactory();
+                    var other = f2.CreateSignal(1);
+                    var v = f1.CreateSignal(1);
+                    void Write(Signal<int> s) { _ = s.Set(2); }
+                    f1.CreateMemoizR(async () => { Write(other); Write(v); return 0; });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR003", diagnostic.Id);
+    }
+
+    [Fact]
+    public async Task LiftedRebind_InvokedOnlyAfterTheCreation_KeepsTheSuppression()
+    {
+        // The method-group lift is not execution: the delegate's only invocation runs after
+        // the creation already used the initializer's factory.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f1 = new MemoFactory();
+                    var f2 = new MemoFactory();
+                    var host = f1;
+                    void Rebind() { host = f2; }
+                    Action later = Rebind;
+                    var other = f2.CreateSignal(1);
+                    host.CreateMemoizR(async () => { await other.Set(2); return 0; });
+                    later();
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
     public async Task RebindCalledOnlyAfterTheCreation_KeepsTheSuppression()
     {
         // Rebind's only call site runs after the creation already used the initializer's

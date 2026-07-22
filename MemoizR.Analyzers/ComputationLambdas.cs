@@ -211,7 +211,12 @@ internal static class ComputationLambdas
                 continue;
             }
 
-            if (sole is not null || node is not AssignmentExpressionSyntax { Left: not TupleExpressionSyntax } assignment)
+            // Only a plain `x = value` fully DETERMINES the value: `x ??= ...` / `x += ...`
+            // can leave (or combine with) an older value supplied elsewhere.
+            if (sole is not null
+                || node is not AssignmentExpressionSyntax assignment
+                || !assignment.IsKind(SyntaxKind.SimpleAssignmentExpression)
+                || assignment.Left is TupleExpressionSyntax)
             {
                 return null;
             }
@@ -220,6 +225,59 @@ internal static class ComputationLambdas
         }
 
         return sole;
+    }
+
+    // Call-site arguments substitute for a chased helper's parameters: maps are built
+    // pre-substituted, so nested helper calls resolve through to the original computation's
+    // operations. A property SETTER's implicit `value` parameter maps to the assignment's
+    // right-hand side. Shared by MZR003's Set-target provenance and MZR004's delegate chase.
+    public static Dictionary<IParameterSymbol, IOperation>? BuildArgumentMap(IOperation operation, Dictionary<IParameterSymbol, IOperation>? outer)
+    {
+        if (operation is IPropertyReferenceOperation { Parent: ISimpleAssignmentOperation setterAssignment } property
+            && ReferenceEquals(setterAssignment.Target, property)
+            && property.Property.SetMethod?.Parameters.LastOrDefault() is { } valueParameter
+            && SubstituteArguments(setterAssignment.Value, outer) is { } setterValue)
+        {
+            return new Dictionary<IParameterSymbol, IOperation>(SymbolEqualityComparer.Default) { [valueParameter] = setterValue };
+        }
+
+        var arguments = operation switch
+        {
+            IInvocationOperation invocation => invocation.Arguments,
+            IObjectCreationOperation creation => creation.Arguments,
+            _ => default,
+        };
+
+        if (arguments.IsDefaultOrEmpty)
+        {
+            return null;
+        }
+
+        Dictionary<IParameterSymbol, IOperation>? map = null;
+        foreach (var argument in arguments)
+        {
+            if (argument.Parameter is { } parameter && SubstituteArguments(argument.Value, outer) is { } value)
+            {
+                map ??= new Dictionary<IParameterSymbol, IOperation>(SymbolEqualityComparer.Default);
+                map[parameter] = value;
+            }
+        }
+
+        return map;
+    }
+
+    public static IOperation? SubstituteArguments(IOperation? reference, Dictionary<IParameterSymbol, IOperation>? argumentMap)
+    {
+        var current = reference;
+        while (current is IConversionOperation conversion)
+        {
+            current = conversion.Operand;
+        }
+
+        return current is IParameterReferenceOperation parameterReference
+            && argumentMap?.TryGetValue(parameterReference.Parameter, out var argument) == true
+            ? argument
+            : reference;
     }
 
     private static ExpressionSyntax? DeconstructionInitializer(SingleVariableDesignationSyntax designation)
@@ -579,7 +637,68 @@ internal static class ComputationLambdas
             if (identifier.Identifier.ValueText == symbol.Name
                 && !local.Span.Contains(identifier.Span)
                 && SymbolEqualityComparer.Default.Equals(semanticModel.GetSymbolInfo(identifier).Symbol, symbol)
-                && CanExecuteBefore(identifier, reference, variable, semanticModel, visitedFunctions))
+                && ReferenceRunsBefore(identifier, reference, variable, semanticModel, visitedFunctions))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    // A direct CALL runs the function at the call's own position. A method-group LIFT runs it
+    // wherever the receiving delegate variable is invoked -- so those invocation sites become
+    // the ordering points; a lift that escapes anywhere else stays unknowable.
+    private static bool ReferenceRunsBefore(IdentifierNameSyntax use, SyntaxNode reference, ISymbol variable, SemanticModel semanticModel, HashSet<SyntaxNode> visitedFunctions)
+    {
+        if (use.Parent is InvocationExpressionSyntax { Expression: { } invoked } && invoked == use)
+        {
+            return CanExecuteBefore(use, reference, variable, semanticModel, visitedFunctions);
+        }
+
+        var lifted = LiftTargetVariable(use, semanticModel);
+        if (lifted is null)
+        {
+            return true;
+        }
+
+        return LiftedDelegateRunsBefore(lifted, reference, variable, semanticModel, visitedFunctions);
+    }
+
+    private static ISymbol? LiftTargetVariable(IdentifierNameSyntax use, SemanticModel semanticModel)
+    {
+        return use.Parent switch
+        {
+            EqualsValueClauseSyntax { Parent: VariableDeclaratorSyntax declarator } => semanticModel.GetDeclaredSymbol(declarator),
+            AssignmentExpressionSyntax assignment when assignment.Right == use && assignment.IsKind(SyntaxKind.SimpleAssignmentExpression)
+                => semanticModel.GetSymbolInfo(assignment.Left).Symbol,
+            _ => null,
+        };
+    }
+
+    private static bool LiftedDelegateRunsBefore(ISymbol lifted, SyntaxNode reference, ISymbol variable, SemanticModel semanticModel, HashSet<SyntaxNode> visitedFunctions)
+    {
+        foreach (var name in semanticModel.SyntaxTree.GetRoot().DescendantNodes().OfType<IdentifierNameSyntax>())
+        {
+            if (name.Identifier.ValueText != lifted.Name
+                || !SymbolEqualityComparer.Default.Equals(semanticModel.GetSymbolInfo(name).Symbol, lifted))
+            {
+                continue;
+            }
+
+            if (name.Parent is InvocationExpressionSyntax { Expression: { } invoked } && invoked == name)
+            {
+                if (CanExecuteBefore(name, reference, variable, semanticModel, visitedFunctions))
+                {
+                    return true;
+                }
+
+                continue;
+            }
+
+            // A write to the variable is not a use of the delegate; anything else lets the
+            // delegate escape to unknowable invocation sites.
+            if (name.Parent is not AssignmentExpressionSyntax { } write || write.Left != name)
             {
                 return true;
             }
@@ -708,6 +827,8 @@ internal static class ComputationLambdas
             .FirstOrDefault(candidate => !candidate.IsStatic && candidate.Parameters.Length == 0);
     }
 
+    // The INITIALIZER's type beats the declared type: `using IDisposable _ = new Writer(v);`
+    // runs Writer.Dispose, not an unwalkable interface member.
     private static IEnumerable<ITypeSymbol?> ResourceTypes(IOperation? resources)
     {
         switch (resources)
@@ -717,15 +838,25 @@ internal static class ComputationLambdas
                 {
                     foreach (var declarator in declaration.Declarators)
                     {
-                        yield return declarator.Symbol.Type;
+                        yield return UnwrappedType(declarator.Initializer?.Value) ?? declarator.Symbol.Type;
                     }
                 }
 
                 break;
             case { } expression:
-                yield return expression.Type;
+                yield return UnwrappedType(expression) ?? expression.Type;
                 break;
         }
+    }
+
+    private static ITypeSymbol? UnwrappedType(IOperation? value)
+    {
+        while (value is IConversionOperation conversion)
+        {
+            value = conversion.Operand;
+        }
+
+        return value?.Type;
     }
 
     private static (bool Reads, bool Writes) PropertyUsage(IPropertyReferenceOperation property)
