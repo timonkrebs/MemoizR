@@ -430,7 +430,11 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
             return;
         }
 
-        foreach (var inner in ComputationLambdas.Descend(body.Body))
+        // Direct execution only: the getter body is EXECUTED code, not stored closure -- a
+        // callback it builds and discards is allocated fresh per replay and never runs, so
+        // its captures must not count (unlike the patch's own nested callbacks, which the
+        // stored display chain pins).
+        foreach (var inner in ComputationLambdas.DescendDirectExecution(body.Body))
         {
             InspectCapture(context, classifier, inner, body.Scope, patchScope, semanticModel, reported, visitedGetters);
         }
@@ -706,7 +710,9 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
             yield break;
         }
 
-        if (SymbolEqualityComparer.Default.Equals(semanticModel.GetSymbolInfo(left).Symbol, variable)
+        // WritesVariable, not plain symbol equality: an assignment through a ref alias
+        // (`ref var alias = ref later; alias = () => hits;`) rebinds the delegate too.
+        if (ComputationLambdas.WritesVariable(left, variable, semanticModel)
             && semanticModel.GetOperation(right) is { } operation)
         {
             yield return operation;

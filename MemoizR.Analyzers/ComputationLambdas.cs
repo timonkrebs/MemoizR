@@ -629,6 +629,16 @@ internal static class ComputationLambdas
             case IConversionOperation { OperatorMethod: { } conversionOperator }:
                 yield return conversionOperator;
                 break;
+
+            // `Changed += handler` executes the custom add (or remove) accessor immediately.
+            case IEventAssignmentOperation { EventReference: IEventReferenceOperation eventReference } eventAssignment:
+                var accessor = eventAssignment.Adds ? eventReference.Event.AddMethod : eventReference.Event.RemoveMethod;
+                if (accessor is not null)
+                {
+                    yield return accessor;
+                }
+
+                break;
         }
     }
 

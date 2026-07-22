@@ -786,6 +786,38 @@ public class SetInsideComputationAnalyzerTests
         Assert.Equal("MZR003", diagnostic.Id);
     }
 
+    // `Changed += handler` executes the custom add accessor immediately, under the same
+    // evaluation lock as the computation itself.
+    [Fact]
+    public async Task SetHiddenInACustomEventAccessor_IsFlagged()
+    {
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                private static readonly MemoFactory F = new();
+                private static readonly Signal<int> V = F.CreateSignal(1);
+
+                private static event Action Changed
+                {
+                    add { _ = V.Set(2); }
+                    remove { }
+                }
+
+                public void M()
+                {
+                    F.CreateMemoizR(async () => { Changed += () => { }; return 0; });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR003", diagnostic.Id);
+        Assert.Contains("Signal<int>.Set", diagnostic.GetMessage());
+    }
+
     [Fact]
     public async Task DeconstructionReassignedState_KeepsTheDiagnostic()
     {

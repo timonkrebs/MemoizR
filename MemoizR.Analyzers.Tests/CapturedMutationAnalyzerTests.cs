@@ -595,6 +595,69 @@ public class CapturedMutationAnalyzerTests
         Assert.Empty(diagnostics);
     }
 
+    // A method invoked on THIS writes the enclosing object's state exactly like the inline
+    // form; a method on some OTHER receiver mutates that object instead -- a captured-
+    // reference mutation, deliberately MZR001's territory.
+    [Fact]
+    public async Task OptimisticPatch_WriteHiddenInAThisMethod_IsFlagged()
+    {
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public class C
+            {
+                private int counter;
+
+                private void Inc() => counter++;
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x => { Inc(); return x; });
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR002", diagnostic.Id);
+        Assert.Contains("field 'counter'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task OptimisticPatch_HelperOnAnotherReceiver_IsNotChased()
+    {
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public class Helper
+            {
+                private int count;
+
+                public void Inc() => count++;
+            }
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    var helper = new Helper();
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x => { helper.Inc(); return x; });
+                    });
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
     // A captured mutable STRUCT invoked through a non-readonly method mutates the hoisted
     // closure field on every re-execution -- covered by the mutating-value-receiver rule, the
     // lambda-capture analog of MZR004's boxed method-group receiver verdict.

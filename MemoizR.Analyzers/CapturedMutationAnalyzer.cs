@@ -46,19 +46,21 @@ public sealed class CapturedMutationAnalyzer : DiagnosticAnalyzer
                     ReportIfShared(context, target, computation.Scope, computation.Scope);
                 }
 
-                InspectCalledLocalFunction(context, operation, computation.Scope, invocation.SemanticModel, visitedLocalFunctions);
+                InspectCalledHelper(context, operation, computation.Scope, invocation.SemanticModel, visitedLocalFunctions);
             }
         }
     }
 
-    // A LOCAL FUNCTION the computation invokes (or lifts into a delegate) has no receiver: its
-    // closure IS the computation's environment, so `int Next() { applied++; return applied; }`
-    // declared outside the computation writes state the computation shares exactly like an
-    // inline `applied++` -- and MZR004 cannot carry this shape (the int is Sendable; the WRITE
-    // is the race). Bodies resolve same-tree, the visited set bounds call cycles, and the
-    // helper's own per-call locals stay exempt via the enclosing-function guard in
-    // ReportIfShared.
-    private static void InspectCalledLocalFunction(
+    // A helper the computation runs writes the same state the inline form would: a LOCAL
+    // FUNCTION's closure IS the computation's environment (`int Next() { applied++; ... }`),
+    // and a method invoked on THIS or statically (`void Inc() => counter++;`) mutates the
+    // enclosing object/static state on every run -- shapes MZR004 cannot carry (a Sendable
+    // type or int hides them; the WRITE is the race). A method on any OTHER receiver stays
+    // unchased: its writes mutate that object's state, a captured-reference mutation that is
+    // deliberately MZR001's territory. Bodies resolve same-tree, the visited set bounds call
+    // cycles, and the helper's own per-call locals stay exempt via the enclosing-function
+    // guard in ReportIfShared.
+    private static void InspectCalledHelper(
         OperationAnalysisContext context,
         IOperation operation,
         SyntaxNode computationScope,
@@ -67,14 +69,14 @@ public sealed class CapturedMutationAnalyzer : DiagnosticAnalyzer
     {
         var method = operation switch
         {
-            IInvocationOperation call => call.TargetMethod,
-            IMethodReferenceOperation reference => reference.Method,
+            IInvocationOperation call when IsChaseableReceiver(call) => call.TargetMethod,
+            IMethodReferenceOperation { Method.MethodKind: MethodKind.LocalFunction } reference => reference.Method,
             _ => null,
         };
 
-        if (method is not { MethodKind: MethodKind.LocalFunction }
+        if (method is null
             || ComputationLambdas.IsInsideNameOf(operation)
-            || !ComputationLambdas.IsDeclaredOutside(method, computationScope)
+            || (method.MethodKind == MethodKind.LocalFunction && !ComputationLambdas.IsDeclaredOutside(method, computationScope))
             || !visited.Add(method)
             || ComputationLambdas.ResolveMethodBody(method, semanticModel) is not { } helper)
         {
@@ -88,8 +90,14 @@ public sealed class CapturedMutationAnalyzer : DiagnosticAnalyzer
                 ReportIfShared(context, target, helper.Scope, computationScope);
             }
 
-            InspectCalledLocalFunction(context, inner, computationScope, semanticModel, visited);
+            InspectCalledHelper(context, inner, computationScope, semanticModel, visited);
         }
+    }
+
+    private static bool IsChaseableReceiver(IInvocationOperation call)
+    {
+        return call.Instance is null
+            || call.Instance is IInstanceReferenceOperation { ReferenceKind: InstanceReferenceKind.ContainingTypeInstance };
     }
 
     private static ImmutableArray<IOperation> MutationTargets(IOperation operation)
