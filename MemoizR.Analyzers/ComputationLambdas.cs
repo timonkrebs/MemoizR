@@ -341,8 +341,16 @@ internal static class ComputationLambdas
     public static bool DeclaredInFunctionEnclosing(ISymbol symbol, SyntaxNode scope)
     {
         var declaration = symbol.ContainingSymbol?.DeclaringSyntaxReferences.FirstOrDefault();
-        return declaration is not null
-            && declaration.SyntaxTree == scope.SyntaxTree
+        if (declaration is null)
+        {
+            // A compiler-synthesized container -- the top-level-statements entry point -- has
+            // no declaration of its own; its locals are the file's global statements, which
+            // enclose everything in the file.
+            return symbol.DeclaringSyntaxReferences.FirstOrDefault() is { } own
+                && own.SyntaxTree == scope.SyntaxTree;
+        }
+
+        return declaration.SyntaxTree == scope.SyntaxTree
             && declaration.Span.Contains(scope.Span);
     }
 

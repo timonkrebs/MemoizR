@@ -155,7 +155,10 @@ reject every capturing lambda, immutable captures included).
 Flagged, once per captured symbol per patch:
 
 - a **captured local or parameter whose type is not Sendable** (the same classifier verdicts as
-  MZR001; type parameters keep the benefit of the doubt);
+  MZR001; type parameters keep the benefit of the doubt) — or whose type is a **mutable
+  struct**: the classifier accepts those for node *values* because values are copied, but a
+  closure hoists the *variable* itself, so the owner mutates the same storage the stored patch
+  re-reads;
 - a read of **writable state on the enclosing object** (a non-readonly field, a settable
   property; `init` counts as immutable, and a ref-returning property counts as writable — no
   setter, but it hands out assignable live storage) — the patch re-reads it on other flows

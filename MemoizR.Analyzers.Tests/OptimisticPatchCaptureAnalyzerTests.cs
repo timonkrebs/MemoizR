@@ -939,6 +939,139 @@ public class OptimisticPatchCaptureAnalyzerTests
         Assert.Contains("writable state", diagnostic.GetMessage());
     }
 
+    // The closure hoists the VARIABLE, not a copy: a mutable struct that is fine as a
+    // (copied) node value is writable shared storage as a capture.
+    [Fact]
+    public async Task CapturedMutableStruct_IsFlagged_ReadonlyStructIsNot()
+    {
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public struct Counter
+            {
+                public int Value;
+            }
+
+            public readonly struct Snapshot
+            {
+                public readonly int Value;
+
+                public Snapshot(int value) { Value = value; }
+            }
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    var counter = new Counter();
+                    var snap = new Snapshot(1);
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x => x + counter.Value + snap.Value);
+                    });
+                    counter.Value++;
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR004", diagnostic.Id);
+        Assert.Contains("'counter'", diagnostic.GetMessage());
+        Assert.Contains("mutable struct", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task ForInitializerDelegate_CarriesItsReassignment()
+    {
+        // Declared in the for-INITIALIZER, the variable outlives each iteration: the trailing
+        // reassignment is what the next iteration's Apply stores.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    var shared = new List<int>();
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        for (Func<int, int> patch = static x => x; ; )
+                        {
+                            await ctx.Apply(state, patch);
+                            patch = x => x + shared.Count;
+                        }
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR004", diagnostic.Id);
+        Assert.Contains("'patch'", diagnostic.GetMessage());
+        Assert.Contains("reassigned", diagnostic.GetMessage());
+    }
+
+    // A property read runs its getter exactly like a call: `static int Hits => hits;` is the
+    // helper-method evasion with property syntax.
+    [Fact]
+    public async Task GetOnlyStaticProperty_HidingAStaticRead_IsFlagged()
+    {
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public class C
+            {
+                private static int hits;
+
+                private static int Hits => hits;
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x => x + Hits);
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR004", diagnostic.Id);
+        Assert.Contains("hits", diagnostic.GetMessage());
+        Assert.Contains("writable static state", diagnostic.GetMessage());
+    }
+
+    // Top-level statements put captured locals in a compiler-synthesized entry point with no
+    // declaration of its own -- the enclosing-function test must not lose them.
+    [Fact]
+    public async Task TopLevelStatementCaptures_AreShared()
+    {
+        var diagnostics = await AnalyzerTestHarness.AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            var f = new MemoFactory();
+            var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+            var shared = new List<int>();
+            f.CreateAction<int>(async (p, ctx) =>
+            {
+                await ctx.Apply(state, x => x + shared.Count);
+            });
+            """, new OptimisticPatchCaptureAnalyzer(), OutputKind.ConsoleApplication);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR004", diagnostic.Id);
+        Assert.Contains("shared", diagnostic.GetMessage());
+    }
+
     [Fact]
     public async Task EachCapturedSymbol_IsReportedOnce_PerPatch()
     {

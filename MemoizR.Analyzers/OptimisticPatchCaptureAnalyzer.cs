@@ -298,12 +298,23 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         return false;
     }
 
-    private static bool DeclaredWithin(ISymbol variable, SyntaxNode node)
+    // Only the loop BODY re-declares per iteration: a variable in a for-INITIALIZER is
+    // declared once and carries across iterations like one declared before the loop.
+    private static bool DeclaredWithin(ISymbol variable, SyntaxNode loop)
     {
+        var body = loop switch
+        {
+            ForStatementSyntax @for => (SyntaxNode)@for.Statement,
+            ForEachStatementSyntax forEach => forEach.Statement,
+            WhileStatementSyntax @while => @while.Statement,
+            DoStatementSyntax @do => @do.Statement,
+            _ => loop,
+        };
+
         var declaration = variable.DeclaringSyntaxReferences.FirstOrDefault();
         return declaration is not null
-            && declaration.SyntaxTree == node.SyntaxTree
-            && node.Span.Contains(declaration.Span);
+            && declaration.SyntaxTree == body.SyntaxTree
+            && body.Span.Contains(declaration.Span);
     }
 
     private static SyntaxNode? EnclosingFunction(SyntaxNode node)
@@ -353,10 +364,10 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         switch (operation)
         {
             case ILocalReferenceOperation local when IsSharedCapture(local.Local, scope, patchScope):
-                ReportIfNotSendable(context, classifier, operation, local.Local, local.Local.Type, reported);
+                ReportCapturedVariable(context, classifier, operation, local.Local, local.Local.Type, reported);
                 break;
             case IParameterReferenceOperation parameter when IsSharedCapture(parameter.Parameter, scope, patchScope):
-                ReportIfNotSendable(context, classifier, operation, parameter.Parameter, parameter.Parameter.Type, reported);
+                ReportCapturedVariable(context, classifier, operation, parameter.Parameter, parameter.Parameter.Type, reported);
                 break;
 
             // A member access on the enclosing object captures `this`. The per-member verdicts
@@ -500,11 +511,19 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         HashSet<IMethodSymbol> visited,
         HashSet<ISymbol> reported)
     {
-        // Only a CALL executes the helper: a method group the patch stores builds a delegate
-        // without running it -- the same deferred shape as a built lambda, which this walk
-        // already prunes. (The capture chase above keeps method references: a lifted local
-        // function's closure is pinned either way.)
-        var method = operation is IInvocationOperation invocation ? invocation.TargetMethod : null;
+        // Only what EXECUTES is chased: a call, or a property READ, which runs its getter
+        // exactly like a call -- `static int Hits => hits;` is the helper-method evasion with
+        // property syntax. A method group the patch stores builds a delegate without running
+        // it -- the same deferred shape as a built lambda, which this walk already prunes.
+        // (The capture chase above keeps method references: a lifted local function's closure
+        // is pinned either way.)
+        var method = operation switch
+        {
+            IInvocationOperation invocation => invocation.TargetMethod,
+            IPropertyReferenceOperation property => property.Property.GetMethod,
+            _ => null,
+        };
+
         if (method is null || !visited.Add(method)
             || ComputationLambdas.ResolveMethodBody(method, semanticModel) is not { } helper)
         {
@@ -537,6 +556,49 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
     {
         return ComputationLambdas.IsDeclaredOutside(symbol, scope)
             && ComputationLambdas.DeclaredInFunctionEnclosing(symbol, patchScope);
+    }
+
+    // A captured VARIABLE is shared storage, not a copy: the closure hoists the variable
+    // itself into the display class. A mutable struct -- which the classifier accepts for node
+    // VALUES precisely because those are copied -- is therefore writable shared state here:
+    // the owner mutates `counter.Value` in place while re-executions re-read the same storage.
+    // Immutable structs and Sendable reference types stay accepted as before.
+    private static void ReportCapturedVariable(
+        OperationAnalysisContext context,
+        SendableSymbolClassifier classifier,
+        IOperation operation,
+        ISymbol symbol,
+        ITypeSymbol type,
+        HashSet<ISymbol> reported)
+    {
+        if (IsMutableStruct(type))
+        {
+            Report(
+                context,
+                operation,
+                symbol,
+                symbol.Name,
+                $"its type '{SendableSymbolClassifier.Display(type)}' is a mutable struct, and the stored closure shares the captured variable's storage rather than a copy",
+                reported);
+            return;
+        }
+
+        ReportIfNotSendable(context, classifier, operation, symbol, type, reported);
+    }
+
+    // A value type with directly writable instance state. Enums have no user state (their
+    // synthesized backing field must not count), and a metadata struct's private fields are
+    // not imported -- benefit of the doubt, like everywhere else.
+    private static bool IsMutableStruct(ITypeSymbol type)
+    {
+        if (!type.IsValueType || type.TypeKind == TypeKind.Enum || type is not INamedTypeSymbol named)
+        {
+            return false;
+        }
+
+        return named.GetMembers().Any(member =>
+            member is IFieldSymbol { IsStatic: false, IsReadOnly: false, IsConst: false }
+            || (member is IPropertySymbol { IsStatic: false } property && IsSettable(property)));
     }
 
     // The shared verdict for a state read: writable storage is flagged outright; immutable
