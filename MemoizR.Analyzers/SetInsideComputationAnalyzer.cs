@@ -71,32 +71,67 @@ public sealed class SetInsideComputationAnalyzer : DiagnosticAnalyzer
                 continue;
             }
 
-            if (ExecutedMethod(operation) is { } method
-                && !ComputationLambdas.IsInsideNameOf(operation)
-                && visitedHelpers.Add(method)
-                && ComputationLambdas.ResolveMethodBody(method, host.SemanticModel) is { } helper)
+            foreach (var method in ExecutedMethods(operation))
             {
-                InspectExecutedBody(context, host, helper.Body, actorHost, visitedHelpers);
+                if (!ComputationLambdas.IsInsideNameOf(operation)
+                    && visitedHelpers.Add(method)
+                    && ComputationLambdas.ResolveMethodBody(method, host.SemanticModel) is { } helper)
+                {
+                    InspectExecutedBody(context, host, helper.Body, actorHost, visitedHelpers);
+                }
             }
         }
     }
 
-    // Same-tree code the computation EXECUTES, whatever the syntax: a call, a property read
-    // (its getter runs like a call), a constructor, or a user-defined operator/conversion --
-    // `new Writer(v)` whose constructor Sets throws under the same evaluation lock as an
-    // inline Set. (A property mentioned only in nameof is not executed and must not be
-    // chased.)
-    private static IMethodSymbol? ExecutedMethod(IOperation operation)
+    // Same-tree code the computation EXECUTES, whatever the syntax: a call, a property access
+    // (a read runs the getter, an assignment target runs the setter, compound forms run
+    // both), a constructor, or a user-defined operator/conversion -- `new Writer(v)` whose
+    // constructor Sets throws under the same evaluation lock as an inline Set. (A property
+    // mentioned only in nameof is not executed and must not be chased.)
+    private static IEnumerable<IMethodSymbol> ExecutedMethods(IOperation operation)
     {
-        return operation switch
+        switch (operation)
         {
-            IInvocationOperation invocation => invocation.TargetMethod,
-            IPropertyReferenceOperation property => property.Property.GetMethod,
-            IObjectCreationOperation creation => creation.Constructor,
-            IBinaryOperation { OperatorMethod: { } binaryOperator } => binaryOperator,
-            IUnaryOperation { OperatorMethod: { } unaryOperator } => unaryOperator,
-            IConversionOperation { OperatorMethod: { } conversionOperator } => conversionOperator,
-            _ => null,
+            case IInvocationOperation invocation:
+                yield return invocation.TargetMethod;
+                break;
+            case IPropertyReferenceOperation property:
+                var (reads, writes) = PropertyUsage(property);
+                if (reads && property.Property.GetMethod is { } getter)
+                {
+                    yield return getter;
+                }
+
+                if (writes && property.Property.SetMethod is { } setter)
+                {
+                    yield return setter;
+                }
+
+                break;
+            case IObjectCreationOperation { Constructor: { } constructor }:
+                yield return constructor;
+                break;
+            case IBinaryOperation { OperatorMethod: { } binaryOperator }:
+                yield return binaryOperator;
+                break;
+            case IUnaryOperation { OperatorMethod: { } unaryOperator }:
+                yield return unaryOperator;
+                break;
+            case IConversionOperation { OperatorMethod: { } conversionOperator }:
+                yield return conversionOperator;
+                break;
+        }
+    }
+
+    private static (bool Reads, bool Writes) PropertyUsage(IPropertyReferenceOperation property)
+    {
+        return property.Parent switch
+        {
+            ISimpleAssignmentOperation assignment when ReferenceEquals(assignment.Target, property) => (false, true),
+            ICompoundAssignmentOperation compound when ReferenceEquals(compound.Target, property) => (true, true),
+            ICoalesceAssignmentOperation coalesce when ReferenceEquals(coalesce.Target, property) => (true, true),
+            IIncrementOrDecrementOperation increment when ReferenceEquals(increment.Target, property) => (true, true),
+            _ => (true, false),
         };
     }
 

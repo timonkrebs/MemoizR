@@ -592,6 +592,63 @@ public class SetInsideComputationAnalyzerTests
         Assert.Contains("Signal<int>.Set", diagnostic.GetMessage());
     }
 
+    // A property assignment executes the SETTER: a Set inside one throws under the same
+    // evaluation lock as an inline Set.
+    [Fact]
+    public async Task SetHiddenInAPropertySetter_IsFlagged()
+    {
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public class C
+            {
+                private static readonly MemoFactory F = new();
+                private static readonly Signal<int> V = F.CreateSignal(1);
+
+                private static int P { get => 0; set { _ = V.Set(2); } }
+
+                public void M()
+                {
+                    F.CreateMemoizR(async () => { P = 1; return 0; });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR003", diagnostic.Id);
+        Assert.Contains("Signal<int>.Set", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task RefAliasReboundState_KeepsTheDiagnostic()
+    {
+        // The state is rebound through a ref alias to another factory's view: the stale
+        // initializer must not prove provenance.
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f1 = new MemoFactory();
+                    var f2 = new MemoFactory();
+                    var other = f2.CreateSignal(1);
+                    var state = f1.CreateOptimistic<int>(f1.CreateSignal(1));
+                    ref var alias = ref state;
+                    alias = f2.CreateOptimistic<int>(f2.CreateSignal(2));
+                    f1.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x => { _ = other.Set(2); return x; });
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR003", diagnostic.Id);
+    }
+
     [Fact]
     public async Task DeconstructionReassignedState_KeepsTheDiagnostic()
     {

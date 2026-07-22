@@ -1405,6 +1405,200 @@ public class OptimisticPatchCaptureAnalyzerTests
     }
 
     [Fact]
+    public async Task AssignmentAfterTheOnlyInvoke_IsNotChased()
+    {
+        // The second assignment executes after the only invocation: its callback is built but
+        // never run during the replay.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                private static int hits;
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x =>
+                        {
+                            Func<int> later;
+                            later = static () => 0;
+                            var y = later();
+                            later = () => hits;
+                            _ = later;
+                            return x + y;
+                        });
+                    });
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task DeconstructionElement_AssignedToAnotherVariable_IsNotChased()
+    {
+        // Positional pairing: the hits callback lands in `other`, which is never invoked.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                private static int hits;
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x =>
+                        {
+                            Func<int> other;
+                            Func<int> later;
+                            (other, later) = ((Func<int>)(() => hits), static () => 0);
+                            _ = other;
+                            return x + later();
+                        });
+                    });
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task InstanceFieldPatch_WrittenOnAFreshOtherInstance_StaysTrusted()
+    {
+        // `other.patch = ...` on a freshly constructed instance cannot rebind `this.patch`.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                private Func<int, int> patch = static x => x;
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    var shared = new List<int>();
+                    var other = new C();
+                    other.patch = x => x + shared.Count;
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, patch);
+                    });
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task ComputedStaticGetter_ReturningFreshValues_IsNotFlagged_AutoPropertyIs()
+    {
+        // `Items` allocates per replay -- nothing shared; `Stored` is backing storage holding
+        // ONE List shared by every flow.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                private static List<int> Items => new();
+
+                private static List<int> Stored { get; } = new();
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x => x + Items.Count + Stored.Count);
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR004", diagnostic.Id);
+        Assert.Contains("Stored", diagnostic.GetMessage());
+        Assert.Contains("not Sendable", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task DeconstructionDeclaredDelegate_ResolvesItsInitializer()
+    {
+        // `var (patch, _) = (...)` declares through a designation: the safe lambda is right
+        // there in the tuple, so the delegate must not be reported as unverifiable.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    var (patch, _) = ((Func<int, int>)(static x => x), 0);
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, patch);
+                    });
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task NullConditionalInvoke_IsChasedForStatics()
+    {
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                private static int hits;
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x =>
+                        {
+                            Func<int>? later = () => hits;
+                            return x + (later?.Invoke() ?? 0);
+                        });
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR004", diagnostic.Id);
+        Assert.Contains("hits", diagnostic.GetMessage());
+        Assert.Contains("writable static state", diagnostic.GetMessage());
+    }
+
+    [Fact]
     public async Task EachCapturedSymbol_IsReportedOnce_PerPatch()
     {
         var diagnostics = await AnalyzeAsync("""

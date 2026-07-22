@@ -187,7 +187,9 @@ Flagged, once per captured symbol per patch:
   same-tree code the patch *executes* is chased for them transitively: helper methods,
   property getters, constructors, user-defined operators/conversions, and delegates the patch
   builds *and* invokes (the classifier deliberately ignores statics, meaning a Sendable `this`
-  says nothing about them). Static
+  says nothing about them). Only *backing storage* gets the type verdict: a computed static
+  getter may hand out a fresh value per replay, so its body is chased instead of its return
+  type being judged. Static
   verdicts follow MZR003's *direct-execution* pruning: a read inside a callback the patch
   merely builds runs later, off the overlay's re-execution (closure captures keep the full
   walk — a built callback still pins them in the stored display chain);

@@ -72,7 +72,7 @@ internal static class ReceiverChains
         foreach (var node in semanticModel.SyntaxTree.GetRoot().DescendantNodes())
         {
             if (ComputationLambdas.ReassignmentTargets(node) is { } targets
-                && targets.Any(target => SymbolEqualityComparer.Default.Equals(semanticModel.GetSymbolInfo(target).Symbol, variable))
+                && targets.Any(target => ComputationLambdas.WritesVariable(target, variable, semanticModel))
                 && ComputationLambdas.CanExecuteBefore(node, reference, variable))
             {
                 return true;

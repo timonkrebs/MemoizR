@@ -175,10 +175,87 @@ internal static class ComputationLambdas
         {
             VariableDeclaratorSyntax { Initializer.Value: { } value } => value,
             PropertyDeclarationSyntax { Initializer.Value: { } value } => value,
+            // `var (patch, _) = (...)` declares through a designation; its initializer is the
+            // positionally matching element of the right-hand tuple.
+            SingleVariableDesignationSyntax designation => DeconstructionInitializer(designation),
             _ => null,
         };
 
         return initializer is null ? null : semanticModel.GetOperation(initializer);
+    }
+
+    private static ExpressionSyntax? DeconstructionInitializer(SingleVariableDesignationSyntax designation)
+    {
+        var indexes = new List<int>();
+        SyntaxNode current = designation;
+        while (current.Parent is ParenthesizedVariableDesignationSyntax parent)
+        {
+            indexes.Add(parent.Variables.IndexOf((VariableDesignationSyntax)current));
+            current = parent;
+        }
+
+        if (current.Parent is not DeclarationExpressionSyntax declaration
+            || declaration.Parent is not AssignmentExpressionSyntax { Right: { } right })
+        {
+            return null;
+        }
+
+        // Indexes were recorded innermost-first; apply them outermost-first over the (possibly
+        // nested) tuple literal. A non-literal right-hand side stays unresolvable.
+        for (var i = indexes.Count - 1; i >= 0; i--)
+        {
+            if (right is not TupleExpressionSyntax tuple || indexes[i] >= tuple.Arguments.Count)
+            {
+                return null;
+            }
+
+            right = tuple.Arguments[indexes[i]].Expression;
+        }
+
+        return right;
+    }
+
+    // A ref-local ALIAS writes its referent: `ref var alias = ref patch; alias = ...` rebinds
+    // patch just as directly. The alias chain resolves through `= ref` initializers; the
+    // visited set breaks alias cycles. Shared by MZR004's delegate-reassignment scan and the
+    // provenance checks in ReceiverChains.
+    public static bool WritesVariable(ExpressionSyntax target, ISymbol variable, SemanticModel semanticModel)
+    {
+        var symbol = semanticModel.GetSymbolInfo(target).Symbol;
+        HashSet<ISymbol>? visited = null;
+        while (true)
+        {
+            if (symbol is null)
+            {
+                return false;
+            }
+
+            if (SymbolEqualityComparer.Default.Equals(symbol, variable))
+            {
+                return true;
+            }
+
+            if (symbol is not ILocalSymbol { RefKind: RefKind.Ref })
+            {
+                return false;
+            }
+
+            visited ??= new HashSet<ISymbol>(SymbolEqualityComparer.Default);
+            if (!visited.Add(symbol))
+            {
+                return false;
+            }
+
+            if (symbol.DeclaringSyntaxReferences.FirstOrDefault()?.GetSyntax() is not VariableDeclaratorSyntax
+                {
+                    Initializer.Value: RefExpressionSyntax { Expression: { } referent }
+                })
+            {
+                return false;
+            }
+
+            symbol = semanticModel.GetSymbolInfo(referent).Symbol;
+        }
     }
 
     // A method group (`f.CreateMemoizR(Compute)`) or local-function reference is as much a

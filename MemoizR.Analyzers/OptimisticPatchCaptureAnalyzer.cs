@@ -207,12 +207,12 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         }
     }
 
-    // Any assignment beyond the declaration initializer (including a ref/out handoff) that can
-    // EXECUTE before this call: a same-tree syntactic scan, so a reassignment in another file
-    // is residual risk like every same-tree-only resolution here. A later straight-line
-    // assignment cannot change the delegate this call already stored -- flagging it would
-    // punish the common rebind-after-use.
-    private static bool IsReassignedBefore(ISymbol variable, SyntaxNode reference, SemanticModel? semanticModel)
+    // Any assignment beyond the declaration initializer (including a ref/out handoff, or a
+    // write through a ref alias) that can EXECUTE before this READ: a same-tree syntactic
+    // scan, so a reassignment in another file is residual risk like every same-tree-only
+    // resolution here. A later straight-line assignment cannot change the delegate this call
+    // already stored -- flagging it would punish the common rebind-after-use.
+    private static bool IsReassignedBefore(ISymbol variable, IOperation readReference, SemanticModel? semanticModel)
     {
         if (semanticModel is null)
         {
@@ -222,14 +222,57 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         foreach (var node in semanticModel.SyntaxTree.GetRoot().DescendantNodes())
         {
             if (ComputationLambdas.ReassignmentTargets(node) is { } targets
-                && targets.Any(target => WritesVariable(target, variable, semanticModel))
-                && ComputationLambdas.CanExecuteBefore(node, reference, variable))
+                && targets.Any(target => ComputationLambdas.WritesVariable(target, variable, semanticModel)
+                    && WritesReadInstance(target, variable, readReference, semanticModel))
+                && ComputationLambdas.CanExecuteBefore(node, readReference.Syntax, variable))
             {
                 return true;
             }
         }
 
         return false;
+    }
+
+    // A write through a local that provably holds a DIFFERENT instance (initialized with its
+    // own `new`) cannot rebind the member being read through some other receiver:
+    // `other.patch = evil;` says nothing about `this.patch`. Approximation: the receiver's
+    // fresh initializer is the proof; a receiver later re-aliased to the read instance is
+    // accepted residual risk.
+    private static bool WritesReadInstance(ExpressionSyntax target, ISymbol variable, IOperation readReference, SemanticModel semanticModel)
+    {
+        if (variable is not (IFieldSymbol or IPropertySymbol)
+            || target is not MemberAccessExpressionSyntax { Expression: { } receiverExpression })
+        {
+            return true;
+        }
+
+        if (semanticModel.GetSymbolInfo(receiverExpression).Symbol is not ILocalSymbol receiver
+            || !IsFreshInstance(receiver)
+            || IsReceiverOf(readReference, receiver))
+        {
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool IsFreshInstance(ILocalSymbol local)
+    {
+        return local.DeclaringSyntaxReferences.FirstOrDefault()?.GetSyntax()
+            is VariableDeclaratorSyntax { Initializer.Value: BaseObjectCreationExpressionSyntax };
+    }
+
+    private static bool IsReceiverOf(IOperation readReference, ILocalSymbol receiver)
+    {
+        var instance = Unwrap(readReference) switch
+        {
+            IFieldReferenceOperation field => field.Instance,
+            IPropertyReferenceOperation property => property.Instance,
+            _ => null,
+        };
+
+        return instance is not null
+            && SymbolEqualityComparer.Default.Equals(ComputationLambdas.ReferencedVariable(Unwrap(instance)), receiver);
     }
 
     // The reassignment check applies to EVERY variable in the alias chain, each against the
@@ -239,11 +282,10 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
     private static ISymbol? FindReassignedLink(IOperation value, SemanticModel? semanticModel)
     {
         var reference = Unwrap(value);
-        var site = value.Syntax;
         HashSet<ISymbol>? visited = null;
         while (ReceiverSymbol(reference) is (ILocalSymbol or IFieldSymbol or IPropertySymbol) and { } variable)
         {
-            if (IsReassignedBefore(variable, site, semanticModel))
+            if (IsReassignedBefore(variable, reference, semanticModel))
             {
                 return variable;
             }
@@ -255,53 +297,10 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
                 return null;
             }
 
-            site = initializer.Syntax;
             reference = Unwrap(initializer);
         }
 
         return null;
-    }
-
-    // A ref-local ALIAS writes its referent: `ref var alias = ref patch; alias = ...` rebinds
-    // patch just as directly. The alias chain resolves through `= ref` initializers; the
-    // visited set breaks alias cycles.
-    private static bool WritesVariable(ExpressionSyntax target, ISymbol variable, SemanticModel semanticModel)
-    {
-        var symbol = semanticModel.GetSymbolInfo(target).Symbol;
-        HashSet<ISymbol>? visited = null;
-        while (true)
-        {
-            if (symbol is null)
-            {
-                return false;
-            }
-
-            if (SymbolEqualityComparer.Default.Equals(symbol, variable))
-            {
-                return true;
-            }
-
-            if (symbol is not ILocalSymbol { RefKind: RefKind.Ref })
-            {
-                return false;
-            }
-
-            visited ??= new HashSet<ISymbol>(SymbolEqualityComparer.Default);
-            if (!visited.Add(symbol))
-            {
-                return false;
-            }
-
-            if (symbol.DeclaringSyntaxReferences.FirstOrDefault()?.GetSyntax() is not VariableDeclaratorSyntax
-                {
-                    Initializer.Value: RefExpressionSyntax { Expression: { } referent }
-                })
-            {
-                return false;
-            }
-
-            symbol = semanticModel.GetSymbolInfo(referent).Symbol;
-        }
     }
 
     private static IOperation Unwrap(IOperation value)
@@ -405,9 +404,7 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
                     writable: !staticField.Field.IsReadOnly, "it is writable static state", reported);
                 break;
             case IPropertyReferenceOperation { Property.IsStatic: true } staticProperty:
-                InspectStateRead(
-                    context, classifier, operation, staticProperty.Property, staticProperty.Property.Type,
-                    writable: IsSettable(staticProperty.Property), "it is writable static state", reported);
+                InspectStaticProperty(context, classifier, operation, staticProperty.Property, reported);
                 break;
 
             // An event's backing delegate is writable storage by construction: any subscriber
@@ -419,6 +416,39 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
                     "it is writable static state (subscribing mutates the event's backing delegate)", reported);
                 break;
         }
+    }
+
+    private static void InspectStaticProperty(
+        OperationAnalysisContext context,
+        SendableSymbolClassifier classifier,
+        IOperation operation,
+        IPropertySymbol property,
+        HashSet<ISymbol> reported)
+    {
+        if (IsSettable(property))
+        {
+            Report(context, operation, property, property.Name, "it is writable static state", reported);
+            return;
+        }
+
+        // Only BACKING STORAGE holds a shared object: a computed getter may hand out a fresh
+        // value on every replay (`static List<int> Items => new();`), and what it actually
+        // returns is covered by the executed chase walking its body. Auto-properties and
+        // metadata properties (no walkable body) keep the type verdict.
+        if (HasBackingStorage(property))
+        {
+            ReportIfNotSendable(context, classifier, operation, property, property.Type, reported);
+        }
+    }
+
+    private static bool HasBackingStorage(IPropertySymbol property)
+    {
+        return property.GetMethod?.DeclaringSyntaxReferences.FirstOrDefault()?.GetSyntax() switch
+        {
+            AccessorDeclarationSyntax { Body: null, ExpressionBody: null } => true, // auto-property
+            null => true,                                                          // metadata: unwalkable
+            _ => false,                                                            // computed: chased instead
+        };
     }
 
     // Two walks with different reach. Closure CONTENTS (captures, receivers, `this`) are
@@ -496,7 +526,7 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
     {
         if (operation is IInvocationOperation { TargetMethod.MethodKind: MethodKind.DelegateInvoke, Instance: { } callee })
         {
-            InspectInvokedDelegate(context, classifier, callee, semanticModel, visited, reported);
+            InspectInvokedDelegate(context, classifier, ResolveConditionalReceiver(callee), semanticModel, visited, reported);
             return;
         }
 
@@ -563,28 +593,46 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
             return;
         }
 
-        foreach (var body in AssignedDelegateBodies(variable, semanticModel))
+        foreach (var body in AssignedDelegateBodies(variable, callee.Syntax, semanticModel))
         {
             ChaseExecutedBody(context, classifier, body, semanticModel, visited, reported);
         }
     }
 
+    // `later?.Invoke()` surfaces the invoke receiver as the conditional-access placeholder;
+    // the real delegate expression is the enclosing conditional access's Operation.
+    private static IOperation ResolveConditionalReceiver(IOperation callee)
+    {
+        if (callee is IConditionalAccessInstanceOperation placeholder)
+        {
+            for (var current = placeholder.Parent; current is not null; current = current.Parent)
+            {
+                if (current is IConditionalAccessOperation conditional)
+                {
+                    return conditional.Operation;
+                }
+            }
+        }
+
+        return callee;
+    }
+
     // A delegate assembled by ASSIGNMENT (`Func<int> later; later = () => hits;`, including
-    // through deconstruction: `(later, _) = (() => hits, 0)`) has no initializer to resolve,
-    // so every same-tree assignment's right-hand side is a body that might be the one invoked
-    // -- all of them are chased, tuple elements included.
-    private static IEnumerable<ComputationLambdas.ComputationBody> AssignedDelegateBodies(ISymbol variable, SemanticModel semanticModel)
+    // through deconstruction) has no initializer to resolve, so every same-tree assignment's
+    // right-hand side that can EXECUTE before the invocation is a body that might be the one
+    // invoked. Deconstructions pair positionally: `(other, later) = (a, b)` assigns only `b`
+    // to `later`, so `a` must not be chased.
+    private static IEnumerable<ComputationLambdas.ComputationBody> AssignedDelegateBodies(ISymbol variable, SyntaxNode invokeSite, SemanticModel semanticModel)
     {
         foreach (var node in semanticModel.SyntaxTree.GetRoot().DescendantNodes())
         {
             if (node is not AssignmentExpressionSyntax assignment
-                || ComputationLambdas.ReassignmentTargets(assignment) is not { } targets
-                || !targets.Any(target => SymbolEqualityComparer.Default.Equals(semanticModel.GetSymbolInfo(target).Symbol, variable)))
+                || !ComputationLambdas.CanExecuteBefore(assignment, invokeSite, variable))
             {
                 continue;
             }
 
-            foreach (var value in RightHandValues(assignment.Right, semanticModel))
+            foreach (var value in AssignedValuesFor(assignment.Left, assignment.Right, variable, semanticModel))
             {
                 foreach (var body in ComputationLambdas.OfArgumentValue(value, semanticModel))
                 {
@@ -594,13 +642,14 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         }
     }
 
-    private static IEnumerable<IOperation> RightHandValues(ExpressionSyntax right, SemanticModel semanticModel)
+    private static IEnumerable<IOperation> AssignedValuesFor(ExpressionSyntax left, ExpressionSyntax right, ISymbol variable, SemanticModel semanticModel)
     {
-        if (right is TupleExpressionSyntax tuple)
+        if (left is TupleExpressionSyntax leftTuple && right is TupleExpressionSyntax rightTuple
+            && leftTuple.Arguments.Count == rightTuple.Arguments.Count)
         {
-            foreach (var element in tuple.Arguments)
+            for (var i = 0; i < leftTuple.Arguments.Count; i++)
             {
-                foreach (var value in RightHandValues(element.Expression, semanticModel))
+                foreach (var value in AssignedValuesFor(leftTuple.Arguments[i].Expression, rightTuple.Arguments[i].Expression, variable, semanticModel))
                 {
                     yield return value;
                 }
@@ -609,7 +658,8 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
             yield break;
         }
 
-        if (semanticModel.GetOperation(right) is { } operation)
+        if (SymbolEqualityComparer.Default.Equals(semanticModel.GetSymbolInfo(left).Symbol, variable)
+            && semanticModel.GetOperation(right) is { } operation)
         {
             yield return operation;
         }
