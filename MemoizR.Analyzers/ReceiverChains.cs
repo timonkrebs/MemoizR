@@ -23,7 +23,7 @@ internal static class ReceiverChains
     // creation (`f.CreateSignal(0).Set(1)`) is its own provenance and resolves directly, and a
     // variable-to-variable ALIAS (`var state = s0;`) resolves through initializers until a
     // creation or a dead end -- the visited set breaks initializer cycles.
-    public static ISymbol? ResolveCreatingFactorySymbol(IOperation? nodeReference, SemanticModel? semanticModel)
+    public static ISymbol? ResolveCreatingFactorySymbol(IOperation? nodeReference, SemanticModel? semanticModel, Dictionary<IParameterSymbol, IOperation>? argumentMap = null)
     {
         var reference = nodeReference;
         var site = nodeReference?.Syntax;
@@ -37,6 +37,19 @@ internal static class ReceiverChains
                     continue;
                 case IInvocationOperation creation:
                     return ResolveKnownCreationFactory(creation, semanticModel);
+                // A chased helper's PARAMETER hops to the call-site argument: `var a = s;
+                // a.Set(...)` inside `Write(other)` is `other`'s provenance. Not when the
+                // helper WROTE the parameter first, though -- a parameter binds the caller's
+                // argument at entry, so any same-tree write that can run before this read is
+                // a rebind (there is no missing initializer to stand in for), and the case
+                // below resolves what was actually assigned instead.
+                case IParameterReferenceOperation parameterReference
+                    when argumentMap?.TryGetValue(parameterReference.Parameter, out var mapped) == true
+                        && site is not null
+                        && !IsWrittenBefore(parameterReference.Parameter, site, semanticModel):
+                    reference = mapped;
+                    site = mapped.Syntax;
+                    continue;
                 case ILocalReferenceOperation or IFieldReferenceOperation or IParameterReferenceOperation or IPropertyReferenceOperation:
                     visited ??= new HashSet<ISymbol>(SymbolEqualityComparer.Default);
                     var symbol = SymbolOf(reference);
@@ -85,6 +98,30 @@ internal static class ReceiverChains
         {
             if (!ReferenceEquals(node, effectiveInitializer)
                 && ComputationLambdas.ReassignmentTargets(node) is { } targets
+                && targets.Any(target => ComputationLambdas.WritesVariable(target, variable, semanticModel))
+                && ComputationLambdas.CanExecuteBefore(node, reference, variable, semanticModel))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    // Any same-tree write to the symbol that can execute before the read -- unlike
+    // IsReassignedBefore, WITHOUT the effective-initializer excuse, because the caller uses
+    // this for parameters, whose declaration itself binds the value. Unverifiable (no model)
+    // counts as written: the hop must rest on proof.
+    private static bool IsWrittenBefore(ISymbol variable, SyntaxNode reference, SemanticModel? semanticModel)
+    {
+        if (semanticModel is null)
+        {
+            return true;
+        }
+
+        foreach (var node in semanticModel.SyntaxTree.GetRoot().DescendantNodes())
+        {
+            if (ComputationLambdas.ReassignmentTargets(node) is { } targets
                 && targets.Any(target => ComputationLambdas.WritesVariable(target, variable, semanticModel))
                 && ComputationLambdas.CanExecuteBefore(node, reference, variable, semanticModel))
             {

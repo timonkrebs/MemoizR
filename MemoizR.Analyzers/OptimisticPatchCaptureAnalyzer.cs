@@ -457,9 +457,63 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         // callback it builds and discards is allocated fresh per replay and never runs, so
         // its captures must not count (unlike the patch's own nested callbacks, which the
         // stored display chain pins).
+        var visitedCallbacks = new HashSet<SyntaxNode>();
         foreach (var inner in ComputationLambdas.DescendDirectExecution(body.Body))
         {
             InspectCapture(context, classifier, inner, body.Scope, patchScope, semanticModel, reported, visitedGetters);
+            InspectGetterCallback(context, classifier, inner, patchScope, semanticModel, reported, visitedGetters, visitedCallbacks);
+        }
+    }
+
+    // A getter-local callback the getter itself INVOKES runs on every replay like the
+    // getter's own statements -- `int Read() => counter; return Read();` re-reads the field
+    // exactly as the direct form would -- so invoked local functions and getter-built
+    // delegates get the same member verdicts, against their own scope. Merely-BUILT callbacks
+    // stay pruned like the rest of this walk: fresh per replay, not executed here. (Statics
+    // inside these bodies need nothing extra: the executed-helper chase resolves getters and
+    // their invoked callees on its own.)
+    private static void InspectGetterCallback(
+        OperationAnalysisContext context,
+        SendableSymbolClassifier classifier,
+        IOperation operation,
+        SyntaxNode patchScope,
+        SemanticModel? semanticModel,
+        HashSet<ISymbol> reported,
+        HashSet<IMethodSymbol> visitedGetters,
+        HashSet<SyntaxNode> visitedCallbacks)
+    {
+        foreach (var body in InvokedCalleeBodies(operation, semanticModel))
+        {
+            if (!visitedCallbacks.Add(body.Scope))
+            {
+                continue;
+            }
+
+            foreach (var inner in ComputationLambdas.DescendDirectExecution(body.Body))
+            {
+                InspectCapture(context, classifier, inner, body.Scope, patchScope, semanticModel, reported, visitedGetters);
+                InspectGetterCallback(context, classifier, inner, patchScope, semanticModel, reported, visitedGetters, visitedCallbacks);
+            }
+        }
+    }
+
+    // What a getter-body operation synchronously runs: a local function called directly, or
+    // the bodies an invoked delegate reference resolves to.
+    private static IEnumerable<ComputationLambdas.ComputationBody> InvokedCalleeBodies(IOperation operation, SemanticModel? semanticModel)
+    {
+        switch (operation)
+        {
+            case IInvocationOperation { TargetMethod: { MethodKind: MethodKind.LocalFunction } local }
+                when ComputationLambdas.ResolveMethodBody(local, semanticModel) is { } resolved:
+                yield return resolved;
+                break;
+            case IInvocationOperation { TargetMethod.MethodKind: MethodKind.DelegateInvoke, Instance: { } callee }:
+                foreach (var body in ComputationLambdas.OfArgumentValue(ResolveConditionalReceiver(callee), semanticModel))
+                {
+                    yield return body;
+                }
+
+                break;
         }
     }
 
@@ -609,10 +663,7 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
     {
         if (operation is IInvocationOperation { TargetMethod.MethodKind: MethodKind.DelegateInvoke, Instance: { } callee })
         {
-            // A delegate PARAMETER invoked by a chased helper resolves through the call-site
-            // arguments: `Run(() => hits)` with `Run(Func<int> f) => f()` executes the lambda.
-            var resolvedCallee = ComputationLambdas.SubstituteArguments(ResolveConditionalReceiver(callee), argumentMap) ?? callee;
-            InspectInvokedDelegate(context, classifier, resolvedCallee, semanticModel, visitedCalls, visitedInvokes, argumentMap, reported);
+            InspectInvokedDelegate(context, classifier, ResolveConditionalReceiver(callee), semanticModel, visitedCalls, visitedInvokes, argumentMap, reported);
             return;
         }
 
@@ -646,9 +697,15 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
     // the built-but-deferred shape stays pruned, but `Func<int> later = () => hits; later()`
     // executes now, and unlike MZR003's identical prune there is no runtime backstop. The
     // callee resolves like a computation argument (same-tree lambda or method group, through
-    // variable initializers). The guard is per INVOCATION SITE: a delegate reassigned between
-    // two invokes executes a different closure at each, while a self-recursive delegate
-    // re-reaches the same site inside its own body and stops there.
+    // variable initializers and assignments), plus two hop kinds of its own: a delegate
+    // PARAMETER hops to the call-site argument, and a variable-to-variable ALIAS hops through
+    // its initializer -- `Run(() => hits)` with `int Run(Func<int> f) { var g = f; return
+    // g(); }` reaches the lambda only through both. The guard keys on the RESOLVED reference:
+    // the same inner invoke reached from different call sites resolves to different caller
+    // operations and each gets its own chase, while a self-recursive delegate re-reaches the
+    // same resolution and stops. A callee resolving to NOTHING walkable gets the same
+    // unverifiable-means-flagged fallback as an unresolvable patch argument -- this walk is
+    // the only check that closure will ever get.
     private static void InspectInvokedDelegate(
         OperationAnalysisContext context,
         SendableSymbolClassifier classifier,
@@ -659,26 +716,104 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         Dictionary<IParameterSymbol, IOperation>? argumentMap,
         HashSet<ISymbol> reported)
     {
-        if (!visitedInvokes.Add(callee.Syntax))
+        var resolved = ResolveDelegateReference(callee, semanticModel, argumentMap);
+        if (!visitedInvokes.Add(resolved.Syntax))
         {
             return;
         }
 
-        foreach (var body in ComputationLambdas.OfArgumentValue(callee, semanticModel))
+        var found = false;
+        foreach (var body in ComputationLambdas.OfArgumentValue(resolved, semanticModel))
         {
+            found = true;
             ChaseExecutedBody(context, classifier, body, semanticModel, visitedCalls, visitedInvokes, argumentMap, reported);
         }
 
-        var variable = ComputationLambdas.ReferencedVariable(Unwrap(callee));
-        if (variable is null || semanticModel is null)
+        var variable = ComputationLambdas.ReferencedVariable(Unwrap(resolved));
+        if (variable is not null && semanticModel is not null)
+        {
+            foreach (var body in AssignedDelegateBodies(variable, resolved.Syntax, semanticModel))
+            {
+                found = true;
+                ChaseExecutedBody(context, classifier, body, semanticModel, visitedCalls, visitedInvokes, argumentMap, reported);
+            }
+        }
+
+        if (!found)
+        {
+            ReportUnresolvedInvokedDelegate(context, resolved, variable, semanticModel, reported);
+        }
+    }
+
+    // The invoked reference, collapsed through parameter-to-argument hops (the map) and
+    // variable-to-variable alias initializers. Hops stop at anything the body resolution can
+    // consume directly (a lambda, a method group, a variable holding one) so no shape is
+    // lost, and at any alias REASSIGNED before its read -- there the assignment scan owns
+    // the chase, and hopping past it would resurrect the stale initializer.
+    private static IOperation ResolveDelegateReference(
+        IOperation callee,
+        SemanticModel? semanticModel,
+        Dictionary<IParameterSymbol, IOperation>? argumentMap)
+    {
+        var current = callee;
+        HashSet<ISymbol>? visited = null;
+        while (true)
+        {
+            if (ComputationLambdas.SubstituteArguments(current, argumentMap) is { } substituted
+                && !ReferenceEquals(substituted, current))
+            {
+                current = substituted;
+                continue;
+            }
+
+            if (ComputationLambdas.ReferencedVariable(Unwrap(current)) is not { } variable)
+            {
+                return current;
+            }
+
+            visited ??= new HashSet<ISymbol>(SymbolEqualityComparer.Default);
+            var initializer = ComputationLambdas.SameTreeInitializerOperation(variable, semanticModel);
+            if (!visited.Add(variable) || initializer is null || !IsReferenceHop(Unwrap(initializer))
+                || IsReassignedBefore(variable, current, semanticModel))
+            {
+                return current;
+            }
+
+            current = initializer;
+        }
+    }
+
+    private static bool IsReferenceHop(IOperation operation)
+    {
+        return operation is IParameterReferenceOperation || ComputationLambdas.ReferencedVariable(operation) is not null;
+    }
+
+    // An invoked delegate resolving to NOTHING walkable -- assembled by an out-helper in
+    // another file, an opaque factory return, a dead-end alias -- executes an arbitrary
+    // closure on every replay: unverifiable means flagged, mirroring the patch-argument
+    // rule. A METADATA method-group target (Math.Abs) stays trusted like every external
+    // contract, and a non-variable dead end (an invoked call-result chain) is left to the
+    // argument-level rules rather than guessed at.
+    private static void ReportUnresolvedInvokedDelegate(
+        OperationAnalysisContext context,
+        IOperation resolved,
+        ISymbol? variable,
+        SemanticModel? semanticModel,
+        HashSet<ISymbol> reported)
+    {
+        if (variable is null
+            || ResolveMethodReference(resolved, semanticModel, visitedVariables: null) is { Method.DeclaringSyntaxReferences.Length: 0 })
         {
             return;
         }
 
-        foreach (var body in AssignedDelegateBodies(variable, callee.Syntax, semanticModel))
-        {
-            ChaseExecutedBody(context, classifier, body, semanticModel, visitedCalls, visitedInvokes, argumentMap, reported);
-        }
+        Report(
+            context,
+            resolved,
+            variable,
+            variable.Name,
+            "the delegate it holds cannot be resolved from this call site, and a delegate can capture arbitrary mutable state (assemble the patch's callees from lambdas or same-tree methods)",
+            reported);
     }
 
     // `later?.Invoke()` surfaces the invoke receiver as the conditional-access placeholder;
@@ -749,20 +884,23 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
     }
 
     // "Straight-line" = the killer sits in plain block statements between itself and wherever
-    // the invoke lives; a killer inside an if/loop may not run, so it kills nothing.
-    private static bool DefinitelyOverwrites(SyntaxNode killer, SyntaxNode victim, SyntaxNode invokeSite, ISymbol variable, SemanticModel semanticModel)
+    // the value is observed (an invoke site, or an out-helper's own scope end); a killer
+    // inside an if/loop may not run, so it kills nothing -- and an exit statement between the
+    // two writes can leave the earlier value observable, so nothing is definite past one.
+    private static bool DefinitelyOverwrites(SyntaxNode killer, SyntaxNode victim, SyntaxNode reference, ISymbol variable, SemanticModel semanticModel)
     {
         if (killer is not AssignmentExpressionSyntax assignment
             || !assignment.IsKind(SyntaxKind.SimpleAssignmentExpression)
             || assignment.Left is TupleExpressionSyntax
             || !ComputationLambdas.WritesVariable(assignment.Left, variable, semanticModel)
             || killer.SpanStart <= victim.SpanStart
-            || killer.SpanStart >= invokeSite.SpanStart)
+            || killer.SpanStart >= reference.Span.End
+            || ExitsBetween(victim, killer))
         {
             return false;
         }
 
-        for (var current = killer.Parent; current is not null && !current.Span.Contains(invokeSite.Span); current = current.Parent)
+        for (var current = killer.Parent; current is not null && !current.Span.Contains(reference.Span); current = current.Parent)
         {
             if (current is not (BlockSyntax or ExpressionStatementSyntax))
             {
@@ -771,6 +909,33 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         }
 
         return true;
+    }
+
+    // A return/throw/goto/break/continue/yield starting between the two writes diverts
+    // control past the killer with the victim's value still bound (an early return in an
+    // out-helper hands that delegate to the caller). Only the killer's OWN function counts:
+    // an exit inside a nested lambda -- e.g. a `return` in the victim's own delegate body --
+    // diverts nothing here.
+    private static bool ExitsBetween(SyntaxNode victim, SyntaxNode killer)
+    {
+        var function = killer.Ancestors().FirstOrDefault(IsFunctionBoundary) ?? killer.SyntaxTree.GetRoot();
+        foreach (var node in function.DescendantNodes(descendIntoChildren: n => ReferenceEquals(n, function) || !IsFunctionBoundary(n)))
+        {
+            if (node is ReturnStatementSyntax or ThrowStatementSyntax or GotoStatementSyntax
+                    or BreakStatementSyntax or ContinueStatementSyntax or YieldStatementSyntax
+                && victim.SpanStart < node.SpanStart && node.SpanStart < killer.SpanStart)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool IsFunctionBoundary(SyntaxNode node)
+    {
+        return node is AnonymousFunctionExpressionSyntax or LocalFunctionStatementSyntax
+            or BaseMethodDeclarationSyntax or AccessorDeclarationSyntax;
     }
 
     private static IEnumerable<ComputationLambdas.ComputationBody> NodeAssignedBodies(SyntaxNode node, ISymbol variable, SemanticModel semanticModel)
@@ -811,10 +976,22 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
             yield break;
         }
 
+        var writes = new List<AssignmentExpressionSyntax>();
         foreach (var node in helper.Scope.DescendantNodes())
         {
-            if (node is not AssignmentExpressionSyntax assignment
-                || !SymbolEqualityComparer.Default.Equals(semanticModel.GetSymbolInfo(assignment.Left).Symbol, parameter)
+            if (node is AssignmentExpressionSyntax assignment
+                && SymbolEqualityComparer.Default.Equals(semanticModel.GetSymbolInfo(assignment.Left).Symbol, parameter))
+            {
+                writes.Add(assignment);
+            }
+        }
+
+        foreach (var assignment in writes)
+        {
+            // What the caller receives is the delegate bound when the helper RETURNS: a later
+            // straight-line overwrite inside the helper kills this body exactly like one
+            // before an invoke, with the helper's scope end as the observation point.
+            if (writes.Any(other => other != assignment && DefinitelyOverwrites(other, assignment, helper.Scope, parameter, semanticModel))
                 || semanticModel.GetOperation(assignment.Right) is not { } assigned)
             {
                 continue;

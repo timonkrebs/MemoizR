@@ -63,7 +63,7 @@ public sealed class SetInsideComputationAnalyzer : DiagnosticAnalyzer
         {
             if (operation is IInvocationOperation inner && IsSameEngineSet(inner.TargetMethod, actorHost))
             {
-                if (!IsProvablyCrossFactory(host, inner, ComputationLambdas.SubstituteArguments(inner.Instance, argumentMap), actorHost))
+                if (!IsProvablyCrossFactory(host, inner, argumentMap, actorHost))
                 {
                     context.ReportDiagnostic(Diagnostic.Create(
                         DiagnosticDescriptors.SetInsideComputation,
@@ -96,7 +96,7 @@ public sealed class SetInsideComputationAnalyzer : DiagnosticAnalyzer
     // diagnostic, because the overwhelmingly common case is one shared context and the runtime
     // exception is deterministic there. Actor hosts are exempt from the check: ActorSignal.Set
     // rejects on the flow's frame, which any actor computation carries regardless of context.
-    private static bool IsProvablyCrossFactory(IInvocationOperation host, IInvocationOperation setInvocation, IOperation? targetReference, bool actorHost)
+    private static bool IsProvablyCrossFactory(IInvocationOperation host, IInvocationOperation setInvocation, Dictionary<IParameterSymbol, IOperation>? argumentMap, bool actorHost)
     {
         if (actorHost)
         {
@@ -104,7 +104,7 @@ public sealed class SetInsideComputationAnalyzer : DiagnosticAnalyzer
         }
 
         var hostFactory = ResolveHostFactory(host);
-        var targetFactory = ReceiverChains.ResolveCreatingFactorySymbol(targetReference ?? setInvocation.Instance, setInvocation.SemanticModel);
+        var targetFactory = ReceiverChains.ResolveCreatingFactorySymbol(setInvocation.Instance, setInvocation.SemanticModel, argumentMap);
         if (hostFactory is null
             || targetFactory is null
             || SymbolEqualityComparer.Default.Equals(hostFactory, targetFactory))

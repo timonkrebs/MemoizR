@@ -1912,6 +1912,168 @@ public class OptimisticPatchCaptureAnalyzerTests
     }
 
     [Fact]
+    public async Task UnwalkableOutHelper_MakesTheInvokedDelegateUnverifiable()
+    {
+        // The helper assembling the delegate lives in another file: nothing can say what
+        // closure `later` holds at the invoke, and this walk is the only check that closure
+        // will ever get -- unverifiable means flagged.
+        var diagnostics = await AnalyzerTestHarness.AnalyzeAsync(new[]
+        {
+            """
+            public static class External
+            {
+                private static int hits;
+
+                public static void Provide(out System.Func<int> d) => d = () => hits;
+            }
+            """,
+            """
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x =>
+                        {
+                            Func<int> later;
+                            External.Provide(out later);
+                            return x + later();
+                        });
+                    });
+                }
+            }
+            """,
+        }, new OptimisticPatchCaptureAnalyzer());
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR004", diagnostic.Id);
+        Assert.Contains("'later'", diagnostic.GetMessage());
+        Assert.Contains("cannot be resolved", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task DelegateArgumentAliasedInsideHelper_IsStillChased()
+    {
+        // The helper stores its delegate parameter in a local before invoking it: the chase
+        // hops the alias to the parameter and the parameter to the call-site lambda.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                private static int hits;
+
+                private static int Run(Func<int> f)
+                {
+                    var g = f;
+                    return g();
+                }
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x => x + Run(() => hits));
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR004", diagnostic.Id);
+        Assert.Contains("hits", diagnostic.GetMessage());
+        Assert.Contains("writable static state", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task GetterLocalFunction_Invoked_ReadsMutableField_IsFlagged()
+    {
+        // The computed getter reads the field through a getter-local function it calls
+        // immediately: the indirection must not hide what the direct read would flag.
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public class C
+            {
+                private int counter;
+
+                private int Counter
+                {
+                    get
+                    {
+                        int Read() => counter;
+                        return Read();
+                    }
+                }
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x => x + Counter);
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR004", diagnostic.Id);
+        Assert.Contains("counter", diagnostic.GetMessage());
+        Assert.Contains("writable state", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task OutHelperOverwrite_ChasesOnlyTheFinalDelegate()
+    {
+        // The helper overwrites its out parameter on the straight-line path to its return:
+        // the caller can only ever receive the second delegate, so the first body -- and its
+        // static read -- must not be charged to the patch.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                private static int hits;
+
+                private static void Provide(out Func<int> d)
+                {
+                    d = () => hits;
+                    d = static () => 0;
+                }
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x =>
+                        {
+                            Func<int> later;
+                            Provide(out later);
+                            return x + later();
+                        });
+                    });
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
     public async Task CoalesceAssignment_DoesNotStandInAsInitializer()
     {
         // `??=` can leave an older, externally supplied value in place: it must not be

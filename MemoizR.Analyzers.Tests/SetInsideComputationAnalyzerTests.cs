@@ -700,6 +700,40 @@ public class SetInsideComputationAnalyzerTests
         Assert.Empty(diagnostics);
     }
 
+    [Fact]
+    public async Task SignalParameterAliasedInsideHelper_ResolvesThroughTheCallSite()
+    {
+        // The helper stores its parameter in a local before the Set: the alias resolves to
+        // the parameter and the parameter to the call-site argument, so the cross-factory
+        // suppression survives -- while the same helper called with the HOST factory's own
+        // signal is still flagged (per-call-site provenance, not per-helper).
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f1 = new MemoFactory();
+                    var f2 = new MemoFactory();
+                    var other = f2.CreateSignal(1);
+                    var mine = f1.CreateSignal(1);
+                    void Write(Signal<int> s)
+                    {
+                        var a = s;
+                        _ = a.Set(2);
+                    }
+                    f1.CreateMemoizR(async () => { Write(other); return 0; });
+                    f1.CreateMemoizR(async () => { Write(mine); return 0; });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR003", diagnostic.Id);
+        Assert.Contains("Signal<int>.Set", diagnostic.GetMessage());
+    }
+
     // `using` runs Dispose before the evaluation exits, under the same lock.
     [Fact]
     public async Task SetHiddenInDispose_IsFlagged()
