@@ -530,37 +530,28 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
             return;
         }
 
-        // Only what EXECUTES is chased: a call; a property READ, which runs its getter exactly
-        // like a call (`static int Hits => hits;` is the helper-method evasion with property
-        // syntax); a constructor; or a user-defined operator/conversion -- each runs on every
-        // replay of the stored patch. A method group the patch stores builds a delegate
-        // without running it -- the same deferred shape as a built lambda, which this walk
-        // already prunes. (The capture chase above keeps method references: a lifted local
-        // function's closure is pinned either way.)
-        var method = operation switch
-        {
-            IInvocationOperation invocation => invocation.TargetMethod,
-            IPropertyReferenceOperation property => property.Property.GetMethod,
-            IObjectCreationOperation creation => creation.Constructor,
-            IBinaryOperation { OperatorMethod: { } binaryOperator } => binaryOperator,
-            IUnaryOperation { OperatorMethod: { } unaryOperator } => unaryOperator,
-            IConversionOperation { OperatorMethod: { } conversionOperator } => conversionOperator,
-            _ => null,
-        };
-
-        // The nameof check runs BEFORE the visited add: a property mentioned only in nameof is
+        // Only what EXECUTES is chased -- calls, property accessors by usage (an assignment
+        // target runs the SETTER, where a hidden static read replays too), constructors,
+        // user-defined operators -- each runs on every replay of the stored patch. A method
+        // group the patch stores builds a delegate without running it -- the same deferred
+        // shape as a built lambda, which this walk already prunes. (The capture chase above
+        // keeps method references: a lifted local function's closure is pinned either way.
+        // The nameof check runs BEFORE the visited add: a member mentioned only in nameof is
         // neither executed nor captured, and it must not poison the visited set for a later
-        // real read of the same member.
-        if (method is null || ComputationLambdas.IsInsideNameOf(operation) || !visited.Add(method)
-            || ComputationLambdas.ResolveMethodBody(method, semanticModel) is not { } helper)
+        // real use.)
+        foreach (var method in ComputationLambdas.ExecutedMethods(operation))
         {
-            return;
-        }
+            if (ComputationLambdas.IsInsideNameOf(operation) || !visited.Add(method)
+                || ComputationLambdas.ResolveMethodBody(method, semanticModel) is not { } helper)
+            {
+                continue;
+            }
 
-        foreach (var inner in ComputationLambdas.DescendDirectExecution(helper.Body))
-        {
-            InspectStaticRead(context, classifier, inner, reported);
-            InspectExecutedHelper(context, classifier, inner, semanticModel, visited, reported);
+            foreach (var inner in ComputationLambdas.DescendDirectExecution(helper.Body))
+            {
+                InspectStaticRead(context, classifier, inner, reported);
+                InspectExecutedHelper(context, classifier, inner, semanticModel, visited, reported);
+            }
         }
     }
 

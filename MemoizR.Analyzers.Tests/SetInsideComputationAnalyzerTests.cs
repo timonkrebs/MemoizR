@@ -620,6 +620,63 @@ public class SetInsideComputationAnalyzerTests
     }
 
     [Fact]
+    public async Task DeconstructionDeclaredState_ProvesTheHostFactory()
+    {
+        // `var (state, _) = (f1.CreateOptimistic(...), 0)` declares through a designation: the
+        // creation is right there in the tuple, so cross-factory suppression must still apply.
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f1 = new MemoFactory();
+                    var f2 = new MemoFactory();
+                    var (state, _) = (f1.CreateOptimistic<int>(f1.CreateSignal(1)), 0);
+                    var other = f2.CreateSignal(1);
+                    f1.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x => { _ = other.Set(2); return x; });
+                    });
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task ReassignedFactoryAlias_KeepsTheDiagnostic()
+    {
+        // `host` holds f2 at the creation, not its f1 initializer: the stale alias must not
+        // prove cross-factory disjointness for a Set that throws on f2's context.
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f1 = new MemoFactory();
+                    var f2 = new MemoFactory();
+                    var host = f1;
+                    host = f2;
+                    var v = f2.CreateSignal(0);
+                    var state = host.CreateOptimistic<int>(v);
+                    f2.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x => { _ = v.Set(1); return x; });
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR003", diagnostic.Id);
+    }
+
+    [Fact]
     public async Task RefAliasReboundState_KeepsTheDiagnostic()
     {
         // The state is rebound through a ref alias to another factory's view: the stale

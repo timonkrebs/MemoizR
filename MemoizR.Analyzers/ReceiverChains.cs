@@ -123,8 +123,15 @@ internal static class ReceiverChains
                 // An intermediate (a stored ReactionBuilder, a factory alias) resolves through
                 // its initializer; when that gives out, the reference symbol itself is the
                 // identity -- two creations hanging off the same local/field/parameter share a
-                // factory by construction.
+                // factory by construction. A variable REASSIGNED before this use proves
+                // nothing (`var host = f1; host = f2; host.CreateOptimistic(...)` holds f2,
+                // not its initializer) -- unprovable keeps the diagnostic.
                 var symbol = SymbolOf(receiver);
+                if (symbol is null || IsReassignedBefore(symbol, receiver.Syntax, semanticModel))
+                {
+                    return null;
+                }
+
                 var initialized = InitializerOf(symbol, semanticModel);
                 if (initialized is not null && ResolveReceiverSymbol(initialized, semanticModel, depth + 1) is { } through)
                 {
@@ -191,29 +198,11 @@ internal static class ReceiverChains
         };
     }
 
+    // The shared resolver covers ordinary variable/property initializers AND deconstruction
+    // designations (`var (state, _) = (f1.CreateOptimistic(...), 0)`), so provenance chases
+    // the same shapes the delegate resolution does.
     private static IOperation? InitializerOf(ISymbol? variable, SemanticModel? semanticModel)
     {
-        if (variable is null || semanticModel is null)
-        {
-            return null;
-        }
-
-        var declaration = variable.DeclaringSyntaxReferences.FirstOrDefault();
-        if (declaration is null || declaration.SyntaxTree != semanticModel.SyntaxTree)
-        {
-            return null;
-        }
-
-        // Locals and fields declare through VariableDeclaratorSyntax; auto-properties with an
-        // initializer (`MemoFactory F { get; } = new MemoFactory();`) through
-        // PropertyDeclarationSyntax. Computed properties have no initializer and stay
-        // unresolvable, as they should.
-        var initializer = declaration.GetSyntax() switch
-        {
-            VariableDeclaratorSyntax { Initializer.Value: { } value } => value,
-            PropertyDeclarationSyntax { Initializer.Value: { } value } => value,
-            _ => null,
-        };
-        return initializer is null ? null : semanticModel.GetOperation(initializer);
+        return ComputationLambdas.SameTreeInitializerOperation(variable, semanticModel);
     }
 }

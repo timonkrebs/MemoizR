@@ -528,6 +528,57 @@ internal static class ComputationLambdas
             && body.Span.Contains(declaration.Span);
     }
 
+    // Same-tree code an operation EXECUTES, whatever the syntax: a call; a property access (a
+    // read runs the getter, an assignment target runs the setter, compound forms run both); a
+    // constructor; or a user-defined operator/conversion. Shared by MZR003's and MZR004's
+    // executed chases. (A member mentioned only in nameof is not executed -- callers guard.)
+    public static IEnumerable<IMethodSymbol> ExecutedMethods(IOperation operation)
+    {
+        switch (operation)
+        {
+            case IInvocationOperation invocation:
+                yield return invocation.TargetMethod;
+                break;
+            case IPropertyReferenceOperation property:
+                var (reads, writes) = PropertyUsage(property);
+                if (reads && property.Property.GetMethod is { } getter)
+                {
+                    yield return getter;
+                }
+
+                if (writes && property.Property.SetMethod is { } setter)
+                {
+                    yield return setter;
+                }
+
+                break;
+            case IObjectCreationOperation { Constructor: { } constructor }:
+                yield return constructor;
+                break;
+            case IBinaryOperation { OperatorMethod: { } binaryOperator }:
+                yield return binaryOperator;
+                break;
+            case IUnaryOperation { OperatorMethod: { } unaryOperator }:
+                yield return unaryOperator;
+                break;
+            case IConversionOperation { OperatorMethod: { } conversionOperator }:
+                yield return conversionOperator;
+                break;
+        }
+    }
+
+    private static (bool Reads, bool Writes) PropertyUsage(IPropertyReferenceOperation property)
+    {
+        return property.Parent switch
+        {
+            ISimpleAssignmentOperation assignment when ReferenceEquals(assignment.Target, property) => (false, true),
+            ICompoundAssignmentOperation compound when ReferenceEquals(compound.Target, property) => (true, true),
+            ICoalesceAssignmentOperation coalesce when ReferenceEquals(coalesce.Target, property) => (true, true),
+            IIncrementOrDecrementOperation increment when ReferenceEquals(increment.Target, property) => (true, true),
+            _ => (true, false),
+        };
+    }
+
     // The tightest useful squiggle for an invocation: the member name, not the whole call with
     // its (possibly multi-line lambda) arguments.
     public static Location NameLocation(IInvocationOperation invocation)

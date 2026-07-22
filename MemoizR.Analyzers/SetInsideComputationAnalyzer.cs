@@ -71,7 +71,7 @@ public sealed class SetInsideComputationAnalyzer : DiagnosticAnalyzer
                 continue;
             }
 
-            foreach (var method in ExecutedMethods(operation))
+            foreach (var method in ComputationLambdas.ExecutedMethods(operation))
             {
                 if (!ComputationLambdas.IsInsideNameOf(operation)
                     && visitedHelpers.Add(method)
@@ -81,58 +81,6 @@ public sealed class SetInsideComputationAnalyzer : DiagnosticAnalyzer
                 }
             }
         }
-    }
-
-    // Same-tree code the computation EXECUTES, whatever the syntax: a call, a property access
-    // (a read runs the getter, an assignment target runs the setter, compound forms run
-    // both), a constructor, or a user-defined operator/conversion -- `new Writer(v)` whose
-    // constructor Sets throws under the same evaluation lock as an inline Set. (A property
-    // mentioned only in nameof is not executed and must not be chased.)
-    private static IEnumerable<IMethodSymbol> ExecutedMethods(IOperation operation)
-    {
-        switch (operation)
-        {
-            case IInvocationOperation invocation:
-                yield return invocation.TargetMethod;
-                break;
-            case IPropertyReferenceOperation property:
-                var (reads, writes) = PropertyUsage(property);
-                if (reads && property.Property.GetMethod is { } getter)
-                {
-                    yield return getter;
-                }
-
-                if (writes && property.Property.SetMethod is { } setter)
-                {
-                    yield return setter;
-                }
-
-                break;
-            case IObjectCreationOperation { Constructor: { } constructor }:
-                yield return constructor;
-                break;
-            case IBinaryOperation { OperatorMethod: { } binaryOperator }:
-                yield return binaryOperator;
-                break;
-            case IUnaryOperation { OperatorMethod: { } unaryOperator }:
-                yield return unaryOperator;
-                break;
-            case IConversionOperation { OperatorMethod: { } conversionOperator }:
-                yield return conversionOperator;
-                break;
-        }
-    }
-
-    private static (bool Reads, bool Writes) PropertyUsage(IPropertyReferenceOperation property)
-    {
-        return property.Parent switch
-        {
-            ISimpleAssignmentOperation assignment when ReferenceEquals(assignment.Target, property) => (false, true),
-            ICompoundAssignmentOperation compound when ReferenceEquals(compound.Target, property) => (true, true),
-            ICoalesceAssignmentOperation coalesce when ReferenceEquals(coalesce.Target, property) => (true, true),
-            IIncrementOrDecrementOperation increment when ReferenceEquals(increment.Target, property) => (true, true),
-            _ => (true, false),
-        };
     }
 
     // A cross-CONTEXT lock-engine Set does not throw at runtime: the Set locks the target
