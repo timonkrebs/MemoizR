@@ -174,12 +174,15 @@ Flagged, once per captured symbol per patch:
   deliberately ignores statics, meaning a Sendable `this` says nothing about them);
 - the **closure of a local function** the patch calls that is declared *outside* the patch —
   no receiver/`this` verdict covers it, so its body is inspected for captures against its own
-  declaration scope (one declared inside the patch is already walked under the patch's scope,
-  and its reads of patch-locals are patch-internal);
+  declaration scope. Only captures declared in a function *enclosing the patch* count: one
+  declared inside the patch is patch-internal, and a local of a *called helper* (captured by a
+  local function nested in that helper) is recreated on every execution, not stored in the
+  delegate;
 - an **already-built delegate that resolves to nothing walkable** (a `Func<T,T>`
-  field/parameter with no same-tree initializer) — the overlay stores it all the same, this
-  rule is the only check a patch ever gets, and a delegate can capture arbitrary mutable
-  state: unverifiable means flagged, like the classifier's unverifiable categories.
+  field/parameter with no same-tree initializer, or a variable *reassigned* after its
+  initializer — the overlay may store the second closure) — the overlay stores it all the
+  same, this rule is the only check a patch ever gets, and a delegate can capture arbitrary
+  mutable state: unverifiable means flagged, like the classifier's unverifiable categories.
 
 Reads of Sendable-typed captures stay unflagged: capturing the action payload or other
 immutable snapshots is the idiomatic pattern. Captured-state **writes** inside a patch are

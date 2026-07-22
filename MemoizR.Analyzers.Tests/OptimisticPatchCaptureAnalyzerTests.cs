@@ -552,6 +552,71 @@ public class OptimisticPatchCaptureAnalyzerTests
     }
 
     [Fact]
+    public async Task HelperLocalClosures_AreNotPatchCaptures()
+    {
+        // Inner captures tmp -- but tmp belongs to Count's INVOCATION, recreated on every
+        // patch execution: nothing of it is stored in the optimistic delegate.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    int Count()
+                    {
+                        var tmp = new List<int>();
+                        int Inner() => tmp.Count;
+                        return Inner();
+                    }
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x => x + Count());
+                    });
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    // The initializer proves nothing once the variable is reassigned: the overlay may store
+    // the second closure, so the variable is held to the unresolvable-delegate verdict.
+    [Fact]
+    public async Task ReassignedDelegateVariable_IsFlaggedAsUnverifiable()
+    {
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    var shared = new List<int>();
+                    Func<int, int> patch = static x => x;
+                    patch = x => x + shared.Count;
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, patch);
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR004", diagnostic.Id);
+        Assert.Contains("'patch'", diagnostic.GetMessage());
+        Assert.Contains("reassigned", diagnostic.GetMessage());
+    }
+
+    [Fact]
     public async Task PatchInternalLocalFunction_UsingPatchLocals_IsNotFlagged()
     {
         // The local function lives INSIDE the patch: its reads of patch-locals are

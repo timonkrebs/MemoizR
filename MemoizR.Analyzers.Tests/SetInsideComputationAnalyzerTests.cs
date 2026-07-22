@@ -495,6 +495,42 @@ public class SetInsideComputationAnalyzerTests
     }
 
     [Fact]
+    public async Task HelperReturnedState_DoesNotProveTheHostFactory()
+    {
+        // MakeState merely RETURNS a state: its receiver (f1) says nothing about which factory
+        // created it -- here it is really F2's, whose context the patch evaluates under, so the
+        // Set on F2's signal throws at runtime and the suppression must not trust the helper.
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+            using MemoizR.Reactive;
+
+            public static class StateHelpers
+            {
+                public static readonly MemoFactory F2 = new MemoFactory();
+
+                public static OptimisticState<int> MakeState(this MemoFactory f)
+                    => F2.CreateOptimistic<int>(F2.CreateSignal(1));
+            }
+
+            public class C
+            {
+                public void M()
+                {
+                    var f1 = new MemoFactory();
+                    var other = StateHelpers.F2.CreateSignal(1);
+                    f1.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(f1.MakeState(), x => { _ = other.Set(2); return x; });
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR003", diagnostic.Id);
+    }
+
+    [Fact]
     public async Task ProvablyCrossFactorySetInsidePatch_IsNotFlagged()
     {
         // A patch's flow locks the context of the factory that created the OPTIMISTIC STATE

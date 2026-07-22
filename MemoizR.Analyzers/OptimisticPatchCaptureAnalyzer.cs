@@ -1,6 +1,9 @@
 using System.Collections.Generic;
 using System.Collections.Immutable;
+using System.Linq;
 using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.Diagnostics;
 using Microsoft.CodeAnalysis.Operations;
 
@@ -74,6 +77,26 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         SemanticModel? semanticModel,
         HashSet<ISymbol> reported)
     {
+        // A delegate variable that is REASSIGNED after its initializer no longer proves which
+        // closure the overlay stores -- the initializer may be harmless while the reassignment
+        // captures anything -- so it is treated like an unresolvable delegate instead of
+        // trusted. (MZR003 deliberately keeps trusting initializers: its runtime exception
+        // still covers reassignment, this rule's does not exist.)
+        if (value.Type is { TypeKind: TypeKind.Delegate }
+            && ReceiverSymbol(Unwrap(value)) is { } variable
+            && variable is ILocalSymbol or IFieldSymbol or IPropertySymbol
+            && IsReassigned(variable, semanticModel))
+        {
+            Report(
+                context,
+                value,
+                variable,
+                variable.Name,
+                "it is reassigned after its initializer, so the delegate stored in the overlay cannot be resolved from this call site, and a delegate can capture arbitrary mutable state",
+                reported);
+            return;
+        }
+
         var methodReference = ResolveMethodReference(value, semanticModel, visitedVariables: null);
         if (methodReference is not null)
         {
@@ -87,7 +110,7 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
             resolved = true;
             foreach (var operation in ComputationLambdas.Descend(patch.Body))
             {
-                InspectCapture(context, classifier, operation, patch.Scope, reported);
+                InspectCapture(context, classifier, operation, patch.Scope, patch.Scope, reported);
                 InspectStaticRead(context, classifier, operation, reported);
                 InspectCalledHelper(context, classifier, operation, patch.Scope, semanticModel, visitedHelpers, reported);
             }
@@ -192,6 +215,35 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         }
     }
 
+    // Any assignment beyond the declaration initializer, anywhere in the tree (including a
+    // ref/out handoff): a same-tree syntactic scan, so a reassignment in another file is
+    // residual risk like every same-tree-only resolution here.
+    private static bool IsReassigned(ISymbol variable, SemanticModel? semanticModel)
+    {
+        if (semanticModel is null)
+        {
+            return false;
+        }
+
+        foreach (var node in semanticModel.SyntaxTree.GetRoot().DescendantNodes())
+        {
+            var target = node switch
+            {
+                AssignmentExpressionSyntax assignment => assignment.Left,
+                ArgumentSyntax argument when !argument.RefOrOutKeyword.IsKind(SyntaxKind.None) => argument.Expression,
+                _ => null,
+            };
+
+            if (target is not null
+                && SymbolEqualityComparer.Default.Equals(semanticModel.GetSymbolInfo(target).Symbol, variable))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     private static IOperation Unwrap(IOperation value)
     {
         while (value is IConversionOperation conversion)
@@ -219,14 +271,15 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         SendableSymbolClassifier classifier,
         IOperation operation,
         SyntaxNode scope,
+        SyntaxNode patchScope,
         HashSet<ISymbol> reported)
     {
         switch (operation)
         {
-            case ILocalReferenceOperation local when ComputationLambdas.IsDeclaredOutside(local.Local, scope):
+            case ILocalReferenceOperation local when IsSharedCapture(local.Local, scope, patchScope):
                 ReportIfNotSendable(context, classifier, operation, local.Local, local.Local.Type, reported);
                 break;
-            case IParameterReferenceOperation parameter when ComputationLambdas.IsDeclaredOutside(parameter.Parameter, scope):
+            case IParameterReferenceOperation parameter when IsSharedCapture(parameter.Parameter, scope, patchScope):
                 ReportIfNotSendable(context, classifier, operation, parameter.Parameter, parameter.Parameter.Type, reported);
                 break;
 
@@ -340,12 +393,30 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         {
             if (inspectCaptures)
             {
-                InspectCapture(context, classifier, inner, helper.Scope, reported);
+                InspectCapture(context, classifier, inner, helper.Scope, patchScope, reported);
             }
 
             InspectStaticRead(context, classifier, inner, reported);
             InspectCalledHelper(context, classifier, inner, patchScope, semanticModel, visitedHelpers, reported);
         }
+    }
+
+    // Captured by the walked scope AND declared in a function that encloses the PATCH: only
+    // then does the symbol live in the environment the patch's stored closure shares. A local
+    // function nested inside a called helper also captures that helper's OWN locals -- but
+    // those are recreated on every patch execution, not stored in the delegate, so they must
+    // stay silent.
+    private static bool IsSharedCapture(ISymbol symbol, SyntaxNode scope, SyntaxNode patchScope)
+    {
+        if (!ComputationLambdas.IsDeclaredOutside(symbol, scope))
+        {
+            return false;
+        }
+
+        var declaringFunction = symbol.ContainingSymbol?.DeclaringSyntaxReferences.FirstOrDefault();
+        return declaringFunction is not null
+            && declaringFunction.SyntaxTree == patchScope.SyntaxTree
+            && declaringFunction.Span.Contains(patchScope.Span);
     }
 
     // The shared verdict for a state read: writable storage is flagged outright; immutable

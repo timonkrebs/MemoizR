@@ -30,12 +30,22 @@ internal static class ReceiverChains
 
         if (reference is IInvocationOperation inlineCreation)
         {
-            return ResolveFactorySymbol(inlineCreation, semanticModel);
+            return ResolveKnownCreationFactory(inlineCreation, semanticModel);
         }
 
         var creation = InitializerOf(SymbolOf(reference), semanticModel);
         return creation is IInvocationOperation invocation
-            ? ResolveFactorySymbol(invocation, semanticModel)
+            ? ResolveKnownCreationFactory(invocation, semanticModel)
+            : null;
+    }
+
+    // Only a RECOGNIZED creation proves provenance: an arbitrary helper that merely RETURNS a
+    // node (`f1.MakeState()`) says nothing about which factory created what it returns, so
+    // resolving its receiver would claim f1 and enable a suppression the runtime contradicts.
+    private static ISymbol? ResolveKnownCreationFactory(IInvocationOperation creation, SemanticModel? semanticModel)
+    {
+        return FactoryMethods.IsValueBearingCreation(creation.TargetMethod)
+            ? ResolveFactorySymbol(creation, semanticModel)
             : null;
     }
 
