@@ -221,9 +221,9 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
 
         foreach (var node in semanticModel.SyntaxTree.GetRoot().DescendantNodes())
         {
-            if (ReassignmentTargets(node) is { } targets
+            if (ComputationLambdas.ReassignmentTargets(node) is { } targets
                 && targets.Any(target => WritesVariable(target, variable, semanticModel))
-                && CanExecuteBefore(node, reference, variable))
+                && ComputationLambdas.CanExecuteBefore(node, reference, variable))
             {
                 return true;
             }
@@ -302,103 +302,6 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
 
             symbol = semanticModel.GetSymbolInfo(referent).Symbol;
         }
-    }
-
-    // The expressions a node writes: an assignment's left-hand side (deconstruction tuples
-    // flattened, nesting included -- `(patch, _) = ...` writes `patch`) or a ref/out argument.
-    private static IEnumerable<ExpressionSyntax>? ReassignmentTargets(SyntaxNode node)
-    {
-        return node switch
-        {
-            AssignmentExpressionSyntax assignment => FlattenTargets(assignment.Left),
-            // `in` is excluded: a readonly reference cannot rebind the variable.
-            ArgumentSyntax argument when argument.RefOrOutKeyword.Kind() is SyntaxKind.RefKeyword or SyntaxKind.OutKeyword
-                => new[] { argument.Expression },
-            _ => null,
-        };
-    }
-
-    private static IEnumerable<ExpressionSyntax> FlattenTargets(ExpressionSyntax left)
-    {
-        if (left is not TupleExpressionSyntax tuple)
-        {
-            yield return left;
-            yield break;
-        }
-
-        foreach (var element in tuple.Arguments)
-        {
-            foreach (var nested in FlattenTargets(element.Expression))
-            {
-                yield return nested;
-            }
-        }
-    }
-
-    // Execution-order reasoning without dataflow: an assignment in a DIFFERENT function body
-    // (a helper, a lambda, another method) runs whenever that function does -- unknowable, so
-    // it counts. In the same function, one textually before the call obviously precedes it,
-    // and one textually after still reaches the call when a loop encloses both (the next
-    // iteration passes the reassigned delegate).
-    private static bool CanExecuteBefore(SyntaxNode assignment, SyntaxNode reference, ISymbol variable)
-    {
-        if (!ReferenceEquals(EnclosingFunction(assignment), EnclosingFunction(reference)))
-        {
-            return true;
-        }
-
-        if (assignment.SpanStart < reference.SpanStart)
-        {
-            return true;
-        }
-
-        for (var current = assignment.Parent; current is not null; current = current.Parent)
-        {
-            // Loop-carried only when the variable OUTLIVES the iteration: a delegate local
-            // declared inside the loop body is freshly initialized each pass, so a trailing
-            // reassignment dies with its iteration and can never reach a call.
-            if (current is ForStatementSyntax or ForEachStatementSyntax or WhileStatementSyntax or DoStatementSyntax
-                && current.Span.Contains(reference.Span)
-                && !DeclaredWithin(variable, current))
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    // Only the loop BODY re-declares per iteration: a variable in a for-INITIALIZER is
-    // declared once and carries across iterations like one declared before the loop.
-    private static bool DeclaredWithin(ISymbol variable, SyntaxNode loop)
-    {
-        var body = loop switch
-        {
-            ForStatementSyntax @for => (SyntaxNode)@for.Statement,
-            ForEachStatementSyntax forEach => forEach.Statement,
-            WhileStatementSyntax @while => @while.Statement,
-            DoStatementSyntax @do => @do.Statement,
-            _ => loop,
-        };
-
-        var declaration = variable.DeclaringSyntaxReferences.FirstOrDefault();
-        return declaration is not null
-            && declaration.SyntaxTree == body.SyntaxTree
-            && body.Span.Contains(declaration.Span);
-    }
-
-    private static SyntaxNode? EnclosingFunction(SyntaxNode node)
-    {
-        for (var current = node.Parent; current is not null; current = current.Parent)
-        {
-            if (current is AnonymousFunctionExpressionSyntax or LocalFunctionStatementSyntax
-                or BaseMethodDeclarationSyntax or AccessorDeclarationSyntax or ArrowExpressionClauseSyntax)
-            {
-                return current;
-            }
-        }
-
-        return null;
     }
 
     private static IOperation Unwrap(IOperation value)
@@ -666,24 +569,49 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         }
     }
 
-    // A delegate assembled by ASSIGNMENT (`Func<int> later; later = () => hits;`) has no
-    // initializer to resolve, so every same-tree assignment's right-hand side is a body that
-    // might be the one invoked -- all of them are chased.
+    // A delegate assembled by ASSIGNMENT (`Func<int> later; later = () => hits;`, including
+    // through deconstruction: `(later, _) = (() => hits, 0)`) has no initializer to resolve,
+    // so every same-tree assignment's right-hand side is a body that might be the one invoked
+    // -- all of them are chased, tuple elements included.
     private static IEnumerable<ComputationLambdas.ComputationBody> AssignedDelegateBodies(ISymbol variable, SemanticModel semanticModel)
     {
         foreach (var node in semanticModel.SyntaxTree.GetRoot().DescendantNodes())
         {
             if (node is not AssignmentExpressionSyntax assignment
-                || !SymbolEqualityComparer.Default.Equals(semanticModel.GetSymbolInfo(assignment.Left).Symbol, variable)
-                || semanticModel.GetOperation(assignment.Right) is not { } assigned)
+                || ComputationLambdas.ReassignmentTargets(assignment) is not { } targets
+                || !targets.Any(target => SymbolEqualityComparer.Default.Equals(semanticModel.GetSymbolInfo(target).Symbol, variable)))
             {
                 continue;
             }
 
-            foreach (var body in ComputationLambdas.OfArgumentValue(assigned, semanticModel))
+            foreach (var value in RightHandValues(assignment.Right, semanticModel))
             {
-                yield return body;
+                foreach (var body in ComputationLambdas.OfArgumentValue(value, semanticModel))
+                {
+                    yield return body;
+                }
             }
+        }
+    }
+
+    private static IEnumerable<IOperation> RightHandValues(ExpressionSyntax right, SemanticModel semanticModel)
+    {
+        if (right is TupleExpressionSyntax tuple)
+        {
+            foreach (var element in tuple.Arguments)
+            {
+                foreach (var value in RightHandValues(element.Expression, semanticModel))
+                {
+                    yield return value;
+                }
+            }
+
+            yield break;
+        }
+
+        if (semanticModel.GetOperation(right) is { } operation)
+        {
+            yield return operation;
         }
     }
 

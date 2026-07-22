@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.Operations;
 
@@ -352,6 +353,102 @@ internal static class ComputationLambdas
 
         return declaration.SyntaxTree == scope.SyntaxTree
             && declaration.Span.Contains(scope.Span);
+    }
+
+    // The expressions a node writes: an assignment's left-hand side (deconstruction tuples
+    // flattened, nesting included -- `(patch, _) = ...` writes `patch`) or a ref/out argument
+    // (`in` is excluded: a readonly reference cannot rebind the variable). Shared by MZR004's
+    // delegate-reassignment scan and the provenance checks in ReceiverChains.
+    public static IEnumerable<ExpressionSyntax>? ReassignmentTargets(SyntaxNode node)
+    {
+        return node switch
+        {
+            AssignmentExpressionSyntax assignment => FlattenTargets(assignment.Left),
+            ArgumentSyntax argument when argument.RefOrOutKeyword.Kind() is SyntaxKind.RefKeyword or SyntaxKind.OutKeyword
+                => new[] { argument.Expression },
+            _ => null,
+        };
+    }
+
+    private static IEnumerable<ExpressionSyntax> FlattenTargets(ExpressionSyntax left)
+    {
+        if (left is not TupleExpressionSyntax tuple)
+        {
+            yield return left;
+            yield break;
+        }
+
+        foreach (var element in tuple.Arguments)
+        {
+            foreach (var nested in FlattenTargets(element.Expression))
+            {
+                yield return nested;
+            }
+        }
+    }
+
+    // Execution-order reasoning without dataflow: an assignment in a DIFFERENT function body
+    // (a helper, a lambda, another method) runs whenever that function does -- unknowable, so
+    // it counts. In the same function, one textually before the reference obviously precedes
+    // it, and one textually after still reaches it when a loop encloses both AND the variable
+    // outlives the iteration (a loop-body local is freshly initialized each pass). Shared by
+    // MZR004's delegate-reassignment scan and the provenance checks in ReceiverChains.
+    public static bool CanExecuteBefore(SyntaxNode assignment, SyntaxNode reference, ISymbol variable)
+    {
+        if (!ReferenceEquals(EnclosingFunction(assignment), EnclosingFunction(reference)))
+        {
+            return true;
+        }
+
+        if (assignment.SpanStart < reference.SpanStart)
+        {
+            return true;
+        }
+
+        for (var current = assignment.Parent; current is not null; current = current.Parent)
+        {
+            if (current is ForStatementSyntax or ForEachStatementSyntax or WhileStatementSyntax or DoStatementSyntax
+                && current.Span.Contains(reference.Span)
+                && !DeclaredWithin(variable, current))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static SyntaxNode? EnclosingFunction(SyntaxNode node)
+    {
+        for (var current = node.Parent; current is not null; current = current.Parent)
+        {
+            if (current is AnonymousFunctionExpressionSyntax or LocalFunctionStatementSyntax
+                or BaseMethodDeclarationSyntax or AccessorDeclarationSyntax or ArrowExpressionClauseSyntax)
+            {
+                return current;
+            }
+        }
+
+        return null;
+    }
+
+    // Only the loop BODY re-declares per iteration: a variable in a for-INITIALIZER is
+    // declared once and carries across iterations like one declared before the loop.
+    private static bool DeclaredWithin(ISymbol variable, SyntaxNode loop)
+    {
+        var body = loop switch
+        {
+            ForStatementSyntax @for => (SyntaxNode)@for.Statement,
+            ForEachStatementSyntax forEach => forEach.Statement,
+            WhileStatementSyntax @while => @while.Statement,
+            DoStatementSyntax @do => @do.Statement,
+            _ => loop,
+        };
+
+        var declaration = variable.DeclaringSyntaxReferences.FirstOrDefault();
+        return declaration is not null
+            && declaration.SyntaxTree == body.SyntaxTree
+            && body.Span.Contains(declaration.Span);
     }
 
     // The tightest useful squiggle for an invocation: the member name, not the whole call with

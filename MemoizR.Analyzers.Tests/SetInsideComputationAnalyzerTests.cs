@@ -559,6 +559,96 @@ public class SetInsideComputationAnalyzerTests
         Assert.Contains("Signal<int>.Set", diagnostic.GetMessage());
     }
 
+    // A constructor the patch executes Sets under the same evaluation lock: non-invocation
+    // syntax (new, getters, operators) must not evade the chase.
+    [Fact]
+    public async Task SetHiddenInAConstructor_IsFlagged()
+    {
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public class Writer
+            {
+                public Writer(Signal<int> target) { _ = target.Set(2); }
+            }
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var v = f.CreateSignal(1);
+                    var state = f.CreateOptimistic<int>(v);
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x => { _ = new Writer(v); return x; });
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR003", diagnostic.Id);
+        Assert.Contains("Signal<int>.Set", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task DeconstructionReassignedState_KeepsTheDiagnostic()
+    {
+        // `(state, _) = ...` rebinds state to another factory's view before the call: the
+        // stale initializer must not prove provenance.
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f1 = new MemoFactory();
+                    var f2 = new MemoFactory();
+                    var other = f2.CreateSignal(1);
+                    f1.CreateAction<int>(async (p, ctx) =>
+                    {
+                        var state = f1.CreateOptimistic<int>(f1.CreateSignal(1));
+                        (state, _) = (f2.CreateOptimistic<int>(f2.CreateSignal(2)), 0);
+                        await ctx.Apply(state, x => { _ = other.Set(2); return x; });
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR003", diagnostic.Id);
+    }
+
+    [Fact]
+    public async Task StateReassignedAfterTheCall_KeepsTheSuppression()
+    {
+        // The reassignment is straight-line AFTER the Apply read: the value already passed
+        // came from the f1 initializer, so the provably-disjoint suppression must hold.
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f1 = new MemoFactory();
+                    var f2 = new MemoFactory();
+                    var other = f2.CreateSignal(1);
+                    f1.CreateAction<int>(async (p, ctx) =>
+                    {
+                        var state = f1.CreateOptimistic<int>(f1.CreateSignal(1));
+                        await ctx.Apply(state, x => { _ = other.Set(2); return x; });
+                        state = f1.CreateOptimistic<int>(f1.CreateSignal(2));
+                    });
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
     [Fact]
     public async Task ReassignedStateAlias_KeepsTheDiagnostic()
     {

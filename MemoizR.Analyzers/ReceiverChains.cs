@@ -26,6 +26,7 @@ internal static class ReceiverChains
     public static ISymbol? ResolveCreatingFactorySymbol(IOperation? nodeReference, SemanticModel? semanticModel)
     {
         var reference = nodeReference;
+        var site = nodeReference?.Syntax;
         HashSet<ISymbol>? visited = null;
         while (true)
         {
@@ -39,12 +40,14 @@ internal static class ReceiverChains
                 case ILocalReferenceOperation or IFieldReferenceOperation or IParameterReferenceOperation or IPropertyReferenceOperation:
                     visited ??= new HashSet<ISymbol>(SymbolEqualityComparer.Default);
                     var symbol = SymbolOf(reference);
-                    if (symbol is null || !visited.Add(symbol) || IsAssignedOutsideDeclaration(symbol, semanticModel))
+                    if (symbol is null || !visited.Add(symbol) || site is null || IsReassignedBefore(symbol, site, semanticModel))
                     {
                         return null;
                     }
 
-                    reference = InitializerOf(symbol, semanticModel);
+                    var initializer = InitializerOf(symbol, semanticModel);
+                    site = initializer?.Syntax ?? site;
+                    reference = initializer;
                     continue;
                 default:
                     return null;
@@ -52,11 +55,14 @@ internal static class ReceiverChains
         }
     }
 
-    // A node variable REASSIGNED after its initializer no longer proves provenance: the value
-    // at the call may come from any factory, and a suppression resting on the stale
-    // initializer would drop a diagnostic the runtime contradicts -- unprovable keeps it.
-    // Same-tree syntactic scan, like every resolution here.
-    private static bool IsAssignedOutsideDeclaration(ISymbol variable, SemanticModel? semanticModel)
+    // A node variable REASSIGNED where the assignment can execute before this READ no longer
+    // proves provenance: the value may come from any factory, and a suppression resting on the
+    // stale initializer would drop a diagnostic the runtime contradicts -- unprovable keeps
+    // it. A later straight-line reassignment cannot change the value already read, so it stays
+    // trusted; deconstruction targets are flattened, like MZR004's delegate scan. Same-tree
+    // syntactic, like every resolution here; each alias link checks against the site where its
+    // value is read (the previous link's initializer).
+    private static bool IsReassignedBefore(ISymbol variable, SyntaxNode reference, SemanticModel? semanticModel)
     {
         if (semanticModel is null)
         {
@@ -65,8 +71,9 @@ internal static class ReceiverChains
 
         foreach (var node in semanticModel.SyntaxTree.GetRoot().DescendantNodes())
         {
-            if (node is AssignmentExpressionSyntax assignment
-                && SymbolEqualityComparer.Default.Equals(semanticModel.GetSymbolInfo(assignment.Left).Symbol, variable))
+            if (ComputationLambdas.ReassignmentTargets(node) is { } targets
+                && targets.Any(target => SymbolEqualityComparer.Default.Equals(semanticModel.GetSymbolInfo(target).Symbol, variable))
+                && ComputationLambdas.CanExecuteBefore(node, reference, variable))
             {
                 return true;
             }

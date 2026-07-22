@@ -57,12 +57,7 @@ public sealed class SetInsideComputationAnalyzer : DiagnosticAnalyzer
     {
         foreach (var operation in ComputationLambdas.DescendDirectExecution(body))
         {
-            if (operation is not IInvocationOperation inner)
-            {
-                continue;
-            }
-
-            if (IsSameEngineSet(inner.TargetMethod, actorHost))
+            if (operation is IInvocationOperation inner && IsSameEngineSet(inner.TargetMethod, actorHost))
             {
                 if (!IsProvablyCrossFactory(host, inner, actorHost))
                 {
@@ -76,12 +71,33 @@ public sealed class SetInsideComputationAnalyzer : DiagnosticAnalyzer
                 continue;
             }
 
-            if (visitedHelpers.Add(inner.TargetMethod)
-                && ComputationLambdas.ResolveMethodBody(inner.TargetMethod, host.SemanticModel) is { } helper)
+            if (ExecutedMethod(operation) is { } method
+                && !ComputationLambdas.IsInsideNameOf(operation)
+                && visitedHelpers.Add(method)
+                && ComputationLambdas.ResolveMethodBody(method, host.SemanticModel) is { } helper)
             {
                 InspectExecutedBody(context, host, helper.Body, actorHost, visitedHelpers);
             }
         }
+    }
+
+    // Same-tree code the computation EXECUTES, whatever the syntax: a call, a property read
+    // (its getter runs like a call), a constructor, or a user-defined operator/conversion --
+    // `new Writer(v)` whose constructor Sets throws under the same evaluation lock as an
+    // inline Set. (A property mentioned only in nameof is not executed and must not be
+    // chased.)
+    private static IMethodSymbol? ExecutedMethod(IOperation operation)
+    {
+        return operation switch
+        {
+            IInvocationOperation invocation => invocation.TargetMethod,
+            IPropertyReferenceOperation property => property.Property.GetMethod,
+            IObjectCreationOperation creation => creation.Constructor,
+            IBinaryOperation { OperatorMethod: { } binaryOperator } => binaryOperator,
+            IUnaryOperation { OperatorMethod: { } unaryOperator } => unaryOperator,
+            IConversionOperation { OperatorMethod: { } conversionOperator } => conversionOperator,
+            _ => null,
+        };
     }
 
     // A cross-CONTEXT lock-engine Set does not throw at runtime: the Set locks the target
