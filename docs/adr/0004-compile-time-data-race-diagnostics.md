@@ -150,8 +150,9 @@ Flagged, once per captured symbol per patch:
 - a **captured local or parameter whose type is not Sendable** (the same classifier verdicts as
   MZR001; type parameters keep the benefit of the doubt);
 - a read of **writable state on the enclosing object** (a non-readonly field, a settable
-  property; `init` counts as immutable) — the patch re-reads it on other flows while the owner
-  mutates it freely;
+  property; `init` counts as immutable, and a ref-returning property counts as writable — no
+  setter, but it hands out assignable live storage) — the patch re-reads it on other flows
+  while the owner mutates it freely;
 - a read of a **readonly/get-only member whose type is not Sendable** — the object handed out
   is what gets shared. Computed get-only property bodies are not chased. Both member verdicts
   refine a *non-Sendable* enclosing object only: an enclosing type the classifier accepts
@@ -162,14 +163,23 @@ Flagged, once per captured symbol per patch:
   method body lives in metadata and cannot be walked. A *mutable struct* receiver is flagged
   when the referenced method is non-readonly: the Sendable verdict for a value type rests on
   copy semantics, but the delegate stores one boxed copy that a non-readonly method mutates in
-  place;
+  place (extension methods never reach this verdict — CS1113 forbids creating a delegate from
+  a value-type extension receiver);
 - a **bare `this`** handed to a helper (`x => ReadCounter()`, `Use(this)`) — the whole
   enclosing object is captured with no member to inspect, so it is held to its type's
   sendability: hiding the read behind a helper must not evade the rule;
 - a read of **static state** that is writable or of a non-Sendable type (`const` is a
   compile-time value) — statics are shared across every flow without any capture at all, so
   same-tree helper methods the patch calls are chased for them transitively (the classifier
-  deliberately ignores statics, meaning a Sendable `this` says nothing about them).
+  deliberately ignores statics, meaning a Sendable `this` says nothing about them);
+- the **closure of a local function** the patch calls that is declared *outside* the patch —
+  no receiver/`this` verdict covers it, so its body is inspected for captures against its own
+  declaration scope (one declared inside the patch is already walked under the patch's scope,
+  and its reads of patch-locals are patch-internal);
+- an **already-built delegate that resolves to nothing walkable** (a `Func<T,T>`
+  field/parameter with no same-tree initializer) — the overlay stores it all the same, this
+  rule is the only check a patch ever gets, and a delegate can capture arbitrary mutable
+  state: unverifiable means flagged, like the classifier's unverifiable categories.
 
 Reads of Sendable-typed captures stay unflagged: capturing the action payload or other
 immutable snapshots is the idiomatic pattern. Captured-state **writes** inside a patch are

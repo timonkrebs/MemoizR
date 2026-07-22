@@ -491,6 +491,128 @@ public class OptimisticPatchCaptureAnalyzerTests
         Assert.Empty(diagnostics);
     }
 
+    // An already-built delegate flowing in as data is the one shape Roslyn cannot see into --
+    // and this rule is the only check a patch ever gets, so unverifiable means flagged.
+    [Fact]
+    public async Task PrebuiltDelegateParameter_IsFlaggedAsUnverifiable()
+    {
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                public void M(Func<int, int> patch)
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, patch);
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR004", diagnostic.Id);
+        Assert.Contains("'patch'", diagnostic.GetMessage());
+        Assert.Contains("cannot be resolved", diagnostic.GetMessage());
+    }
+
+    // A local function has no receiver, so no receiver/this verdict covers its closure: moving
+    // the read behind one declared outside the patch must not evade the rule.
+    [Fact]
+    public async Task LocalFunctionHelper_CapturingNonSendableState_IsFlagged()
+    {
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    var shared = new List<int>();
+                    int Count() => shared.Count;
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x => x + Count());
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR004", diagnostic.Id);
+        Assert.Contains("shared", diagnostic.GetMessage());
+        Assert.Contains("not Sendable", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task PatchInternalLocalFunction_UsingPatchLocals_IsNotFlagged()
+    {
+        // The local function lives INSIDE the patch: its reads of patch-locals are
+        // patch-internal state created fresh per execution, not cross-flow sharing.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x =>
+                        {
+                            var list = new List<int> { x };
+                            int Count() => list.Count;
+                            return x + Count();
+                        });
+                    });
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    // No setter, yet `ref int Counter => ref counter` hands out assignable live storage.
+    [Fact]
+    public async Task RefReturningProperty_IsFlaggedAsWritable()
+    {
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public class C
+            {
+                private int counter;
+
+                public ref int Counter => ref counter;
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x => x + Counter);
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR004", diagnostic.Id);
+        Assert.Contains("Counter", diagnostic.GetMessage());
+        Assert.Contains("writable state", diagnostic.GetMessage());
+    }
+
     [Fact]
     public async Task EachCapturedSymbol_IsReportedOnce_PerPatch()
     {

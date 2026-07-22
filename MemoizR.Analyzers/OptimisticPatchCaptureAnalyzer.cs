@@ -10,12 +10,14 @@ namespace MemoizR.Analyzers;
 // stored in the overlay and re-executed by the view's computation on whichever flow pulls the
 // optimistic state, so everything its closure captures crosses flows exactly like a node value.
 // A capture whose type is not Sendable (a List<int> local), or a read of writable state on a
-// non-Sendable enclosing object (a non-readonly field, a settable property), is therefore
-// unsynchronized cross-flow sharing -- and so are a method-group patch's receiver (including a
-// mutable struct boxed into the delegate), a bare `this` handed to a helper, and static state
-// the patch reads directly or through same-tree helpers (shared without any capture at all).
-// Reads of Sendable-typed captures stay unflagged -- capturing the action payload or other
-// immutable snapshots is the idiomatic pattern. This rule exists because the
+// non-Sendable enclosing object (a non-readonly field, a settable or ref-returning property),
+// is therefore unsynchronized cross-flow sharing -- and so are a method-group patch's receiver
+// (including a mutable struct boxed into the delegate), a bare `this` handed to a helper,
+// static state the patch reads directly or through same-tree helpers (shared without any
+// capture at all), closure state of outside-the-patch local functions it calls, and an
+// already-built delegate that resolves to nothing walkable. Reads of Sendable-typed captures
+// stay unflagged -- capturing the action payload or other immutable snapshots is the idiomatic
+// pattern. This rule exists because the
 // RUNTIME cannot check it: closure display classes always carry writable fields, so a
 // structural runtime check would reject every capturing lambda. Captured-state WRITES inside a
 // patch are MZR002's territory (Apply is a computation host), and a Set inside one is MZR003's.
@@ -53,35 +55,67 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         // of its reads.
         var reported = new HashSet<ISymbol>(SymbolEqualityComparer.Default);
 
-        // A method-group patch (`ctx.Apply(state, helper.Patch)`) captures its RECEIVER into
-        // the stored delegate -- shared across pull flows even when the method body lives in
-        // metadata or another file and cannot be walked.
         foreach (var argument in invocation.Arguments)
         {
-            InspectMethodGroupReceiver(context, classifier, argument.Value, invocation.SemanticModel, reported);
-        }
-
-        var visitedHelpers = new HashSet<IMethodSymbol>(SymbolEqualityComparer.Default);
-        foreach (var patch in ComputationLambdas.OfInvocation(invocation))
-        {
-            foreach (var operation in ComputationLambdas.Descend(patch.Body))
-            {
-                InspectCapture(context, classifier, operation, patch.Scope, reported);
-                InspectStaticRead(context, classifier, operation, reported);
-                InspectCalledHelper(context, classifier, operation, invocation.SemanticModel, visitedHelpers, reported);
-            }
+            InspectPatchArgument(context, classifier, argument.Value, invocation.SemanticModel, reported);
         }
     }
 
-    private static void InspectMethodGroupReceiver(
+    // One patch argument, all shapes: a lambda (or a delegate variable resolving to one) walks
+    // its body; a method group (however stored) checks its receiver and walks its same-tree
+    // body; a delegate-typed argument resolving to NEITHER is an already-built closure Roslyn
+    // cannot see into -- flagged, because the overlay stores it all the same, this rule is the
+    // only check the patch will ever get, and a delegate can capture arbitrary mutable state
+    // (the classifier rejects delegate-typed values for the same reason).
+    private static void InspectPatchArgument(
         OperationAnalysisContext context,
         SendableSymbolClassifier classifier,
         IOperation value,
         SemanticModel? semanticModel,
         HashSet<ISymbol> reported)
     {
-        if (ResolveMethodReference(value, semanticModel, visitedVariables: null) is not { Instance: { } receiver } methodReference
-            || receiver.Type is not { } receiverType)
+        var methodReference = ResolveMethodReference(value, semanticModel, visitedVariables: null);
+        if (methodReference is not null)
+        {
+            InspectMethodGroupReceiver(context, classifier, methodReference, reported);
+        }
+
+        var resolved = methodReference is not null;
+        var visitedHelpers = new HashSet<IMethodSymbol>(SymbolEqualityComparer.Default);
+        foreach (var patch in ComputationLambdas.OfArgumentValue(value, semanticModel))
+        {
+            resolved = true;
+            foreach (var operation in ComputationLambdas.Descend(patch.Body))
+            {
+                InspectCapture(context, classifier, operation, patch.Scope, reported);
+                InspectStaticRead(context, classifier, operation, reported);
+                InspectCalledHelper(context, classifier, operation, patch.Scope, semanticModel, visitedHelpers, reported);
+            }
+        }
+
+        if (!resolved && value.Type is { TypeKind: TypeKind.Delegate })
+        {
+            var symbol = ReceiverSymbol(Unwrap(value));
+            Report(
+                context,
+                value,
+                symbol ?? value.Type,
+                symbol?.Name ?? SendableSymbolClassifier.Display(value.Type),
+                "it is an already-built delegate whose closure cannot be resolved from this call site, and a delegate can capture arbitrary mutable state (define the patch inline or as a same-tree method)",
+                reported);
+        }
+    }
+
+    // A method-group patch (`ctx.Apply(state, helper.Patch)`) captures its RECEIVER into the
+    // stored delegate -- shared across pull flows even when the method body lives in metadata
+    // or another file and cannot be walked.
+    private static void InspectMethodGroupReceiver(
+        OperationAnalysisContext context,
+        SendableSymbolClassifier classifier,
+        IMethodReferenceOperation methodReference,
+        HashSet<ISymbol> reported)
+    {
+        if (methodReference.Instance is not { } receiver || receiver.Type is not { } receiverType)
         {
             return;
         }
@@ -94,7 +128,9 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
             // A Sendable verdict for a VALUE TYPE rests on copy semantics -- but a method-group
             // delegate stores ONE boxed receiver that every re-execution shares, and a
             // non-readonly struct method mutates that box in place. (A readonly method cannot,
-            // and the box is reachable only through the delegate.)
+            // and the box is reachable only through the delegate. Extension methods need no
+            // exemption: CS1113 forbids creating a delegate from a value-type extension
+            // receiver, so only real instance methods reach this branch.)
             if (receiverType.IsValueType && !methodReference.Method.IsReadOnly)
             {
                 Report(
@@ -154,6 +190,16 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
                     return null;
             }
         }
+    }
+
+    private static IOperation Unwrap(IOperation value)
+    {
+        while (value is IConversionOperation conversion)
+        {
+            value = conversion.Operand;
+        }
+
+        return value;
     }
 
     private static ISymbol? ReceiverSymbol(IOperation receiver)
@@ -263,6 +309,7 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         OperationAnalysisContext context,
         SendableSymbolClassifier classifier,
         IOperation operation,
+        SyntaxNode patchScope,
         SemanticModel? semanticModel,
         HashSet<IMethodSymbol> visitedHelpers,
         HashSet<ISymbol> reported)
@@ -280,10 +327,24 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
             return;
         }
 
+        // A LOCAL FUNCTION has no receiver, so no receiver/`this` verdict covers its closure:
+        // one declared outside the patch shares the enclosing method's locals with the patch,
+        // and what its body reads from outside its own declaration is captured state, held to
+        // the ordinary capture verdicts. (One declared INSIDE the patch was already walked
+        // under the patch's own scope, and its reads of patch-locals are patch-internal, not
+        // shared -- re-inspecting it against its own scope would flag them falsely.)
+        var inspectCaptures = method.MethodKind == MethodKind.LocalFunction
+            && ComputationLambdas.IsDeclaredOutside(method, patchScope);
+
         foreach (var inner in ComputationLambdas.Descend(helper.Body))
         {
+            if (inspectCaptures)
+            {
+                InspectCapture(context, classifier, inner, helper.Scope, reported);
+            }
+
             InspectStaticRead(context, classifier, inner, reported);
-            InspectCalledHelper(context, classifier, inner, semanticModel, visitedHelpers, reported);
+            InspectCalledHelper(context, classifier, inner, patchScope, semanticModel, visitedHelpers, reported);
         }
     }
 
@@ -311,10 +372,12 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
 
     // An init accessor surfaces as SetMethod but cannot run after construction: `{ get; init; }`
     // is immutable state, held (like readonly fields) only to its TYPE's sendability -- the same
-    // verdict the runtime SendableChecker gives it.
+    // verdict the runtime SendableChecker gives it. A ref-RETURNING property is the reverse
+    // disguise: no setter, yet `ref int Counter => ref counter` hands out assignable live
+    // storage, so it counts as writable.
     private static bool IsSettable(IPropertySymbol property)
     {
-        return property.SetMethod is { IsInitOnly: false };
+        return property.SetMethod is { IsInitOnly: false } || property.RefKind == RefKind.Ref;
     }
 
     // True when the reference is the receiver of a member read InspectCapture handles itself:

@@ -36,11 +36,18 @@ internal static class ComputationLambdas
     {
         foreach (var argument in invocation.Arguments)
         {
-            foreach (var body in BodiesIn(argument.Value, invocation.SemanticModel, visitedVariables: null))
+            foreach (var body in OfArgumentValue(argument.Value, invocation.SemanticModel))
             {
                 yield return body;
             }
         }
+    }
+
+    // A single argument's computations, for callers that need per-argument resolution (MZR004
+    // distinguishes "resolved to nothing" from a walked body).
+    public static IEnumerable<ComputationBody> OfArgumentValue(IOperation value, SemanticModel? semanticModel)
+    {
+        return BodiesIn(value, semanticModel, visitedVariables: null);
     }
 
     private static IEnumerable<ComputationBody> BodiesIn(IOperation value, SemanticModel? semanticModel, HashSet<ISymbol>? visitedVariables)
