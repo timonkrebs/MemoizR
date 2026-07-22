@@ -693,4 +693,64 @@ public class CapturedMutationAnalyzerTests
         Assert.Equal("MZR002", diagnostic.Id);
         Assert.Contains("captured local 'counter'", diagnostic.GetMessage());
     }
+
+    [Fact]
+    public async Task ExtensionMethodOnThis_MutatingEnclosingState_IsFlagged()
+    {
+        // `this.Inc()` runs the extension body with `this` bound to the receiver parameter:
+        // the write through that parameter mutates the enclosing object exactly like
+        // `this.Counter++` would, and the extension syntax must not hide it.
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public static class CExtensions
+            {
+                public static void Inc(this C c) => c.Counter++;
+            }
+
+            public class C
+            {
+                public int Counter;
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    f.CreateMemoizR(async () => { this.Inc(); return 0; });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR002", diagnostic.Id);
+        Assert.Contains("field 'Counter'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task ExtensionMethodOnAnotherReceiver_IsNotChasedForMutation()
+    {
+        // The same extension on some OTHER object mutates that object's state -- a
+        // captured-reference mutation that is deliberately MZR001's territory, not MZR002's.
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public static class CExtensions
+            {
+                public static void Inc(this C c) => c.Counter++;
+            }
+
+            public class C
+            {
+                public int Counter;
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var otherObject = new C();
+                    f.CreateMemoizR(async () => { otherObject.Inc(); return 0; });
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
 }

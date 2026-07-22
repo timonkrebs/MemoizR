@@ -182,10 +182,41 @@ internal static class ComputationLambdas
         };
 
         // `Func<int,int> patch; patch = static x => x;` initializes by assignment: when the
-        // SOLE same-tree write is a simple assignment, its right-hand side is the initializer.
-        initializer ??= EffectiveInitializerAssignment(variable, semanticModel)?.Right;
+        // SOLE same-tree write is a simple assignment, its right-hand side is the initializer
+        // -- for a deconstruction form, the positionally matching tuple element.
+        if (initializer is null && EffectiveInitializerAssignment(variable, semanticModel) is { } assignment)
+        {
+            initializer = AssignedElementFor(assignment.Left, assignment.Right, variable, semanticModel);
+        }
 
         return initializer is null ? null : semanticModel.GetOperation(initializer);
+    }
+
+    // The right-hand expression a simple assignment gives THIS variable: the whole right side
+    // for `x = value`, the positionally matching element for `(x, _) = (value, 0)` (nesting
+    // included). A non-literal tuple right side stays unresolvable, like the declaration
+    // deconstruction above.
+    private static ExpressionSyntax? AssignedElementFor(ExpressionSyntax left, ExpressionSyntax right, ISymbol variable, SemanticModel semanticModel)
+    {
+        if (left is not TupleExpressionSyntax leftTuple)
+        {
+            return SymbolEqualityComparer.Default.Equals(semanticModel.GetSymbolInfo(left).Symbol, variable) ? right : null;
+        }
+
+        if (right is not TupleExpressionSyntax rightTuple || leftTuple.Arguments.Count != rightTuple.Arguments.Count)
+        {
+            return null;
+        }
+
+        for (var i = 0; i < leftTuple.Arguments.Count; i++)
+        {
+            if (AssignedElementFor(leftTuple.Arguments[i].Expression, rightTuple.Arguments[i].Expression, variable, semanticModel) is { } element)
+            {
+                return element;
+            }
+        }
+
+        return null;
     }
 
     // The single same-tree assignment standing in for a missing declaration initializer, or
@@ -212,11 +243,12 @@ internal static class ComputationLambdas
             }
 
             // Only a plain `x = value` fully DETERMINES the value: `x ??= ...` / `x += ...`
-            // can leave (or combine with) an older value supplied elsewhere.
+            // can leave (or combine with) an older value supplied elsewhere. A simple
+            // DECONSTRUCTION qualifies too -- the variable's slot is fully determined by its
+            // tuple element, which SameTreeInitializerOperation extracts.
             if (sole is not null
                 || node is not AssignmentExpressionSyntax assignment
-                || !assignment.IsKind(SyntaxKind.SimpleAssignmentExpression)
-                || assignment.Left is TupleExpressionSyntax)
+                || !assignment.IsKind(SyntaxKind.SimpleAssignmentExpression))
             {
                 return null;
             }
@@ -230,7 +262,11 @@ internal static class ComputationLambdas
     // Call-site arguments substitute for a chased helper's parameters: maps are built
     // pre-substituted, so nested helper calls resolve through to the original computation's
     // operations. A property SETTER's implicit `value` parameter maps to the assignment's
-    // right-hand side. Shared by MZR003's Set-target provenance and MZR004's delegate chase.
+    // right-hand side. The OUTER bindings carry through -- a called local function closes
+    // over its enclosing helper's parameters (`void Inner() => s.Set(2); Inner();`), so
+    // dropping them would orphan those references; keys are parameter symbols, so unrelated
+    // callees cannot collide, and a recursive call's fresh binding overwrites the stale one.
+    // Shared by MZR003's Set-target provenance and MZR004's delegate chase.
     public static Dictionary<IParameterSymbol, IOperation>? BuildArgumentMap(IOperation operation, Dictionary<IParameterSymbol, IOperation>? outer)
     {
         if (operation is IPropertyReferenceOperation { Parent: ISimpleAssignmentOperation setterAssignment } property
@@ -238,7 +274,9 @@ internal static class ComputationLambdas
             && property.Property.SetMethod?.Parameters.LastOrDefault() is { } valueParameter
             && SubstituteArguments(setterAssignment.Value, outer) is { } setterValue)
         {
-            return new Dictionary<IParameterSymbol, IOperation>(SymbolEqualityComparer.Default) { [valueParameter] = setterValue };
+            var setterMap = CopyOf(outer);
+            setterMap[valueParameter] = setterValue;
+            return setterMap;
         }
 
         var arguments = operation switch
@@ -250,7 +288,7 @@ internal static class ComputationLambdas
 
         if (arguments.IsDefaultOrEmpty)
         {
-            return null;
+            return outer;
         }
 
         Dictionary<IParameterSymbol, IOperation>? map = null;
@@ -258,12 +296,19 @@ internal static class ComputationLambdas
         {
             if (argument.Parameter is { } parameter && SubstituteArguments(argument.Value, outer) is { } value)
             {
-                map ??= new Dictionary<IParameterSymbol, IOperation>(SymbolEqualityComparer.Default);
+                map ??= CopyOf(outer);
                 map[parameter] = value;
             }
         }
 
-        return map;
+        return map ?? outer;
+    }
+
+    private static Dictionary<IParameterSymbol, IOperation> CopyOf(Dictionary<IParameterSymbol, IOperation>? outer)
+    {
+        return outer is null
+            ? new Dictionary<IParameterSymbol, IOperation>(SymbolEqualityComparer.Default)
+            : new Dictionary<IParameterSymbol, IOperation>(outer, SymbolEqualityComparer.Default);
     }
 
     public static IOperation? SubstituteArguments(IOperation? reference, Dictionary<IParameterSymbol, IOperation>? argumentMap)

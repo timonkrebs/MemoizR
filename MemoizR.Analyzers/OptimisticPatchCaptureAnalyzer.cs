@@ -398,7 +398,7 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
                 }
                 else
                 {
-                    InspectComputedGetter(context, classifier, property.Property, patchScope, semanticModel, reported, visitedGetters);
+                    InspectComputedGetter(context, classifier, operation, property.Property, patchScope, semanticModel, reported, visitedGetters);
                 }
 
                 break;
@@ -435,15 +435,23 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
     private static void InspectComputedGetter(
         OperationAnalysisContext context,
         SendableSymbolClassifier classifier,
+        IOperation operation,
         IPropertySymbol property,
         SyntaxNode patchScope,
         SemanticModel? semanticModel,
         HashSet<ISymbol> reported,
         HashSet<IMethodSymbol>? visitedGetters)
     {
-        if (property.GetMethod is not { } getter
-            || ComputationLambdas.ResolveMethodBody(getter, semanticModel) is not { } body)
+        if (property.GetMethod is not { } getter)
         {
+            return;
+        }
+
+        if (ComputationLambdas.ResolveMethodBody(getter, semanticModel) is not { } body)
+        {
+            // A source getter declared in another file (a partial type's other half) cannot
+            // be walked: held to the property TYPE's verdict, like unwalkable statics.
+            ReportIfNotSendable(context, classifier, operation, property, property.Type, reported);
             return;
         }
 
@@ -565,11 +573,19 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         // Only BACKING STORAGE holds a shared object: a computed getter may hand out a fresh
         // value on every replay (`static List<int> Items => new();`), and what it actually
         // returns is covered by the executed chase walking its body. Auto-properties and
-        // metadata properties (no walkable body) keep the type verdict.
-        if (HasBackingStorage(property))
+        // metadata properties (no walkable body) keep the type verdict -- and so does a
+        // SOURCE getter declared in another file, which that chase cannot walk either:
+        // trusting it silently would leave the property entirely unchecked.
+        if (HasBackingStorage(property) || !CanWalkGetter(property, operation.SemanticModel))
         {
             ReportIfNotSendable(context, classifier, operation, property, property.Type, reported);
         }
+    }
+
+    private static bool CanWalkGetter(IPropertySymbol property, SemanticModel? semanticModel)
+    {
+        return property.GetMethod is { } getter
+            && ComputationLambdas.ResolveMethodBody(getter, semanticModel) is not null;
     }
 
     private static bool HasBackingStorage(IPropertySymbol property)
@@ -732,17 +748,62 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         var variable = ComputationLambdas.ReferencedVariable(Unwrap(resolved));
         if (variable is not null && semanticModel is not null)
         {
-            foreach (var body in AssignedDelegateBodies(variable, resolved.Syntax, semanticModel))
+            foreach (var body in AssignedDelegateBodies(variable, resolved.Syntax, semanticModel, argumentMap))
             {
                 found = true;
                 ChaseExecutedBody(context, classifier, body, semanticModel, visitedCalls, visitedInvokes, argumentMap, reported);
             }
         }
 
+        if (!found && Unwrap(resolved) is IInvocationOperation callResult)
+        {
+            found = ChaseReturnedDelegateBodies(context, classifier, callResult, semanticModel, visitedCalls, visitedInvokes, argumentMap, reported);
+        }
+
         if (!found)
         {
             ReportUnresolvedInvokedDelegate(context, resolved, variable, semanticModel, reported);
         }
+    }
+
+    // A delegate RETURNED by a same-tree helper and immediately invoked (`Get()()`) executes
+    // whatever the helper's return statements assemble, on every replay -- resolved through
+    // the call's own argument map, so `Make(() => hits)()` reaches the call-site lambda.
+    // DescendDirectExecution keeps returns inside built callbacks out: those belong to the
+    // callback, not to the helper's own return path.
+    private static bool ChaseReturnedDelegateBodies(
+        OperationAnalysisContext context,
+        SendableSymbolClassifier classifier,
+        IInvocationOperation call,
+        SemanticModel? semanticModel,
+        HashSet<(SyntaxNode, IMethodSymbol)> visitedCalls,
+        HashSet<SyntaxNode> visitedInvokes,
+        Dictionary<IParameterSymbol, IOperation>? argumentMap,
+        HashSet<ISymbol> reported)
+    {
+        if (ComputationLambdas.ResolveMethodBody(call.TargetMethod, semanticModel) is not { } helper)
+        {
+            return false;
+        }
+
+        var found = false;
+        var callMap = ComputationLambdas.BuildArgumentMap(call, argumentMap);
+        foreach (var inner in ComputationLambdas.DescendDirectExecution(helper.Body))
+        {
+            if (inner is not IReturnOperation { ReturnedValue: { } returned })
+            {
+                continue;
+            }
+
+            var resolved = ResolveDelegateReference(returned, semanticModel, callMap);
+            foreach (var body in ComputationLambdas.OfArgumentValue(resolved, semanticModel))
+            {
+                found = true;
+                ChaseExecutedBody(context, classifier, body, semanticModel, visitedCalls, visitedInvokes, callMap, reported);
+            }
+        }
+
+        return found;
     }
 
     // The invoked reference, collapsed through parameter-to-argument hops (the map) and
@@ -789,11 +850,10 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
     }
 
     // An invoked delegate resolving to NOTHING walkable -- assembled by an out-helper in
-    // another file, an opaque factory return, a dead-end alias -- executes an arbitrary
-    // closure on every replay: unverifiable means flagged, mirroring the patch-argument
-    // rule. A METADATA method-group target (Math.Abs) stays trusted like every external
-    // contract, and a non-variable dead end (an invoked call-result chain) is left to the
-    // argument-level rules rather than guessed at.
+    // another file, returned by a helper whose returns cannot be resolved, a dead-end alias
+    // -- executes an arbitrary closure on every replay: unverifiable means flagged,
+    // mirroring the patch-argument rule. METADATA targets (a Math.Abs method group, a
+    // BCL-returned delegate) stay trusted like every other external contract.
     private static void ReportUnresolvedInvokedDelegate(
         OperationAnalysisContext context,
         IOperation resolved,
@@ -801,19 +861,32 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         SemanticModel? semanticModel,
         HashSet<ISymbol> reported)
     {
-        if (variable is null
-            || ResolveMethodReference(resolved, semanticModel, visitedVariables: null) is { Method.DeclaringSyntaxReferences.Length: 0 })
+        if (variable is not null)
         {
+            if (ResolveMethodReference(resolved, semanticModel, visitedVariables: null) is not { Method.DeclaringSyntaxReferences.Length: 0 })
+            {
+                Report(
+                    context,
+                    resolved,
+                    variable,
+                    variable.Name,
+                    "the delegate it holds cannot be resolved from this call site, and a delegate can capture arbitrary mutable state (assemble the patch's callees from lambdas or same-tree methods)",
+                    reported);
+            }
+
             return;
         }
 
-        Report(
-            context,
-            resolved,
-            variable,
-            variable.Name,
-            "the delegate it holds cannot be resolved from this call site, and a delegate can capture arbitrary mutable state (assemble the patch's callees from lambdas or same-tree methods)",
-            reported);
+        if (Unwrap(resolved) is IInvocationOperation { TargetMethod: { DeclaringSyntaxReferences.Length: > 0 } sourceMethod })
+        {
+            Report(
+                context,
+                resolved,
+                sourceMethod,
+                sourceMethod.Name,
+                "the delegate it returns cannot be resolved from this call site, and a delegate can capture arbitrary mutable state (return a lambda or a method declared in this file)",
+                reported);
+        }
     }
 
     // `later?.Invoke()` surfaces the invoke receiver as the conditional-access placeholder;
@@ -839,7 +912,11 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
     // right-hand side that can EXECUTE before the invocation is a body that might be the one
     // invoked. Deconstructions pair positionally: `(other, later) = (a, b)` assigns only `b`
     // to `later`, so `a` must not be chased.
-    private static IEnumerable<ComputationLambdas.ComputationBody> AssignedDelegateBodies(ISymbol variable, SyntaxNode invokeSite, SemanticModel semanticModel)
+    private static IEnumerable<ComputationLambdas.ComputationBody> AssignedDelegateBodies(
+        ISymbol variable,
+        SyntaxNode invokeSite,
+        SemanticModel semanticModel,
+        Dictionary<IParameterSymbol, IOperation>? argumentMap)
     {
         var writes = new List<SyntaxNode>();
         foreach (var node in semanticModel.SyntaxTree.GetRoot().DescendantNodes())
@@ -859,7 +936,7 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
                 continue;
             }
 
-            foreach (var body in NodeAssignedBodies(node, variable, semanticModel))
+            foreach (var body in NodeAssignedBodies(node, variable, semanticModel, argumentMap))
             {
                 yield return body;
             }
@@ -938,14 +1015,18 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
             or BaseMethodDeclarationSyntax or AccessorDeclarationSyntax;
     }
 
-    private static IEnumerable<ComputationLambdas.ComputationBody> NodeAssignedBodies(SyntaxNode node, ISymbol variable, SemanticModel semanticModel)
+    private static IEnumerable<ComputationLambdas.ComputationBody> NodeAssignedBodies(
+        SyntaxNode node,
+        ISymbol variable,
+        SemanticModel semanticModel,
+        Dictionary<IParameterSymbol, IOperation>? argumentMap)
     {
         switch (node)
         {
             case AssignmentExpressionSyntax assignment:
                 foreach (var value in AssignedValuesFor(assignment.Left, assignment.Right, variable, semanticModel))
                 {
-                    foreach (var body in ComputationLambdas.OfArgumentValue(value, semanticModel))
+                    foreach (var body in ComputationLambdas.OfArgumentValue(ResolveDelegateReference(value, semanticModel, argumentMap), semanticModel))
                     {
                         yield return body;
                     }
@@ -956,7 +1037,7 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
             // `Provide(out later)` assembles the delegate inside the callee: the bodies come
             // from the helper's assignments to its out/ref parameter.
             case ArgumentSyntax argument:
-                foreach (var body in OutAssignedBodies(argument, semanticModel))
+                foreach (var body in OutAssignedBodies(argument, semanticModel, argumentMap))
                 {
                     yield return body;
                 }
@@ -965,16 +1046,26 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         }
     }
 
-    private static IEnumerable<ComputationLambdas.ComputationBody> OutAssignedBodies(ArgumentSyntax argument, SemanticModel semanticModel)
+    private static IEnumerable<ComputationLambdas.ComputationBody> OutAssignedBodies(
+        ArgumentSyntax argument,
+        SemanticModel semanticModel,
+        Dictionary<IParameterSymbol, IOperation>? argumentMap)
     {
         // The SEMANTIC parameter, not the syntactic position: named arguments reorder freely
         // (`Provide(second: out later, first: 0)`).
-        if ((semanticModel.GetOperation(argument) as IArgumentOperation)?.Parameter is not { } parameter
+        if ((semanticModel.GetOperation(argument) as IArgumentOperation) is not { Parameter: { } parameter } argumentOperation
             || parameter.ContainingSymbol is not IMethodSymbol method
             || ComputationLambdas.ResolveMethodBody(method, semanticModel) is not { } helper)
         {
             yield break;
         }
+
+        // The helper's OTHER parameters resolve through this call's own arguments:
+        // `Provide(out later, static () => 0)` with `Provide(out d, source) => d = source`
+        // hands the call-site lambda back through `d`.
+        var callMap = argumentOperation.Parent is { } call
+            ? ComputationLambdas.BuildArgumentMap(call, argumentMap)
+            : argumentMap;
 
         var writes = new List<AssignmentExpressionSyntax>();
         foreach (var node in helper.Scope.DescendantNodes())
@@ -997,7 +1088,7 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
                 continue;
             }
 
-            foreach (var body in ComputationLambdas.OfArgumentValue(assigned, semanticModel))
+            foreach (var body in ComputationLambdas.OfArgumentValue(ResolveDelegateReference(assigned, semanticModel, callMap), semanticModel))
             {
                 yield return body;
             }

@@ -734,6 +734,70 @@ public class SetInsideComputationAnalyzerTests
         Assert.Contains("Signal<int>.Set", diagnostic.GetMessage());
     }
 
+    [Fact]
+    public async Task ExtensionHelperReceiver_KeepsCallSiteProvenance()
+    {
+        // The Set target is the extension helper's `this` parameter: the receiver at the
+        // call site (a provably disjoint factory's signal) is what actually gets Set, while
+        // the same helper on the HOST factory's own signal is still flagged.
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public static class SignalExtensions
+            {
+                public static void Write(this Signal<int> s)
+                {
+                    _ = s.Set(2);
+                }
+            }
+
+            public class C
+            {
+                public void M()
+                {
+                    var f1 = new MemoFactory();
+                    var f2 = new MemoFactory();
+                    var other = f2.CreateSignal(1);
+                    var mine = f1.CreateSignal(1);
+                    f1.CreateMemoizR(async () => { other.Write(); return 0; });
+                    f1.CreateMemoizR(async () => { mine.Write(); return 0; });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR003", diagnostic.Id);
+        Assert.Contains("Signal<int>.Set", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task ZeroArgumentLocalFunction_KeepsTheArgumentMap()
+    {
+        // The helper's local function closes over the helper's signal parameter: the
+        // call-site provenance must survive the zero-argument inner call.
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f1 = new MemoFactory();
+                    var f2 = new MemoFactory();
+                    var other = f2.CreateSignal(1);
+                    void Write(Signal<int> s)
+                    {
+                        void Inner() { _ = s.Set(2); }
+                        Inner();
+                    }
+                    f1.CreateMemoizR(async () => { Write(other); return 0; });
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
     // `using` runs Dispose before the evaluation exits, under the same lock.
     [Fact]
     public async Task SetHiddenInDispose_IsFlagged()
