@@ -101,14 +101,29 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
             InspectMethodGroupReceiver(context, classifier, methodReference, reported);
         }
 
-        var resolved = methodReference is not null;
+        var bodyResolved = false;
         foreach (var patch in ComputationLambdas.OfArgumentValue(value, semanticModel))
         {
-            resolved = true;
+            bodyResolved = true;
             InspectPatchBody(context, classifier, patch, semanticModel, reported);
         }
 
-        if (!resolved && value.Type is { TypeKind: TypeKind.Delegate })
+        // A SOURCE-declared method group whose body lives in another file cannot be walked:
+        // nothing checks the statics it executes, so unverifiable means flagged -- while
+        // metadata targets (Math.Abs) stay trusted like every other external contract.
+        if (methodReference is not null && !bodyResolved
+            && methodReference.Method.DeclaringSyntaxReferences.Length > 0)
+        {
+            Report(
+                context,
+                value,
+                methodReference.Method,
+                methodReference.Method.Name,
+                "its body is declared in another file, so what the stored patch executes cannot be verified from this call site (define the patch in this file, or wrap verified state in a lambda)",
+                reported);
+        }
+
+        if (methodReference is null && !bodyResolved && value.Type is { TypeKind: TypeKind.Delegate })
         {
             var symbol = ReceiverSymbol(Unwrap(value));
             Report(
@@ -221,8 +236,16 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
 
         // The sole assignment standing in for a missing initializer is initialization, not a
         // rebind (`Func<int,int> patch; patch = static x => x;` is the declaration in two
-        // steps).
+        // steps) -- but only when it can actually RUN before this read: a future write proves
+        // nothing about the value read here (a constructor- or externally-supplied delegate
+        // would slip through on its strength).
         var effectiveInitializer = ComputationLambdas.EffectiveInitializerAssignment(variable, semanticModel);
+        if (effectiveInitializer is not null
+            && !ComputationLambdas.CanExecuteBefore(effectiveInitializer, readReference.Syntax, variable, semanticModel))
+        {
+            return true;
+        }
+
         foreach (var node in semanticModel.SyntaxTree.GetRoot().DescendantNodes())
         {
             if (!ReferenceEquals(node, effectiveInitializer)
@@ -678,18 +701,73 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
     {
         foreach (var node in semanticModel.SyntaxTree.GetRoot().DescendantNodes())
         {
+            foreach (var body in NodeAssignedBodies(node, variable, invokeSite, semanticModel))
+            {
+                yield return body;
+            }
+        }
+    }
+
+    private static IEnumerable<ComputationLambdas.ComputationBody> NodeAssignedBodies(SyntaxNode node, ISymbol variable, SyntaxNode invokeSite, SemanticModel semanticModel)
+    {
+        switch (node)
+        {
+            case AssignmentExpressionSyntax assignment when ComputationLambdas.CanExecuteBefore(assignment, invokeSite, variable, semanticModel):
+                foreach (var value in AssignedValuesFor(assignment.Left, assignment.Right, variable, semanticModel))
+                {
+                    foreach (var body in ComputationLambdas.OfArgumentValue(value, semanticModel))
+                    {
+                        yield return body;
+                    }
+                }
+
+                break;
+
+            // `Provide(out later)` assembles the delegate inside the callee: the bodies come
+            // from the helper's assignments to its out/ref parameter.
+            case ArgumentSyntax argument
+                when argument.RefOrOutKeyword.Kind() is SyntaxKind.OutKeyword or SyntaxKind.RefKeyword
+                    && ComputationLambdas.CanExecuteBefore(argument, invokeSite, variable, semanticModel):
+                foreach (var body in OutAssignedBodies(argument, variable, semanticModel))
+                {
+                    yield return body;
+                }
+
+                break;
+        }
+    }
+
+    private static IEnumerable<ComputationLambdas.ComputationBody> OutAssignedBodies(ArgumentSyntax argument, ISymbol variable, SemanticModel semanticModel)
+    {
+        if (semanticModel.GetSymbolInfo(argument.Expression).Symbol is not { } written
+            || !SymbolEqualityComparer.Default.Equals(written, variable)
+            || argument.Parent is not ArgumentListSyntax argumentList
+            || argumentList.Parent is not InvocationExpressionSyntax invocation
+            || semanticModel.GetSymbolInfo(invocation).Symbol is not IMethodSymbol method)
+        {
+            yield break;
+        }
+
+        var index = argumentList.Arguments.IndexOf(argument);
+        if (index < 0 || index >= method.Parameters.Length
+            || ComputationLambdas.ResolveMethodBody(method, semanticModel) is not { } helper)
+        {
+            yield break;
+        }
+
+        var parameter = method.Parameters[index];
+        foreach (var node in helper.Scope.DescendantNodes())
+        {
             if (node is not AssignmentExpressionSyntax assignment
-                || !ComputationLambdas.CanExecuteBefore(assignment, invokeSite, variable, semanticModel))
+                || !SymbolEqualityComparer.Default.Equals(semanticModel.GetSymbolInfo(assignment.Left).Symbol, parameter)
+                || semanticModel.GetOperation(assignment.Right) is not { } assigned)
             {
                 continue;
             }
 
-            foreach (var value in AssignedValuesFor(assignment.Left, assignment.Right, variable, semanticModel))
+            foreach (var body in ComputationLambdas.OfArgumentValue(assigned, semanticModel))
             {
-                foreach (var body in ComputationLambdas.OfArgumentValue(value, semanticModel))
-                {
-                    yield return body;
-                }
+                yield return body;
             }
         }
     }

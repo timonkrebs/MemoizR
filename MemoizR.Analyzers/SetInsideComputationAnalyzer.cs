@@ -39,7 +39,7 @@ public sealed class SetInsideComputationAnalyzer : DiagnosticAnalyzer
         foreach (var computation in ComputationLambdas.OfInvocation(invocation))
         {
             var visitedHelpers = new HashSet<IMethodSymbol>(SymbolEqualityComparer.Default);
-            InspectExecutedBody(context, invocation, computation.Body, actorHost, visitedHelpers);
+            InspectExecutedBody(context, invocation, computation.Body, actorHost, visitedHelpers, argumentMap: null);
         }
     }
 
@@ -53,13 +53,14 @@ public sealed class SetInsideComputationAnalyzer : DiagnosticAnalyzer
         IInvocationOperation host,
         IOperation body,
         bool actorHost,
-        HashSet<IMethodSymbol> visitedHelpers)
+        HashSet<IMethodSymbol> visitedHelpers,
+        Dictionary<IParameterSymbol, IOperation>? argumentMap)
     {
         foreach (var operation in ComputationLambdas.DescendDirectExecution(body))
         {
             if (operation is IInvocationOperation inner && IsSameEngineSet(inner.TargetMethod, actorHost))
             {
-                if (!IsProvablyCrossFactory(host, inner, actorHost))
+                if (!IsProvablyCrossFactory(host, inner, SubstituteArguments(inner.Instance, argumentMap), actorHost))
                 {
                     context.ReportDiagnostic(Diagnostic.Create(
                         DiagnosticDescriptors.SetInsideComputation,
@@ -77,10 +78,58 @@ public sealed class SetInsideComputationAnalyzer : DiagnosticAnalyzer
                     && visitedHelpers.Add(method)
                     && ComputationLambdas.ResolveMethodBody(method, host.SemanticModel) is { } helper)
                 {
-                    InspectExecutedBody(context, host, helper.Body, actorHost, visitedHelpers);
+                    InspectExecutedBody(context, host, helper.Body, actorHost, visitedHelpers, BuildArgumentMap(operation, argumentMap));
                 }
             }
         }
+    }
+
+    // Call-site arguments substitute for the helper's parameters when judging a chased Set's
+    // target provenance: in `void Write(Signal<int> s) => s.Set(2);` called as `Write(other)`,
+    // the target is `other`, exactly as the inline form -- a bare parameter would resolve to
+    // nothing and lose a legitimate cross-factory suppression. Maps are built pre-substituted,
+    // so nested helper calls resolve through to the original computation's operations. (One
+    // map per helper -- the visited set keeps the FIRST call site's arguments; re-walking per
+    // call site is not worth the cost for the precision it would buy.)
+    private static Dictionary<IParameterSymbol, IOperation>? BuildArgumentMap(IOperation operation, Dictionary<IParameterSymbol, IOperation>? outer)
+    {
+        var arguments = operation switch
+        {
+            IInvocationOperation invocation => invocation.Arguments,
+            IObjectCreationOperation creation => creation.Arguments,
+            _ => default,
+        };
+
+        if (arguments.IsDefaultOrEmpty)
+        {
+            return null;
+        }
+
+        Dictionary<IParameterSymbol, IOperation>? map = null;
+        foreach (var argument in arguments)
+        {
+            if (argument.Parameter is { } parameter && SubstituteArguments(argument.Value, outer) is { } value)
+            {
+                map ??= new Dictionary<IParameterSymbol, IOperation>(SymbolEqualityComparer.Default);
+                map[parameter] = value;
+            }
+        }
+
+        return map;
+    }
+
+    private static IOperation? SubstituteArguments(IOperation? reference, Dictionary<IParameterSymbol, IOperation>? argumentMap)
+    {
+        var current = reference;
+        while (current is IConversionOperation conversion)
+        {
+            current = conversion.Operand;
+        }
+
+        return current is IParameterReferenceOperation parameterReference
+            && argumentMap?.TryGetValue(parameterReference.Parameter, out var argument) == true
+            ? argument
+            : reference;
     }
 
     // A cross-CONTEXT lock-engine Set does not throw at runtime: the Set locks the target
@@ -92,7 +141,7 @@ public sealed class SetInsideComputationAnalyzer : DiagnosticAnalyzer
     // diagnostic, because the overwhelmingly common case is one shared context and the runtime
     // exception is deterministic there. Actor hosts are exempt from the check: ActorSignal.Set
     // rejects on the flow's frame, which any actor computation carries regardless of context.
-    private static bool IsProvablyCrossFactory(IInvocationOperation host, IInvocationOperation setInvocation, bool actorHost)
+    private static bool IsProvablyCrossFactory(IInvocationOperation host, IInvocationOperation setInvocation, IOperation? targetReference, bool actorHost)
     {
         if (actorHost)
         {
@@ -100,7 +149,7 @@ public sealed class SetInsideComputationAnalyzer : DiagnosticAnalyzer
         }
 
         var hostFactory = ResolveHostFactory(host);
-        var targetFactory = ReceiverChains.ResolveCreatingFactorySymbol(setInvocation.Instance, setInvocation.SemanticModel);
+        var targetFactory = ReceiverChains.ResolveCreatingFactorySymbol(targetReference ?? setInvocation.Instance, setInvocation.SemanticModel);
         if (hostFactory is null
             || targetFactory is null
             || SymbolEqualityComparer.Default.Equals(hostFactory, targetFactory))

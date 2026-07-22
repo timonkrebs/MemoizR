@@ -676,6 +676,94 @@ public class SetInsideComputationAnalyzerTests
     }
 
     [Fact]
+    public async Task HelperArgumentProvenance_IsSubstituted()
+    {
+        // The chased Set's target is the helper's parameter: the call-site argument `other`
+        // (a provably disjoint factory's signal) is what actually gets Set, exactly as the
+        // inline form -- the suppression must survive the helper boundary.
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f1 = new MemoFactory();
+                    var f2 = new MemoFactory();
+                    var other = f2.CreateSignal(1);
+                    void Write(Signal<int> s) { _ = s.Set(2); }
+                    f1.CreateMemoizR(async () => { Write(other); return 0; });
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    // `using` runs Dispose before the evaluation exits, under the same lock.
+    [Fact]
+    public async Task SetHiddenInDispose_IsFlagged()
+    {
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class Writer : IDisposable
+            {
+                private readonly Signal<int> target;
+
+                public Writer(Signal<int> target) { this.target = target; }
+
+                public void Dispose() { _ = target.Set(2); }
+            }
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var v = f.CreateSignal(1);
+                    f.CreateMemoizR(async () =>
+                    {
+                        using var w = new Writer(v);
+                        return 0;
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR003", diagnostic.Id);
+        Assert.Contains("Signal<int>.Set", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task RebindCalledOnlyAfterTheCreation_KeepsTheSuppression()
+    {
+        // Rebind's only call site runs after the creation already used the initializer's
+        // factory: the write cannot precede the read.
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f1 = new MemoFactory();
+                    var f2 = new MemoFactory();
+                    var host = f1;
+                    void Rebind() { host = f2; }
+                    var other = f2.CreateSignal(1);
+                    host.CreateMemoizR(async () => { await other.Set(2); return 0; });
+                    Rebind();
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
     public async Task DeadLocalFunctionRebind_KeepsTheSuppression()
     {
         // Rebind is declared but never referenced: dead code cannot execute, so the factory

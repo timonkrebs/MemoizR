@@ -504,26 +504,31 @@ internal static class ComputationLambdas
 
     // Execution-order reasoning without dataflow: an assignment in a DIFFERENT function body
     // (a helper, a lambda, another method) runs whenever that function does -- unknowable, so
-    // it counts, UNLESS that function is a local function never referenced in the tree (dead
-    // code cannot execute). In the same function, one textually before the reference obviously
-    // precedes it, and one textually after still reaches it when a loop encloses both AND the
-    // variable outlives the iteration (a loop-body local is freshly initialized each pass).
-    // Shared by MZR004's delegate-reassignment scan and the provenance checks in
-    // ReceiverChains.
+    // it counts, UNLESS that function is a LOCAL FUNCTION none of whose references can run
+    // before the read (dead code, or only called later). In the same function, one textually
+    // before the reference obviously precedes it, and one textually after still reaches it
+    // when a loop encloses both AND the variable outlives the iteration (a loop-body local is
+    // freshly initialized each pass). Shared by MZR004's delegate-reassignment scan and the
+    // provenance checks in ReceiverChains.
     public static bool CanExecuteBefore(SyntaxNode assignment, SyntaxNode reference, ISymbol variable, SemanticModel? semanticModel)
     {
-        var assignmentFunction = EnclosingFunction(assignment);
-        if (!ReferenceEquals(assignmentFunction, EnclosingFunction(reference)))
+        return CanExecuteBefore(assignment, reference, variable, semanticModel, visitedFunctions: null);
+    }
+
+    private static bool CanExecuteBefore(SyntaxNode node, SyntaxNode reference, ISymbol variable, SemanticModel? semanticModel, HashSet<SyntaxNode>? visitedFunctions)
+    {
+        var enclosing = EnclosingFunction(node);
+        if (!ReferenceEquals(enclosing, EnclosingFunction(reference)))
         {
-            return CouldExecute(assignmentFunction, semanticModel);
+            return CouldRunBefore(enclosing, reference, variable, semanticModel, visitedFunctions);
         }
 
-        if (assignment.SpanStart < reference.SpanStart)
+        if (node.SpanStart < reference.SpanStart)
         {
             return true;
         }
 
-        for (var current = assignment.Parent; current is not null; current = current.Parent)
+        for (var current = node.Parent; current is not null; current = current.Parent)
         {
             if (current is ForStatementSyntax or ForEachStatementSyntax or WhileStatementSyntax or DoStatementSyntax
                 && current.Span.Contains(reference.Span)
@@ -550,10 +555,12 @@ internal static class ComputationLambdas
         return null;
     }
 
-    // A LOCAL FUNCTION with no reference outside its own body is dead code: its writes cannot
-    // execute. Anything else -- a method, accessor, or lambda, all reachable from outside this
-    // tree or through stored values -- stays unknowable and counts.
-    private static bool CouldExecute(SyntaxNode? function, SemanticModel? semanticModel)
+    // A write inside a LOCAL FUNCTION runs only when some call site does: it can precede the
+    // read only if a REFERENCE to the function can (each reference is ordered recursively --
+    // the visited set breaks mutual-recursion cycles). Anything else -- a method, accessor, or
+    // lambda, all reachable from outside this tree or through stored values -- stays
+    // unknowable and counts.
+    private static bool CouldRunBefore(SyntaxNode? function, SyntaxNode reference, ISymbol variable, SemanticModel? semanticModel, HashSet<SyntaxNode>? visitedFunctions)
     {
         if (function is not LocalFunctionStatementSyntax local || semanticModel is null
             || semanticModel.GetDeclaredSymbol(local) is not { } symbol)
@@ -561,11 +568,18 @@ internal static class ComputationLambdas
             return true;
         }
 
+        visitedFunctions ??= new HashSet<SyntaxNode>();
+        if (!visitedFunctions.Add(local))
+        {
+            return false;
+        }
+
         foreach (var identifier in semanticModel.SyntaxTree.GetRoot().DescendantNodes().OfType<IdentifierNameSyntax>())
         {
             if (identifier.Identifier.ValueText == symbol.Name
                 && !local.Span.Contains(identifier.Span)
-                && SymbolEqualityComparer.Default.Equals(semanticModel.GetSymbolInfo(identifier).Symbol, symbol))
+                && SymbolEqualityComparer.Default.Equals(semanticModel.GetSymbolInfo(identifier).Symbol, symbol)
+                && CanExecuteBefore(identifier, reference, variable, semanticModel, visitedFunctions))
             {
                 return true;
             }
@@ -638,6 +652,78 @@ internal static class ComputationLambdas
                     yield return accessor;
                 }
 
+                break;
+
+            // `using` runs Dispose/DisposeAsync before the evaluation exits: the resource
+            // type's concrete implementation is what actually runs.
+            case IUsingDeclarationOperation usingDeclaration:
+                foreach (var dispose in DisposeMethods(ResourceTypes(usingDeclaration.DeclarationGroup), usingDeclaration.IsAsynchronous))
+                {
+                    yield return dispose;
+                }
+
+                break;
+            case IUsingOperation usingOperation:
+                foreach (var dispose in DisposeMethods(ResourceTypes(usingOperation.Resources), usingOperation.IsAsynchronous))
+                {
+                    yield return dispose;
+                }
+
+                break;
+        }
+    }
+
+    private static IEnumerable<IMethodSymbol> DisposeMethods(IEnumerable<ITypeSymbol?> resourceTypes, bool isAsynchronous)
+    {
+        foreach (var type in resourceTypes)
+        {
+            if (ConcreteDispose(type, isAsynchronous) is { } dispose)
+            {
+                yield return dispose;
+            }
+        }
+    }
+
+    private static IMethodSymbol? ConcreteDispose(ITypeSymbol? type, bool isAsynchronous)
+    {
+        if (type is null)
+        {
+            return null;
+        }
+
+        var interfaceName = isAsynchronous ? "IAsyncDisposable" : "IDisposable";
+        var methodName = isAsynchronous ? "DisposeAsync" : "Dispose";
+        foreach (var implemented in type.AllInterfaces)
+        {
+            if (implemented.Name == interfaceName && implemented.ContainingNamespace?.ToDisplayString() == "System"
+                && implemented.GetMembers(methodName).FirstOrDefault() is IMethodSymbol member
+                && type.FindImplementationForInterfaceMember(member) is IMethodSymbol implementation)
+            {
+                return implementation;
+            }
+        }
+
+        // Pattern-based disposal (ref structs): a parameterless instance Dispose.
+        return type.GetMembers(methodName).OfType<IMethodSymbol>()
+            .FirstOrDefault(candidate => !candidate.IsStatic && candidate.Parameters.Length == 0);
+    }
+
+    private static IEnumerable<ITypeSymbol?> ResourceTypes(IOperation? resources)
+    {
+        switch (resources)
+        {
+            case IVariableDeclarationGroupOperation group:
+                foreach (var declaration in group.Declarations)
+                {
+                    foreach (var declarator in declaration.Declarators)
+                    {
+                        yield return declarator.Symbol.Type;
+                    }
+                }
+
+                break;
+            case { } expression:
+                yield return expression.Type;
                 break;
         }
     }

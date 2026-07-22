@@ -1802,6 +1802,116 @@ public class OptimisticPatchCaptureAnalyzerTests
     }
 
     [Fact]
+    public async Task FutureWriteToAFieldDelegate_DoesNotCountAsInitializer()
+    {
+        // The sole write executes strictly after the Apply read: whatever the field holds at
+        // the call came from somewhere the analyzer cannot see, so the future write must not
+        // stand in as the initializer.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                private Func<int, int> patch;
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, patch);
+                        patch = static x => x;
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR004", diagnostic.Id);
+        Assert.Contains("'patch'", diagnostic.GetMessage());
+        Assert.Contains("cannot be resolved", diagnostic.GetMessage());
+    }
+
+    // A source-declared method group whose body lives in another file cannot be walked, so
+    // its statics go unchecked: unverifiable means flagged. Metadata targets stay trusted.
+    [Fact]
+    public async Task CrossFileMethodGroup_IsFlaggedAsUnverifiable_MetadataIsNot()
+    {
+        var diagnostics = await AnalyzerTestHarness.AnalyzeAsync(new[]
+        {
+            """
+            public static class Other
+            {
+                private static int hits;
+
+                public static int Patch(int x) => x + hits;
+            }
+            """,
+            """
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, Other.Patch);
+                        await ctx.Apply(state, System.Math.Abs);
+                    });
+                }
+            }
+            """,
+        }, new OptimisticPatchCaptureAnalyzer());
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR004", diagnostic.Id);
+        Assert.Contains("'Patch'", diagnostic.GetMessage());
+        Assert.Contains("another file", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task OutParameterAssembledDelegate_Invoked_IsChasedForStatics()
+    {
+        // The delegate is assembled inside the callee through its out parameter.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                private static int hits;
+
+                private static void Provide(out Func<int> d) => d = () => hits;
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x =>
+                        {
+                            Func<int> later;
+                            Provide(out later);
+                            return x + later();
+                        });
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR004", diagnostic.Id);
+        Assert.Contains("hits", diagnostic.GetMessage());
+        Assert.Contains("writable static state", diagnostic.GetMessage());
+    }
+
+    [Fact]
     public async Task EachCapturedSymbol_IsReportedOnce_PerPatch()
     {
         var diagnostics = await AnalyzeAsync("""

@@ -23,12 +23,17 @@ internal static class AnalyzerTestHarness
     }
 
     // ConsoleApplication is for top-level-statement snippets, which cannot compile in a library.
-    public static async Task<ImmutableArray<Diagnostic>> AnalyzeAsync(string source, DiagnosticAnalyzer analyzer, OutputKind outputKind = OutputKind.DynamicallyLinkedLibrary)
+    public static Task<ImmutableArray<Diagnostic>> AnalyzeAsync(string source, DiagnosticAnalyzer analyzer, OutputKind outputKind = OutputKind.DynamicallyLinkedLibrary)
+        => AnalyzeAsync([source], analyzer, outputKind);
+
+    // Multiple sources compile as separate syntax trees: for pinning the same-tree-only
+    // resolution boundaries (a method group whose body lives in another file).
+    public static async Task<ImmutableArray<Diagnostic>> AnalyzeAsync(string[] sources, DiagnosticAnalyzer analyzer, OutputKind outputKind = OutputKind.DynamicallyLinkedLibrary)
     {
-        var tree = CSharpSyntaxTree.ParseText(source, new CSharpParseOptions(LanguageVersion.Latest));
+        var trees = sources.Select(source => CSharpSyntaxTree.ParseText(source, new CSharpParseOptions(LanguageVersion.Latest))).ToArray();
         var compilation = CSharpCompilation.Create(
             "AnalyzerTestSnippet",
-            [tree],
+            trees,
             References.Value,
             new CSharpCompilationOptions(outputKind, nullableContextOptions: NullableContextOptions.Enable));
 

@@ -71,8 +71,16 @@ internal static class ReceiverChains
 
         // The sole assignment standing in for a missing initializer is initialization, not a
         // rebind (`OptimisticState<int> state; state = f1.CreateOptimistic(...);` still proves
-        // provenance -- the same assignment is what InitializerOf resolves through).
+        // provenance -- the same assignment is what InitializerOf resolves through) -- but
+        // only when it can actually RUN before this read: a future write proves nothing about
+        // the value read here.
         var effectiveInitializer = ComputationLambdas.EffectiveInitializerAssignment(variable, semanticModel);
+        if (effectiveInitializer is not null
+            && !ComputationLambdas.CanExecuteBefore(effectiveInitializer, reference, variable, semanticModel))
+        {
+            return true;
+        }
+
         foreach (var node in semanticModel.SyntaxTree.GetRoot().DescendantNodes())
         {
             if (!ReferenceEquals(node, effectiveInitializer)
