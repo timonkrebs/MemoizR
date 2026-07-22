@@ -39,7 +39,7 @@ internal static class ReceiverChains
                 case ILocalReferenceOperation or IFieldReferenceOperation or IParameterReferenceOperation or IPropertyReferenceOperation:
                     visited ??= new HashSet<ISymbol>(SymbolEqualityComparer.Default);
                     var symbol = SymbolOf(reference);
-                    if (symbol is null || !visited.Add(symbol))
+                    if (symbol is null || !visited.Add(symbol) || IsAssignedOutsideDeclaration(symbol, semanticModel))
                     {
                         return null;
                     }
@@ -50,6 +50,29 @@ internal static class ReceiverChains
                     return null;
             }
         }
+    }
+
+    // A node variable REASSIGNED after its initializer no longer proves provenance: the value
+    // at the call may come from any factory, and a suppression resting on the stale
+    // initializer would drop a diagnostic the runtime contradicts -- unprovable keeps it.
+    // Same-tree syntactic scan, like every resolution here.
+    private static bool IsAssignedOutsideDeclaration(ISymbol variable, SemanticModel? semanticModel)
+    {
+        if (semanticModel is null)
+        {
+            return false;
+        }
+
+        foreach (var node in semanticModel.SyntaxTree.GetRoot().DescendantNodes())
+        {
+            if (node is AssignmentExpressionSyntax assignment
+                && SymbolEqualityComparer.Default.Equals(semanticModel.GetSymbolInfo(assignment.Left).Symbol, variable))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     // Only a RECOGNIZED creation proves provenance: an arbitrary helper that merely RETURNS a

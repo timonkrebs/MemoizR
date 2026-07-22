@@ -139,9 +139,12 @@ The walk is likewise scoped to the lock semantics: only the computation's **dire
 path** is inspected. Nested anonymous functions and local-function declarations are pruned,
 because a callback the computation merely *builds* — the diagnostic's own fix guidance,
 "schedule the write outside the evaluation" — runs later on a flow that holds no evaluation
-lock. (The cost is a false negative for a nested function invoked synchronously inside the
-computation; the runtime exception still guards that path. MZR002 keeps the full walk: a
-captured-state write is a data race whenever the callback runs, deferred or not.)
+lock. Same-tree helpers the computation **calls** on that path are chased, though: their `Set`
+executes under the same evaluation lock and throws identically, so hiding the write behind a
+local function does not evade the rule. (The remaining cost is a false negative for a
+*delegate* invoked synchronously inside the computation; the runtime exception still guards
+that path. MZR002 keeps the full walk: a captured-state write is a data race whenever the
+callback runs, deferred or not.)
 
 ### MZR004 — optimistic patch captures non-Sendable state
 

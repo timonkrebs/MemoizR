@@ -652,11 +652,53 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
 
         foreach (var body in ComputationLambdas.OfArgumentValue(callee, semanticModel))
         {
-            foreach (var inner in ComputationLambdas.DescendDirectExecution(body.Body))
+            ChaseExecutedBody(context, classifier, body, semanticModel, visited, reported);
+        }
+
+        if (variable is null || semanticModel is null)
+        {
+            return;
+        }
+
+        foreach (var body in AssignedDelegateBodies(variable, semanticModel))
+        {
+            ChaseExecutedBody(context, classifier, body, semanticModel, visited, reported);
+        }
+    }
+
+    // A delegate assembled by ASSIGNMENT (`Func<int> later; later = () => hits;`) has no
+    // initializer to resolve, so every same-tree assignment's right-hand side is a body that
+    // might be the one invoked -- all of them are chased.
+    private static IEnumerable<ComputationLambdas.ComputationBody> AssignedDelegateBodies(ISymbol variable, SemanticModel semanticModel)
+    {
+        foreach (var node in semanticModel.SyntaxTree.GetRoot().DescendantNodes())
+        {
+            if (node is not AssignmentExpressionSyntax assignment
+                || !SymbolEqualityComparer.Default.Equals(semanticModel.GetSymbolInfo(assignment.Left).Symbol, variable)
+                || semanticModel.GetOperation(assignment.Right) is not { } assigned)
             {
-                InspectStaticRead(context, classifier, inner, reported);
-                InspectExecutedHelper(context, classifier, inner, semanticModel, visited, reported);
+                continue;
             }
+
+            foreach (var body in ComputationLambdas.OfArgumentValue(assigned, semanticModel))
+            {
+                yield return body;
+            }
+        }
+    }
+
+    private static void ChaseExecutedBody(
+        OperationAnalysisContext context,
+        SendableSymbolClassifier classifier,
+        ComputationLambdas.ComputationBody body,
+        SemanticModel? semanticModel,
+        HashSet<ISymbol> visited,
+        HashSet<ISymbol> reported)
+    {
+        foreach (var inner in ComputationLambdas.DescendDirectExecution(body.Body))
+        {
+            InspectStaticRead(context, classifier, inner, reported);
+            InspectExecutedHelper(context, classifier, inner, semanticModel, visited, reported);
         }
     }
 

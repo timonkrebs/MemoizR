@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.Linq;
 using Microsoft.CodeAnalysis;
@@ -37,13 +38,33 @@ public sealed class SetInsideComputationAnalyzer : DiagnosticAnalyzer
 
         foreach (var computation in ComputationLambdas.OfInvocation(invocation))
         {
-            // Direct execution path only: a Set inside a callback the computation merely BUILDS
-            // (the diagnostic's suggested escape) runs later, off the evaluation's flow.
-            foreach (var operation in ComputationLambdas.DescendDirectExecution(computation.Body))
+            var visitedHelpers = new HashSet<IMethodSymbol>(SymbolEqualityComparer.Default);
+            InspectExecutedBody(context, invocation, computation.Body, actorHost, visitedHelpers);
+        }
+    }
+
+    // Direct execution path only: a Set inside a callback the computation merely BUILDS (the
+    // diagnostic's suggested escape) runs later, off the evaluation's flow -- but a same-tree
+    // helper the computation CALLS executes its Set under the same evaluation lock and throws
+    // identically, so called bodies are chased (the visited set bounds call cycles; metadata
+    // bodies stay unwalkable, and the runtime exception still covers those).
+    private static void InspectExecutedBody(
+        OperationAnalysisContext context,
+        IInvocationOperation host,
+        IOperation body,
+        bool actorHost,
+        HashSet<IMethodSymbol> visitedHelpers)
+    {
+        foreach (var operation in ComputationLambdas.DescendDirectExecution(body))
+        {
+            if (operation is not IInvocationOperation inner)
             {
-                if (operation is IInvocationOperation inner
-                    && IsSameEngineSet(inner.TargetMethod, actorHost)
-                    && !IsProvablyCrossFactory(invocation, inner, actorHost))
+                continue;
+            }
+
+            if (IsSameEngineSet(inner.TargetMethod, actorHost))
+            {
+                if (!IsProvablyCrossFactory(host, inner, actorHost))
                 {
                     context.ReportDiagnostic(Diagnostic.Create(
                         DiagnosticDescriptors.SetInsideComputation,
@@ -51,6 +72,14 @@ public sealed class SetInsideComputationAnalyzer : DiagnosticAnalyzer
                         SendableSymbolClassifier.Display(inner.TargetMethod.ContainingType),
                         inner.TargetMethod.Name));
                 }
+
+                continue;
+            }
+
+            if (visitedHelpers.Add(inner.TargetMethod)
+                && ComputationLambdas.ResolveMethodBody(inner.TargetMethod, host.SemanticModel) is { } helper)
+            {
+                InspectExecutedBody(context, host, helper.Body, actorHost, visitedHelpers);
             }
         }
     }

@@ -530,6 +530,65 @@ public class SetInsideComputationAnalyzerTests
         Assert.Equal("MZR003", diagnostic.Id);
     }
 
+    // A helper the computation CALLS executes its Set under the same evaluation lock: hiding
+    // the write behind a local function must not evade the diagnostic.
+    [Fact]
+    public async Task SetHiddenInALocalHelper_IsFlagged()
+    {
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var v = f.CreateSignal(1);
+                    var state = f.CreateOptimistic<int>(v);
+                    void Write() { _ = v.Set(2); }
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x => { Write(); return x; });
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR003", diagnostic.Id);
+        Assert.Contains("Signal<int>.Set", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task ReassignedStateAlias_KeepsTheDiagnostic()
+    {
+        // The state variable is reassigned from another factory before the call: the stale
+        // initializer must not prove provenance, or the suppression would drop a diagnostic
+        // the runtime contradicts.
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f1 = new MemoFactory();
+                    var f2 = new MemoFactory();
+                    var other = f2.CreateSignal(1);
+                    var state = f1.CreateOptimistic<int>(f1.CreateSignal(1));
+                    state = f2.CreateOptimistic<int>(f2.CreateSignal(1));
+                    f1.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x => { _ = other.Set(2); return x; });
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR003", diagnostic.Id);
+    }
+
     [Fact]
     public async Task AliasedStateArgument_ProvesTheHostFactory()
     {
