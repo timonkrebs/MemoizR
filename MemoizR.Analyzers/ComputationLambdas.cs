@@ -318,6 +318,22 @@ internal static class ComputationLambdas
             || !scope.Span.Contains(declaration.Span);
     }
 
+    // A symbol or member referenced only inside nameof() is a compile-time string -- nothing
+    // is captured, read, invoked, or stored. Shared guard for MZR002's and MZR004's reporting
+    // and helper chasing.
+    public static bool IsInsideNameOf(IOperation operation)
+    {
+        for (var current = operation.Parent; current is not null; current = current.Parent)
+        {
+            if (current is INameOfOperation)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     // Whether the symbol's DECLARING FUNCTION (method, local function, lambda, accessor)
     // lexically encloses the scope -- i.e. the symbol lives in an environment the scope's
     // closure shares, rather than in some helper invocation that is recreated per call.

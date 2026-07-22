@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.Linq;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
@@ -19,24 +20,36 @@ internal static class ReceiverChains
 
     // A node reference (the signal a Set is invoked on) resolves through its same-tree
     // initializer to the creating invocation, then to that creation's factory. An INLINE
-    // creation (`f.CreateSignal(0).Set(1)`) is its own provenance and resolves directly.
+    // creation (`f.CreateSignal(0).Set(1)`) is its own provenance and resolves directly, and a
+    // variable-to-variable ALIAS (`var state = s0;`) resolves through initializers until a
+    // creation or a dead end -- the visited set breaks initializer cycles.
     public static ISymbol? ResolveCreatingFactorySymbol(IOperation? nodeReference, SemanticModel? semanticModel)
     {
         var reference = nodeReference;
-        while (reference is IConversionOperation conversion)
+        HashSet<ISymbol>? visited = null;
+        while (true)
         {
-            reference = conversion.Operand;
-        }
+            switch (reference)
+            {
+                case IConversionOperation conversion:
+                    reference = conversion.Operand;
+                    continue;
+                case IInvocationOperation creation:
+                    return ResolveKnownCreationFactory(creation, semanticModel);
+                case ILocalReferenceOperation or IFieldReferenceOperation or IParameterReferenceOperation or IPropertyReferenceOperation:
+                    visited ??= new HashSet<ISymbol>(SymbolEqualityComparer.Default);
+                    var symbol = SymbolOf(reference);
+                    if (symbol is null || !visited.Add(symbol))
+                    {
+                        return null;
+                    }
 
-        if (reference is IInvocationOperation inlineCreation)
-        {
-            return ResolveKnownCreationFactory(inlineCreation, semanticModel);
+                    reference = InitializerOf(symbol, semanticModel);
+                    continue;
+                default:
+                    return null;
+            }
         }
-
-        var creation = InitializerOf(SymbolOf(reference), semanticModel);
-        return creation is IInvocationOperation invocation
-            ? ResolveKnownCreationFactory(invocation, semanticModel)
-            : null;
     }
 
     // Only a RECOGNIZED creation proves provenance: an arbitrary helper that merely RETURNS a

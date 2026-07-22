@@ -73,6 +73,7 @@ public sealed class CapturedMutationAnalyzer : DiagnosticAnalyzer
         };
 
         if (method is not { MethodKind: MethodKind.LocalFunction }
+            || ComputationLambdas.IsInsideNameOf(operation)
             || !ComputationLambdas.IsDeclaredOutside(method, computationScope)
             || !visited.Add(method)
             || ComputationLambdas.ResolveMethodBody(method, semanticModel) is not { } helper)

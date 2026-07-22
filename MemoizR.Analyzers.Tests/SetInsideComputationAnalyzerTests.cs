@@ -531,6 +531,34 @@ public class SetInsideComputationAnalyzerTests
     }
 
     [Fact]
+    public async Task AliasedStateArgument_ProvesTheHostFactory()
+    {
+        // The state reaches Apply through a variable-to-variable alias: provenance must chase
+        // initializers until the creation, or disjoint factories would keep a false warning.
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f1 = new MemoFactory();
+                    var f2 = new MemoFactory();
+                    var s0 = f1.CreateOptimistic<int>(f1.CreateSignal(1));
+                    var state = s0;
+                    var other = f2.CreateSignal(1);
+                    f1.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x => { _ = other.Set(2); return x; });
+                    });
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
     public async Task ProvablyCrossFactorySetInsidePatch_IsNotFlagged()
     {
         // A patch's flow locks the context of the factory that created the OPTIMISTIC STATE

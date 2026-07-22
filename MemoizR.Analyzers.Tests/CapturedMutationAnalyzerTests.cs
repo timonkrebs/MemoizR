@@ -572,6 +572,29 @@ public class CapturedMutationAnalyzerTests
         Assert.Contains("captured local 'applied'", diagnostic.GetMessage());
     }
 
+    // nameof(Next) is a compile-time string: the local function is neither invoked nor stored,
+    // so its body must not be chased.
+    [Fact]
+    public async Task NameofALocalHelper_DoesNotChaseIt()
+    {
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var applied = 0;
+                    int Next() { applied++; return applied; }
+                    f.CreateMemoizR(async () => nameof(Next).Length);
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
     // A captured mutable STRUCT invoked through a non-readonly method mutates the hoisted
     // closure field on every re-execution -- covered by the mutating-value-receiver rule, the
     // lambda-capture analog of MZR004's boxed method-group receiver verdict.

@@ -241,7 +241,9 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         return node switch
         {
             AssignmentExpressionSyntax assignment => FlattenTargets(assignment.Left),
-            ArgumentSyntax argument when !argument.RefOrOutKeyword.IsKind(SyntaxKind.None) => new[] { argument.Expression },
+            // `in` is excluded: a readonly reference cannot rebind the variable.
+            ArgumentSyntax argument when argument.RefOrOutKeyword.Kind() is SyntaxKind.RefKeyword or SyntaxKind.OutKeyword
+                => new[] { argument.Expression },
             _ => null,
         };
     }
@@ -469,6 +471,7 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
     {
         var method = ReferencedMethod(operation);
         if (method is not { MethodKind: MethodKind.LocalFunction }
+            || ComputationLambdas.IsInsideNameOf(operation)
             || !ComputationLambdas.IsDeclaredOutside(method, patchScope)
             || !visited.Add(method)
             || ComputationLambdas.ResolveMethodBody(method, semanticModel) is not { } helper)
@@ -497,7 +500,11 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         HashSet<IMethodSymbol> visited,
         HashSet<ISymbol> reported)
     {
-        var method = ReferencedMethod(operation);
+        // Only a CALL executes the helper: a method group the patch stores builds a delegate
+        // without running it -- the same deferred shape as a built lambda, which this walk
+        // already prunes. (The capture chase above keeps method references: a lifted local
+        // function's closure is pinned either way.)
+        var method = operation is IInvocationOperation invocation ? invocation.TargetMethod : null;
         if (method is null || !visited.Add(method)
             || ComputationLambdas.ResolveMethodBody(method, semanticModel) is not { } helper)
         {
@@ -609,7 +616,7 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         string problem,
         HashSet<ISymbol> reported)
     {
-        if (IsInsideNameOf(operation) || !reported.Add(dedupeKey))
+        if (ComputationLambdas.IsInsideNameOf(operation) || !reported.Add(dedupeKey))
         {
             return;
         }
@@ -621,19 +628,4 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
             problem));
     }
 
-    // A symbol used only inside nameof() is a compile-time string: the built delegate neither
-    // captures nor reads it, so nothing crosses flows. Checked at the single report choke
-    // point (before the dedupe add, so a real use elsewhere still reports).
-    private static bool IsInsideNameOf(IOperation operation)
-    {
-        for (var current = operation.Parent; current is not null; current = current.Parent)
-        {
-            if (current is INameOfOperation)
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
 }

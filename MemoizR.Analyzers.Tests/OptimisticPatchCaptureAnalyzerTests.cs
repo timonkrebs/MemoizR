@@ -812,6 +812,71 @@ public class OptimisticPatchCaptureAnalyzerTests
         Assert.Empty(diagnostics);
     }
 
+    // A method group the patch stores builds a delegate without running it -- the same
+    // deferred shape as a built lambda, so its statics must not count as patch reads.
+    [Fact]
+    public async Task MethodGroupStoredInACallback_IsNotExecutedForStatics()
+    {
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                private static int hits;
+
+                private static int ReadHits() => hits;
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x =>
+                        {
+                            Func<int> later = ReadHits;
+                            _ = later;
+                            return x;
+                        });
+                    });
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    // An `in` argument hands out a readonly reference: it cannot rebind the local, so it must
+    // not distrust the initializer.
+    [Fact]
+    public async Task InArgument_DoesNotDistrustTheInitializer()
+    {
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                private static void Use(in Func<int, int> candidate) { }
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        Func<int, int> patch = static x => x;
+                        Use(in patch);
+                        await ctx.Apply(state, patch);
+                    });
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
     [Fact]
     public async Task PatchInternalLocalFunction_UsingPatchLocals_IsNotFlagged()
     {
