@@ -180,7 +180,8 @@ Flagged, once per captured symbol per patch:
   sendability: hiding the read behind a helper must not evade the rule;
 - a read of **static state** that is writable or of a non-Sendable type (`const` is a
   compile-time value) — statics are shared across every flow without any capture at all, so
-  same-tree helper methods the patch calls are chased for them transitively (the classifier
+  same-tree code the patch *executes* is chased for them transitively: helper methods,
+  property getters, constructors, and user-defined operators/conversions (the classifier
   deliberately ignores statics, meaning a Sendable `this` says nothing about them). Static
   verdicts follow MZR003's *direct-execution* pruning: a read inside a callback the patch
   merely builds runs later, off the overlay's re-execution (closure captures keep the full

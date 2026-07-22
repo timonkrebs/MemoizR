@@ -1073,6 +1073,135 @@ public class OptimisticPatchCaptureAnalyzerTests
     }
 
     [Fact]
+    public async Task NameofProperty_DoesNotChaseItsGetter()
+    {
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public class C
+            {
+                private static int hits;
+
+                private static int Hits => hits;
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x => x + nameof(Hits).Length);
+                    });
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task NameofMention_DoesNotSuppressTheRealRead()
+    {
+        // The nameof mention comes first in the walk; it must not enter the visited set and
+        // swallow the chase of the real read that follows.
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public class C
+            {
+                private static int hits;
+
+                private static int Hits => hits;
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x => x + nameof(Hits).Length + Hits);
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR004", diagnostic.Id);
+        Assert.Contains("hits", diagnostic.GetMessage());
+    }
+
+    // `alias = ...` rebinds patch just as directly as `patch = ...`.
+    [Fact]
+    public async Task RefAliasReassignment_IsUnresolvable()
+    {
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    var shared = new List<int>();
+                    Func<int, int> patch = static x => x;
+                    ref var alias = ref patch;
+                    alias = x => x + shared.Count;
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, patch);
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR004", diagnostic.Id);
+        Assert.Contains("'patch'", diagnostic.GetMessage());
+        Assert.Contains("reassigned", diagnostic.GetMessage());
+    }
+
+    // A constructor and a user-defined operator run on every replay exactly like helper calls.
+    [Fact]
+    public async Task ConstructorAndOperator_HidingStaticReads_AreChased()
+    {
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public class Meter
+            {
+                private static int hits;
+
+                public readonly int Sample;
+
+                public Meter() { Sample = hits; }
+
+                public static int operator +(Meter meter, int x) => x + hits;
+            }
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x => new Meter() + x);
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR004", diagnostic.Id);
+        Assert.Contains("hits", diagnostic.GetMessage());
+        Assert.Contains("writable static state", diagnostic.GetMessage());
+    }
+
+    [Fact]
     public async Task EachCapturedSymbol_IsReportedOnce_PerPatch()
     {
         var diagnostics = await AnalyzeAsync("""

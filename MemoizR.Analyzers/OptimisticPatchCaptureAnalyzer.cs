@@ -224,7 +224,7 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         foreach (var node in semanticModel.SyntaxTree.GetRoot().DescendantNodes())
         {
             if (ReassignmentTargets(node) is { } targets
-                && targets.Any(target => SymbolEqualityComparer.Default.Equals(semanticModel.GetSymbolInfo(target).Symbol, variable))
+                && targets.Any(target => WritesVariable(target, variable, semanticModel))
                 && CanExecuteBefore(node, reference, variable))
             {
                 return true;
@@ -232,6 +232,48 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         }
 
         return false;
+    }
+
+    // A ref-local ALIAS writes its referent: `ref var alias = ref patch; alias = ...` rebinds
+    // patch just as directly. The alias chain resolves through `= ref` initializers; the
+    // visited set breaks alias cycles.
+    private static bool WritesVariable(ExpressionSyntax target, ISymbol variable, SemanticModel semanticModel)
+    {
+        var symbol = semanticModel.GetSymbolInfo(target).Symbol;
+        HashSet<ISymbol>? visited = null;
+        while (true)
+        {
+            if (symbol is null)
+            {
+                return false;
+            }
+
+            if (SymbolEqualityComparer.Default.Equals(symbol, variable))
+            {
+                return true;
+            }
+
+            if (symbol is not ILocalSymbol { RefKind: RefKind.Ref })
+            {
+                return false;
+            }
+
+            visited ??= new HashSet<ISymbol>(SymbolEqualityComparer.Default);
+            if (!visited.Add(symbol))
+            {
+                return false;
+            }
+
+            if (symbol.DeclaringSyntaxReferences.FirstOrDefault()?.GetSyntax() is not VariableDeclaratorSyntax
+                {
+                    Initializer.Value: RefExpressionSyntax { Expression: { } referent }
+                })
+            {
+                return false;
+            }
+
+            symbol = semanticModel.GetSymbolInfo(referent).Symbol;
+        }
     }
 
     // The expressions a node writes: an assignment's left-hand side (deconstruction tuples
@@ -511,20 +553,28 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         HashSet<IMethodSymbol> visited,
         HashSet<ISymbol> reported)
     {
-        // Only what EXECUTES is chased: a call, or a property READ, which runs its getter
-        // exactly like a call -- `static int Hits => hits;` is the helper-method evasion with
-        // property syntax. A method group the patch stores builds a delegate without running
-        // it -- the same deferred shape as a built lambda, which this walk already prunes.
-        // (The capture chase above keeps method references: a lifted local function's closure
-        // is pinned either way.)
+        // Only what EXECUTES is chased: a call; a property READ, which runs its getter exactly
+        // like a call (`static int Hits => hits;` is the helper-method evasion with property
+        // syntax); a constructor; or a user-defined operator/conversion -- each runs on every
+        // replay of the stored patch. A method group the patch stores builds a delegate
+        // without running it -- the same deferred shape as a built lambda, which this walk
+        // already prunes. (The capture chase above keeps method references: a lifted local
+        // function's closure is pinned either way.)
         var method = operation switch
         {
             IInvocationOperation invocation => invocation.TargetMethod,
             IPropertyReferenceOperation property => property.Property.GetMethod,
+            IObjectCreationOperation creation => creation.Constructor,
+            IBinaryOperation { OperatorMethod: { } binaryOperator } => binaryOperator,
+            IUnaryOperation { OperatorMethod: { } unaryOperator } => unaryOperator,
+            IConversionOperation { OperatorMethod: { } conversionOperator } => conversionOperator,
             _ => null,
         };
 
-        if (method is null || !visited.Add(method)
+        // The nameof check runs BEFORE the visited add: a property mentioned only in nameof is
+        // neither executed nor captured, and it must not poison the visited set for a later
+        // real read of the same member.
+        if (method is null || ComputationLambdas.IsInsideNameOf(operation) || !visited.Add(method)
             || ComputationLambdas.ResolveMethodBody(method, semanticModel) is not { } helper)
         {
             return;
