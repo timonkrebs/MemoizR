@@ -2,7 +2,16 @@
   <ItemGroup>
     <ProjectReference Include="..\MemoizR\MemoizR.csproj" />
   </ItemGroup>
-  
+
+  <ItemGroup>
+    <!-- NuGet does not flow analyzer assets through package dependencies, so a consumer
+         installing only this package would build the structured-concurrency factories the MZR
+         rules cover with no diagnostics. Same packing as MemoizR.csproj; identical analyzer
+         assemblies are deduplicated by MVID when several MemoizR packages are referenced. -->
+    <ProjectReference Include="..\MemoizR.Analyzers\MemoizR.Analyzers.csproj" ReferenceOutputAssembly="false" PrivateAssets="all" />
+    <None Include="$(ArtifactsPath)\bin\MemoizR.Analyzers\$(Configuration.ToLowerInvariant())\MemoizR.Analyzers.dll" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
+  </ItemGroup>
+
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
     <PackageId>MemoizR.StructuredConcurrency</PackageId>

@@ -616,6 +616,101 @@ public class OptimisticPatchCaptureAnalyzerTests
         Assert.Contains("reassigned", diagnostic.GetMessage());
     }
 
+    // nameof(shared) is a compile-time string: the built delegate neither captures nor reads
+    // the symbol, so nothing crosses flows.
+    [Fact]
+    public async Task NameofOperands_AreNotCaptures()
+    {
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                private static int hits;
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    var shared = new List<int>();
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x => x + nameof(shared).Length + nameof(hits).Length);
+                    });
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    // A straight-line reassignment AFTER the call cannot change the delegate the overlay
+    // already stored; only assignments that can execute before it distrust the initializer.
+    [Fact]
+    public async Task ReassignmentAfterTheCall_KeepsTheInitializerTrusted()
+    {
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    var shared = new List<int>();
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        Func<int, int> patch = static x => x;
+                        await ctx.Apply(state, patch);
+                        patch = x => x + shared.Count;
+                    });
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task LoopCarriedReassignment_IsStillUnresolvable()
+    {
+        // Textually after the call, but the loop carries the reassigned delegate back into
+        // the next iteration's Apply.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    var shared = new List<int>();
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        Func<int, int> patch = static x => x;
+                        for (var i = 0; i < 2; i++)
+                        {
+                            await ctx.Apply(state, patch);
+                            patch = x => x + shared.Count;
+                        }
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR004", diagnostic.Id);
+        Assert.Contains("'patch'", diagnostic.GetMessage());
+        Assert.Contains("reassigned", diagnostic.GetMessage());
+    }
+
     [Fact]
     public async Task PatchInternalLocalFunction_UsingPatchLocals_IsNotFlagged()
     {

@@ -85,7 +85,7 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         if (value.Type is { TypeKind: TypeKind.Delegate }
             && ReceiverSymbol(Unwrap(value)) is { } variable
             && variable is ILocalSymbol or IFieldSymbol or IPropertySymbol
-            && IsReassigned(variable, semanticModel))
+            && IsReassignedBefore(variable, value.Syntax, semanticModel))
         {
             Report(
                 context,
@@ -215,10 +215,12 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         }
     }
 
-    // Any assignment beyond the declaration initializer, anywhere in the tree (including a
-    // ref/out handoff): a same-tree syntactic scan, so a reassignment in another file is
-    // residual risk like every same-tree-only resolution here.
-    private static bool IsReassigned(ISymbol variable, SemanticModel? semanticModel)
+    // Any assignment beyond the declaration initializer (including a ref/out handoff) that can
+    // EXECUTE before this call: a same-tree syntactic scan, so a reassignment in another file
+    // is residual risk like every same-tree-only resolution here. A later straight-line
+    // assignment cannot change the delegate this call already stored -- flagging it would
+    // punish the common rebind-after-use.
+    private static bool IsReassignedBefore(ISymbol variable, SyntaxNode reference, SemanticModel? semanticModel)
     {
         if (semanticModel is null)
         {
@@ -235,13 +237,57 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
             };
 
             if (target is not null
-                && SymbolEqualityComparer.Default.Equals(semanticModel.GetSymbolInfo(target).Symbol, variable))
+                && SymbolEqualityComparer.Default.Equals(semanticModel.GetSymbolInfo(target).Symbol, variable)
+                && CanExecuteBefore(node, reference))
             {
                 return true;
             }
         }
 
         return false;
+    }
+
+    // Execution-order reasoning without dataflow: an assignment in a DIFFERENT function body
+    // (a helper, a lambda, another method) runs whenever that function does -- unknowable, so
+    // it counts. In the same function, one textually before the call obviously precedes it,
+    // and one textually after still reaches the call when a loop encloses both (the next
+    // iteration passes the reassigned delegate).
+    private static bool CanExecuteBefore(SyntaxNode assignment, SyntaxNode reference)
+    {
+        if (!ReferenceEquals(EnclosingFunction(assignment), EnclosingFunction(reference)))
+        {
+            return true;
+        }
+
+        if (assignment.SpanStart < reference.SpanStart)
+        {
+            return true;
+        }
+
+        for (var current = assignment.Parent; current is not null; current = current.Parent)
+        {
+            if (current is ForStatementSyntax or ForEachStatementSyntax or WhileStatementSyntax or DoStatementSyntax
+                && current.Span.Contains(reference.Span))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static SyntaxNode? EnclosingFunction(SyntaxNode node)
+    {
+        for (var current = node.Parent; current is not null; current = current.Parent)
+        {
+            if (current is AnonymousFunctionExpressionSyntax or LocalFunctionStatementSyntax
+                or BaseMethodDeclarationSyntax or AccessorDeclarationSyntax or ArrowExpressionClauseSyntax)
+            {
+                return current;
+            }
+        }
+
+        return null;
     }
 
     private static IOperation Unwrap(IOperation value)
@@ -496,7 +542,7 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         string problem,
         HashSet<ISymbol> reported)
     {
-        if (!reported.Add(dedupeKey))
+        if (IsInsideNameOf(operation) || !reported.Add(dedupeKey))
         {
             return;
         }
@@ -506,5 +552,21 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
             operation.Syntax.GetLocation(),
             name,
             problem));
+    }
+
+    // A symbol used only inside nameof() is a compile-time string: the built delegate neither
+    // captures nor reads it, so nothing crosses flows. Checked at the single report choke
+    // point (before the dedupe add, so a real use elsewhere still reports).
+    private static bool IsInsideNameOf(IOperation operation)
+    {
+        for (var current = operation.Parent; current is not null; current = current.Parent)
+        {
+            if (current is INameOfOperation)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 }

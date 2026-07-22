@@ -18,7 +18,10 @@ deliberately does and does not flag, and the constraints Roslyn imposes.
 ## Decision
 
 A new `MemoizR.Analyzers` project (netstandard2.0, Roslyn 4.8 floor so any SDK ≥ 8 can load it)
-ships **inside the MemoizR NuGet package** (`analyzers/dotnet/cs`), so every consumer gets the
+ships **inside every graph-facing MemoizR NuGet package** (`analyzers/dotnet/cs` in MemoizR,
+MemoizR.Reactive, MemoizR.StructuredConcurrency, MemoizR.Blazor and MemoizR.Wpf — NuGet does
+not flow analyzer assets through package dependencies, and the compiler deduplicates the
+identical assembly by MVID when several are referenced), so every consumer gets the
 rules on build with no extra reference. All rules default to **Warning** — the Swift 5.x
 "strict concurrency warnings" migration posture — and are configurable per project via
 `.editorconfig` (`dotnet_diagnostic.MZR001.severity = error|suggestion|none`).
