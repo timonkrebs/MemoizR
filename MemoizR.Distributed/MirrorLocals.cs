@@ -24,15 +24,16 @@ internal static class MirrorLocals
 
     // Whether the node is a mirror local or (transitively) depends on one: a memo built over a
     // mirror carries stamps captured from the consumer-local trigger, so re-exporting it is
-    // the same unsoundness one hop removed. Walks the CURRENT source wiring -- a lazy memo has
-    // none until its first evaluation, which is why the pull re-checks at the wire egress.
+    // the same unsoundness one hop removed. Walks the CURRENT wiring from BOTH ends -- a lazy
+    // memo has none until its first evaluation, which is why the pull re-checks at the wire
+    // egress.
     internal static bool TouchesMirrorLocal(SignalHandlR node)
     {
-        if (IsMirrorLocal(node))
-        {
-            return true;
-        }
+        return IsMirrorLocal(node) || SourcesTouchMirrorLocal(node) || ObservedByMirrorLocal(node);
+    }
 
+    private static bool SourcesTouchMirrorLocal(SignalHandlR node)
+    {
         var visited = new HashSet<SignalHandlR>();
         var pending = new Stack<SignalHandlR>();
         pending.Push(node);
@@ -43,6 +44,38 @@ internal static class MirrorLocals
                 if (source is SignalHandlR handle && visited.Add(handle))
                 {
                     if (IsMirrorLocal(handle))
+                    {
+                        return true;
+                    }
+                    pending.Push(handle);
+                }
+            }
+        }
+        return false;
+    }
+
+    // The observer-side half of the same walk: a ConcurrentRace consumes its inputs without
+    // ever populating its own Sources (its update publishes without rewiring source links; it
+    // registers on the input as an OBSERVER only), so the source walk cannot see through it.
+    // The observer down-links carry the missing direction -- walk DOWN from every live mirror
+    // local and refuse when the exported node is reachable. The registry stays small (one
+    // entry per live mirror) and observer fans are the consumer's own graph, so the sweep is
+    // cheap at export/pull frequency.
+    private static bool ObservedByMirrorLocal(SignalHandlR node)
+    {
+        var visited = new HashSet<SignalHandlR>();
+        var pending = new Stack<SignalHandlR>();
+        foreach (var (local, _) in Registry)
+        {
+            pending.Push(local);
+        }
+        while (pending.Count > 0)
+        {
+            foreach (var weak in pending.Pop().Observers)
+            {
+                if (weak.TryGetTarget(out var observer) && observer is SignalHandlR handle && visited.Add(handle))
+                {
+                    if (ReferenceEquals(handle, node))
                     {
                         return true;
                     }

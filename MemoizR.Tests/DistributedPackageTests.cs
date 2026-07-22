@@ -349,6 +349,29 @@ public class DistributedPackageTests
         Assert.True(await outbox.Get() >= 1);
     }
 
+    [Fact]
+    public async Task Export_RaceOverAMirrorLocal_IsRefused()
+    {
+        // A ConcurrentRace consumes its inputs without populating its own Sources (it wires
+        // observer links only), so the source-chain walk cannot see through it -- the
+        // observer-side walk must refuse the re-export all the same.
+        var host = new MemoFactory();
+        var s = host.CreateSignal(1);
+        using var export = host.Export(s, _ => Task.CompletedTask);
+
+        var consumer = new MemoFactory();
+        var mirror = consumer.CreateRemoteSignal("m", 0, export.PullAsync);
+        var race = consumer.CreateConcurrentRace(() => mirror.Local.Get(), async (_, r) => r);
+        await race.Get(); // wire the observer links
+        Assert.Throws<InvalidOperationException>(() => consumer.Export(race, _ => Task.CompletedTask));
+
+        // The lazily-wired variant: exported before any evaluation, so creation cannot see the
+        // dependency -- the pull's wire-egress recheck must refuse instead.
+        var lazyRace = consumer.CreateConcurrentRace(() => mirror.Local.Get(), async (_, r) => r);
+        using var lazyExport = consumer.Export(lazyRace, _ => Task.CompletedTask);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => lazyExport.PullAsync());
+    }
+
     // ── consumer side: adoption ordering ─────────────────────────────────────────────────
 
     [Fact]
