@@ -812,6 +812,39 @@ public class CapturedMutationAnalyzerTests
     }
 
     [Fact]
+    public async Task OtherReceiverHelper_StaticWriteIsFlagged_MemberWriteIsNot()
+    {
+        // The helper runs on another object, but the STATIC it writes races regardless of
+        // receiver; the write to that object's own member stays MZR001's territory.
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public class C
+            {
+                private static int hits;
+                private int instanceCount;
+
+                public void Touch()
+                {
+                    hits++;
+                    instanceCount++;
+                }
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var other = new C();
+                    f.CreateMemoizR(async () => { other.Touch(); return 0; });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR002", diagnostic.Id);
+        Assert.Contains("static field 'hits'", diagnostic.GetMessage());
+    }
+
+    [Fact]
     public async Task ExtensionMethodOnAnotherReceiver_IsNotChasedForMutation()
     {
         // The same extension on some OTHER object mutates that object's state -- a

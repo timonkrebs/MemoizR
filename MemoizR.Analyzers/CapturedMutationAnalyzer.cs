@@ -38,15 +38,15 @@ public sealed class CapturedMutationAnalyzer : DiagnosticAnalyzer
 
         foreach (var computation in ComputationLambdas.OfInvocation(invocation))
         {
-            var visitedHelpers = new HashSet<(IMethodSymbol, IParameterSymbol?)>(ChaseKeyComparer.Instance);
+            var visitedHelpers = new HashSet<(IMethodSymbol, IParameterSymbol?, bool)>(ChaseKeyComparer.Instance);
             foreach (var operation in ComputationLambdas.Descend(computation.Body))
             {
                 foreach (var target in MutationTargets(operation))
                 {
-                    ReportIfShared(context, target, computation.Scope, computation.Scope, thisParameter: null);
+                    ReportIfShared(context, target, computation.Scope, computation.Scope, thisParameter: null, foreignThis: false);
                 }
 
-                InspectCalledHelper(context, operation, computation.Scope, invocation.SemanticModel, visitedHelpers, thisParameter: null);
+                InspectCalledHelper(context, operation, computation.Scope, invocation.SemanticModel, visitedHelpers, thisParameter: null, foreignThis: false);
             }
         }
     }
@@ -54,26 +54,28 @@ public sealed class CapturedMutationAnalyzer : DiagnosticAnalyzer
     // A helper the computation runs writes the same state the inline form would: a LOCAL
     // FUNCTION's closure IS the computation's environment (`int Next() { applied++; ... }`),
     // a method invoked on THIS or statically (`void Inc() => counter++;`) mutates the
-    // enclosing object/static state on every run, and a GETTER read on the enclosing object
-    // executes the same way (`int P { get { counter++; ... } }`) -- shapes MZR004 cannot
-    // carry (a Sendable type or int hides them; the WRITE is the race). A helper handed the
-    // enclosing instance -- an extension's receiver argument, or an explicit `Mutate(this)`
-    // -- is the same in disguise: the receiving parameter IS `this` for the walked body, so
-    // it is carried as such. A member on any OTHER receiver stays unchased: its writes
-    // mutate that object's state, a captured-reference mutation that is deliberately
-    // MZR001's territory. Bodies resolve same-tree; the visited set -- keyed per RECEIVER
-    // BINDING, so `other.Inc()` before `this.Inc()` cannot poison the chase -- bounds call
-    // cycles, and the helper's own per-call locals stay exempt via the enclosing-function
-    // guard in ReportIfShared.
+    // enclosing object/static state on every run, and a GETTER read executes the same way
+    // (`int P { get { counter++; ... } }`) -- shapes MZR004 cannot carry (a Sendable type or
+    // int hides them; the WRITE is the race). A helper handed the enclosing instance -- an
+    // extension's receiver argument, or an explicit `Mutate(this)` -- is the same in
+    // disguise: the receiving parameter IS `this` for the walked body, so it is carried as
+    // such. A helper on some OTHER receiver is chased too -- a STATIC it writes races
+    // regardless of who the receiver is -- but with `foreignThis` set, so writes to that
+    // body's own object stay suppressed: those are a captured-reference mutation,
+    // deliberately MZR001's territory. Bodies resolve same-tree; the visited set -- keyed
+    // per RECEIVER BINDING, so `other.Inc()` before `this.Inc()` cannot poison the chase --
+    // bounds call cycles, and the helper's own per-call locals stay exempt via the
+    // enclosing-function guard in ReportIfShared.
     private static void InspectCalledHelper(
         OperationAnalysisContext context,
         IOperation operation,
         SyntaxNode computationScope,
         SemanticModel? semanticModel,
-        HashSet<(IMethodSymbol, IParameterSymbol?)> visited,
-        IParameterSymbol? thisParameter)
+        HashSet<(IMethodSymbol, IParameterSymbol?, bool)> visited,
+        IParameterSymbol? thisParameter,
+        bool foreignThis)
     {
-        foreach (var method in ChaseableMethods(operation, thisParameter))
+        foreach (var method in ChaseableMethods(operation))
         {
             if (ComputationLambdas.IsInsideNameOf(operation)
                 || (method.MethodKind == MethodKind.LocalFunction && !ComputationLambdas.IsDeclaredOutside(method, computationScope))
@@ -82,8 +84,9 @@ public sealed class CapturedMutationAnalyzer : DiagnosticAnalyzer
                 continue;
             }
 
-            var nestedThis = NestedThisParameter(operation, thisParameter);
-            if (!visited.Add((method, nestedThis)))
+            var nestedThis = NestedThisParameter(operation, thisParameter, foreignThis);
+            var nestedForeign = ForeignReceiver(operation, thisParameter, foreignThis);
+            if (!visited.Add((method, nestedThis, nestedForeign)))
             {
                 continue;
             }
@@ -92,35 +95,49 @@ public sealed class CapturedMutationAnalyzer : DiagnosticAnalyzer
             {
                 foreach (var target in MutationTargets(inner))
                 {
-                    ReportIfShared(context, target, helper.Scope, computationScope, nestedThis);
+                    ReportIfShared(context, target, helper.Scope, computationScope, nestedThis, nestedForeign);
                 }
 
-                InspectCalledHelper(context, inner, computationScope, semanticModel, visited, nestedThis);
+                InspectCalledHelper(context, inner, computationScope, semanticModel, visited, nestedThis, nestedForeign);
             }
         }
     }
 
-    private static IEnumerable<IMethodSymbol> ChaseableMethods(IOperation operation, IParameterSymbol? thisParameter)
+    private static IEnumerable<IMethodSymbol> ChaseableMethods(IOperation operation)
     {
         switch (operation)
         {
-            case IInvocationOperation call when call.Instance is null || IsEnclosingInstance(call.Instance, thisParameter):
+            case IInvocationOperation call:
                 yield return call.TargetMethod;
                 break;
             case IMethodReferenceOperation { Method.MethodKind: MethodKind.LocalFunction } reference:
                 yield return reference.Method;
                 break;
 
-            // A property READ on the enclosing object (or a static one) runs its getter like
-            // an invoked helper. Writes need no chase: the property itself is already the
-            // mutation target the direct walk reports.
+            // A property READ runs its getter like an invoked helper. Writes need no chase:
+            // the property itself is already the mutation target the direct walk reports.
             case IPropertyReferenceOperation property
-                when (property.Instance is null || IsEnclosingInstance(property.Instance, thisParameter))
-                    && ComputationLambdas.PropertyUsage(property).Reads
-                    && property.Property.GetMethod is { } getter:
+                when ComputationLambdas.PropertyUsage(property).Reads && property.Property.GetMethod is { } getter:
                 yield return getter;
                 break;
         }
+    }
+
+    // Whether the chased body's own `this` is some OTHER object than the computation's:
+    // true when the receiver is neither the enclosing instance nor the current this-bound
+    // parameter. A receiverless callee (static, extension, local function) has no `this` of
+    // its own to rebind, so the current answer carries through -- a local function nested
+    // in a foreign body still belongs to that foreign object.
+    private static bool ForeignReceiver(IOperation operation, IParameterSymbol? thisParameter, bool foreignThis)
+    {
+        var instance = operation switch
+        {
+            IInvocationOperation call => call.Instance,
+            IPropertyReferenceOperation property => property.Instance,
+            _ => null,
+        };
+
+        return instance is null ? foreignThis : !IsComputationInstance(instance, thisParameter, foreignThis);
     }
 
     // The `this` identity for a chased body: the parameter that RECEIVES the enclosing
@@ -130,7 +147,7 @@ public sealed class CapturedMutationAnalyzer : DiagnosticAnalyzer
     // instance nowhere rebinds nothing: a chased local function keeps the current binding
     // (its closure can still name an extension body's receiver parameter), while any other
     // callee cannot reference it at all.
-    private static IParameterSymbol? NestedThisParameter(IOperation operation, IParameterSymbol? thisParameter)
+    private static IParameterSymbol? NestedThisParameter(IOperation operation, IParameterSymbol? thisParameter, bool foreignThis)
     {
         if (operation is not IInvocationOperation call)
         {
@@ -145,7 +162,7 @@ public sealed class CapturedMutationAnalyzer : DiagnosticAnalyzer
                 value = conversion.Operand;
             }
 
-            if (IsEnclosingInstance(value, thisParameter) && argument.Parameter is { } parameter)
+            if (IsComputationInstance(value, thisParameter, foreignThis) && argument.Parameter is { } parameter)
             {
                 return parameter;
             }
@@ -154,25 +171,29 @@ public sealed class CapturedMutationAnalyzer : DiagnosticAnalyzer
         return call.TargetMethod.MethodKind == MethodKind.LocalFunction ? thisParameter : null;
     }
 
-    private static bool IsEnclosingInstance(IOperation? receiver, IParameterSymbol? thisParameter)
+    // The operation refers to the COMPUTATION's enclosing instance: a direct `this` -- only
+    // while walking code whose `this` IS that instance -- or the current body's this-bound
+    // parameter.
+    private static bool IsComputationInstance(IOperation? receiver, IParameterSymbol? thisParameter, bool foreignThis)
     {
-        return receiver is IInstanceReferenceOperation { ReferenceKind: InstanceReferenceKind.ContainingTypeInstance }
+        return (receiver is IInstanceReferenceOperation { ReferenceKind: InstanceReferenceKind.ContainingTypeInstance } && !foreignThis)
             || (receiver is IParameterReferenceOperation parameter
                 && thisParameter is not null
                 && SymbolEqualityComparer.Default.Equals(parameter.Parameter, thisParameter));
     }
 
-    private sealed class ChaseKeyComparer : IEqualityComparer<(IMethodSymbol Method, IParameterSymbol? This)>
+    private sealed class ChaseKeyComparer : IEqualityComparer<(IMethodSymbol Method, IParameterSymbol? This, bool Foreign)>
     {
         public static readonly ChaseKeyComparer Instance = new();
 
-        public bool Equals((IMethodSymbol Method, IParameterSymbol? This) x, (IMethodSymbol Method, IParameterSymbol? This) y)
+        public bool Equals((IMethodSymbol Method, IParameterSymbol? This, bool Foreign) x, (IMethodSymbol Method, IParameterSymbol? This, bool Foreign) y)
         {
             return SymbolEqualityComparer.Default.Equals(x.Method, y.Method)
-                && SymbolEqualityComparer.Default.Equals(x.This, y.This);
+                && SymbolEqualityComparer.Default.Equals(x.This, y.This)
+                && x.Foreign == y.Foreign;
         }
 
-        public int GetHashCode((IMethodSymbol Method, IParameterSymbol? This) key)
+        public int GetHashCode((IMethodSymbol Method, IParameterSymbol? This, bool Foreign) key)
         {
             return SymbolEqualityComparer.Default.GetHashCode(key.Method);
         }
@@ -268,9 +289,9 @@ public sealed class CapturedMutationAnalyzer : DiagnosticAnalyzer
         return targets.ToImmutable();
     }
 
-    private static void ReportIfShared(OperationAnalysisContext context, IOperation target, SyntaxNode scope, SyntaxNode computationScope, IParameterSymbol? thisParameter)
+    private static void ReportIfShared(OperationAnalysisContext context, IOperation target, SyntaxNode scope, SyntaxNode computationScope, IParameterSymbol? thisParameter, bool foreignThis)
     {
-        var (kind, symbol) = ResolveSharedRoot(target, scope, thisParameter);
+        var (kind, symbol) = ResolveSharedRoot(target, scope, thisParameter, foreignThis);
         if (kind is null || !SharesComputationEnvironment(symbol!, computationScope))
         {
             return;
@@ -299,7 +320,7 @@ public sealed class CapturedMutationAnalyzer : DiagnosticAnalyzer
     // all resolve to the shared field/local being mutated. Returns (null, null) when the target is a
     // member of some OTHER reference object (mutation through a captured reference -- MZR001's
     // territory, the value type there should be Sendable).
-    private static (string? kind, ISymbol? symbol) ResolveSharedRoot(IOperation target, SyntaxNode scope, IParameterSymbol? thisParameter)
+    private static (string? kind, ISymbol? symbol) ResolveSharedRoot(IOperation target, SyntaxNode scope, IParameterSymbol? thisParameter, bool foreignThis)
     {
         switch (target)
         {
@@ -310,39 +331,40 @@ public sealed class CapturedMutationAnalyzer : DiagnosticAnalyzer
             case IFieldReferenceOperation { Field.IsStatic: true } staticField:
                 return ("static field", staticField.Field);
             case IFieldReferenceOperation field:
-                return ResolveThroughReceiver(field.Instance, "field", field.Field, scope, thisParameter);
+                return ResolveThroughReceiver(field.Instance, "field", field.Field, scope, thisParameter, foreignThis);
             case IPropertyReferenceOperation { Property.IsStatic: true } staticProperty:
                 return ("static property", staticProperty.Property);
             case IPropertyReferenceOperation property:
-                return ResolveThroughReceiver(property.Instance, "property", property.Property, scope, thisParameter);
+                return ResolveThroughReceiver(property.Instance, "property", property.Property, scope, thisParameter, foreignThis);
             case IEventReferenceOperation { Event.IsStatic: true } staticEvent:
                 return ("static event", staticEvent.Event);
             case IEventReferenceOperation @event:
-                return ResolveThroughReceiver(@event.Instance, "event", @event.Event, scope, thisParameter);
+                return ResolveThroughReceiver(@event.Instance, "event", @event.Event, scope, thisParameter, foreignThis);
             default:
                 return (null, null);
         }
     }
 
-    // A member on `this` -- or on an extension body's receiver parameter bound to `this` --
-    // is reported as the member. A member on a value-type receiver that is itself shared
-    // storage (a captured struct local/parameter, or a nested value-type
-    // field/property/this) reports that RECEIVER -- mutating the member mutates the receiver's
-    // storage. A member on any other (reference) receiver is left to MZR001.
-    private static (string? kind, ISymbol? symbol) ResolveThroughReceiver(IOperation? receiver, string memberKind, ISymbol member, SyntaxNode scope, IParameterSymbol? thisParameter)
+    // A member on the COMPUTATION's instance -- direct `this` in a non-foreign body, or a
+    // this-bound receiver parameter -- is reported as the member. A member on a value-type
+    // receiver that is itself shared storage (a captured struct local/parameter, or a
+    // nested value-type field/property/this) reports that RECEIVER -- mutating the member
+    // mutates the receiver's storage. A member on any other receiver -- including a foreign
+    // body's own `this` -- is left to MZR001.
+    private static (string? kind, ISymbol? symbol) ResolveThroughReceiver(IOperation? receiver, string memberKind, ISymbol member, SyntaxNode scope, IParameterSymbol? thisParameter, bool foreignThis)
     {
         switch (receiver)
         {
-            case var enclosing when IsEnclosingInstance(enclosing, thisParameter):
+            case var enclosing when IsComputationInstance(enclosing, thisParameter, foreignThis):
                 return (memberKind, member);
             case ILocalReferenceOperation { Local.Type.IsValueType: true } local when IsDeclaredOutside(local.Local, scope):
                 return ("captured local", local.Local);
             case IParameterReferenceOperation { Parameter.Type.IsValueType: true } parameter when IsDeclaredOutside(parameter.Parameter, scope):
                 return ("captured parameter", parameter.Parameter);
             case IFieldReferenceOperation { Type.IsValueType: true } outerField:
-                return ResolveSharedRoot(outerField, scope, thisParameter);
+                return ResolveSharedRoot(outerField, scope, thisParameter, foreignThis);
             case IPropertyReferenceOperation { Type.IsValueType: true } outerProperty:
-                return ResolveSharedRoot(outerProperty, scope, thisParameter);
+                return ResolveSharedRoot(outerProperty, scope, thisParameter, foreignThis);
             default:
                 return (null, null);
         }

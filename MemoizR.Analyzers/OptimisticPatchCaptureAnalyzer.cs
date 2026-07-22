@@ -449,9 +449,10 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
 
         if (ComputationLambdas.ResolveMethodBody(getter, semanticModel) is not { } body)
         {
-            // A source getter declared in another file (a partial type's other half) cannot
-            // be walked: held to the property TYPE's verdict, like unwalkable statics.
-            ReportIfNotSendable(context, classifier, operation, property, property.Type, reported);
+            // A source getter declared in another file (a partial type's other half) re-runs
+            // unverifiable code on every replay, and a Sendable return type proves nothing
+            // about what its body re-reads: flagged like a cross-file executed helper.
+            ReportUnwalkableGetter(context, operation, property, reported);
             return;
         }
 
@@ -573,12 +574,18 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         // Only BACKING STORAGE holds a shared object: a computed getter may hand out a fresh
         // value on every replay (`static List<int> Items => new();`), and what it actually
         // returns is covered by the executed chase walking its body. Auto-properties and
-        // metadata properties (no walkable body) keep the type verdict -- and so does a
-        // SOURCE getter declared in another file, which that chase cannot walk either:
-        // trusting it silently would leave the property entirely unchecked.
-        if (HasBackingStorage(property) || !CanWalkGetter(property, operation.SemanticModel))
+        // metadata properties (no walkable body) keep the type verdict; a SOURCE getter
+        // declared in another file, which that chase cannot walk either, is unverifiable
+        // code re-run on every replay -- its return type proves nothing about what it reads.
+        if (HasBackingStorage(property))
         {
             ReportIfNotSendable(context, classifier, operation, property, property.Type, reported);
+            return;
+        }
+
+        if (!CanWalkGetter(property, operation.SemanticModel))
+        {
+            ReportUnwalkableGetter(context, operation, property, reported);
         }
     }
 
@@ -586,6 +593,21 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
     {
         return property.GetMethod is { } getter
             && ComputationLambdas.ResolveMethodBody(getter, semanticModel) is not null;
+    }
+
+    private static void ReportUnwalkableGetter(
+        OperationAnalysisContext context,
+        IOperation operation,
+        IPropertySymbol property,
+        HashSet<ISymbol> reported)
+    {
+        Report(
+            context,
+            operation,
+            property,
+            property.Name,
+            "its getter is declared in another file, so what the stored patch re-reads cannot be verified from this call site (declare it in this file, or lift its state into MemoizR nodes)",
+            reported);
     }
 
     private static bool HasBackingStorage(IPropertySymbol property)
@@ -720,29 +742,41 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         }
     }
 
-    // A helper the patch CALLS whose source body lives in another file is as unverifiable
-    // as a cross-file method-group patch: nothing checks the statics it reads on every
-    // replay, so unverifiable means flagged -- while metadata callees (Math.Abs, List.Add)
-    // stay trusted external contracts. Scoped to CALLS: accessors and constructors keep
-    // their member/type verdicts from the capture walk.
+    // Code the patch EXECUTES whose source body lives in another file -- a called helper, a
+    // constructor, a user-defined operator or conversion -- is as unverifiable as a
+    // cross-file method-group patch: nothing checks the statics it reads on every replay,
+    // so unverifiable means flagged, while metadata callees (Math.Abs, List.Add) stay
+    // trusted external contracts. Accessors keep their own member/type/getter verdicts from
+    // the capture walk.
     private static void ReportUnwalkableExecutedHelper(
         OperationAnalysisContext context,
         IOperation operation,
         IMethodSymbol method,
         HashSet<ISymbol> reported)
     {
-        if (operation is not IInvocationOperation || method.DeclaringSyntaxReferences.Length == 0)
+        if (!IsUnverifiableExecutedShape(operation) || method.DeclaringSyntaxReferences.Length == 0)
         {
             return;
         }
 
+        var name = method.MethodKind == MethodKind.Constructor
+            ? SendableSymbolClassifier.Display(method.ContainingType)
+            : method.Name;
         Report(
             context,
             operation,
             method,
-            method.Name,
-            "its body is declared in another file, so what the patch executes cannot be verified from this call site (declare the helper in this file, or lift its state into MemoizR nodes)",
+            name,
+            "its body is declared in another file, so what the patch executes cannot be verified from this call site (declare it in this file, or lift its state into MemoizR nodes)",
             reported);
+    }
+
+    private static bool IsUnverifiableExecutedShape(IOperation operation)
+    {
+        return operation is IInvocationOperation or IObjectCreationOperation
+            or IBinaryOperation { OperatorMethod: not null }
+            or IUnaryOperation { OperatorMethod: not null }
+            or IConversionOperation { OperatorMethod: not null };
     }
 
     // A delegate the patch builds AND synchronously invokes runs its body on every replay:

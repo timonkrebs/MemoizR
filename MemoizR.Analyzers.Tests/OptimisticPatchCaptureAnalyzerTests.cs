@@ -2144,10 +2144,11 @@ public class OptimisticPatchCaptureAnalyzerTests
     }
 
     [Fact]
-    public async Task CrossFileComputedStaticGetter_FallsBackToTheTypeVerdict()
+    public async Task CrossFileComputedStaticGetter_IsUnverifiable()
     {
-        // The static getter is computed but declared in another file: what it returns cannot
-        // be walked, so the property TYPE's verdict must apply instead of silent trust.
+        // The static getter is computed but declared in another file: what its body re-reads
+        // cannot be walked, and a Sendable return type would prove nothing -- unverifiable
+        // means flagged, like a cross-file executed helper.
         var diagnostics = await AnalyzerTestHarness.AnalyzeAsync(new[]
         {
             """
@@ -2181,7 +2182,163 @@ public class OptimisticPatchCaptureAnalyzerTests
         var diagnostic = Assert.Single(diagnostics);
         Assert.Equal("MZR004", diagnostic.Id);
         Assert.Contains("'Items'", diagnostic.GetMessage());
-        Assert.Contains("not Sendable", diagnostic.GetMessage());
+        Assert.Contains("another file", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task CrossFilePartialInstanceGetter_IsUnverifiable()
+    {
+        // The partial type's other half holds the computed getter: the patch re-runs it on
+        // every replay, and the Sendable int return type must not hide the unverifiable
+        // mutable-field re-read.
+        var diagnostics = await AnalyzerTestHarness.AnalyzeAsync(new[]
+        {
+            """
+            public partial class C
+            {
+                private int counter;
+
+                public int Counter => counter;
+            }
+            """,
+            """
+            using MemoizR;
+
+            public partial class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x => x + Counter);
+                    });
+                }
+            }
+            """,
+        }, new OptimisticPatchCaptureAnalyzer());
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR004", diagnostic.Id);
+        Assert.Contains("'Counter'", diagnostic.GetMessage());
+        Assert.Contains("another file", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task ForeignInstanceWrite_DoesNotStandInAsInitializer()
+    {
+        // The sole write targets ANOTHER instance's member: it says nothing about
+        // `this.patch`, so the delegate the overlay stores stays unresolvable.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                private Func<int, int> patch;
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    var otherObject = new C();
+                    otherObject.patch = static x => x;
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, patch);
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR004", diagnostic.Id);
+        Assert.Contains("'patch'", diagnostic.GetMessage());
+        Assert.Contains("cannot be resolved", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task ConditionalFirstAssignment_DoesNotStandInAsInitializer()
+    {
+        // The field's only write sits under an `if`: it may never run, and the member can
+        // still hold a delegate supplied somewhere the analyzer cannot see.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                private Func<int, int> patch;
+                private bool reset;
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    if (reset)
+                    {
+                        patch = static x => x;
+                    }
+
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, patch);
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR004", diagnostic.Id);
+        Assert.Contains("'patch'", diagnostic.GetMessage());
+        Assert.Contains("cannot be resolved", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task CrossFileConstructorAndOperator_AreUnverifiable()
+    {
+        // The patch executes a constructor and a user-defined operator whose bodies live in
+        // another file: both replay unverifiable code, exactly like a cross-file helper call.
+        var diagnostics = await AnalyzerTestHarness.AnalyzeAsync(new[]
+        {
+            """
+            public class Meter
+            {
+                private static int hits;
+
+                public Meter() { hits++; }
+
+                public static int operator +(Meter m, int x) => x + hits;
+            }
+            """,
+            """
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x =>
+                        {
+                            var meter = new Meter();
+                            return meter + x;
+                        });
+                    });
+                }
+            }
+            """,
+        }, new OptimisticPatchCaptureAnalyzer());
+
+        Assert.Equal(2, diagnostics.Length);
+        Assert.All(diagnostics, d => Assert.Equal("MZR004", d.Id));
+        Assert.All(diagnostics, d => Assert.Contains("another file", d.GetMessage()));
+        Assert.Contains(diagnostics, d => d.GetMessage().Contains("'Meter'"));
+        Assert.Contains(diagnostics, d => d.GetMessage().Contains("op_Addition"));
     }
 
     [Fact]

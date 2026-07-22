@@ -13,9 +13,9 @@ namespace MemoizR.Analyzers;
 // computation host's: null means "unprovable", and callers must treat it as such.
 internal static class ReceiverChains
 {
-    public static ISymbol? ResolveFactorySymbol(IInvocationOperation invocation, SemanticModel? semanticModel)
+    public static ISymbol? ResolveFactorySymbol(IInvocationOperation invocation, SemanticModel? semanticModel, Dictionary<IParameterSymbol, IOperation>? argumentMap = null)
     {
-        return ResolveReceiverSymbol(ReceiverOf(invocation), semanticModel, depth: 0);
+        return ResolveReceiverSymbol(ReceiverOf(invocation), semanticModel, depth: 0, argumentMap);
     }
 
     // A node reference (the signal a Set is invoked on) resolves through its same-tree
@@ -36,7 +36,7 @@ internal static class ReceiverChains
                     reference = conversion.Operand;
                     continue;
                 case IInvocationOperation creation:
-                    return ResolveKnownCreationFactory(creation, semanticModel);
+                    return ResolveKnownCreationFactory(creation, semanticModel, argumentMap);
                 // A chased helper's PARAMETER hops to the call-site argument: `var a = s;
                 // a.Set(...)` inside `Write(other)` is `other`'s provenance. Not when the
                 // helper WROTE the parameter first, though -- a parameter binds the caller's
@@ -135,10 +135,10 @@ internal static class ReceiverChains
     // Only a RECOGNIZED creation proves provenance: an arbitrary helper that merely RETURNS a
     // node (`f1.MakeState()`) says nothing about which factory created what it returns, so
     // resolving its receiver would claim f1 and enable a suppression the runtime contradicts.
-    private static ISymbol? ResolveKnownCreationFactory(IInvocationOperation creation, SemanticModel? semanticModel)
+    private static ISymbol? ResolveKnownCreationFactory(IInvocationOperation creation, SemanticModel? semanticModel, Dictionary<IParameterSymbol, IOperation>? argumentMap)
     {
         return FactoryMethods.IsValueBearingCreation(creation.TargetMethod)
-            ? ResolveFactorySymbol(creation, semanticModel)
+            ? ResolveFactorySymbol(creation, semanticModel, argumentMap)
             : null;
     }
 
@@ -156,7 +156,7 @@ internal static class ReceiverChains
             : null;
     }
 
-    private static ISymbol? ResolveReceiverSymbol(IOperation? receiver, SemanticModel? semanticModel, int depth)
+    private static ISymbol? ResolveReceiverSymbol(IOperation? receiver, SemanticModel? semanticModel, int depth, Dictionary<IParameterSymbol, IOperation>? argumentMap = null)
     {
         if (depth > 8 || receiver is null)
         {
@@ -166,9 +166,18 @@ internal static class ReceiverChains
         switch (receiver)
         {
             case IInvocationOperation chained:
-                return ResolveReceiverSymbol(ReceiverOf(chained), semanticModel, depth + 1);
+                return ResolveReceiverSymbol(ReceiverOf(chained), semanticModel, depth + 1, argumentMap);
             case IConversionOperation conversion:
-                return ResolveReceiverSymbol(conversion.Operand, semanticModel, depth + 1);
+                return ResolveReceiverSymbol(conversion.Operand, semanticModel, depth + 1, argumentMap);
+
+            // A chased helper's FACTORY parameter hops to the call-site argument, like the
+            // node-reference hop above: `f.CreateSignal(0)` inside `Write(f2)` is created
+            // by f2. Same rebind guard: a parameter overwritten before this use resolves
+            // through the effective-initializer machinery below instead.
+            case IParameterReferenceOperation parameterReference
+                when argumentMap?.TryGetValue(parameterReference.Parameter, out var mapped) == true
+                    && !IsWrittenBefore(parameterReference.Parameter, receiver.Syntax, semanticModel):
+                return ResolveReceiverSymbol(mapped, semanticModel, depth + 1, argumentMap);
             case ILocalReferenceOperation or IFieldReferenceOperation or IParameterReferenceOperation or IPropertyReferenceOperation:
                 // An intermediate (a stored ReactionBuilder, a factory alias) resolves through
                 // its initializer; when that gives out, the reference symbol itself is the

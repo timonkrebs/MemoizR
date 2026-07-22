@@ -240,8 +240,13 @@ internal static class ComputationLambdas
             // write through a ref alias (`ref var alias = ref patch; alias = ...`), so the
             // initializer detection must recognize the same write or the sole initializing
             // assignment would read as a rebind.
-            if (ReassignmentTargets(node) is not { } targets
-                || !targets.Any(target => WritesVariable(target, variable, semanticModel)))
+            if (ReassignmentTargets(node) is not { } targets)
+            {
+                continue;
+            }
+
+            var target = targets.FirstOrDefault(candidate => WritesVariable(candidate, variable, semanticModel));
+            if (target is null)
             {
                 continue;
             }
@@ -251,6 +256,7 @@ internal static class ComputationLambdas
             // DECONSTRUCTION qualifies too -- the variable's slot is fully determined by its
             // tuple element, which SameTreeInitializerOperation extracts.
             if (sole is not null
+                || !WritesThroughOwnReceiver(target, variable)
                 || node is not AssignmentExpressionSyntax assignment
                 || !assignment.IsKind(SyntaxKind.SimpleAssignmentExpression))
             {
@@ -260,7 +266,52 @@ internal static class ComputationLambdas
             sole = assignment;
         }
 
-        return sole;
+        return sole is not null && DominatesItsFunction(sole, variable) ? sole : null;
+    }
+
+    // For an instance member, only a write through the member's OWN object initializes what
+    // a read observes -- and this synthesis is receiver-blind about the read, so only the
+    // unambiguous shapes count: a bare identifier (implicit this, or a ref alias) or an
+    // explicit `this.X`. A write on any OTHER receiver (`other.Patch = safe;`) says nothing
+    // about `this.Patch`, so the whole story turns unprovable instead.
+    private static bool WritesThroughOwnReceiver(ExpressionSyntax target, ISymbol variable)
+    {
+        if (variable is not (IFieldSymbol or IPropertySymbol) || variable.IsStatic)
+        {
+            return true;
+        }
+
+        return target is IdentifierNameSyntax or MemberAccessExpressionSyntax { Expression: ThisExpressionSyntax };
+    }
+
+    // A synthetic initializer must DOMINATE any read: storage that exists before the write
+    // (a field, a property, a parameter) can still hold a value supplied elsewhere when an
+    // assignment nested in a conditional never runs. Locals need no check -- definite
+    // assignment already forbids reading them on a path that skipped the write. "Dominates"
+    // = plain block statements all the way up to the assignment's own function.
+    private static bool DominatesItsFunction(AssignmentExpressionSyntax assignment, ISymbol variable)
+    {
+        if (variable is ILocalSymbol)
+        {
+            return true;
+        }
+
+        for (SyntaxNode? current = assignment.Parent; current is not null; current = current.Parent)
+        {
+            if (current is AnonymousFunctionExpressionSyntax or LocalFunctionStatementSyntax
+                or BaseMethodDeclarationSyntax or AccessorDeclarationSyntax or ArrowExpressionClauseSyntax
+                or CompilationUnitSyntax)
+            {
+                return true;
+            }
+
+            if (current is not (BlockSyntax or ExpressionStatementSyntax or GlobalStatementSyntax))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     // Call-site arguments substitute for a chased helper's parameters: maps are built
