@@ -200,7 +200,7 @@ internal static class ComputationLambdas
     {
         if (left is not TupleExpressionSyntax leftTuple)
         {
-            return SymbolEqualityComparer.Default.Equals(semanticModel.GetSymbolInfo(left).Symbol, variable) ? right : null;
+            return WritesVariable(left, variable, semanticModel) ? right : null;
         }
 
         if (right is not TupleExpressionSyntax rightTuple || leftTuple.Arguments.Count != rightTuple.Arguments.Count)
@@ -236,8 +236,12 @@ internal static class ComputationLambdas
         AssignmentExpressionSyntax? sole = null;
         foreach (var node in semanticModel.SyntaxTree.GetRoot().DescendantNodes())
         {
+            // WritesVariable, not plain symbol equality: the reassignment scans count a
+            // write through a ref alias (`ref var alias = ref patch; alias = ...`), so the
+            // initializer detection must recognize the same write or the sole initializing
+            // assignment would read as a rebind.
             if (ReassignmentTargets(node) is not { } targets
-                || !targets.Any(target => SymbolEqualityComparer.Default.Equals(semanticModel.GetSymbolInfo(target).Symbol, variable)))
+                || !targets.Any(target => WritesVariable(target, variable, semanticModel)))
             {
                 continue;
             }
@@ -262,46 +266,102 @@ internal static class ComputationLambdas
     // Call-site arguments substitute for a chased helper's parameters: maps are built
     // pre-substituted, so nested helper calls resolve through to the original computation's
     // operations. A property SETTER's implicit `value` parameter maps to the assignment's
-    // right-hand side. The OUTER bindings carry through -- a called local function closes
-    // over its enclosing helper's parameters (`void Inner() => s.Set(2); Inner();`), so
-    // dropping them would orphan those references; keys are parameter symbols, so unrelated
-    // callees cannot collide, and a recursive call's fresh binding overwrites the stale one.
-    // Shared by MZR003's Set-target provenance and MZR004's delegate chase.
+    // right-hand side, and an INDEXER's index arguments map like call arguments (aliased
+    // onto the accessors' own parameter symbols, which is what accessor bodies bind). The
+    // OUTER bindings carry through -- a called local function closes over its enclosing
+    // helper's parameters (`void Inner() => s.Set(2); Inner();`), so dropping them would
+    // orphan those references; keys are parameter symbols, so unrelated callees cannot
+    // collide, and a recursive call's fresh binding overwrites the stale one. Shared by
+    // MZR003's Set-target provenance and MZR004's delegate chase.
     public static Dictionary<IParameterSymbol, IOperation>? BuildArgumentMap(IOperation operation, Dictionary<IParameterSymbol, IOperation>? outer)
     {
-        if (operation is IPropertyReferenceOperation { Parent: ISimpleAssignmentOperation setterAssignment } property
-            && ReferenceEquals(setterAssignment.Target, property)
-            && property.Property.SetMethod?.Parameters.LastOrDefault() is { } valueParameter
-            && SubstituteArguments(setterAssignment.Value, outer) is { } setterValue)
-        {
-            var setterMap = CopyOf(outer);
-            setterMap[valueParameter] = setterValue;
-            return setterMap;
-        }
-
         var arguments = operation switch
         {
             IInvocationOperation invocation => invocation.Arguments,
             IObjectCreationOperation creation => creation.Arguments,
+            IPropertyReferenceOperation propertyReference => propertyReference.Arguments,
             _ => default,
         };
 
-        if (arguments.IsDefaultOrEmpty)
-        {
-            return outer;
-        }
-
         Dictionary<IParameterSymbol, IOperation>? map = null;
-        foreach (var argument in arguments)
+        if (!arguments.IsDefaultOrEmpty)
         {
-            if (argument.Parameter is { } parameter && SubstituteArguments(argument.Value, outer) is { } value)
+            foreach (var argument in arguments)
             {
-                map ??= CopyOf(outer);
-                map[parameter] = value;
+                if (argument.Parameter is { } parameter && SubstituteArguments(argument.Value, outer) is { } value)
+                {
+                    map ??= CopyOf(outer);
+                    map[parameter] = value;
+                    AliasAccessorParameters(operation, parameter, value, map);
+                }
             }
         }
 
+        if (SetterValue(operation, outer) is { } setter)
+        {
+            map ??= CopyOf(outer);
+            map[setter.Parameter] = setter.Value;
+        }
+
         return map ?? outer;
+    }
+
+    private static (IParameterSymbol Parameter, IOperation Value)? SetterValue(IOperation operation, Dictionary<IParameterSymbol, IOperation>? outer)
+    {
+        return operation is IPropertyReferenceOperation { Parent: ISimpleAssignmentOperation assignment } property
+            && ReferenceEquals(assignment.Target, property)
+            && property.Property.SetMethod?.Parameters.LastOrDefault() is { } valueParameter
+            && SubstituteArguments(assignment.Value, outer) is { } value
+            ? (valueParameter, value)
+            : null;
+    }
+
+    // An accessor body binds the ACCESSOR's own parameter symbols, distinct from the
+    // property parameters an indexer reference's arguments name: alias the ordinal twins on
+    // the property and both accessors so a chased `set => s.Set(value)` resolves `s` to the
+    // call-site index argument whichever symbol the body carries.
+    private static void AliasAccessorParameters(IOperation operation, IParameterSymbol parameter, IOperation value, Dictionary<IParameterSymbol, IOperation> map)
+    {
+        if (operation is not IPropertyReferenceOperation { Property: { } property })
+        {
+            return;
+        }
+
+        foreach (var parameters in new[] { property.Parameters, property.GetMethod?.Parameters ?? default, property.SetMethod?.Parameters ?? default })
+        {
+            if (!parameters.IsDefaultOrEmpty && parameter.Ordinal < parameters.Length)
+            {
+                map[parameters[parameter.Ordinal]] = value;
+            }
+        }
+    }
+
+    // A stable VALUE identity for an argument map: chase guards key on it so the same
+    // callee syntax re-walks under different bindings (two outer calls handing different
+    // lambdas into one inner call site) while a recursive call -- whose rebuilt map carries
+    // the same substituted values -- terminates. Parameters are identified by declaration
+    // position and ordinal, values by their operation's syntax position: both stable within
+    // one compilation, unlike symbol hash codes.
+    public static string ArgumentMapKey(Dictionary<IParameterSymbol, IOperation>? map)
+    {
+        if (map is null || map.Count == 0)
+        {
+            return "";
+        }
+
+        var parts = new List<string>(map.Count);
+        foreach (var entry in map)
+        {
+            var declaration = entry.Key.DeclaringSyntaxReferences.FirstOrDefault()
+                ?? entry.Key.ContainingSymbol?.DeclaringSyntaxReferences.FirstOrDefault();
+            var parameter = declaration is null
+                ? $"{entry.Key.Name}"
+                : $"{declaration.SyntaxTree.FilePath}:{declaration.Span.Start}";
+            parts.Add($"{parameter}#{entry.Key.Ordinal}={entry.Value.Syntax.SyntaxTree.FilePath}:{entry.Value.Syntax.SpanStart}");
+        }
+
+        parts.Sort(StringComparer.Ordinal);
+        return string.Join(";", parts);
     }
 
     private static Dictionary<IParameterSymbol, IOperation> CopyOf(Dictionary<IParameterSymbol, IOperation>? outer)
@@ -660,12 +720,26 @@ internal static class ComputationLambdas
 
     // A write inside a LOCAL FUNCTION runs only when some call site does: it can precede the
     // read only if a REFERENCE to the function can (each reference is ordered recursively --
-    // the visited set breaks mutual-recursion cycles). Anything else -- a method, accessor, or
-    // lambda, all reachable from outside this tree or through stored values -- stays
-    // unknowable and counts.
+    // the visited set breaks mutual-recursion cycles). A write inside a LAMBDA runs where
+    // the built delegate does: immediately for an immediately-invoked one, at the receiving
+    // variable's invocation sites for a lifted one -- a callback that is merely BUILT and
+    // never runs before the read cannot feed it. Anything else -- a method or accessor,
+    // reachable from outside this tree, or a lambda that escapes -- stays unknowable and
+    // counts.
     private static bool CouldRunBefore(SyntaxNode? function, SyntaxNode reference, ISymbol variable, SemanticModel? semanticModel, HashSet<SyntaxNode>? visitedFunctions)
     {
-        if (function is not LocalFunctionStatementSyntax local || semanticModel is null
+        if (semanticModel is null)
+        {
+            return true;
+        }
+
+        if (function is AnonymousFunctionExpressionSyntax lambda)
+        {
+            visitedFunctions ??= new HashSet<SyntaxNode>();
+            return visitedFunctions.Add(lambda) && LambdaRunsBefore(lambda, reference, variable, semanticModel, visitedFunctions);
+        }
+
+        if (function is not LocalFunctionStatementSyntax local
             || semanticModel.GetDeclaredSymbol(local) is not { } symbol)
         {
             return true;
@@ -689,6 +763,34 @@ internal static class ComputationLambdas
         }
 
         return false;
+    }
+
+    // Where a lambda's body can run: at the invocation site for an immediately-invoked one
+    // (`(() => ...)()`), at the receiving variable's invocation sites for one lifted into a
+    // delegate variable -- resolved with the same machinery as method-group lifts. A lambda
+    // that goes anywhere else (an argument, a return value) escapes to unknowable callers.
+    private static bool LambdaRunsBefore(AnonymousFunctionExpressionSyntax lambda, SyntaxNode reference, ISymbol variable, SemanticModel semanticModel, HashSet<SyntaxNode> visitedFunctions)
+    {
+        SyntaxNode current = lambda;
+        while (current.Parent is ParenthesizedExpressionSyntax or CastExpressionSyntax)
+        {
+            current = current.Parent;
+        }
+
+        if (current.Parent is InvocationExpressionSyntax { Expression: { } invoked } invocation && invoked == current)
+        {
+            return CanExecuteBefore(invocation, reference, variable, semanticModel, visitedFunctions);
+        }
+
+        var lifted = current.Parent switch
+        {
+            EqualsValueClauseSyntax { Parent: VariableDeclaratorSyntax declarator } => semanticModel.GetDeclaredSymbol(declarator),
+            AssignmentExpressionSyntax assignment when assignment.Right == current && assignment.IsKind(SyntaxKind.SimpleAssignmentExpression)
+                => semanticModel.GetSymbolInfo(assignment.Left).Symbol,
+            _ => null,
+        };
+
+        return lifted is null || LiftedDelegateRunsBefore(lifted, reference, variable, semanticModel, visitedFunctions);
     }
 
     // A direct CALL runs the function at the call's own position. A method-group LIFT runs it
@@ -904,7 +1006,9 @@ internal static class ComputationLambdas
         return value?.Type;
     }
 
-    private static (bool Reads, bool Writes) PropertyUsage(IPropertyReferenceOperation property)
+    // How an access uses the property: a plain read runs the getter, an assignment target
+    // the setter, compound forms both. Shared with MZR002's getter chase.
+    public static (bool Reads, bool Writes) PropertyUsage(IPropertyReferenceOperation property)
     {
         return property.Parent switch
         {

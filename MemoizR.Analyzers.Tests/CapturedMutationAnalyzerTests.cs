@@ -726,6 +726,92 @@ public class CapturedMutationAnalyzerTests
     }
 
     [Fact]
+    public async Task ExtensionOnThis_AfterAnotherReceiver_IsStillFlagged()
+    {
+        // The earlier call on another object walks the same helper with no `this` binding:
+        // it must not poison the chase for the later call that DOES hand it the enclosing
+        // instance.
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public static class CExtensions
+            {
+                public static void Inc(this C c) => c.Counter++;
+            }
+
+            public class C
+            {
+                public int Counter;
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var otherObject = new C();
+                    f.CreateMemoizR(async () => { otherObject.Inc(); this.Inc(); return 0; });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR002", diagnostic.Id);
+        Assert.Contains("field 'Counter'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task MutatingGetter_ReadInComputation_IsFlagged()
+    {
+        // Reading the property runs its getter on every evaluation: the hidden `counter++`
+        // races exactly like the inline form.
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public class C
+            {
+                private int counter;
+
+                private int P { get { counter++; return 0; } }
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    f.CreateMemoizR(async () => { return P; });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR002", diagnostic.Id);
+        Assert.Contains("field 'counter'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task StaticHelperWithExplicitThisArgument_IsFlagged()
+    {
+        // `Mutate(this)` hands the enclosing instance to the parameter: the write through
+        // it mutates the enclosing object exactly like `this.Counter++`.
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public class C
+            {
+                public int Counter;
+
+                private static void Mutate(C c) => c.Counter++;
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    f.CreateMemoizR(async () => { Mutate(this); return 0; });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR002", diagnostic.Id);
+        Assert.Contains("field 'Counter'", diagnostic.GetMessage());
+    }
+
+    [Fact]
     public async Task ExtensionMethodOnAnotherReceiver_IsNotChasedForMutation()
     {
         // The same extension on some OTHER object mutates that object's state -- a

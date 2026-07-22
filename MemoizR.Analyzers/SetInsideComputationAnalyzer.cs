@@ -38,10 +38,11 @@ public sealed class SetInsideComputationAnalyzer : DiagnosticAnalyzer
 
         foreach (var computation in ComputationLambdas.OfInvocation(invocation))
         {
-            // Keyed per CALL SITE, not per method: the same helper called with different
-            // signal arguments has different target provenance at each call, and a recursive
-            // helper re-reaches its own call site and stops there.
-            var visitedCalls = new HashSet<(SyntaxNode, IMethodSymbol)>();
+            // Keyed per CALL SITE and ARGUMENT BINDING, not per method: the same helper (or
+            // the same nested call inside it) reached with different signal arguments has
+            // different target provenance each time, while a recursive helper -- whose
+            // rebuilt map carries the same substituted values -- stops.
+            var visitedCalls = new HashSet<(SyntaxNode, IMethodSymbol, string)>();
             InspectExecutedBody(context, invocation, computation.Body, actorHost, visitedCalls, argumentMap: null);
         }
     }
@@ -56,7 +57,7 @@ public sealed class SetInsideComputationAnalyzer : DiagnosticAnalyzer
         IInvocationOperation host,
         IOperation body,
         bool actorHost,
-        HashSet<(SyntaxNode, IMethodSymbol)> visitedCalls,
+        HashSet<(SyntaxNode, IMethodSymbol, string)> visitedCalls,
         Dictionary<IParameterSymbol, IOperation>? argumentMap)
     {
         foreach (var operation in ComputationLambdas.DescendDirectExecution(body))
@@ -75,14 +76,30 @@ public sealed class SetInsideComputationAnalyzer : DiagnosticAnalyzer
                 continue;
             }
 
-            foreach (var method in ComputationLambdas.ExecutedMethods(operation))
+            InspectExecutedCalls(context, host, operation, actorHost, visitedCalls, argumentMap);
+        }
+    }
+
+    private static void InspectExecutedCalls(
+        OperationAnalysisContext context,
+        IInvocationOperation host,
+        IOperation operation,
+        bool actorHost,
+        HashSet<(SyntaxNode, IMethodSymbol, string)> visitedCalls,
+        Dictionary<IParameterSymbol, IOperation>? argumentMap)
+    {
+        foreach (var method in ComputationLambdas.ExecutedMethods(operation))
+        {
+            if (ComputationLambdas.IsInsideNameOf(operation)
+                || ComputationLambdas.ResolveMethodBody(method, host.SemanticModel) is not { } helper)
             {
-                if (!ComputationLambdas.IsInsideNameOf(operation)
-                    && visitedCalls.Add((operation.Syntax, method))
-                    && ComputationLambdas.ResolveMethodBody(method, host.SemanticModel) is { } helper)
-                {
-                    InspectExecutedBody(context, host, helper.Body, actorHost, visitedCalls, ComputationLambdas.BuildArgumentMap(operation, argumentMap));
-                }
+                continue;
+            }
+
+            var nestedMap = ComputationLambdas.BuildArgumentMap(operation, argumentMap);
+            if (visitedCalls.Add((operation.Syntax, method, ComputationLambdas.ArgumentMapKey(nestedMap))))
+            {
+                InspectExecutedBody(context, host, helper.Body, actorHost, visitedCalls, nestedMap);
             }
         }
     }

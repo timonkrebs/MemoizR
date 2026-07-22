@@ -618,12 +618,13 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
             InspectCapturedLocalFunction(context, classifier, operation, patch.Scope, semanticModel, visitedLocalFunctions, reported);
         }
 
-        // Both chases are bounded per SITE, not per symbol: the same delegate reassigned and
-        // invoked again executes a different closure, and the same helper called with
-        // different delegate arguments executes different bodies -- while recursion re-reaches
-        // the same site and stops.
-        var visitedCalls = new HashSet<(SyntaxNode, IMethodSymbol)>();
-        var visitedInvokes = new HashSet<SyntaxNode>();
+        // Both chases are bounded per SITE and ARGUMENT BINDING, not per symbol: the same
+        // delegate reassigned and invoked again executes a different closure, and the same
+        // call site reached under different outer bindings executes different bodies (two
+        // outer calls handing different lambdas into one nested call) -- while recursion,
+        // whose rebuilt map carries the same substituted values, stops.
+        var visitedCalls = new HashSet<(SyntaxNode, IMethodSymbol, string)>();
+        var visitedInvokes = new HashSet<(SyntaxNode, string)>();
         foreach (var operation in ComputationLambdas.DescendDirectExecution(patch.Body))
         {
             InspectStaticRead(context, classifier, operation, reported);
@@ -672,8 +673,8 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         SendableSymbolClassifier classifier,
         IOperation operation,
         SemanticModel? semanticModel,
-        HashSet<(SyntaxNode, IMethodSymbol)> visitedCalls,
-        HashSet<SyntaxNode> visitedInvokes,
+        HashSet<(SyntaxNode, IMethodSymbol, string)> visitedCalls,
+        HashSet<(SyntaxNode, string)> visitedInvokes,
         Dictionary<IParameterSymbol, IOperation>? argumentMap,
         HashSet<ISymbol> reported)
     {
@@ -694,19 +695,54 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         // real use.)
         foreach (var method in ComputationLambdas.ExecutedMethods(operation))
         {
-            if (ComputationLambdas.IsInsideNameOf(operation) || !visitedCalls.Add((operation.Syntax, method))
-                || ComputationLambdas.ResolveMethodBody(method, semanticModel) is not { } helper)
+            if (ComputationLambdas.IsInsideNameOf(operation))
             {
                 continue;
             }
 
+            if (ComputationLambdas.ResolveMethodBody(method, semanticModel) is not { } helper)
+            {
+                ReportUnwalkableExecutedHelper(context, operation, method, reported);
+                continue;
+            }
+
             var nestedMap = ComputationLambdas.BuildArgumentMap(operation, argumentMap);
+            if (!visitedCalls.Add((operation.Syntax, method, ComputationLambdas.ArgumentMapKey(nestedMap))))
+            {
+                continue;
+            }
+
             foreach (var inner in ComputationLambdas.DescendDirectExecution(helper.Body))
             {
                 InspectStaticRead(context, classifier, inner, reported);
                 InspectExecutedHelper(context, classifier, inner, semanticModel, visitedCalls, visitedInvokes, nestedMap, reported);
             }
         }
+    }
+
+    // A helper the patch CALLS whose source body lives in another file is as unverifiable
+    // as a cross-file method-group patch: nothing checks the statics it reads on every
+    // replay, so unverifiable means flagged -- while metadata callees (Math.Abs, List.Add)
+    // stay trusted external contracts. Scoped to CALLS: accessors and constructors keep
+    // their member/type verdicts from the capture walk.
+    private static void ReportUnwalkableExecutedHelper(
+        OperationAnalysisContext context,
+        IOperation operation,
+        IMethodSymbol method,
+        HashSet<ISymbol> reported)
+    {
+        if (operation is not IInvocationOperation || method.DeclaringSyntaxReferences.Length == 0)
+        {
+            return;
+        }
+
+        Report(
+            context,
+            operation,
+            method,
+            method.Name,
+            "its body is declared in another file, so what the patch executes cannot be verified from this call site (declare the helper in this file, or lift its state into MemoizR nodes)",
+            reported);
     }
 
     // A delegate the patch builds AND synchronously invokes runs its body on every replay:
@@ -727,13 +763,13 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         SendableSymbolClassifier classifier,
         IOperation callee,
         SemanticModel? semanticModel,
-        HashSet<(SyntaxNode, IMethodSymbol)> visitedCalls,
-        HashSet<SyntaxNode> visitedInvokes,
+        HashSet<(SyntaxNode, IMethodSymbol, string)> visitedCalls,
+        HashSet<(SyntaxNode, string)> visitedInvokes,
         Dictionary<IParameterSymbol, IOperation>? argumentMap,
         HashSet<ISymbol> reported)
     {
         var resolved = ResolveDelegateReference(callee, semanticModel, argumentMap);
-        if (!visitedInvokes.Add(resolved.Syntax))
+        if (!visitedInvokes.Add((resolved.Syntax, ComputationLambdas.ArgumentMapKey(argumentMap))))
         {
             return;
         }
@@ -776,8 +812,8 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         SendableSymbolClassifier classifier,
         IInvocationOperation call,
         SemanticModel? semanticModel,
-        HashSet<(SyntaxNode, IMethodSymbol)> visitedCalls,
-        HashSet<SyntaxNode> visitedInvokes,
+        HashSet<(SyntaxNode, IMethodSymbol, string)> visitedCalls,
+        HashSet<(SyntaxNode, string)> visitedInvokes,
         Dictionary<IParameterSymbol, IOperation>? argumentMap,
         HashSet<ISymbol> reported)
     {
@@ -1067,32 +1103,44 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
             ? ComputationLambdas.BuildArgumentMap(call, argumentMap)
             : argumentMap;
 
-        var writes = new List<AssignmentExpressionSyntax>();
-        foreach (var node in helper.Scope.DescendantNodes())
-        {
-            if (node is AssignmentExpressionSyntax assignment
-                && SymbolEqualityComparer.Default.Equals(semanticModel.GetSymbolInfo(assignment.Left).Symbol, parameter))
-            {
-                writes.Add(assignment);
-            }
-        }
-
+        var writes = ParameterWrites(helper.Scope, parameter, semanticModel);
         foreach (var assignment in writes)
         {
             // What the caller receives is the delegate bound when the helper RETURNS: a later
             // straight-line overwrite inside the helper kills this body exactly like one
             // before an invoke, with the helper's scope end as the observation point.
-            if (writes.Any(other => other != assignment && DefinitelyOverwrites(other, assignment, helper.Scope, parameter, semanticModel))
-                || semanticModel.GetOperation(assignment.Right) is not { } assigned)
+            if (writes.Any(other => other != assignment && DefinitelyOverwrites(other, assignment, helper.Scope, parameter, semanticModel)))
             {
                 continue;
             }
 
-            foreach (var body in ComputationLambdas.OfArgumentValue(ResolveDelegateReference(assigned, semanticModel, callMap), semanticModel))
+            foreach (var value in AssignedValuesFor(assignment.Left, assignment.Right, parameter, semanticModel))
             {
-                yield return body;
+                foreach (var body in ComputationLambdas.OfArgumentValue(ResolveDelegateReference(value, semanticModel, callMap), semanticModel))
+                {
+                    yield return body;
+                }
             }
         }
+    }
+
+    // ReassignmentTargets flattens deconstruction left sides, so `(d, _) = (...)` assembles
+    // the delegate exactly like `d = ...`; AssignedValuesFor later pairs the parameter's
+    // slot with its tuple element.
+    private static List<AssignmentExpressionSyntax> ParameterWrites(SyntaxNode scope, IParameterSymbol parameter, SemanticModel semanticModel)
+    {
+        var writes = new List<AssignmentExpressionSyntax>();
+        foreach (var node in scope.DescendantNodes())
+        {
+            if (node is AssignmentExpressionSyntax assignment
+                && ComputationLambdas.ReassignmentTargets(assignment) is { } targets
+                && targets.Any(target => ComputationLambdas.WritesVariable(target, parameter, semanticModel)))
+            {
+                writes.Add(assignment);
+            }
+        }
+
+        return writes;
     }
 
     private static IEnumerable<IOperation> AssignedValuesFor(ExpressionSyntax left, ExpressionSyntax right, ISymbol variable, SemanticModel semanticModel)
@@ -1125,8 +1173,8 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         SendableSymbolClassifier classifier,
         ComputationLambdas.ComputationBody body,
         SemanticModel? semanticModel,
-        HashSet<(SyntaxNode, IMethodSymbol)> visitedCalls,
-        HashSet<SyntaxNode> visitedInvokes,
+        HashSet<(SyntaxNode, IMethodSymbol, string)> visitedCalls,
+        HashSet<(SyntaxNode, string)> visitedInvokes,
         Dictionary<IParameterSymbol, IOperation>? argumentMap,
         HashSet<ISymbol> reported)
     {

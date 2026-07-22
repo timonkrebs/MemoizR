@@ -771,6 +771,43 @@ public class SetInsideComputationAnalyzerTests
     }
 
     [Fact]
+    public async Task IndexerSetterArguments_KeepCallSiteProvenance()
+    {
+        // The Set target is the indexer's index parameter: the call-site index argument (a
+        // provably disjoint factory's signal) is what actually gets Set, while the same
+        // indexer fed the HOST factory's own signal is still flagged.
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public class Wrapper
+            {
+                public int this[Signal<int> s]
+                {
+                    set { _ = s.Set(value); }
+                }
+            }
+
+            public class C
+            {
+                public void M()
+                {
+                    var f1 = new MemoFactory();
+                    var f2 = new MemoFactory();
+                    var other = f2.CreateSignal(1);
+                    var mine = f1.CreateSignal(1);
+                    var wrapper = new Wrapper();
+                    f1.CreateMemoizR(async () => { wrapper[other] = 1; return 0; });
+                    f1.CreateMemoizR(async () => { wrapper[mine] = 1; return 0; });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR003", diagnostic.Id);
+        Assert.Contains("Signal<int>.Set", diagnostic.GetMessage());
+    }
+
+    [Fact]
     public async Task ZeroArgumentLocalFunction_KeepsTheArgumentMap()
     {
         // The helper's local function closes over the helper's signal parameter: the
