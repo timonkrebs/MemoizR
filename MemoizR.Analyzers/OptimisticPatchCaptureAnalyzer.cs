@@ -83,15 +83,13 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         // trusted. (MZR003 deliberately keeps trusting initializers: its runtime exception
         // still covers reassignment, this rule's does not exist.)
         if (value.Type is { TypeKind: TypeKind.Delegate }
-            && ReceiverSymbol(Unwrap(value)) is { } variable
-            && variable is ILocalSymbol or IFieldSymbol or IPropertySymbol
-            && IsReassignedBefore(variable, value.Syntax, semanticModel))
+            && FindReassignedLink(value, semanticModel) is { } reassigned)
         {
             Report(
                 context,
                 value,
-                variable,
-                variable.Name,
+                reassigned,
+                reassigned.Name,
                 "it is reassigned after its initializer, so the delegate stored in the overlay cannot be resolved from this call site, and a delegate can capture arbitrary mutable state",
                 reported);
             return;
@@ -232,6 +230,36 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         }
 
         return false;
+    }
+
+    // The reassignment check applies to EVERY variable in the alias chain, each against the
+    // site where its value is READ: `p0 = evil; Func<int,int> patch = p0;` stores p0's
+    // post-reassignment closure even though patch itself is never written again. A link whose
+    // initializer is the computation itself (a lambda or method group) ends the chain.
+    private static ISymbol? FindReassignedLink(IOperation value, SemanticModel? semanticModel)
+    {
+        var reference = Unwrap(value);
+        var site = value.Syntax;
+        HashSet<ISymbol>? visited = null;
+        while (ReceiverSymbol(reference) is (ILocalSymbol or IFieldSymbol or IPropertySymbol) and { } variable)
+        {
+            if (IsReassignedBefore(variable, site, semanticModel))
+            {
+                return variable;
+            }
+
+            visited ??= new HashSet<ISymbol>(SymbolEqualityComparer.Default);
+            if (!visited.Add(variable)
+                || ComputationLambdas.SameTreeInitializerOperation(variable, semanticModel) is not { } initializer)
+            {
+                return null;
+            }
+
+            site = initializer.Syntax;
+            reference = Unwrap(initializer);
+        }
+
+        return null;
     }
 
     // A ref-local ALIAS writes its referent: `ref var alias = ref patch; alias = ...` rebinds
@@ -478,6 +506,15 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
                     context, classifier, operation, staticProperty.Property, staticProperty.Property.Type,
                     writable: IsSettable(staticProperty.Property), "it is writable static state", reported);
                 break;
+
+            // An event's backing delegate is writable storage by construction: any subscriber
+            // mutates it, so a static event read/invoke shares mutable state like a writable
+            // static field.
+            case IEventReferenceOperation { Event.IsStatic: true } staticEvent:
+                Report(
+                    context, operation, staticEvent.Event, staticEvent.Event.Name,
+                    "it is writable static state (subscribing mutates the event's backing delegate)", reported);
+                break;
         }
     }
 
@@ -501,7 +538,8 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
             InspectCapturedLocalFunction(context, classifier, operation, patch.Scope, semanticModel, visitedLocalFunctions, reported);
         }
 
-        var visitedHelpers = new HashSet<IMethodSymbol>(SymbolEqualityComparer.Default);
+        // ISymbol, not IMethodSymbol: the executed chase also visits invoked delegate VARIABLES.
+        var visitedHelpers = new HashSet<ISymbol>(SymbolEqualityComparer.Default);
         foreach (var operation in ComputationLambdas.DescendDirectExecution(patch.Body))
         {
             InspectStaticRead(context, classifier, operation, reported);
@@ -550,9 +588,15 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         SendableSymbolClassifier classifier,
         IOperation operation,
         SemanticModel? semanticModel,
-        HashSet<IMethodSymbol> visited,
+        HashSet<ISymbol> visited,
         HashSet<ISymbol> reported)
     {
+        if (operation is IInvocationOperation { TargetMethod.MethodKind: MethodKind.DelegateInvoke, Instance: { } callee })
+        {
+            InspectInvokedDelegate(context, classifier, callee, semanticModel, visited, reported);
+            return;
+        }
+
         // Only what EXECUTES is chased: a call; a property READ, which runs its getter exactly
         // like a call (`static int Hits => hits;` is the helper-method evasion with property
         // syntax); a constructor; or a user-defined operator/conversion -- each runs on every
@@ -584,6 +628,35 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         {
             InspectStaticRead(context, classifier, inner, reported);
             InspectExecutedHelper(context, classifier, inner, semanticModel, visited, reported);
+        }
+    }
+
+    // A delegate the patch builds AND synchronously invokes runs its body on every replay:
+    // the built-but-deferred shape stays pruned, but `Func<int> later = () => hits; later()`
+    // executes now, and unlike MZR003's identical prune there is no runtime backstop. The
+    // callee resolves like a computation argument (same-tree lambda or method group, through
+    // variable initializers); the variable visited-guard bounds self-referential delegates.
+    private static void InspectInvokedDelegate(
+        OperationAnalysisContext context,
+        SendableSymbolClassifier classifier,
+        IOperation callee,
+        SemanticModel? semanticModel,
+        HashSet<ISymbol> visited,
+        HashSet<ISymbol> reported)
+    {
+        var variable = ComputationLambdas.ReferencedVariable(Unwrap(callee));
+        if (variable is not null && !visited.Add(variable))
+        {
+            return;
+        }
+
+        foreach (var body in ComputationLambdas.OfArgumentValue(callee, semanticModel))
+        {
+            foreach (var inner in ComputationLambdas.DescendDirectExecution(body.Body))
+            {
+                InspectStaticRead(context, classifier, inner, reported);
+                InspectExecutedHelper(context, classifier, inner, semanticModel, visited, reported);
+            }
         }
     }
 

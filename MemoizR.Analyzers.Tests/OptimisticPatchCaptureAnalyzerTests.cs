@@ -1201,6 +1201,137 @@ public class OptimisticPatchCaptureAnalyzerTests
         Assert.Contains("writable static state", diagnostic.GetMessage());
     }
 
+    // Every link of the alias chain gets the reassignment check, against the site where its
+    // value is READ: patch is never written again, but it copied p0 after p0's reassignment.
+    [Fact]
+    public async Task ReassignedAlias_IsUnresolvable()
+    {
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    var shared = new List<int>();
+                    Func<int, int> p0 = static x => x;
+                    p0 = x => x + shared.Count;
+                    Func<int, int> patch = p0;
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, patch);
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR004", diagnostic.Id);
+        Assert.Contains("'p0'", diagnostic.GetMessage());
+        Assert.Contains("reassigned", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task AliasReassignedAfterTheCopy_KeepsTheInitializerTrusted()
+    {
+        // p0's reassignment happens AFTER patch copied it: the copied value is the harmless
+        // initializer, so nothing distrusts the chain.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    var shared = new List<int>();
+                    Func<int, int> p0 = static x => x;
+                    Func<int, int> patch = p0;
+                    p0 = x => x + shared.Count;
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, patch);
+                    });
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    // An event's backing delegate is writable storage by construction: subscribers on other
+    // flows mutate what the patch reads.
+    [Fact]
+    public async Task StaticEventRead_IsFlagged()
+    {
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                private static event Action? Changed;
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x => { Changed?.Invoke(); return x; });
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR004", diagnostic.Id);
+        Assert.Contains("Changed", diagnostic.GetMessage());
+        Assert.Contains("writable static state", diagnostic.GetMessage());
+    }
+
+    // A delegate the patch builds AND invokes runs on every replay -- only the
+    // built-but-deferred shape is pruned.
+    [Fact]
+    public async Task ImmediatelyInvokedBuiltDelegate_IsChasedForStatics()
+    {
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                private static int hits;
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x =>
+                        {
+                            Func<int> later = () => hits;
+                            return x + later();
+                        });
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR004", diagnostic.Id);
+        Assert.Contains("hits", diagnostic.GetMessage());
+        Assert.Contains("writable static state", diagnostic.GetMessage());
+    }
+
     [Fact]
     public async Task EachCapturedSymbol_IsReportedOnce_PerPatch()
     {

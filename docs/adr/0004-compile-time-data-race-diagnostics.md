@@ -179,10 +179,12 @@ Flagged, once per captured symbol per patch:
   enclosing object is captured with no member to inspect, so it is held to its type's
   sendability: hiding the read behind a helper must not evade the rule;
 - a read of **static state** that is writable or of a non-Sendable type (`const` is a
-  compile-time value) — statics are shared across every flow without any capture at all, so
+  compile-time value; a static *event* always counts as writable — subscribing mutates its
+  backing delegate) — statics are shared across every flow without any capture at all, so
   same-tree code the patch *executes* is chased for them transitively: helper methods,
-  property getters, constructors, and user-defined operators/conversions (the classifier
-  deliberately ignores statics, meaning a Sendable `this` says nothing about them). Static
+  property getters, constructors, user-defined operators/conversions, and delegates the patch
+  builds *and* invokes (the classifier deliberately ignores statics, meaning a Sendable `this`
+  says nothing about them). Static
   verdicts follow MZR003's *direct-execution* pruning: a read inside a callback the patch
   merely builds runs later, off the overlay's re-execution (closure captures keep the full
   walk — a built callback still pins them in the stored display chain);
