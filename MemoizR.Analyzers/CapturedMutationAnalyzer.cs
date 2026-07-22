@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.Linq;
 using Microsoft.CodeAnalysis;
@@ -37,13 +38,56 @@ public sealed class CapturedMutationAnalyzer : DiagnosticAnalyzer
 
         foreach (var computation in ComputationLambdas.OfInvocation(invocation))
         {
+            var visitedLocalFunctions = new HashSet<IMethodSymbol>(SymbolEqualityComparer.Default);
             foreach (var operation in ComputationLambdas.Descend(computation.Body))
             {
                 foreach (var target in MutationTargets(operation))
                 {
-                    ReportIfShared(context, target, computation.Scope);
+                    ReportIfShared(context, target, computation.Scope, computation.Scope);
                 }
+
+                InspectCalledLocalFunction(context, operation, computation.Scope, invocation.SemanticModel, visitedLocalFunctions);
             }
+        }
+    }
+
+    // A LOCAL FUNCTION the computation invokes (or lifts into a delegate) has no receiver: its
+    // closure IS the computation's environment, so `int Next() { applied++; return applied; }`
+    // declared outside the computation writes state the computation shares exactly like an
+    // inline `applied++` -- and MZR004 cannot carry this shape (the int is Sendable; the WRITE
+    // is the race). Bodies resolve same-tree, the visited set bounds call cycles, and the
+    // helper's own per-call locals stay exempt via the enclosing-function guard in
+    // ReportIfShared.
+    private static void InspectCalledLocalFunction(
+        OperationAnalysisContext context,
+        IOperation operation,
+        SyntaxNode computationScope,
+        SemanticModel? semanticModel,
+        HashSet<IMethodSymbol> visited)
+    {
+        var method = operation switch
+        {
+            IInvocationOperation call => call.TargetMethod,
+            IMethodReferenceOperation reference => reference.Method,
+            _ => null,
+        };
+
+        if (method is not { MethodKind: MethodKind.LocalFunction }
+            || !ComputationLambdas.IsDeclaredOutside(method, computationScope)
+            || !visited.Add(method)
+            || ComputationLambdas.ResolveMethodBody(method, semanticModel) is not { } helper)
+        {
+            return;
+        }
+
+        foreach (var inner in ComputationLambdas.Descend(helper.Body))
+        {
+            foreach (var target in MutationTargets(inner))
+            {
+                ReportIfShared(context, target, helper.Scope, computationScope);
+            }
+
+            InspectCalledLocalFunction(context, inner, computationScope, semanticModel, visited);
         }
     }
 
@@ -137,10 +181,10 @@ public sealed class CapturedMutationAnalyzer : DiagnosticAnalyzer
         return targets.ToImmutable();
     }
 
-    private static void ReportIfShared(OperationAnalysisContext context, IOperation target, SyntaxNode scope)
+    private static void ReportIfShared(OperationAnalysisContext context, IOperation target, SyntaxNode scope, SyntaxNode computationScope)
     {
         var (kind, symbol) = ResolveSharedRoot(target, scope);
-        if (kind is null)
+        if (kind is null || !SharesComputationEnvironment(symbol!, computationScope))
         {
             return;
         }
@@ -150,6 +194,17 @@ public sealed class CapturedMutationAnalyzer : DiagnosticAnalyzer
             target.Syntax.GetLocation(),
             kind,
             symbol!.Name));
+    }
+
+    // A captured local/parameter is the computation's business only when it lives in a
+    // function ENCLOSING the computation -- a chased helper's own locals are recreated per
+    // call. Members of `this` and statics are shared storage wherever they are written from.
+    // (For the computation's own body, scope == computationScope and C# scoping makes this
+    // trivially true.)
+    private static bool SharesComputationEnvironment(ISymbol symbol, SyntaxNode computationScope)
+    {
+        return symbol is not (ILocalSymbol or IParameterSymbol)
+            || ComputationLambdas.DeclaredInFunctionEnclosing(symbol, computationScope);
     }
 
     // Resolves a mutation target to the shared storage it ultimately writes, walking up value-type

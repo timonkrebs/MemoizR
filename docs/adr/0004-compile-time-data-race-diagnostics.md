@@ -91,7 +91,11 @@ deconstructions (flattened through nested tuples: `(a, (b, c)) = ...` writes eve
 `ref`/`out` arguments, and non-`readonly` instance-method calls on value-type receivers that
 resolve to shared storage (`counter.Increment()` mutates the captured local exactly like
 `counter.Value++`; `readonly` members — which includes most BCL structs — and the
-object-virtual overrides stay exempt).
+object-virtual overrides stay exempt). A **local function** the computation calls (declared
+outside it, same tree) is chased for the same writes: its closure is the computation's
+environment, so `int Next() { applied++; ... }` is the inline `applied++` behind a name — while
+the helper's own per-call locals stay exempt (only storage declared in a function *enclosing
+the computation* counts).
 
 Deliberately **not** flagged:
 
@@ -174,7 +178,10 @@ Flagged, once per captured symbol per patch:
 - a read of **static state** that is writable or of a non-Sendable type (`const` is a
   compile-time value) — statics are shared across every flow without any capture at all, so
   same-tree helper methods the patch calls are chased for them transitively (the classifier
-  deliberately ignores statics, meaning a Sendable `this` says nothing about them);
+  deliberately ignores statics, meaning a Sendable `this` says nothing about them). Static
+  verdicts follow MZR003's *direct-execution* pruning: a read inside a callback the patch
+  merely builds runs later, off the overlay's re-execution (closure captures keep the full
+  walk — a built callback still pins them in the stored display chain);
 - the **closure of a local function** the patch calls that is declared *outside* the patch —
   no receiver/`this` verdict covers it, so its body is inspected for captures against its own
   declaration scope. Only captures declared in a function *enclosing the patch* count: one
@@ -182,10 +189,12 @@ Flagged, once per captured symbol per patch:
   local function nested in that helper) is recreated on every execution, not stored in the
   delegate;
 - an **already-built delegate that resolves to nothing walkable** (a `Func<T,T>`
-  field/parameter with no same-tree initializer, or a variable *reassigned* after its
-  initializer — the overlay may store the second closure) — the overlay stores it all the
-  same, this rule is the only check a patch ever gets, and a delegate can capture arbitrary
-  mutable state: unverifiable means flagged, like the classifier's unverifiable categories.
+  field/parameter with no same-tree initializer, or a variable *reassigned* — including
+  through deconstruction — where the assignment can execute before the call: a different
+  function body, textually earlier, or loop-carried into a variable that outlives the
+  iteration) — the overlay stores it all the same, this rule is the only check a patch ever
+  gets, and a delegate can capture arbitrary mutable state: unverifiable means flagged, like
+  the classifier's unverifiable categories.
 
 Reads of Sendable-typed captures stay unflagged: capturing the action payload or other
 immutable snapshots is the idiomatic pattern. Captured-state **writes** inside a patch are

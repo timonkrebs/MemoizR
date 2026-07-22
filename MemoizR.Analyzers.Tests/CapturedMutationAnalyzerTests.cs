@@ -534,4 +534,77 @@ public class CapturedMutationAnalyzerTests
 
         Assert.Empty(diagnostics);
     }
+
+    // The write hides behind a local function declared outside the computation: its closure is
+    // the computation's environment, so the chased `applied++` is the same data race as the
+    // inline form (and MZR004 cannot carry it -- the int is Sendable; the WRITE is the race).
+    // The helper's OWN local stays exempt: it is recreated per call.
+    [Fact]
+    public async Task OptimisticPatch_WriteHiddenInALocalHelper_IsFlagged()
+    {
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    var applied = 0;
+                    int Next()
+                    {
+                        var tmp = 0;
+                        tmp++;
+                        applied++;
+                        return applied + tmp;
+                    }
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x => x + Next());
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR002", diagnostic.Id);
+        Assert.Contains("captured local 'applied'", diagnostic.GetMessage());
+    }
+
+    // A captured mutable STRUCT invoked through a non-readonly method mutates the hoisted
+    // closure field on every re-execution -- covered by the mutating-value-receiver rule, the
+    // lambda-capture analog of MZR004's boxed method-group receiver verdict.
+    [Fact]
+    public async Task OptimisticPatch_MutatingCapturedStructReceiver_IsFlagged()
+    {
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public struct Counter
+            {
+                private int count;
+
+                public int Next(int x) => x + count++;
+            }
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    var counter = new Counter();
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x => counter.Next(x));
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR002", diagnostic.Id);
+        Assert.Contains("captured local 'counter'", diagnostic.GetMessage());
+    }
 }

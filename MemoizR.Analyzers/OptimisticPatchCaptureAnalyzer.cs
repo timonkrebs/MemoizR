@@ -104,16 +104,10 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         }
 
         var resolved = methodReference is not null;
-        var visitedHelpers = new HashSet<IMethodSymbol>(SymbolEqualityComparer.Default);
         foreach (var patch in ComputationLambdas.OfArgumentValue(value, semanticModel))
         {
             resolved = true;
-            foreach (var operation in ComputationLambdas.Descend(patch.Body))
-            {
-                InspectCapture(context, classifier, operation, patch.Scope, patch.Scope, reported);
-                InspectStaticRead(context, classifier, operation, reported);
-                InspectCalledHelper(context, classifier, operation, patch.Scope, semanticModel, visitedHelpers, reported);
-            }
+            InspectPatchBody(context, classifier, patch, semanticModel, reported);
         }
 
         if (!resolved && value.Type is { TypeKind: TypeKind.Delegate })
@@ -229,16 +223,9 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
 
         foreach (var node in semanticModel.SyntaxTree.GetRoot().DescendantNodes())
         {
-            var target = node switch
-            {
-                AssignmentExpressionSyntax assignment => assignment.Left,
-                ArgumentSyntax argument when !argument.RefOrOutKeyword.IsKind(SyntaxKind.None) => argument.Expression,
-                _ => null,
-            };
-
-            if (target is not null
-                && SymbolEqualityComparer.Default.Equals(semanticModel.GetSymbolInfo(target).Symbol, variable)
-                && CanExecuteBefore(node, reference))
+            if (ReassignmentTargets(node) is { } targets
+                && targets.Any(target => SymbolEqualityComparer.Default.Equals(semanticModel.GetSymbolInfo(target).Symbol, variable))
+                && CanExecuteBefore(node, reference, variable))
             {
                 return true;
             }
@@ -247,12 +234,41 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         return false;
     }
 
+    // The expressions a node writes: an assignment's left-hand side (deconstruction tuples
+    // flattened, nesting included -- `(patch, _) = ...` writes `patch`) or a ref/out argument.
+    private static IEnumerable<ExpressionSyntax>? ReassignmentTargets(SyntaxNode node)
+    {
+        return node switch
+        {
+            AssignmentExpressionSyntax assignment => FlattenTargets(assignment.Left),
+            ArgumentSyntax argument when !argument.RefOrOutKeyword.IsKind(SyntaxKind.None) => new[] { argument.Expression },
+            _ => null,
+        };
+    }
+
+    private static IEnumerable<ExpressionSyntax> FlattenTargets(ExpressionSyntax left)
+    {
+        if (left is not TupleExpressionSyntax tuple)
+        {
+            yield return left;
+            yield break;
+        }
+
+        foreach (var element in tuple.Arguments)
+        {
+            foreach (var nested in FlattenTargets(element.Expression))
+            {
+                yield return nested;
+            }
+        }
+    }
+
     // Execution-order reasoning without dataflow: an assignment in a DIFFERENT function body
     // (a helper, a lambda, another method) runs whenever that function does -- unknowable, so
     // it counts. In the same function, one textually before the call obviously precedes it,
     // and one textually after still reaches the call when a loop encloses both (the next
     // iteration passes the reassigned delegate).
-    private static bool CanExecuteBefore(SyntaxNode assignment, SyntaxNode reference)
+    private static bool CanExecuteBefore(SyntaxNode assignment, SyntaxNode reference, ISymbol variable)
     {
         if (!ReferenceEquals(EnclosingFunction(assignment), EnclosingFunction(reference)))
         {
@@ -266,14 +282,26 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
 
         for (var current = assignment.Parent; current is not null; current = current.Parent)
         {
+            // Loop-carried only when the variable OUTLIVES the iteration: a delegate local
+            // declared inside the loop body is freshly initialized each pass, so a trailing
+            // reassignment dies with its iteration and can never reach a call.
             if (current is ForStatementSyntax or ForEachStatementSyntax or WhileStatementSyntax or DoStatementSyntax
-                && current.Span.Contains(reference.Span))
+                && current.Span.Contains(reference.Span)
+                && !DeclaredWithin(variable, current))
             {
                 return true;
             }
         }
 
         return false;
+    }
+
+    private static bool DeclaredWithin(ISymbol variable, SyntaxNode node)
+    {
+        var declaration = variable.DeclaringSyntaxReferences.FirstOrDefault();
+        return declaration is not null
+            && declaration.SyntaxTree == node.SyntaxTree
+            && node.Span.Contains(declaration.Span);
     }
 
     private static SyntaxNode? EnclosingFunction(SyntaxNode node)
@@ -398,53 +426,99 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         }
     }
 
-    // A same-tree method the patch calls (or lifts into a delegate) is chased for STATIC reads
-    // only: a static is shared however deep the call chain that reaches it, and the instance
-    // verdicts (receiver, bare `this`) already cover the object the helper runs on -- but the
-    // classifier deliberately ignores statics, so `int ReadHits() => hits;` on a Sendable type
-    // would otherwise hide what the direct read flags. Metadata bodies stay unwalkable, like
-    // every same-tree-only resolution here; the visited set bounds recursion on call cycles.
-    private static void InspectCalledHelper(
+    // Two walks with different reach. Closure CONTENTS (captures, receivers, `this`) are
+    // storage facts -- a callback the patch merely builds still pins them in the stored
+    // display chain -- so they use the FULL walk, chasing outside local functions wherever
+    // they are referenced. Static READS happen only on execution: one inside a built callback
+    // runs later, off the overlay's re-execution, on whatever flow invokes it -- so statics
+    // (and the helper chase that finds them) follow MZR003's direct-execution pruning.
+    private static void InspectPatchBody(
+        OperationAnalysisContext context,
+        SendableSymbolClassifier classifier,
+        ComputationLambdas.ComputationBody patch,
+        SemanticModel? semanticModel,
+        HashSet<ISymbol> reported)
+    {
+        var visitedLocalFunctions = new HashSet<IMethodSymbol>(SymbolEqualityComparer.Default);
+        foreach (var operation in ComputationLambdas.Descend(patch.Body))
+        {
+            InspectCapture(context, classifier, operation, patch.Scope, patch.Scope, reported);
+            InspectCapturedLocalFunction(context, classifier, operation, patch.Scope, semanticModel, visitedLocalFunctions, reported);
+        }
+
+        var visitedHelpers = new HashSet<IMethodSymbol>(SymbolEqualityComparer.Default);
+        foreach (var operation in ComputationLambdas.DescendDirectExecution(patch.Body))
+        {
+            InspectStaticRead(context, classifier, operation, reported);
+            InspectExecutedHelper(context, classifier, operation, semanticModel, visitedHelpers, reported);
+        }
+    }
+
+    // A LOCAL FUNCTION referenced by the patch (called, or lifted into a delegate) has no
+    // receiver: its closure is the patch's own environment, so its body is inspected for
+    // captures like patch code -- against its own declaration scope, which keeps helper-call
+    // locals out. One declared inside the patch is already covered by the surrounding walk.
+    private static void InspectCapturedLocalFunction(
         OperationAnalysisContext context,
         SendableSymbolClassifier classifier,
         IOperation operation,
         SyntaxNode patchScope,
         SemanticModel? semanticModel,
-        HashSet<IMethodSymbol> visitedHelpers,
+        HashSet<IMethodSymbol> visited,
         HashSet<ISymbol> reported)
     {
-        var method = operation switch
-        {
-            IInvocationOperation invocation => invocation.TargetMethod,
-            IMethodReferenceOperation reference => reference.Method,
-            _ => null,
-        };
-
-        if (method is null || !visitedHelpers.Add(method)
+        var method = ReferencedMethod(operation);
+        if (method is not { MethodKind: MethodKind.LocalFunction }
+            || !ComputationLambdas.IsDeclaredOutside(method, patchScope)
+            || !visited.Add(method)
             || ComputationLambdas.ResolveMethodBody(method, semanticModel) is not { } helper)
         {
             return;
         }
 
-        // A LOCAL FUNCTION has no receiver, so no receiver/`this` verdict covers its closure:
-        // one declared outside the patch shares the enclosing method's locals with the patch,
-        // and what its body reads from outside its own declaration is captured state, held to
-        // the ordinary capture verdicts. (One declared INSIDE the patch was already walked
-        // under the patch's own scope, and its reads of patch-locals are patch-internal, not
-        // shared -- re-inspecting it against its own scope would flag them falsely.)
-        var inspectCaptures = method.MethodKind == MethodKind.LocalFunction
-            && ComputationLambdas.IsDeclaredOutside(method, patchScope);
-
         foreach (var inner in ComputationLambdas.Descend(helper.Body))
         {
-            if (inspectCaptures)
-            {
-                InspectCapture(context, classifier, inner, helper.Scope, patchScope, reported);
-            }
-
-            InspectStaticRead(context, classifier, inner, reported);
-            InspectCalledHelper(context, classifier, inner, patchScope, semanticModel, visitedHelpers, reported);
+            InspectCapture(context, classifier, inner, helper.Scope, patchScope, reported);
+            InspectCapturedLocalFunction(context, classifier, inner, patchScope, semanticModel, visited, reported);
         }
+    }
+
+    // Any same-tree method or local function on the patch's own execution path is chased for
+    // STATIC reads: a static is shared however deep the call chain that reaches it, and the
+    // instance verdicts (receiver, bare `this`) already cover the object the helper runs on --
+    // but the classifier deliberately ignores statics, so `int ReadHits() => hits;` on a
+    // Sendable type would otherwise hide what the direct read flags. Metadata bodies stay
+    // unwalkable, like every same-tree-only resolution here.
+    private static void InspectExecutedHelper(
+        OperationAnalysisContext context,
+        SendableSymbolClassifier classifier,
+        IOperation operation,
+        SemanticModel? semanticModel,
+        HashSet<IMethodSymbol> visited,
+        HashSet<ISymbol> reported)
+    {
+        var method = ReferencedMethod(operation);
+        if (method is null || !visited.Add(method)
+            || ComputationLambdas.ResolveMethodBody(method, semanticModel) is not { } helper)
+        {
+            return;
+        }
+
+        foreach (var inner in ComputationLambdas.DescendDirectExecution(helper.Body))
+        {
+            InspectStaticRead(context, classifier, inner, reported);
+            InspectExecutedHelper(context, classifier, inner, semanticModel, visited, reported);
+        }
+    }
+
+    private static IMethodSymbol? ReferencedMethod(IOperation operation)
+    {
+        return operation switch
+        {
+            IInvocationOperation invocation => invocation.TargetMethod,
+            IMethodReferenceOperation reference => reference.Method,
+            _ => null,
+        };
     }
 
     // Captured by the walked scope AND declared in a function that encloses the PATCH: only
@@ -454,15 +528,8 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
     // stay silent.
     private static bool IsSharedCapture(ISymbol symbol, SyntaxNode scope, SyntaxNode patchScope)
     {
-        if (!ComputationLambdas.IsDeclaredOutside(symbol, scope))
-        {
-            return false;
-        }
-
-        var declaringFunction = symbol.ContainingSymbol?.DeclaringSyntaxReferences.FirstOrDefault();
-        return declaringFunction is not null
-            && declaringFunction.SyntaxTree == patchScope.SyntaxTree
-            && declaringFunction.Span.Contains(patchScope.Span);
+        return ComputationLambdas.IsDeclaredOutside(symbol, scope)
+            && ComputationLambdas.DeclaredInFunctionEnclosing(symbol, patchScope);
     }
 
     // The shared verdict for a state read: writable storage is flagged outright; immutable

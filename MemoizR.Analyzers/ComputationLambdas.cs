@@ -318,6 +318,18 @@ internal static class ComputationLambdas
             || !scope.Span.Contains(declaration.Span);
     }
 
+    // Whether the symbol's DECLARING FUNCTION (method, local function, lambda, accessor)
+    // lexically encloses the scope -- i.e. the symbol lives in an environment the scope's
+    // closure shares, rather than in some helper invocation that is recreated per call.
+    // Shared by MZR002's and MZR004's local-function chasing.
+    public static bool DeclaredInFunctionEnclosing(ISymbol symbol, SyntaxNode scope)
+    {
+        var declaration = symbol.ContainingSymbol?.DeclaringSyntaxReferences.FirstOrDefault();
+        return declaration is not null
+            && declaration.SyntaxTree == scope.SyntaxTree
+            && declaration.Span.Contains(scope.Span);
+    }
+
     // The tightest useful squiggle for an invocation: the member name, not the whole call with
     // its (possibly multi-line lambda) arguments.
     public static Location NameLocation(IInvocationOperation invocation)

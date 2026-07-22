@@ -712,6 +712,107 @@ public class OptimisticPatchCaptureAnalyzerTests
     }
 
     [Fact]
+    public async Task LoopLocalDelegate_TrailingReassignment_IsNotCarried()
+    {
+        // The delegate local is declared INSIDE the loop body: freshly initialized each
+        // iteration, so the trailing reassignment dies with its iteration and can never
+        // reach a call -- the initializer stays trustworthy.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    var shared = new List<int>();
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        for (var i = 0; i < 2; i++)
+                        {
+                            Func<int, int> patch = static x => x;
+                            await ctx.Apply(state, patch);
+                            patch = x => x + shared.Count;
+                        }
+                    });
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task DeconstructionReassignment_IsUnresolvable()
+    {
+        // `(patch, _) = ...` writes `patch` just as much as `patch = ...`: the tuple
+        // left-hand side must be flattened before comparing symbols.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    var shared = new List<int>();
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        Func<int, int> patch = static x => x;
+                        (patch, _) = ((Func<int, int>)(x => x + shared.Count), 0);
+                        await ctx.Apply(state, patch);
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR004", diagnostic.Id);
+        Assert.Contains("'patch'", diagnostic.GetMessage());
+        Assert.Contains("reassigned", diagnostic.GetMessage());
+    }
+
+    // A static read inside a callback the patch merely BUILDS runs later, off the overlay's
+    // re-execution, on whatever flow invokes it -- the same deferred-callback shape MZR003
+    // prunes. (Closure captures keep the full walk: a built callback still pins them.)
+    [Fact]
+    public async Task StaticReadInACallbackThePatchOnlyBuilds_IsNotFlagged()
+    {
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                private static int hits;
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x =>
+                        {
+                            Func<int> later = () => hits;
+                            _ = later;
+                            return x;
+                        });
+                    });
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
     public async Task PatchInternalLocalFunction_UsingPatchLocals_IsNotFlagged()
     {
         // The local function lives INSIDE the patch: its reads of patch-locals are
