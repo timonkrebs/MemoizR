@@ -120,12 +120,50 @@ public sealed class SetInsideComputationAnalyzer : DiagnosticAnalyzer
         HashSet<(SyntaxNode, IMethodSymbol, string)> visitedCalls,
         Dictionary<IParameterSymbol, IOperation>? argumentMap)
     {
-        var resolved = ComputationLambdas.ResolveDelegateValue(callee, host.SemanticModel, argumentMap);
+        var resolved = ComputationLambdas.ResolveDelegateValue(ComputationLambdas.ResolveConditionalReceiver(callee), host.SemanticModel, argumentMap);
+        var found = false;
         foreach (var body in ComputationLambdas.OfArgumentValue(resolved, host.SemanticModel))
         {
+            found = true;
             if (visitedCalls.Add((body.Scope, host.TargetMethod, ComputationLambdas.ArgumentMapKey(argumentMap))))
             {
                 InspectExecutedBody(context, host, body.Body, actorHost, visitedCalls, argumentMap);
+            }
+        }
+
+        if (!found)
+        {
+            InspectInvokedFactoryResult(context, host, resolved, actorHost, visitedCalls, argumentMap);
+        }
+    }
+
+    // `Get()(x)` executes whatever the same-tree factory returned, immediately and under
+    // the same lock: the returns are walked with their own maps, cycles bounded by the
+    // per-body visited guard.
+    private static void InspectInvokedFactoryResult(
+        OperationAnalysisContext context,
+        IInvocationOperation host,
+        IOperation resolved,
+        bool actorHost,
+        HashSet<(SyntaxNode, IMethodSymbol, string)> visitedCalls,
+        Dictionary<IParameterSymbol, IOperation>? argumentMap)
+    {
+        while (resolved is IConversionOperation conversion)
+        {
+            resolved = conversion.Operand;
+        }
+
+        if (resolved is not IInvocationOperation call
+            || ComputationLambdas.ResolveMethodBody(call.TargetMethod, host.SemanticModel) is not { } factory)
+        {
+            return;
+        }
+
+        foreach (var (body, map) in ComputationLambdas.ReturnedBodies(factory, host.SemanticModel, ComputationLambdas.BuildArgumentMap(call, argumentMap)))
+        {
+            if (visitedCalls.Add((body.Scope, host.TargetMethod, ComputationLambdas.ArgumentMapKey(map))))
+            {
+                InspectExecutedBody(context, host, body.Body, actorHost, visitedCalls, map);
             }
         }
     }
@@ -202,10 +240,50 @@ public sealed class SetInsideComputationAnalyzer : DiagnosticAnalyzer
         if (FactoryMethods.IsOptimisticPatchHost(host.TargetMethod))
         {
             var stateArgument = host.Arguments.FirstOrDefault(a => a.Parameter?.Ordinal == 0)?.Value;
-            return ReceiverChains.ResolveCreatingFactorySymbol(stateArgument, host.SemanticModel);
+            return ReceiverChains.ResolveCreatingFactorySymbol(stateArgument, host.SemanticModel)
+                ?? ResolveComputedStateFactory(stateArgument, host.SemanticModel);
         }
 
         return ReceiverChains.ResolveFactorySymbol(host, host.SemanticModel);
+    }
+
+    // A get-only computed STATE property (`OptimisticState<int> State => f1.CreateOptimistic(...)`)
+    // resolves through its getter's returns -- and only when EVERY return agrees on the
+    // creating factory: a getter that can hand back states from different factories keeps
+    // the host unprovable, which keeps the diagnostic.
+    private static ISymbol? ResolveComputedStateFactory(IOperation? stateArgument, SemanticModel? semanticModel)
+    {
+        var reference = stateArgument;
+        while (reference is IConversionOperation conversion)
+        {
+            reference = conversion.Operand;
+        }
+
+        if (reference is null
+            || ComputationLambdas.ReferencedVariable(reference) is not IPropertySymbol { GetMethod: { } getter, SetMethod: null }
+            || ComputationLambdas.ResolveMethodBody(getter, semanticModel) is not { } getterBody)
+        {
+            return null;
+        }
+
+        ISymbol? factory = null;
+        foreach (var inner in ComputationLambdas.DescendDirectExecution(getterBody.Body))
+        {
+            if (inner is not IReturnOperation { ReturnedValue: { } returned })
+            {
+                continue;
+            }
+
+            var resolved = ReceiverChains.ResolveCreatingFactorySymbol(returned, semanticModel);
+            if (resolved is null || (factory is not null && !SymbolEqualityComparer.Default.Equals(factory, resolved)))
+            {
+                return null;
+            }
+
+            factory = resolved;
+        }
+
+        return factory;
     }
 
     // A write API that throws in THIS host's engine: ActorSignal.Set inside an actor

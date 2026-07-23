@@ -149,6 +149,25 @@ internal static class ComputationLambdas
         }
     }
 
+    // A null-conditional invoke's receiver surfaces as a conditional-access PLACEHOLDER
+    // (`d?.Invoke()`): the real delegate expression is the enclosing conditional access's
+    // operation. Shared by every invoked-delegate chase.
+    public static IOperation ResolveConditionalReceiver(IOperation callee)
+    {
+        if (callee is IConditionalAccessInstanceOperation placeholder)
+        {
+            for (var current = placeholder.Parent; current is not null; current = current.Parent)
+            {
+                if (current is IConditionalAccessOperation conditional)
+                {
+                    return conditional.Operation;
+                }
+            }
+        }
+
+        return callee;
+    }
+
     // Shared with MZR004's method-group receiver resolution.
     public static ISymbol? ReferencedVariable(IOperation reference)
     {

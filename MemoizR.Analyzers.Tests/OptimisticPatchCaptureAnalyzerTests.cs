@@ -4431,4 +4431,33 @@ public class OptimisticPatchCaptureAnalyzerTests
         Assert.Contains("'patch'", diagnostic.GetMessage());
         Assert.Contains("cannot be resolved", diagnostic.GetMessage());
     }
+    [Fact]
+    public async Task CapturedComputedPropertyDelegate_IsWalkedNotTypeRejected()
+    {
+        // The captured delegate was read from a same-tree computed property: the getter's
+        // returns ARE the stored closure, walked instead of the capture being rejected
+        // wholesale for its delegate type.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                private static Func<int> Safe => static () => 0;
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    var d = Safe;
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x => x + d());
+                    });
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
 }

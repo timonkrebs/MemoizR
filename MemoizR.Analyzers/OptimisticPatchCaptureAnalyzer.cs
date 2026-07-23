@@ -1250,8 +1250,52 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
 
         if (!found)
         {
+            found = ChaseInvokedPropertyBodies(context, classifier, unwrapped, semanticModel, visitedCalls, visitedInvokes, argumentMap, reported);
+        }
+
+        if (!found)
+        {
             ReportUnresolvedInvokedDelegate(context, resolved, variable, semanticModel, reported);
         }
+    }
+
+    // A delegate READ from a same-tree computed get-only property and invoked executes
+    // whatever the getter returns, exactly like an invoked factory result: each return is
+    // its own accounted candidate, with the property's (indexer) argument map.
+    private static bool ChaseInvokedPropertyBodies(
+        OperationAnalysisContext context,
+        SendableSymbolClassifier classifier,
+        IOperation reference,
+        SemanticModel? semanticModel,
+        HashSet<(SyntaxNode, IMethodSymbol, string)> visitedCalls,
+        HashSet<(SyntaxNode, string)> visitedInvokes,
+        Dictionary<IParameterSymbol, IOperation>? argumentMap,
+        HashSet<ISymbol> reported)
+    {
+        if (ComputationLambdas.ReferencedVariable(reference) is not IPropertySymbol property
+            || IsSettable(property) || HasBackingStorage(property)
+            || property.GetMethod is not { } getter
+            || ComputationLambdas.ResolveMethodBody(getter, semanticModel) is not { } getterBody)
+        {
+            return false;
+        }
+
+        var propertyMap = ComputationLambdas.BuildArgumentMap(reference, argumentMap);
+        if (!visitedCalls.Add((reference.Syntax, getter, ComputationLambdas.ArgumentMapKey(propertyMap))))
+        {
+            return true;
+        }
+
+        var found = false;
+        foreach (var inner in ComputationLambdas.DescendDirectExecution(getterBody.Body))
+        {
+            if (inner is IReturnOperation { ReturnedValue: { } returned })
+            {
+                found |= ChaseReturnCandidate(context, classifier, returned, semanticModel, visitedCalls, visitedInvokes, propertyMap, reported);
+            }
+        }
+
+        return found;
     }
 
     // A delegate RETURNED by a same-tree helper and immediately invoked (`Get()()`) executes
@@ -1478,18 +1522,7 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
     // the real delegate expression is the enclosing conditional access's Operation.
     private static IOperation ResolveConditionalReceiver(IOperation callee)
     {
-        if (callee is IConditionalAccessInstanceOperation placeholder)
-        {
-            for (var current = placeholder.Parent; current is not null; current = current.Parent)
-            {
-                if (current is IConditionalAccessOperation conditional)
-                {
-                    return conditional.Operation;
-                }
-            }
-        }
-
-        return callee;
+        return ComputationLambdas.ResolveConditionalReceiver(callee);
     }
 
     // A delegate assembled by ASSIGNMENT (`Func<int> later; later = () => hits;`, including
@@ -1996,7 +2029,8 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
             default:
                 return ComputationLambdas.OfArgumentValue(value, semanticModel).Any()
                     || ResolveMethodReference(value, semanticModel, visitedVariables: null) is { Method.DeclaringSyntaxReferences.Length: 0 }
-                    || CapturedFactoryReturnsResolve(value, semanticModel);
+                    || CapturedFactoryReturnsResolve(value, semanticModel)
+                    || CapturedPropertyReturnsResolve(value, semanticModel);
         }
     }
 
@@ -2008,6 +2042,18 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         return Unwrap(value) is IInvocationOperation call
             && ComputationLambdas.ResolveMethodBody(call.TargetMethod, semanticModel) is { } factoryBody
             && ComputationLambdas.ReturnedBodies(factoryBody, semanticModel, ComputationLambdas.BuildArgumentMap(call, outer: null)).Any();
+    }
+
+    // A captured delegate READ from a same-tree computed get-only property (`var d = Safe;`
+    // with `Func<int> Safe => ...`) stores whatever the getter returned: the same
+    // returned-body resolution, sourced from the accessor.
+    private static bool CapturedPropertyReturnsResolve(IOperation value, SemanticModel? semanticModel)
+    {
+        return ComputationLambdas.ReferencedVariable(Unwrap(value)) is IPropertySymbol property
+            && !IsSettable(property) && !HasBackingStorage(property)
+            && property.GetMethod is { } getter
+            && ComputationLambdas.ResolveMethodBody(getter, semanticModel) is { } getterBody
+            && ComputationLambdas.ReturnedBodies(getterBody, semanticModel, ComputationLambdas.BuildArgumentMap(Unwrap(value), outer: null)).Any();
     }
 
     private static void WalkCapturedDelegateArms(
@@ -2052,7 +2098,16 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         if (!resolvedAny && Unwrap(value) is IInvocationOperation factoryCall
             && ComputationLambdas.ResolveMethodBody(factoryCall.TargetMethod, semanticModel) is { } factoryBody)
         {
-            InspectReturnedPatchBodies(context, classifier, factoryBody, factoryCall.TargetMethod, ComputationLambdas.BuildArgumentMap(factoryCall, outer: null), semanticModel, reported);
+            resolvedAny = InspectReturnedPatchBodies(context, classifier, factoryBody, factoryCall.TargetMethod, ComputationLambdas.BuildArgumentMap(factoryCall, outer: null), semanticModel, reported);
+        }
+
+        // The computed-property candidate: the getter's returns, with the same accounting.
+        if (!resolvedAny && ComputationLambdas.ReferencedVariable(Unwrap(value)) is IPropertySymbol patchProperty
+            && !IsSettable(patchProperty) && !HasBackingStorage(patchProperty)
+            && patchProperty.GetMethod is { } propertyGetter
+            && ComputationLambdas.ResolveMethodBody(propertyGetter, semanticModel) is { } propertyBody)
+        {
+            InspectReturnedPatchBodies(context, classifier, propertyBody, patchProperty, ComputationLambdas.BuildArgumentMap(Unwrap(value), outer: null), semanticModel, reported);
         }
     }
 

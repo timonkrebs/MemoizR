@@ -1896,4 +1896,95 @@ public class SetInsideComputationAnalyzerTests
         Assert.Equal("MZR003", diagnostic.Id);
         Assert.Contains("Signal<int>.Set", diagnostic.GetMessage());
     }
+    [Fact]
+    public async Task SetInNullConditionalInvokedDelegate_IsFlagged()
+    {
+        // `d?.Invoke()` still executes the delegate under the evaluation lock when non-null:
+        // the conditional-access placeholder resolves to the real delegate expression.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var v = f.CreateSignal(1);
+                    var state = f.CreateOptimistic<int>(v);
+                    Func<int> d = () => { _ = v.Set(1); return 0; };
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x => { d?.Invoke(); return x; });
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR003", diagnostic.Id);
+        Assert.Contains("Signal<int>.Set", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task SetInFactoryReturnedInvokedDelegate_IsFlagged()
+    {
+        // `Get()(x)` runs whatever the same-tree factory returned, immediately and under
+        // the same lock: the returned lambda's Set throws like an inline one.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var v = f.CreateSignal(1);
+                    var state = f.CreateOptimistic<int>(v);
+                    Func<int, int> Get() => x => { _ = v.Set(1); return x; };
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x => Get()(x));
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR003", diagnostic.Id);
+        Assert.Contains("Signal<int>.Set", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task ComputedStateProperty_KeepsCrossFactoryProof()
+    {
+        // The Apply state comes from a computed property whose getter always builds on f1:
+        // the Set targets a disjoint unkeyed factory's signal, so it locks another context
+        // and cannot throw here.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+            using MemoizR.Reactive;
+
+            public class C
+            {
+                private static readonly MemoFactory f1 = new MemoFactory();
+
+                private static OptimisticState<int> State => f1.CreateOptimistic<int>(f1.CreateSignal(1));
+
+                public void M()
+                {
+                    var f2 = new MemoFactory();
+                    var other = f2.CreateSignal(1);
+                    f1.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(State, x => { _ = other.Set(2); return x; });
+                    });
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
 }

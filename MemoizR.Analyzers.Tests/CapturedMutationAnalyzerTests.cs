@@ -1096,4 +1096,104 @@ public class CapturedMutationAnalyzerTests
         Assert.Equal("MZR002", diagnostic.Id);
         Assert.Contains("captured local 'applied'", diagnostic.GetMessage());
     }
+    [Fact]
+    public async Task HelperInvokedDelegate_MutationIsFlagged()
+    {
+        // The helper executes the delegate the patch handed it: step's captured-local write
+        // replays on the computation's flows, reached through the helper's own binding.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    var applied = 0;
+                    Func<int, int> step = x => { applied++; return x; };
+                    static int Run(Func<int, int> g, int x) => g(x);
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x => Run(step, x));
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR002", diagnostic.Id);
+        Assert.Contains("captured local 'applied'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task ConstructorMutation_IsFlagged()
+    {
+        // The patch constructs a Writer on every replay: the ctor's static write races,
+        // while the fresh object's own field write is nobody's shared state.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class Writer
+            {
+                public static int count;
+                public int mine;
+
+                public Writer()
+                {
+                    mine = 1;
+                    count++;
+                }
+            }
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x => { _ = new Writer(); return x; });
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR002", diagnostic.Id);
+        Assert.Contains("static field 'count'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task FactoryReturnedInvokedDelegate_MutationIsFlagged()
+    {
+        // `Get()(x)` executes the factory-returned lambda on the computation's flows: its
+        // captured-local write races like inline code.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    var applied = 0;
+                    Func<int, int> Get() => x => { applied++; return x; };
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x => Get()(x));
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR002", diagnostic.Id);
+        Assert.Contains("captured local 'applied'", diagnostic.GetMessage());
+    }
 }

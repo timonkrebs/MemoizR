@@ -63,9 +63,18 @@ public sealed class CapturedMutationAnalyzer : DiagnosticAnalyzer
 
     private static void InspectComputationBody(OperationAnalysisContext context, ComputationLambdas.ComputationBody computation, SemanticModel? semanticModel)
     {
-        var visitedHelpers = new HashSet<(IMethodSymbol, IParameterSymbol?, bool)>(ChaseKeyComparer.Instance);
-        var visitedDelegates = new HashSet<SyntaxNode>();
-        InspectComputationOperations(context, computation, computation.Scope, semanticModel, visitedHelpers, visitedDelegates);
+        var walk = new ChaseState();
+        InspectComputationOperations(context, computation, computation.Scope, semanticModel, walk, argumentMap: null);
+    }
+
+    // Per-computation walk state: the visited sets bound helper/delegate cycles, and the
+    // reported set keeps a body re-walked under a DIFFERENT delegate binding from emitting
+    // the same mutation diagnostic twice.
+    private sealed class ChaseState
+    {
+        public readonly HashSet<(IMethodSymbol, IParameterSymbol?, bool, string)> VisitedHelpers = new(ChaseKeyComparer.Instance);
+        public readonly HashSet<SyntaxNode> VisitedDelegates = new();
+        public readonly HashSet<SyntaxNode> ReportedTargets = new();
     }
 
     private static void InspectComputationOperations(
@@ -73,18 +82,18 @@ public sealed class CapturedMutationAnalyzer : DiagnosticAnalyzer
         ComputationLambdas.ComputationBody body,
         SyntaxNode computationScope,
         SemanticModel? semanticModel,
-        HashSet<(IMethodSymbol, IParameterSymbol?, bool)> visitedHelpers,
-        HashSet<SyntaxNode> visitedDelegates)
+        ChaseState walk,
+        Dictionary<IParameterSymbol, IOperation>? argumentMap)
     {
         foreach (var operation in ComputationLambdas.Descend(body.Body))
         {
             foreach (var target in MutationTargets(operation))
             {
-                ReportIfShared(context, target, body.Scope, computationScope, thisParameter: null, foreignThis: false);
+                ReportIfShared(context, target, body.Scope, computationScope, thisParameter: null, foreignThis: false, walk.ReportedTargets);
             }
 
-            InspectCalledHelper(context, operation, computationScope, semanticModel, visitedHelpers, thisParameter: null, foreignThis: false);
-            InspectInvokedDelegate(context, operation, computationScope, semanticModel, visitedHelpers, visitedDelegates);
+            InspectCalledHelper(context, operation, computationScope, semanticModel, walk, thisParameter: null, foreignThis: false, argumentMap);
+            InspectInvokedDelegate(context, operation, computationScope, semanticModel, walk, argumentMap);
         }
     }
 
@@ -98,21 +107,66 @@ public sealed class CapturedMutationAnalyzer : DiagnosticAnalyzer
         IOperation operation,
         SyntaxNode computationScope,
         SemanticModel? semanticModel,
-        HashSet<(IMethodSymbol, IParameterSymbol?, bool)> visitedHelpers,
-        HashSet<SyntaxNode> visitedDelegates)
+        ChaseState walk,
+        Dictionary<IParameterSymbol, IOperation>? argumentMap)
     {
         if (operation is not IInvocationOperation { TargetMethod.MethodKind: MethodKind.DelegateInvoke, Instance: { } callee })
         {
             return;
         }
 
-        var resolved = ComputationLambdas.ResolveDelegateValue(callee, semanticModel, null);
+        var resolved = ComputationLambdas.ResolveDelegateValue(ComputationLambdas.ResolveConditionalReceiver(callee), semanticModel, argumentMap);
+        var found = false;
         foreach (var delegateBody in ComputationLambdas.OfArgumentValue(resolved, semanticModel))
         {
-            if (!computationScope.Span.Contains(delegateBody.Scope.Span) && visitedDelegates.Add(delegateBody.Scope))
-            {
-                InspectComputationOperations(context, delegateBody, computationScope, semanticModel, visitedHelpers, visitedDelegates);
-            }
+            found = true;
+            InspectDelegateBody(context, delegateBody, computationScope, semanticModel, walk, argumentMap);
+        }
+
+        if (!found)
+        {
+            InspectInvokedFactoryResult(context, resolved, computationScope, semanticModel, walk, argumentMap);
+        }
+    }
+
+    // `Get()(x)` executes whatever the same-tree factory returned, with the returns' own
+    // argument maps.
+    private static void InspectInvokedFactoryResult(
+        OperationAnalysisContext context,
+        IOperation resolved,
+        SyntaxNode computationScope,
+        SemanticModel? semanticModel,
+        ChaseState walk,
+        Dictionary<IParameterSymbol, IOperation>? argumentMap)
+    {
+        while (resolved is IConversionOperation conversion)
+        {
+            resolved = conversion.Operand;
+        }
+
+        if (resolved is not IInvocationOperation call
+            || ComputationLambdas.ResolveMethodBody(call.TargetMethod, semanticModel) is not { } factory)
+        {
+            return;
+        }
+
+        foreach (var (delegateBody, map) in ComputationLambdas.ReturnedBodies(factory, semanticModel, ComputationLambdas.BuildArgumentMap(call, argumentMap)))
+        {
+            InspectDelegateBody(context, delegateBody, computationScope, semanticModel, walk, map);
+        }
+    }
+
+    private static void InspectDelegateBody(
+        OperationAnalysisContext context,
+        ComputationLambdas.ComputationBody delegateBody,
+        SyntaxNode computationScope,
+        SemanticModel? semanticModel,
+        ChaseState walk,
+        Dictionary<IParameterSymbol, IOperation>? argumentMap)
+    {
+        if (!computationScope.Span.Contains(delegateBody.Scope.Span) && walk.VisitedDelegates.Add(delegateBody.Scope))
+        {
+            InspectComputationOperations(context, delegateBody, computationScope, semanticModel, walk, argumentMap);
         }
     }
 
@@ -136,9 +190,10 @@ public sealed class CapturedMutationAnalyzer : DiagnosticAnalyzer
         IOperation operation,
         SyntaxNode computationScope,
         SemanticModel? semanticModel,
-        HashSet<(IMethodSymbol, IParameterSymbol?, bool)> visited,
+        ChaseState walk,
         IParameterSymbol? thisParameter,
-        bool foreignThis)
+        bool foreignThis,
+        Dictionary<IParameterSymbol, IOperation>? argumentMap)
     {
         foreach (var method in ChaseableMethods(operation, thisParameter, foreignThis))
         {
@@ -151,7 +206,14 @@ public sealed class CapturedMutationAnalyzer : DiagnosticAnalyzer
 
             var nestedThis = NestedThisParameter(operation, thisParameter, foreignThis);
             var nestedForeign = ForeignReceiver(operation, thisParameter, foreignThis);
-            if (!visited.Add((method, nestedThis, nestedForeign)))
+
+            // The map lets a delegate handed INTO the helper resolve at its invocation
+            // (`Run(step)` with `Run(Func<int> f) => f()` executes step's body). Only the
+            // DELEGATE bindings key the visited set: they decide what an invoked parameter
+            // resolves to, while re-walking on ordinary arguments would only repeat the
+            // same reports (which the reported set deduplicates anyway).
+            var nestedMap = ComputationLambdas.BuildArgumentMap(operation, argumentMap);
+            if (!walk.VisitedHelpers.Add((method, nestedThis, nestedForeign, DelegateBindingsKey(nestedMap))))
             {
                 continue;
             }
@@ -160,21 +222,31 @@ public sealed class CapturedMutationAnalyzer : DiagnosticAnalyzer
             {
                 foreach (var target in MutationTargets(inner))
                 {
-                    ReportIfShared(context, target, helper.Scope, computationScope, nestedThis, nestedForeign);
+                    ReportIfShared(context, target, helper.Scope, computationScope, nestedThis, nestedForeign, walk.ReportedTargets);
                 }
 
-                InspectCalledHelper(context, inner, computationScope, semanticModel, visited, nestedThis, nestedForeign);
+                InspectCalledHelper(context, inner, computationScope, semanticModel, walk, nestedThis, nestedForeign, nestedMap);
+                InspectInvokedDelegate(context, inner, computationScope, semanticModel, walk, nestedMap);
             }
         }
+    }
+
+    private static string DelegateBindingsKey(Dictionary<IParameterSymbol, IOperation>? map)
+    {
+        if (map is null)
+        {
+            return "";
+        }
+
+        var delegates = map.Where(entry => entry.Key.Type.TypeKind == TypeKind.Delegate)
+            .ToDictionary(entry => entry.Key, entry => entry.Value);
+        return ComputationLambdas.ArgumentMapKey(delegates);
     }
 
     private static IEnumerable<IMethodSymbol> ChaseableMethods(IOperation operation, IParameterSymbol? thisParameter, bool foreignThis)
     {
         switch (operation)
         {
-            case IInvocationOperation call:
-                yield return call.TargetMethod;
-                break;
             case IMethodReferenceOperation { Method.MethodKind: MethodKind.LocalFunction } reference:
                 yield return reference.Method;
                 break;
@@ -182,6 +254,19 @@ public sealed class CapturedMutationAnalyzer : DiagnosticAnalyzer
                 foreach (var accessor in ChaseableAccessors(property, thisParameter, foreignThis))
                 {
                     yield return accessor;
+                }
+
+                break;
+
+            // Every other executed shape runs like a call: a same-tree CONSTRUCTOR
+            // (`new Writer()` incrementing a static counter), a user-defined
+            // operator/conversion, a custom event accessor, using-driven Dispose.
+            // ForeignReceiver marks a constructor's fresh object so its own instance
+            // writes stay suppressed while statics and captured state still report.
+            default:
+                foreach (var method in ComputationLambdas.ExecutedMethods(operation))
+                {
+                    yield return method;
                 }
 
                 break;
@@ -215,6 +300,13 @@ public sealed class CapturedMutationAnalyzer : DiagnosticAnalyzer
     // in a foreign body still belongs to that foreign object.
     private static bool ForeignReceiver(IOperation operation, IParameterSymbol? thisParameter, bool foreignThis)
     {
+        // A constructor body's `this` is the FRESH object being built -- never the
+        // computation's instance, whichever flow reaches it.
+        if (operation is IObjectCreationOperation)
+        {
+            return true;
+        }
+
         var instance = operation switch
         {
             IInvocationOperation call => call.Instance,
@@ -294,18 +386,19 @@ public sealed class CapturedMutationAnalyzer : DiagnosticAnalyzer
         }
     }
 
-    private sealed class ChaseKeyComparer : IEqualityComparer<(IMethodSymbol Method, IParameterSymbol? This, bool Foreign)>
+    private sealed class ChaseKeyComparer : IEqualityComparer<(IMethodSymbol Method, IParameterSymbol? This, bool Foreign, string Bindings)>
     {
         public static readonly ChaseKeyComparer Instance = new();
 
-        public bool Equals((IMethodSymbol Method, IParameterSymbol? This, bool Foreign) x, (IMethodSymbol Method, IParameterSymbol? This, bool Foreign) y)
+        public bool Equals((IMethodSymbol Method, IParameterSymbol? This, bool Foreign, string Bindings) x, (IMethodSymbol Method, IParameterSymbol? This, bool Foreign, string Bindings) y)
         {
             return SymbolEqualityComparer.Default.Equals(x.Method, y.Method)
                 && SymbolEqualityComparer.Default.Equals(x.This, y.This)
-                && x.Foreign == y.Foreign;
+                && x.Foreign == y.Foreign
+                && x.Bindings == y.Bindings;
         }
 
-        public int GetHashCode((IMethodSymbol Method, IParameterSymbol? This, bool Foreign) key)
+        public int GetHashCode((IMethodSymbol Method, IParameterSymbol? This, bool Foreign, string Bindings) key)
         {
             return SymbolEqualityComparer.Default.GetHashCode(key.Method);
         }
@@ -401,10 +494,10 @@ public sealed class CapturedMutationAnalyzer : DiagnosticAnalyzer
         return targets.ToImmutable();
     }
 
-    private static void ReportIfShared(OperationAnalysisContext context, IOperation target, SyntaxNode scope, SyntaxNode computationScope, IParameterSymbol? thisParameter, bool foreignThis)
+    private static void ReportIfShared(OperationAnalysisContext context, IOperation target, SyntaxNode scope, SyntaxNode computationScope, IParameterSymbol? thisParameter, bool foreignThis, HashSet<SyntaxNode> reportedTargets)
     {
         var (kind, symbol) = ResolveSharedRoot(target, scope, thisParameter, foreignThis);
-        if (kind is null || !SharesComputationEnvironment(symbol!, computationScope))
+        if (kind is null || !SharesComputationEnvironment(symbol!, computationScope) || !reportedTargets.Add(target.Syntax))
         {
             return;
         }
