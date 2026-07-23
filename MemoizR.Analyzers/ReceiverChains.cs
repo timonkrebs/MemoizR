@@ -84,15 +84,10 @@ internal static class ReceiverChains
 
         // The sole assignment standing in for a missing initializer is initialization, not a
         // rebind (`OptimisticState<int> state; state = f1.CreateOptimistic(...);` still proves
-        // provenance -- the same assignment is what InitializerOf resolves through) -- but
-        // only when it can actually RUN before this read: a future write proves nothing about
-        // the value read here.
-        var effectiveInitializer = ComputationLambdas.EffectiveInitializerAssignment(variable, semanticModel);
-        if (effectiveInitializer is not null
-            && !ComputationLambdas.CanExecuteBefore(effectiveInitializer, reference, variable, semanticModel))
-        {
-            return true;
-        }
+        // provenance -- the same assignment is what InitializerOf resolves through). The
+        // synthesis is READ-relative: a write that cannot run before this read, or a member
+        // write that does not provably reach it, excuses nothing and falls to the scan below.
+        var effectiveInitializer = ComputationLambdas.EffectiveInitializerAssignment(variable, semanticModel, reference);
 
         foreach (var node in semanticModel.SyntaxTree.GetRoot().DescendantNodes())
         {

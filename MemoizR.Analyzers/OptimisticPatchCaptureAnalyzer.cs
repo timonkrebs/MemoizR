@@ -310,6 +310,17 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
             return true;
         }
 
+        // A two-step initialization whose initializing write stands only RELATIVE to this
+        // read (`patch = safe; await Apply(state, patch); patch = other;` -- the later
+        // rebind makes the global scan ambiguous, but cannot change what this call stored)
+        // resolves to that write's value, walked like a surviving reassignment write.
+        if (semanticModel is not null
+            && ReceiverSymbol(Unwrap(value)) is { } stepwise
+            && ComputationLambdas.EffectiveInitializerWrite(stepwise, semanticModel, Unwrap(value).Syntax) is AssignmentExpressionSyntax stepwiseWrite)
+        {
+            return InspectSurvivingWrite(context, classifier, stepwiseWrite, stepwise, semanticModel, reported);
+        }
+
         // A same-tree computed get-only delegate PROPERTY resolves through its getter's
         // returns, like a delegate-returning helper: each return is walked as a patch body,
         // with unresolvable returns reported.
@@ -341,7 +352,7 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
     {
         if (semanticModel is null
             || ReceiverSymbol(Unwrap(value)) is not { } assembled
-            || ComputationLambdas.EffectiveInitializerWrite(assembled, semanticModel) is not ArgumentSyntax outWrite)
+            || ComputationLambdas.EffectiveInitializerWrite(assembled, semanticModel, Unwrap(value).Syntax) is not ArgumentSyntax outWrite)
         {
             return false;
         }
@@ -558,15 +569,11 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         // The sole WRITE standing in for a missing initializer is initialization, not a
         // rebind (`Func<int,int> patch; patch = static x => x;` -- or `Provide(out patch)`,
         // whose bodies the out-helper machinery resolves -- is the declaration in two
-        // steps) -- but only when it can actually RUN before this read: a future write proves
-        // nothing about the value read here (a constructor- or externally-supplied delegate
-        // would slip through on its strength).
-        var effectiveInitializer = ComputationLambdas.EffectiveInitializerWrite(variable, semanticModel);
-        if (effectiveInitializer is not null
-            && !ComputationLambdas.CanExecuteBefore(effectiveInitializer, readReference.Syntax, variable, semanticModel))
-        {
-            return true;
-        }
+        // steps). The synthesis itself is READ-relative: writes that cannot run before this
+        // read neither initialize nor disqualify what it observes, and a member write must
+        // provably reach the read -- so a write that fails those tests falls through to the
+        // rebind scan below instead of excusing anything.
+        var effectiveInitializer = ComputationLambdas.EffectiveInitializerWrite(variable, semanticModel, readReference.Syntax);
 
         foreach (var node in semanticModel.SyntaxTree.GetRoot().DescendantNodes())
         {
@@ -937,6 +944,7 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         return property.GetMethod?.DeclaringSyntaxReferences.FirstOrDefault()?.GetSyntax() switch
         {
             AccessorDeclarationSyntax { Body: null, ExpressionBody: null } => true, // auto-property
+            ParameterSyntax => true,                                               // positional record: synthesized auto
             null => true,                                                          // metadata: unwalkable
             _ => false,                                                            // computed: chased instead
         };
@@ -1076,7 +1084,7 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         IMethodSymbol method,
         HashSet<ISymbol> reported)
     {
-        if ((!IsUnverifiableExecutedShape(operation) && !IsExecutedSetter(operation, method))
+        if ((!IsUnverifiableExecutedShape(operation) && !IsUnverdictedAccessor(operation, method))
             || method.DeclaringSyntaxReferences.Length == 0)
         {
             return;
@@ -1108,13 +1116,28 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
             or IUsingOperation;
     }
 
-    // A SETTER an assignment runs is executed code like a call: on a receiver the capture
-    // walk gives no verdict for (a computation-local object, a Sendable-trusted type), this
-    // fallback is the only look a cross-file setter body ever gets. Getters stay with their
-    // own member/type/getter verdicts.
-    private static bool IsExecutedSetter(IOperation operation, IMethodSymbol method)
+    // An ACCESSOR the patch runs is executed code like a call. Setters always land here: on
+    // a receiver the capture walk gives no verdict for (a computation-local object, a
+    // Sendable-trusted type), this fallback is the only look a cross-file setter body ever
+    // gets. GETTERS land here on those same unverdicted receivers -- enclosing-instance and
+    // static reads keep their own member/type/getter verdicts from the capture walk, but
+    // `new Box().P` with the getter in another file is checked by nothing else.
+    private static bool IsUnverdictedAccessor(IOperation operation, IMethodSymbol method)
     {
-        return operation is IPropertyReferenceOperation && method.MethodKind == MethodKind.PropertySet;
+        if (operation is not IPropertyReferenceOperation property)
+        {
+            return false;
+        }
+
+        if (method.MethodKind == MethodKind.PropertySet)
+        {
+            return true;
+        }
+
+        return method.MethodKind == MethodKind.PropertyGet
+            && property.Property is { IsStatic: false }
+            && !HasBackingStorage(property.Property)
+            && property.Instance is not (null or IInstanceReferenceOperation { ReferenceKind: InstanceReferenceKind.ContainingTypeInstance });
     }
 
     // A delegate the patch builds AND synchronously invokes runs its body on every replay:
@@ -1912,8 +1935,19 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
                     && CapturedDelegateArmsResolve(coalesce.WhenNull, semanticModel);
             default:
                 return ComputationLambdas.OfArgumentValue(value, semanticModel).Any()
-                    || ResolveMethodReference(value, semanticModel, visitedVariables: null) is { Method.DeclaringSyntaxReferences.Length: 0 };
+                    || ResolveMethodReference(value, semanticModel, visitedVariables: null) is { Method.DeclaringSyntaxReferences.Length: 0 }
+                    || CapturedFactoryReturnsResolve(value, semanticModel);
         }
+    }
+
+    // A captured delegate BUILT by a same-tree factory (`var d = Safe();`) stores whatever
+    // the factory returned, so it resolves through the factory's returns exactly like a
+    // factory-built patch argument -- instead of being rejected wholesale for its type.
+    private static bool CapturedFactoryReturnsResolve(IOperation value, SemanticModel? semanticModel)
+    {
+        return Unwrap(value) is IInvocationOperation call
+            && ComputationLambdas.ResolveMethodBody(call.TargetMethod, semanticModel) is { } factoryBody
+            && ComputationLambdas.ReturnedBodies(factoryBody, semanticModel, ComputationLambdas.BuildArgumentMap(call, outer: null)).Any();
     }
 
     private static void WalkCapturedDelegateArms(
@@ -1946,9 +1980,19 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
             InspectMethodGroupReceiver(context, classifier, methodReference, reported);
         }
 
+        var resolvedAny = false;
         foreach (var body in ComputationLambdas.OfArgumentValue(value, semanticModel))
         {
+            resolvedAny = true;
             InspectPatchBody(context, classifier, body, semanticModel, reported);
+        }
+
+        // The factory-built candidate: each of the factory's returns is a patch body of its
+        // own, with unresolvable returns reported by the per-return accounting.
+        if (!resolvedAny && Unwrap(value) is IInvocationOperation factoryCall
+            && ComputationLambdas.ResolveMethodBody(factoryCall.TargetMethod, semanticModel) is { } factoryBody)
+        {
+            InspectReturnedPatchBodies(context, classifier, factoryBody, factoryCall.TargetMethod, ComputationLambdas.BuildArgumentMap(factoryCall, outer: null), semanticModel, reported);
         }
     }
 

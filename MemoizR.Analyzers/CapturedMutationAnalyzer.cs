@@ -38,16 +38,40 @@ public sealed class CapturedMutationAnalyzer : DiagnosticAnalyzer
 
         foreach (var computation in ComputationLambdas.OfInvocation(invocation))
         {
-            var visitedHelpers = new HashSet<(IMethodSymbol, IParameterSymbol?, bool)>(ChaseKeyComparer.Instance);
-            foreach (var operation in ComputationLambdas.Descend(computation.Body))
+            InspectComputationBody(context, computation, invocation.SemanticModel);
+        }
+
+        // Patch shapes resolved beyond plain arguments -- assembled by an out-helper,
+        // returned by a computed delegate property or a same-tree factory -- replay on the
+        // state's flows exactly like an inline patch, so their writes race identically.
+        if (FactoryMethods.IsOptimisticPatchHost(invocation.TargetMethod))
+        {
+            foreach (var argument in invocation.Arguments)
             {
-                foreach (var target in MutationTargets(operation))
+                if (argument.Parameter?.Type is not { TypeKind: TypeKind.Delegate })
                 {
-                    ReportIfShared(context, target, computation.Scope, computation.Scope, thisParameter: null, foreignThis: false);
+                    continue;
                 }
 
-                InspectCalledHelper(context, operation, computation.Scope, invocation.SemanticModel, visitedHelpers, thisParameter: null, foreignThis: false);
+                foreach (var (body, _) in ComputationLambdas.AssembledPatchBodies(argument.Value, invocation.SemanticModel))
+                {
+                    InspectComputationBody(context, body, invocation.SemanticModel);
+                }
             }
+        }
+    }
+
+    private static void InspectComputationBody(OperationAnalysisContext context, ComputationLambdas.ComputationBody computation, SemanticModel? semanticModel)
+    {
+        var visitedHelpers = new HashSet<(IMethodSymbol, IParameterSymbol?, bool)>(ChaseKeyComparer.Instance);
+        foreach (var operation in ComputationLambdas.Descend(computation.Body))
+        {
+            foreach (var target in MutationTargets(operation))
+            {
+                ReportIfShared(context, target, computation.Scope, computation.Scope, thisParameter: null, foreignThis: false);
+            }
+
+            InspectCalledHelper(context, operation, computation.Scope, semanticModel, visitedHelpers, thisParameter: null, foreignThis: false);
         }
     }
 

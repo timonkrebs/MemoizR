@@ -945,4 +945,35 @@ public class CapturedMutationAnalyzerTests
 
         Assert.Empty(diagnostics);
     }
+    [Fact]
+    public async Task AssembledPatchMutation_IsFlagged()
+    {
+        // The patch assembled by the out-helper replays on the state's flows exactly like an
+        // inline patch: its write to the captured local is the same data race.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    var applied = 0;
+                    void Provide(out Func<int, int> d) => d = x => { applied++; return x; };
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        Func<int, int> patch;
+                        Provide(out patch);
+                        await ctx.Apply(state, patch);
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR002", diagnostic.Id);
+        Assert.Contains("captured local 'applied'", diagnostic.GetMessage());
+    }
 }

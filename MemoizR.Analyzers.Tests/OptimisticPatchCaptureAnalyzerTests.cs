@@ -4062,4 +4062,176 @@ public class OptimisticPatchCaptureAnalyzerTests
 
         Assert.Single(diagnostics);
     }
+    [Fact]
+    public async Task PostReadLocalFunctionEscape_DoesNotCountAsRunnable()
+    {
+        // The local function that rebinds the patch is lifted into a delegate, but that
+        // delegate escapes only AFTER the Apply call on the straight-line path: nothing can
+        // have invoked the rebind before the read, so the declaration initializer stands.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    Func<int, int> patch = static x => x;
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        void Rebind() => patch = static x => x + 1;
+                        Action a = Rebind;
+                        await ctx.Apply(state, patch);
+                        Consume(a);
+                    });
+                }
+
+                private static void Consume(Action a) { }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task FutureRebindOfTwoStepLocal_KeepsTheInitializingWrite()
+    {
+        // The two-step local is rebound only AFTER the Apply call: the later write makes the
+        // global sole-write scan ambiguous, but cannot change what this call stored, so the
+        // initializing write's lambda is what gets walked -- and the rebind's captured static
+        // must not be charged to it.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                private static int hits;
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        Func<int, int> patch;
+                        patch = static x => x;
+                        await ctx.Apply(state, patch);
+                        patch = static x => x + hits;
+                    });
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task CrossFileGetterOnLocalReceiver_IsUnverifiable()
+    {
+        // The receiver is a patch-local struct the capture walk never verdicts, and the
+        // getter body lives in another file: nothing else checks the statics it re-reads on
+        // every replay, so unverifiable means flagged.
+        var diagnostics = await AnalyzerTestHarness.AnalyzeAsync(new[]
+        {
+            """
+            public struct Box
+            {
+                private static int hits;
+                public int P => hits++;
+            }
+            """,
+            """
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x =>
+                        {
+                            var box = new Box();
+                            return x + box.P;
+                        });
+                    });
+                }
+            }
+            """,
+        }, new OptimisticPatchCaptureAnalyzer());
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR004", diagnostic.Id);
+        Assert.Contains("'P'", diagnostic.GetMessage());
+        Assert.Contains("another file", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task CapturedFactoryDelegate_IsWalkedNotTypeRejected()
+    {
+        // The captured delegate was built by a same-tree factory: its returns ARE the stored
+        // closure, so they are walked like a factory-built patch argument instead of the
+        // capture being rejected wholesale for its delegate type.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    static Func<int> Safe() => static () => 0;
+                    var d = Safe();
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x => x + d());
+                    });
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task UnrelatedMethodWrite_DoesNotStandInForAFieldPatch()
+    {
+        // The field's sole write lives in a method nothing here calls: at the Apply read the
+        // field may still hold its default or an externally supplied delegate, so the write
+        // must not stand in as the initializer -- unresolvable keeps the flag.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                private Func<int, int> patch;
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, patch);
+                    });
+                }
+
+                private void Reset() => patch = static x => x;
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR004", diagnostic.Id);
+        Assert.Contains("'patch'", diagnostic.GetMessage());
+        Assert.Contains("cannot be resolved", diagnostic.GetMessage());
+    }
 }

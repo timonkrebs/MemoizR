@@ -256,9 +256,9 @@ internal static class ComputationLambdas
     // The effective initializer narrowed to the shapes whose right-hand side resolves to a
     // single operation; an out-argument handoff has no RHS here (its bodies come from the
     // callee's assignments, which MZR004 resolves itself).
-    public static AssignmentExpressionSyntax? EffectiveInitializerAssignment(ISymbol variable, SemanticModel? semanticModel)
+    public static AssignmentExpressionSyntax? EffectiveInitializerAssignment(ISymbol variable, SemanticModel? semanticModel, SyntaxNode? readSite = null)
     {
-        return EffectiveInitializerWrite(variable, semanticModel) as AssignmentExpressionSyntax;
+        return EffectiveInitializerWrite(variable, semanticModel, readSite) as AssignmentExpressionSyntax;
     }
 
     // The single same-tree WRITE standing in for a missing declaration initializer -- a
@@ -267,7 +267,7 @@ internal static class ComputationLambdas
     // declaration has an initializer, there are several writes (ambiguous), or the one
     // write does not fully determine the value. Reassignment scans EXCLUDE this node: it is
     // the initialization, not a rebind.
-    public static SyntaxNode? EffectiveInitializerWrite(ISymbol variable, SemanticModel? semanticModel)
+    public static SyntaxNode? EffectiveInitializerWrite(ISymbol variable, SemanticModel? semanticModel, SyntaxNode? readSite = null)
     {
         if (semanticModel is null || variable.DeclaringSyntaxReferences.FirstOrDefault()?.GetSyntax()
                 is VariableDeclaratorSyntax { Initializer: not null }
@@ -283,8 +283,11 @@ internal static class ComputationLambdas
             // WritesVariable, not plain symbol equality: the reassignment scans count a
             // write through a ref alias (`ref var alias = ref patch; alias = ...`), so the
             // initializer detection must recognize the same write or the sole initializing
-            // assignment would read as a rebind.
-            if (ReassignmentTargets(node) is not { } targets)
+            // assignment would read as a rebind. With a READ SITE, writes that cannot run
+            // before it are ignored outright: a future rebind neither initializes nor
+            // disqualifies the write whose value this read observes.
+            if (ReassignmentTargets(node) is not { } targets
+                || (readSite is not null && !CanExecuteBefore(node, readSite, variable, semanticModel)))
             {
                 continue;
             }
@@ -303,7 +306,32 @@ internal static class ComputationLambdas
             sole = node;
         }
 
-        return sole is not null && DominatesItsFunction(sole, variable) ? sole : null;
+        return sole is not null && DominatesItsFunction(sole, variable) && ReachesMemberRead(sole, variable, readSite)
+            ? sole
+            : null;
+    }
+
+    // For MEMBER storage the sole write must also provably reach THIS read: unlike locals
+    // (definite assignment) and parameters (binding), a field holds its default or an
+    // externally supplied value until the write actually runs -- a write in some unrelated
+    // method that merely COULD run first proves nothing. Provable = the write shares the
+    // read's function, or its function lexically contains the read (the flow reaching a
+    // computation built after the write passed it first).
+    private static bool ReachesMemberRead(SyntaxNode write, ISymbol variable, SyntaxNode? readSite)
+    {
+        if (variable is not (IFieldSymbol or IPropertySymbol))
+        {
+            return true;
+        }
+
+        if (readSite is null)
+        {
+            return false;
+        }
+
+        var function = EnclosingFunction(write);
+        return function is not null
+            && (ReferenceEquals(function, EnclosingFunction(readSite)) || function.Span.Contains(readSite.Span));
     }
 
     // Only a write that fully DETERMINES the value qualifies: `x ??= ...` / `x += ...` can
@@ -586,7 +614,7 @@ internal static class ComputationLambdas
         }
 
         var variable = ReferencedVariable(reference);
-        if (variable is not null && EffectiveInitializerWrite(variable, semanticModel) is ArgumentSyntax outWrite)
+        if (variable is not null && EffectiveInitializerWrite(variable, semanticModel, reference.Syntax) is ArgumentSyntax outWrite)
         {
             foreach (var body in OutHandoffBodies(outWrite, semanticModel, new HashSet<SyntaxNode>(), outerMap: null))
             {
@@ -621,6 +649,63 @@ internal static class ComputationLambdas
         }
     }
 
+    // A delegate VALUE collapsed through variable-alias initializers and parameter-to-
+    // argument hops -- the resolution-only mirror of MZR004's invoked-delegate resolver,
+    // with a strict rebind guard: a written alias or parameter stays put, because the
+    // write (not the initializer or the call site) owns the value.
+    public static IOperation ResolveDelegateValue(IOperation value, SemanticModel? semanticModel, Dictionary<IParameterSymbol, IOperation>? argumentMap)
+    {
+        var current = value;
+        HashSet<ISymbol>? visited = null;
+        while (true)
+        {
+            var unwrapped = current;
+            while (unwrapped is IConversionOperation conversion)
+            {
+                unwrapped = conversion.Operand;
+            }
+
+            if (unwrapped is IParameterReferenceOperation rebound
+                && argumentMap?.ContainsKey(rebound.Parameter) == true
+                && IsWrittenBefore(rebound.Parameter, current.Syntax, semanticModel))
+            {
+                return current;
+            }
+
+            if (SubstituteArguments(current, argumentMap) is { } substituted && !ReferenceEquals(substituted, current))
+            {
+                current = substituted;
+                continue;
+            }
+
+            if (ReferencedVariable(unwrapped) is not { } variable)
+            {
+                return current;
+            }
+
+            visited ??= new HashSet<ISymbol>(SymbolEqualityComparer.Default);
+            var initializer = SameTreeInitializerOperation(variable, semanticModel);
+            if (!visited.Add(variable) || initializer is null
+                || IsWrittenBefore(variable, current.Syntax, semanticModel)
+                || !IsReferenceShape(initializer))
+            {
+                return current;
+            }
+
+            current = initializer;
+        }
+    }
+
+    private static bool IsReferenceShape(IOperation operation)
+    {
+        while (operation is IConversionOperation conversion)
+        {
+            operation = conversion.Operand;
+        }
+
+        return operation is IParameterReferenceOperation || ReferencedVariable(operation) is not null;
+    }
+
     private static IInvocationOperation? UnwrappedInitializerCall(ISymbol? variable, SemanticModel? semanticModel)
     {
         var initializer = SameTreeInitializerOperation(variable, semanticModel);
@@ -632,7 +717,7 @@ internal static class ComputationLambdas
         return initializer as IInvocationOperation;
     }
 
-    private static IEnumerable<ComputationBody> ReturnedBodies(ComputationBody methodBody, SemanticModel? semanticModel, Dictionary<IParameterSymbol, IOperation>? argumentMap = null)
+    public static IEnumerable<ComputationBody> ReturnedBodies(ComputationBody methodBody, SemanticModel? semanticModel, Dictionary<IParameterSymbol, IOperation>? argumentMap = null)
     {
         foreach (var inner in DescendDirectExecution(methodBody.Body))
         {
@@ -641,7 +726,8 @@ internal static class ComputationLambdas
                 continue;
             }
 
-            foreach (var body in OfArgumentValue(SubstituteArguments(returned, argumentMap) ?? returned, semanticModel))
+            // Aliases resolve too: `var q = p; return q;` hands back the call-site value.
+            foreach (var body in OfArgumentValue(ResolveDelegateValue(returned, semanticModel, argumentMap), semanticModel))
             {
                 yield return body;
             }
@@ -715,8 +801,9 @@ internal static class ComputationLambdas
                 foreach (var value in AssignedValuesFor(assignment.Left, assignment.Right, parameter, semanticModel))
                 {
                     // The call-site map resolves a value forwarded from ANOTHER delegate
-                    // parameter (`Provide(source, out patch)` with `p = source`).
-                    foreach (var body in OfArgumentValue(SubstituteArguments(value, callMap) ?? value, semanticModel))
+                    // parameter (`Provide(source, out patch)` with `p = source`), aliases
+                    // included.
+                    foreach (var body in OfArgumentValue(ResolveDelegateValue(value, semanticModel, callMap), semanticModel))
                     {
                         yield return (body, callMap);
                     }
@@ -1270,30 +1357,34 @@ internal static class ComputationLambdas
                 continue;
             }
 
-            var current = UnwrapCastsAndParentheses(name);
-            if (current.Parent is InvocationExpressionSyntax { Expression: { } invoked } && invoked == current)
+            if (LiftedUseRunsBefore(name, reference, variable, semanticModel, visitedFunctions))
             {
-                if (CanExecuteBefore(current, reference, variable, semanticModel, visitedFunctions))
-                {
-                    return true;
-                }
-
-                continue;
+                return true;
             }
-
-            // A write to the variable is not a use of the delegate, and a DISCARD
-            // (`_ = unused;`) provably drops it; anything else lets the delegate escape to
-            // unknowable invocation sites.
-            if (current.Parent is AssignmentExpressionSyntax write
-                && (write.Left == current || semanticModel.GetSymbolInfo(write.Left).Symbol is IDiscardSymbol))
-            {
-                continue;
-            }
-
-            return true;
         }
 
         return false;
+    }
+
+    private static bool LiftedUseRunsBefore(IdentifierNameSyntax name, SyntaxNode reference, ISymbol variable, SemanticModel semanticModel, HashSet<SyntaxNode> visitedFunctions)
+    {
+        var current = UnwrapCastsAndParentheses(name);
+        if (current.Parent is InvocationExpressionSyntax { Expression: { } invoked } && invoked == current)
+        {
+            return CanExecuteBefore(current, reference, variable, semanticModel, visitedFunctions);
+        }
+
+        // A write to the variable is not a use of the delegate, and a DISCARD
+        // (`_ = unused;`) provably drops it; anything else lets the delegate escape to
+        // unknowable invocation sites -- but only an escape that can itself RUN before
+        // the read can put an invocation before it.
+        if (current.Parent is AssignmentExpressionSyntax write
+            && (write.Left == current || semanticModel.GetSymbolInfo(write.Left).Symbol is IDiscardSymbol))
+        {
+            return false;
+        }
+
+        return CanExecuteBefore(current, reference, variable, semanticModel, visitedFunctions);
     }
 
     // Only the loop BODY re-declares per iteration: a variable in a for-INITIALIZER is

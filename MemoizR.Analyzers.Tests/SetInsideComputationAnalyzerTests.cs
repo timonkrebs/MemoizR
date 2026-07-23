@@ -1665,4 +1665,34 @@ public class SetInsideComputationAnalyzerTests
 
         Assert.Empty(diagnostics);
     }
+    [Fact]
+    public async Task AliasedReturnedPatch_IsResolved()
+    {
+        // The factory parks the patch in a local alias before returning it: the return
+        // resolves through the alias and the parameter back to the call-site lambda, whose
+        // Set runs under the evaluation lock like any inline patch's.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var v = f.CreateSignal(1);
+                    var state = f.CreateOptimistic<int>(v);
+                    Func<int, int> Make(Func<int, int> p) { var q = p; return q; }
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, Make(x => { _ = v.Set(2); return x; }));
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR003", diagnostic.Id);
+        Assert.Contains("Signal<int>.Set", diagnostic.GetMessage());
+    }
 }
