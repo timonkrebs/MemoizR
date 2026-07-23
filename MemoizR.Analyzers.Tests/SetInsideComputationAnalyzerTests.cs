@@ -830,6 +830,34 @@ public class SetInsideComputationAnalyzerTests
     }
 
     [Fact]
+    public async Task SetInsideAConditionalComputationArm_IsFlagged()
+    {
+        // The conditional picks one of two computations at build time: either arm can be
+        // the body the factory stores, so a Set inside one must not hide behind the ternary.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using System.Threading.Tasks;
+            using MemoizR;
+
+            public class C
+            {
+                public void M(bool choose)
+                {
+                    var f = new MemoFactory();
+                    var v = f.CreateSignal(1);
+                    f.CreateMemoizR(choose
+                        ? (Func<Task<int>>)(async () => { _ = v.Set(2); return 1; })
+                        : async () => 2);
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR003", diagnostic.Id);
+        Assert.Contains("Signal<int>.Set", diagnostic.GetMessage());
+    }
+
+    [Fact]
     public async Task FactoryAliasInsideHelper_KeepsCallSiteProvenance()
     {
         // The helper aliases its factory parameter before creating the signal: the

@@ -77,6 +77,14 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         SemanticModel? semanticModel,
         HashSet<ISymbol> reported)
     {
+        // A conditional or null-coalescing patch stores whichever arm the flow picks: each
+        // arm gets the full argument treatment, so a safe arm cannot silence an
+        // unverifiable one (and vice versa).
+        if (InspectConditionalArms(context, classifier, value, semanticModel, reported))
+        {
+            return;
+        }
+
         // A delegate variable that is REASSIGNED after its initializer no longer proves which
         // closure the overlay stores -- the initializer may be harmless while the reassignment
         // captures anything -- so it is treated like an unresolvable delegate instead of
@@ -113,19 +121,20 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         // like an inline patch body, with unresolvable branches reported by the helper
         // accounting itself; an unwalkable helper falls through to the unverifiable report
         // below.
-        if (!bodyResolved && semanticModel is not null
-            && ReceiverSymbol(Unwrap(value)) is { } assembled
-            && ComputationLambdas.EffectiveInitializerWrite(assembled, semanticModel) is ArgumentSyntax outWrite)
+        if (!bodyResolved)
         {
-            var visitedCalls = new HashSet<(SyntaxNode, IMethodSymbol, string)>();
-            var visitedInvokes = new HashSet<(SyntaxNode, string)>();
-            var (bodies, accounted) = OutAssignedBodies(context, classifier, outWrite, semanticModel, visitedCalls, visitedInvokes, argumentMap: null, reported);
-            foreach (var patch in bodies)
-            {
-                InspectPatchBody(context, classifier, patch, semanticModel, reported);
-            }
+            bodyResolved = InspectOutAssembledPatch(context, classifier, value, semanticModel, reported);
+        }
 
-            bodyResolved |= bodies.Count > 0 || accounted;
+        // A same-tree computed get-only delegate PROPERTY resolves through its getter's
+        // returns, like a delegate-returning helper: each return is walked as a patch body,
+        // with unresolvable returns reported.
+        if (!bodyResolved && ReceiverSymbol(Unwrap(value)) is IPropertySymbol patchProperty
+            && !IsSettable(patchProperty) && !HasBackingStorage(patchProperty)
+            && patchProperty.GetMethod is { } patchGetter
+            && ComputationLambdas.ResolveMethodBody(patchGetter, semanticModel) is { } getterBody)
+        {
+            bodyResolved = InspectPropertyPatchReturns(context, classifier, getterBody, patchProperty, semanticModel, reported);
         }
 
         // A SOURCE-declared method group whose body lives in another file cannot be walked:
@@ -153,6 +162,102 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
                 symbol?.Name ?? SendableSymbolClassifier.Display(value.Type),
                 "it is an already-built delegate whose closure cannot be resolved from this call site, and a delegate can capture arbitrary mutable state (define the patch inline or as a same-tree method)",
                 reported);
+        }
+    }
+
+    private static bool InspectOutAssembledPatch(
+        OperationAnalysisContext context,
+        SendableSymbolClassifier classifier,
+        IOperation value,
+        SemanticModel? semanticModel,
+        HashSet<ISymbol> reported)
+    {
+        if (semanticModel is null
+            || ReceiverSymbol(Unwrap(value)) is not { } assembled
+            || ComputationLambdas.EffectiveInitializerWrite(assembled, semanticModel) is not ArgumentSyntax outWrite)
+        {
+            return false;
+        }
+
+        var visitedCalls = new HashSet<(SyntaxNode, IMethodSymbol, string)>();
+        var visitedInvokes = new HashSet<(SyntaxNode, string)>();
+        var (bodies, accounted) = OutAssignedBodies(context, classifier, outWrite, semanticModel, visitedCalls, visitedInvokes, argumentMap: null, reported);
+        foreach (var patch in bodies)
+        {
+            InspectPatchBody(context, classifier, patch, semanticModel, reported);
+        }
+
+        return bodies.Count > 0 || accounted;
+    }
+
+    // Each getter return is a CANDIDATE: walked as a patch body when it resolves, trusted
+    // when it is a metadata target, reported otherwise -- a safe return must not silence an
+    // unresolvable one. (The getter runs at the Apply call, once; only the RETURNED
+    // delegate replays, so the getter's own statements need no per-replay walk here.)
+    private static bool InspectPropertyPatchReturns(
+        OperationAnalysisContext context,
+        SendableSymbolClassifier classifier,
+        ComputationLambdas.ComputationBody getterBody,
+        IPropertySymbol property,
+        SemanticModel? semanticModel,
+        HashSet<ISymbol> reported)
+    {
+        var accounted = false;
+        foreach (var inner in ComputationLambdas.DescendDirectExecution(getterBody.Body))
+        {
+            if (inner is not IReturnOperation { ReturnedValue: { } returned })
+            {
+                continue;
+            }
+
+            accounted = true;
+            var resolvedValue = ResolveDelegateReference(returned, semanticModel, argumentMap: null);
+            var resolvedAny = false;
+            foreach (var patch in ComputationLambdas.OfArgumentValue(resolvedValue, semanticModel))
+            {
+                resolvedAny = true;
+                InspectPatchBody(context, classifier, patch, semanticModel, reported);
+            }
+
+            if (!resolvedAny
+                && ResolveMethodReference(resolvedValue, semanticModel, visitedVariables: null) is not { Method.DeclaringSyntaxReferences.Length: 0 })
+            {
+                Report(
+                    context,
+                    returned,
+                    property,
+                    property.Name,
+                    "the delegate it returns cannot be resolved from this call site, and a delegate can capture arbitrary mutable state (return a lambda or a method declared in this file)",
+                    reported);
+            }
+        }
+
+        return accounted;
+    }
+
+    private static bool InspectConditionalArms(
+        OperationAnalysisContext context,
+        SendableSymbolClassifier classifier,
+        IOperation value,
+        SemanticModel? semanticModel,
+        HashSet<ISymbol> reported)
+    {
+        switch (Unwrap(value))
+        {
+            case IConditionalOperation conditional:
+                InspectPatchArgument(context, classifier, conditional.WhenTrue, semanticModel, reported);
+                if (conditional.WhenFalse is { } whenFalse)
+                {
+                    InspectPatchArgument(context, classifier, whenFalse, semanticModel, reported);
+                }
+
+                return true;
+            case ICoalesceOperation coalesce:
+                InspectPatchArgument(context, classifier, coalesce.Value, semanticModel, reported);
+                InspectPatchArgument(context, classifier, coalesce.WhenNull, semanticModel, reported);
+                return true;
+            default:
+                return false;
         }
     }
 
@@ -775,14 +880,15 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         IMethodSymbol method,
         HashSet<ISymbol> reported)
     {
-        if (!IsUnverifiableExecutedShape(operation) || method.DeclaringSyntaxReferences.Length == 0)
+        if ((!IsUnverifiableExecutedShape(operation) && !IsExecutedSetter(operation, method))
+            || method.DeclaringSyntaxReferences.Length == 0)
         {
             return;
         }
 
         var name = method.MethodKind == MethodKind.Constructor
             ? SendableSymbolClassifier.Display(method.ContainingType)
-            : method.Name;
+            : method.AssociatedSymbol?.Name ?? method.Name;
         Report(
             context,
             operation,
@@ -798,6 +904,15 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
             or IBinaryOperation { OperatorMethod: not null }
             or IUnaryOperation { OperatorMethod: not null }
             or IConversionOperation { OperatorMethod: not null };
+    }
+
+    // A SETTER an assignment runs is executed code like a call: on a receiver the capture
+    // walk gives no verdict for (a computation-local object, a Sendable-trusted type), this
+    // fallback is the only look a cross-file setter body ever gets. Getters stay with their
+    // own member/type/getter verdicts.
+    private static bool IsExecutedSetter(IOperation operation, IMethodSymbol method)
+    {
+        return operation is IPropertyReferenceOperation && method.MethodKind == MethodKind.PropertySet;
     }
 
     // A delegate the patch builds AND synchronously invokes runs its body on every replay:
@@ -830,10 +945,13 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         }
 
         var found = false;
-        foreach (var body in ComputationLambdas.OfArgumentValue(resolved, semanticModel))
+        if (!InitializerOverwrittenBeforeInvoke(resolved, semanticModel))
         {
-            found = true;
-            ChaseExecutedBody(context, classifier, body, semanticModel, visitedCalls, visitedInvokes, argumentMap, reported);
+            foreach (var body in ComputationLambdas.OfArgumentValue(resolved, semanticModel))
+            {
+                found = true;
+                ChaseExecutedBody(context, classifier, body, semanticModel, visitedCalls, visitedInvokes, argumentMap, reported);
+            }
         }
 
         var unwrapped = Unwrap(resolved);
@@ -1191,6 +1309,32 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         foreach (var value in AssignedValuesFor(assignment.Left, assignment.Right, variable, semanticModel))
         {
             if (AccountsForValue(context, classifier, ResolveDelegateReference(value, semanticModel, argumentMap), semanticModel, visitedCalls, visitedInvokes, argumentMap, reported))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    // A declaration initializer definitely OVERWRITTEN on the straight-line path to the
+    // invoke can never be the delegate invoked -- only the surviving assignment candidates
+    // can -- so the stale initializer must not charge its closure to this call.
+    private static bool InitializerOverwrittenBeforeInvoke(IOperation resolved, SemanticModel? semanticModel)
+    {
+        if (semanticModel is null
+            || ComputationLambdas.ReferencedVariable(Unwrap(resolved)) is not { } variable
+            || variable.DeclaringSyntaxReferences.FirstOrDefault() is not { } declaration
+            || declaration.SyntaxTree != semanticModel.SyntaxTree
+            || declaration.GetSyntax() is not VariableDeclaratorSyntax { Initializer: not null } declarator)
+        {
+            return false;
+        }
+
+        foreach (var node in semanticModel.SyntaxTree.GetRoot().DescendantNodes())
+        {
+            if (WritesDelegateBeforeInvoke(node, variable, resolved, semanticModel)
+                && DefinitelyOverwrites(node, declarator, resolved.Syntax, variable, semanticModel))
             {
                 return true;
             }

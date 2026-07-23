@@ -53,29 +53,23 @@ internal static class ComputationLambdas
 
     private static IEnumerable<ComputationBody> BodiesIn(IOperation value, SemanticModel? semanticModel, HashSet<ISymbol>? visitedVariables)
     {
+        // GetOperation on a variable initializer's lambda/method-group syntax yields the
+        // operation WITHOUT the enclosing delegate-creation wrapper: unwrapping here makes
+        // the wrapped and bare forms one case each.
+        if (value is IDelegateCreationOperation creation)
+        {
+            value = creation.Target;
+        }
+
         switch (value)
         {
-            case IDelegateCreationOperation { Target: IAnonymousFunctionOperation lambda }:
+            case IAnonymousFunctionOperation lambda:
                 yield return new ComputationBody(lambda.Body, lambda.Syntax);
                 break;
-            case IAnonymousFunctionOperation bareLambda:
-                // GetOperation on a variable initializer's lambda syntax yields the function
-                // operation itself, without the enclosing delegate-creation wrapper.
-                yield return new ComputationBody(bareLambda.Body, bareLambda.Syntax);
-                break;
-            case IDelegateCreationOperation { Target: IMethodReferenceOperation methodReference }:
+            case IMethodReferenceOperation methodReference:
                 if (ResolveMethodBody(methodReference.Method, semanticModel) is { } resolved)
                 {
                     yield return resolved;
-                }
-
-                break;
-            case IMethodReferenceOperation bareMethodReference:
-                // Like the bare-lambda case: GetOperation on a variable initializer's method
-                // group yields the reference without the delegate-creation wrapper.
-                if (ResolveMethodBody(bareMethodReference.Method, semanticModel) is { } resolvedBare)
-                {
-                    yield return resolvedBare;
                 }
 
                 break;
@@ -100,6 +94,46 @@ internal static class ComputationLambdas
                 }
 
                 break;
+
+            // A conditional (or null-coalescing) computation stores whichever arm the flow
+            // picks: both are possible bodies, so both are walked.
+            case IConditionalOperation or ICoalesceOperation:
+                foreach (var body in BranchBodies(value, semanticModel, visitedVariables))
+                {
+                    yield return body;
+                }
+
+                break;
+        }
+    }
+
+    private static IEnumerable<ComputationBody> BranchBodies(IOperation value, SemanticModel? semanticModel, HashSet<ISymbol>? visitedVariables)
+    {
+        var arms = value switch
+        {
+            IConditionalOperation conditional => (First: (IOperation?)conditional.WhenTrue, Second: conditional.WhenFalse),
+            ICoalesceOperation coalesce => (First: (IOperation?)coalesce.Value, Second: coalesce.WhenNull),
+            _ => (First: null, Second: null),
+        };
+
+        if (arms.First is null)
+        {
+            yield break;
+        }
+
+        foreach (var body in BodiesIn(arms.First, semanticModel, visitedVariables))
+        {
+            yield return body;
+        }
+
+        if (arms.Second is null)
+        {
+            yield break;
+        }
+
+        foreach (var body in BodiesIn(arms.Second, semanticModel, visitedVariables))
+        {
+            yield return body;
         }
     }
 
