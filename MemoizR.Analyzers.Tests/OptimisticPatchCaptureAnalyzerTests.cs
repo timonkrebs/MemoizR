@@ -3669,6 +3669,164 @@ public class OptimisticPatchCaptureAnalyzerTests
     }
 
     [Fact]
+    public async Task ComputedStateProperty_IsNotTreatedAsThePatch()
+    {
+        // Only the delegate-typed patch parameter is inspected: the computed state property
+        // must not run the delegate-shaped fallbacks.
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+            using MemoizR.Reactive;
+
+            public class C
+            {
+                private readonly MemoFactory f = new();
+                private readonly OptimisticState<int> _state;
+
+                private OptimisticState<int> State => _state;
+
+                public C()
+                {
+                    _state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(State, static x => x);
+                    });
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task FactoryCallPatchArgument_ReturnsAreWalked()
+    {
+        // The patch comes from a same-tree factory -- inline and through a variable -- and
+        // its only return is a verified static lambda.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                private static Func<int, int> Safe()
+                {
+                    return static x => x;
+                }
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, Safe());
+                        Func<int, int> stored = Safe();
+                        await ctx.Apply(state, stored);
+                    });
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task CapturedSafeDelegate_IsWalkedInsteadOfTypeRejected()
+    {
+        // The captured delegate resolves to a same-tree static lambda: its body is the
+        // whole closure, and it is safe.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        Func<int> safe = static () => 0;
+                        await ctx.Apply(state, x => x + safe());
+                    });
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task CapturedUnsafeDelegate_FlagsItsRealCapture()
+    {
+        // The captured delegate's body itself captures shared state: walking it points at
+        // the actual problem instead of the delegate's type.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    var shared = new List<int>();
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        Func<int> reader = () => shared.Count;
+                        await ctx.Apply(state, x => x + reader());
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR004", diagnostic.Id);
+        Assert.Contains("shared", diagnostic.GetMessage());
+        Assert.Contains("not Sendable", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task SwitchBreakBetweenWrites_DoesNotBlockTheOverwrite()
+    {
+        // The break only exits its own switch, which ends before the safe overwrite:
+        // control still reaches it, so the stale initializer stays dead.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    var shared = new List<int>();
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        Func<int, int> patch = x => x + shared.Count;
+                        switch (p)
+                        {
+                            case 0:
+                                break;
+                        }
+
+                        patch = static x => x;
+                        await ctx.Apply(state, patch);
+                    });
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
     public async Task CoalesceAssignment_DoesNotStandInAsInitializer()
     {
         // `??=` can leave an older, externally supplied value in place: it must not be

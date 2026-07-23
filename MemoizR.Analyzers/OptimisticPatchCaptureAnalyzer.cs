@@ -60,7 +60,12 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
 
         foreach (var argument in invocation.Arguments)
         {
-            InspectPatchArgument(context, classifier, argument.Value, invocation.SemanticModel, reported);
+            // Only the PATCH parameter stores a delegate: the state argument (possibly a
+            // computed property) must not run the delegate-shaped fallbacks.
+            if (argument.Parameter?.Type is { TypeKind: TypeKind.Delegate })
+            {
+                InspectPatchArgument(context, classifier, argument.Value, invocation.SemanticModel, reported);
+            }
         }
     }
 
@@ -130,25 +135,12 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
             InspectPatchBody(context, classifier, patch, semanticModel, reported);
         }
 
-        // A patch definitely ASSEMBLED by a same-tree out-helper (`Provide(out patch)` as
-        // the sole dominating write) resolves to the helper's assignments -- each walked
-        // like an inline patch body, with unresolvable branches reported by the helper
-        // accounting itself; an unwalkable helper falls through to the unverifiable report
-        // below.
+        // Patch shapes assembled elsewhere -- an out-helper, a computed delegate property's
+        // returns, a same-tree delegate factory's returns -- resolve through their own
+        // chases before anything is called unverifiable.
         if (!bodyResolved)
         {
-            bodyResolved = InspectOutAssembledPatch(context, classifier, value, semanticModel, reported);
-        }
-
-        // A same-tree computed get-only delegate PROPERTY resolves through its getter's
-        // returns, like a delegate-returning helper: each return is walked as a patch body,
-        // with unresolvable returns reported.
-        if (!bodyResolved && ReceiverSymbol(Unwrap(value)) is IPropertySymbol patchProperty
-            && !IsSettable(patchProperty) && !HasBackingStorage(patchProperty)
-            && patchProperty.GetMethod is { } patchGetter
-            && ComputationLambdas.ResolveMethodBody(patchGetter, semanticModel) is { } getterBody)
-        {
-            bodyResolved = InspectReturnedPatchBodies(context, classifier, getterBody, patchProperty, argumentMap: null, semanticModel, reported);
+            bodyResolved = InspectAssembledPatchSources(context, classifier, value, semanticModel, reported);
         }
 
         // A SOURCE-declared method group whose body lives in another file cannot be walked:
@@ -302,6 +294,44 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         return bodies.Count > 0 || accounted;
     }
 
+    private static bool InspectAssembledPatchSources(
+        OperationAnalysisContext context,
+        SendableSymbolClassifier classifier,
+        IOperation value,
+        SemanticModel? semanticModel,
+        HashSet<ISymbol> reported)
+    {
+        // A patch definitely ASSEMBLED by a same-tree out-helper (`Provide(out patch)` as
+        // the sole dominating write) resolves to the helper's assignments -- each walked
+        // like an inline patch body, with unresolvable branches reported by the helper
+        // accounting itself; an unwalkable helper falls back to the caller's reports.
+        if (InspectOutAssembledPatch(context, classifier, value, semanticModel, reported))
+        {
+            return true;
+        }
+
+        // A same-tree computed get-only delegate PROPERTY resolves through its getter's
+        // returns, like a delegate-returning helper: each return is walked as a patch body,
+        // with unresolvable returns reported.
+        if (ReceiverSymbol(Unwrap(value)) is IPropertySymbol patchProperty
+            && !IsSettable(patchProperty) && !HasBackingStorage(patchProperty)
+            && patchProperty.GetMethod is { } patchGetter
+            && ComputationLambdas.ResolveMethodBody(patchGetter, semanticModel) is { } getterBody)
+        {
+            return InspectReturnedPatchBodies(context, classifier, getterBody, patchProperty, argumentMap: null, semanticModel, reported);
+        }
+
+        // A patch produced by a same-tree delegate FACTORY -- called inline, or stored
+        // through a variable initializer -- resolves through the factory's returns.
+        if (FactoryCallOf(value, semanticModel) is { } factoryCall
+            && ComputationLambdas.ResolveMethodBody(factoryCall.TargetMethod, semanticModel) is { } factoryBody)
+        {
+            return InspectReturnedPatchBodies(context, classifier, factoryBody, factoryCall.TargetMethod, ComputationLambdas.BuildArgumentMap(factoryCall, outer: null), semanticModel, reported);
+        }
+
+        return false;
+    }
+
     private static bool InspectOutAssembledPatch(
         OperationAnalysisContext context,
         SendableSymbolClassifier classifier,
@@ -371,6 +401,22 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         }
 
         return accounted;
+    }
+
+    // The invocation producing this patch value: the argument itself, or the variable's
+    // same-tree initializer.
+    private static IInvocationOperation? FactoryCallOf(IOperation value, SemanticModel? semanticModel)
+    {
+        if (Unwrap(value) is IInvocationOperation direct)
+        {
+            return direct;
+        }
+
+        return ReceiverSymbol(Unwrap(value)) is { } variable
+            && ComputationLambdas.SameTreeInitializerOperation(variable, semanticModel) is { } initializer
+            && Unwrap(initializer) is IInvocationOperation stored
+            ? stored
+            : null;
     }
 
     private static bool InspectConditionalInitializer(
@@ -642,10 +688,10 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         switch (operation)
         {
             case ILocalReferenceOperation local when IsSharedCapture(local.Local, scope, patchScope):
-                ReportCapturedVariable(context, classifier, operation, local.Local, local.Local.Type, reported);
+                ReportCapturedVariable(context, classifier, operation, local.Local, local.Local.Type, semanticModel, reported);
                 break;
             case IParameterReferenceOperation parameter when IsSharedCapture(parameter.Parameter, scope, patchScope):
-                ReportCapturedVariable(context, classifier, operation, parameter.Parameter, parameter.Parameter.Type, reported);
+                ReportCapturedVariable(context, classifier, operation, parameter.Parameter, parameter.Parameter.Type, semanticModel, reported);
                 break;
 
             // A member access on the enclosing object captures `this`. The per-member verdicts
@@ -1601,7 +1647,8 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
     // control past the killer with the victim's value still bound (an early return in an
     // out-helper hands that delegate to the caller). Only the killer's OWN function counts:
     // an exit inside a nested lambda -- e.g. a `return` in the victim's own delegate body --
-    // diverts nothing here.
+    // diverts nothing here, and neither does a break/continue/case-goto whose OWN construct
+    // ends before the killer (control leaves the switch/loop and still reaches it).
     private static bool ExitsBetween(SyntaxNode victim, SyntaxNode killer)
     {
         var function = killer.Ancestors().FirstOrDefault(IsFunctionBoundary) ?? killer.SyntaxTree.GetRoot();
@@ -1609,13 +1656,31 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         {
             if (node is ReturnStatementSyntax or ThrowStatementSyntax or GotoStatementSyntax
                     or BreakStatementSyntax or ContinueStatementSyntax or YieldStatementSyntax
-                && victim.SpanStart < node.SpanStart && node.SpanStart < killer.SpanStart)
+                && victim.SpanStart < node.SpanStart && node.SpanStart < killer.SpanStart
+                && !(ExitTarget(node) is { } target && target.Span.End <= killer.SpanStart))
             {
                 return true;
             }
         }
 
         return false;
+    }
+
+    // The construct a contained exit leaves: the nearest switch/loop for `break`, the
+    // nearest loop for `continue`, the nearest switch for `goto case`/`goto default`.
+    // Returns null for the truly divergent exits (return/throw/yield, labeled goto).
+    private static SyntaxNode? ExitTarget(SyntaxNode exit)
+    {
+        return exit switch
+        {
+            BreakStatementSyntax => exit.Ancestors().FirstOrDefault(static ancestor =>
+                ancestor is SwitchStatementSyntax or ForStatementSyntax or ForEachStatementSyntax or WhileStatementSyntax or DoStatementSyntax),
+            ContinueStatementSyntax => exit.Ancestors().FirstOrDefault(static ancestor =>
+                ancestor is ForStatementSyntax or ForEachStatementSyntax or WhileStatementSyntax or DoStatementSyntax),
+            GotoStatementSyntax @goto when @goto.IsKind(SyntaxKind.GotoCaseStatement) || @goto.IsKind(SyntaxKind.GotoDefaultStatement)
+                => exit.Ancestors().FirstOrDefault(static ancestor => ancestor is SwitchStatementSyntax),
+            _ => null,
+        };
     }
 
     private static bool IsFunctionBoundary(SyntaxNode node)
@@ -1882,6 +1947,7 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         IOperation operation,
         ISymbol symbol,
         ITypeSymbol type,
+        SemanticModel? semanticModel,
         HashSet<ISymbol> reported)
     {
         if (IsMutableStruct(type))
@@ -1893,6 +1959,26 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
                 symbol.Name,
                 $"its type '{SendableSymbolClassifier.Display(type)}' is a mutable struct, and the stored closure shares the captured variable's storage rather than a copy",
                 reported);
+            return;
+        }
+
+        // A captured DELEGATE whose same-tree bodies resolve is verified by WALKING those
+        // bodies as patch code -- their own captures included -- instead of rejected
+        // wholesale for its type: the stored closure is fully visible. Reassigned or
+        // unresolvable delegate captures keep the type verdict, and the reported-set add
+        // both dedupes and bounds self-referential delegate cycles.
+        if (type.TypeKind == TypeKind.Delegate
+            && !IsReassignedBefore(symbol, operation, semanticModel)
+            && ComputationLambdas.OfArgumentValue(operation, semanticModel).Any())
+        {
+            if (reported.Add(symbol))
+            {
+                foreach (var body in ComputationLambdas.OfArgumentValue(operation, semanticModel))
+                {
+                    InspectPatchBody(context, classifier, body, semanticModel, reported);
+                }
+            }
+
             return;
         }
 

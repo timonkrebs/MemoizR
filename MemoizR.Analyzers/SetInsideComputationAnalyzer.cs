@@ -53,10 +53,15 @@ public sealed class SetInsideComputationAnalyzer : DiagnosticAnalyzer
         {
             foreach (var argument in invocation.Arguments)
             {
-                foreach (var body in ComputationLambdas.AssembledPatchBodies(argument.Value, invocation.SemanticModel))
+                if (argument.Parameter?.Type is not { TypeKind: TypeKind.Delegate })
+                {
+                    continue;
+                }
+
+                foreach (var (body, map) in ComputationLambdas.AssembledPatchBodies(argument.Value, invocation.SemanticModel))
                 {
                     var visitedCalls = new HashSet<(SyntaxNode, IMethodSymbol, string)>();
-                    InspectExecutedBody(context, invocation, body.Body, actorHost, visitedCalls, argumentMap: null);
+                    InspectExecutedBody(context, invocation, body.Body, actorHost, visitedCalls, map);
                 }
             }
         }

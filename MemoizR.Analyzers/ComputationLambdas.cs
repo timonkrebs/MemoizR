@@ -577,7 +577,7 @@ internal static class ComputationLambdas
     // forwarded handoffs), or returned by a same-tree computed get-only delegate property.
     // Resolution only -- MZR004 owns the unverifiable accounting for these shapes; MZR003
     // needs the BODIES, because a Set inside them still throws under the evaluation lock.
-    public static IEnumerable<ComputationBody> AssembledPatchBodies(IOperation value, SemanticModel? semanticModel)
+    public static IEnumerable<(ComputationBody Body, Dictionary<IParameterSymbol, IOperation>? ArgumentMap)> AssembledPatchBodies(IOperation value, SemanticModel? semanticModel)
     {
         var reference = value;
         while (reference is IConversionOperation conversion)
@@ -588,7 +588,7 @@ internal static class ComputationLambdas
         var variable = ReferencedVariable(reference);
         if (variable is not null && EffectiveInitializerWrite(variable, semanticModel) is ArgumentSyntax outWrite)
         {
-            foreach (var body in OutHandoffBodies(outWrite, semanticModel, new HashSet<SyntaxNode>()))
+            foreach (var body in OutHandoffBodies(outWrite, semanticModel, new HashSet<SyntaxNode>(), outerMap: null))
             {
                 yield return body;
             }
@@ -599,7 +599,7 @@ internal static class ComputationLambdas
         {
             foreach (var body in ReturnedBodies(getterBody, semanticModel))
             {
-                yield return body;
+                yield return (body, null);
             }
         }
     }
@@ -622,27 +622,42 @@ internal static class ComputationLambdas
 
     // The delegate bodies an out-helper binds to its parameter: direct assignments'
     // paired values, plus FORWARDED out handoffs (`Provide(out d) { Build(out d); }`)
-    // followed recursively -- the visited set bounds forwarding cycles.
-    public static IEnumerable<ComputationBody> OutHandoffBodies(ArgumentSyntax argument, SemanticModel? semanticModel, HashSet<SyntaxNode> visited)
+    // followed recursively -- the visited set bounds forwarding cycles. Each body carries
+    // the CALL-SITE argument map (composed through forwarding), so a lambda using another
+    // helper parameter keeps its provenance.
+    public static IEnumerable<(ComputationBody Body, Dictionary<IParameterSymbol, IOperation>? ArgumentMap)> OutHandoffBodies(
+        ArgumentSyntax argument,
+        SemanticModel? semanticModel,
+        HashSet<SyntaxNode> visited,
+        Dictionary<IParameterSymbol, IOperation>? outerMap)
     {
         if (semanticModel is null || !visited.Add(argument)
-            || (semanticModel.GetOperation(argument) as IArgumentOperation)?.Parameter is not { } parameter
+            || (semanticModel.GetOperation(argument) as IArgumentOperation) is not { Parameter: { } parameter } argumentOperation
             || parameter.ContainingSymbol is not IMethodSymbol method
             || ResolveMethodBody(method, semanticModel) is not { } helper)
         {
             yield break;
         }
 
+        var callMap = argumentOperation.Parent is { } call
+            ? BuildArgumentMap(call, outerMap)
+            : outerMap;
+
         foreach (var node in helper.Scope.DescendantNodes())
         {
-            foreach (var body in OutHandoffNodeBodies(node, parameter, semanticModel, visited))
+            foreach (var body in OutHandoffNodeBodies(node, parameter, semanticModel, visited, callMap))
             {
                 yield return body;
             }
         }
     }
 
-    private static IEnumerable<ComputationBody> OutHandoffNodeBodies(SyntaxNode node, IParameterSymbol parameter, SemanticModel semanticModel, HashSet<SyntaxNode> visited)
+    private static IEnumerable<(ComputationBody Body, Dictionary<IParameterSymbol, IOperation>? ArgumentMap)> OutHandoffNodeBodies(
+        SyntaxNode node,
+        IParameterSymbol parameter,
+        SemanticModel semanticModel,
+        HashSet<SyntaxNode> visited,
+        Dictionary<IParameterSymbol, IOperation>? callMap)
     {
         switch (node)
         {
@@ -653,7 +668,7 @@ internal static class ComputationLambdas
                 {
                     foreach (var body in OfArgumentValue(value, semanticModel))
                     {
-                        yield return body;
+                        yield return (body, callMap);
                     }
                 }
 
@@ -661,7 +676,7 @@ internal static class ComputationLambdas
             case ArgumentSyntax forwarded
                 when forwarded.RefOrOutKeyword.IsKind(SyntaxKind.OutKeyword)
                     && SymbolEqualityComparer.Default.Equals(semanticModel.GetSymbolInfo(forwarded.Expression).Symbol, parameter):
-                foreach (var body in OutHandoffBodies(forwarded, semanticModel, visited))
+                foreach (var body in OutHandoffBodies(forwarded, semanticModel, visited, callMap))
                 {
                     yield return body;
                 }

@@ -862,6 +862,47 @@ public class SetInsideComputationAnalyzerTests
     }
 
     [Fact]
+    public async Task SetInsideAnOutAssembledPatch_KeepsCallSiteProvenance()
+    {
+        // The assembled patch writes through the helper's signal parameter: the call-site
+        // argument decides -- a disjoint factory's signal is suppressed, the host factory's
+        // own is flagged.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f1 = new MemoFactory();
+                    var f2 = new MemoFactory();
+                    var other = f2.CreateSignal(1);
+                    var mine = f1.CreateSignal(1);
+                    var state = f1.CreateOptimistic<int>(mine);
+                    void Provide(Signal<int> s, out Func<int, int> p) => p = x => { _ = s.Set(1); return x; };
+                    f1.CreateAction<int>(async (p, ctx) =>
+                    {
+                        Func<int, int> patch;
+                        Provide(other, out patch);
+                        await ctx.Apply(state, patch);
+                    });
+                    f1.CreateAction<int>(async (p, ctx) =>
+                    {
+                        Func<int, int> patch;
+                        Provide(mine, out patch);
+                        await ctx.Apply(state, patch);
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR003", diagnostic.Id);
+        Assert.Contains("Signal<int>.Set", diagnostic.GetMessage());
+    }
+
+    [Fact]
     public async Task SetInsideAComputedPropertyPatch_IsFlagged()
     {
         var diagnostics = await AnalyzeAsync("""
