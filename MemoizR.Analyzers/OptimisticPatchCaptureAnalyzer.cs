@@ -110,17 +110,22 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
 
         // A patch definitely ASSEMBLED by a same-tree out-helper (`Provide(out patch)` as
         // the sole dominating write) resolves to the helper's assignments -- each walked
-        // like an inline patch body; an unresolvable helper falls through to the
-        // unverifiable report below.
+        // like an inline patch body, with unresolvable branches reported by the helper
+        // accounting itself; an unwalkable helper falls through to the unverifiable report
+        // below.
         if (!bodyResolved && semanticModel is not null
             && ReceiverSymbol(Unwrap(value)) is { } assembled
             && ComputationLambdas.EffectiveInitializerWrite(assembled, semanticModel) is ArgumentSyntax outWrite)
         {
-            foreach (var patch in OutAssignedBodies(outWrite, semanticModel, argumentMap: null))
+            var visitedCalls = new HashSet<(SyntaxNode, IMethodSymbol, string)>();
+            var visitedInvokes = new HashSet<(SyntaxNode, string)>();
+            var (bodies, accounted) = OutAssignedBodies(context, classifier, outWrite, semanticModel, visitedCalls, visitedInvokes, argumentMap: null, reported);
+            foreach (var patch in bodies)
             {
-                bodyResolved = true;
                 InspectPatchBody(context, classifier, patch, semanticModel, reported);
             }
+
+            bodyResolved |= bodies.Count > 0 || accounted;
         }
 
         // A SOURCE-declared method group whose body lives in another file cannot be walked:
@@ -866,8 +871,10 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
     // A delegate RETURNED by a same-tree helper and immediately invoked (`Get()()`) executes
     // whatever the helper's return statements assemble, on every replay -- resolved through
     // the call's own argument map, so `Make(() => hits)()` reaches the call-site lambda.
-    // DescendDirectExecution keeps returns inside built callbacks out: those belong to the
-    // callback, not to the helper's own return path.
+    // Each return is a CANDIDATE accounted for separately: a safe branch must not silence
+    // one that resolves to nothing. The visited guard keys on the call site and binding, so
+    // recursive factories terminate; DescendDirectExecution keeps returns inside built
+    // callbacks out (those belong to the callback, not to the helper's own return path).
     private static bool ChaseReturnedDelegateBodies(
         OperationAnalysisContext context,
         SendableSymbolClassifier classifier,
@@ -883,24 +890,83 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
             return false;
         }
 
-        var found = false;
         var callMap = ComputationLambdas.BuildArgumentMap(call, argumentMap);
+        if (!visitedCalls.Add((call.Syntax, call.TargetMethod, ComputationLambdas.ArgumentMapKey(callMap))))
+        {
+            return true;
+        }
+
+        var found = false;
         foreach (var inner in ComputationLambdas.DescendDirectExecution(helper.Body))
         {
-            if (inner is not IReturnOperation { ReturnedValue: { } returned })
+            if (inner is IReturnOperation { ReturnedValue: { } returned })
             {
-                continue;
-            }
-
-            var resolved = ResolveDelegateReference(returned, semanticModel, callMap);
-            foreach (var body in ComputationLambdas.OfArgumentValue(resolved, semanticModel))
-            {
-                found = true;
-                ChaseExecutedBody(context, classifier, body, semanticModel, visitedCalls, visitedInvokes, callMap, reported);
+                found |= ChaseReturnCandidate(context, classifier, returned, semanticModel, visitedCalls, visitedInvokes, callMap, reported);
             }
         }
 
         return found;
+    }
+
+    private static bool ChaseReturnCandidate(
+        OperationAnalysisContext context,
+        SendableSymbolClassifier classifier,
+        IOperation returned,
+        SemanticModel? semanticModel,
+        HashSet<(SyntaxNode, IMethodSymbol, string)> visitedCalls,
+        HashSet<(SyntaxNode, string)> visitedInvokes,
+        Dictionary<IParameterSymbol, IOperation>? callMap,
+        HashSet<ISymbol> reported)
+    {
+        var resolved = ResolveDelegateReference(returned, semanticModel, callMap);
+        var resolvedAny = false;
+        foreach (var body in ComputationLambdas.OfArgumentValue(resolved, semanticModel))
+        {
+            resolvedAny = true;
+            ChaseExecutedBody(context, classifier, body, semanticModel, visitedCalls, visitedInvokes, callMap, reported);
+        }
+
+        if (!resolvedAny)
+        {
+            resolvedAny = AccountsForValue(context, classifier, resolved, semanticModel, visitedCalls, visitedInvokes, callMap, reported);
+        }
+
+        if (!resolvedAny)
+        {
+            var unwrapped = Unwrap(resolved);
+            ReportUnresolvedInvokedDelegate(
+                context,
+                resolved,
+                ComputationLambdas.ReferencedVariable(unwrapped) ?? (unwrapped as IParameterReferenceOperation)?.Parameter,
+                semanticModel,
+                reported);
+        }
+
+        // Chased, trusted, or reported -- either way this return is accounted for (a silent
+        // dead end like `return null` stays silent by design: nothing runs from it).
+        return true;
+    }
+
+    // A resolved candidate VALUE that yields no walkable body can still be accounted for: a
+    // METADATA method-group target is a trusted external contract, and a same-tree
+    // delegate-returning call resolves through its return statements.
+    private static bool AccountsForValue(
+        OperationAnalysisContext context,
+        SendableSymbolClassifier classifier,
+        IOperation resolvedValue,
+        SemanticModel? semanticModel,
+        HashSet<(SyntaxNode, IMethodSymbol, string)> visitedCalls,
+        HashSet<(SyntaxNode, string)> visitedInvokes,
+        Dictionary<IParameterSymbol, IOperation>? argumentMap,
+        HashSet<ISymbol> reported)
+    {
+        if (ResolveMethodReference(resolvedValue, semanticModel, visitedVariables: null) is { Method.DeclaringSyntaxReferences.Length: 0 })
+        {
+            return true;
+        }
+
+        return Unwrap(resolvedValue) is IInvocationOperation callResult
+            && ChaseReturnedDelegateBodies(context, classifier, callResult, semanticModel, visitedCalls, visitedInvokes, argumentMap, reported);
     }
 
     // The invoked reference, collapsed through parameter-to-argument hops (the map) and
@@ -1050,18 +1116,7 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
                 continue;
             }
 
-            var resolvedAny = false;
-            foreach (var body in NodeAssignedBodies(node, variable, semanticModel, argumentMap))
-            {
-                resolvedAny = true;
-                ChaseExecutedBody(context, classifier, body, semanticModel, visitedCalls, visitedInvokes, argumentMap, reported);
-            }
-
-            if (!resolvedAny)
-            {
-                resolvedAny = ResolvesOutsideBodies(context, classifier, node, variable, semanticModel, visitedCalls, visitedInvokes, argumentMap, reported);
-            }
-
+            var resolvedAny = ChaseWriteCandidate(context, classifier, node, variable, semanticModel, visitedCalls, visitedInvokes, argumentMap, reported);
             if (!resolvedAny && semanticModel.GetOperation(node) is { } writeOperation)
             {
                 Report(
@@ -1079,10 +1134,44 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         return found;
     }
 
+    private static bool ChaseWriteCandidate(
+        OperationAnalysisContext context,
+        SendableSymbolClassifier classifier,
+        SyntaxNode node,
+        ISymbol variable,
+        SemanticModel semanticModel,
+        HashSet<(SyntaxNode, IMethodSymbol, string)> visitedCalls,
+        HashSet<(SyntaxNode, string)> visitedInvokes,
+        Dictionary<IParameterSymbol, IOperation>? argumentMap,
+        HashSet<ISymbol> reported)
+    {
+        // `Provide(out later)` assembles the delegate inside the callee: the helper does its
+        // own per-branch accounting (and reporting), so a handled helper never falls through
+        // to the caller-side report.
+        if (node is ArgumentSyntax outArgument)
+        {
+            var (bodies, accounted) = OutAssignedBodies(context, classifier, outArgument, semanticModel, visitedCalls, visitedInvokes, argumentMap, reported);
+            foreach (var body in bodies)
+            {
+                ChaseExecutedBody(context, classifier, body, semanticModel, visitedCalls, visitedInvokes, argumentMap, reported);
+            }
+
+            return bodies.Count > 0 || accounted;
+        }
+
+        var resolvedAny = false;
+        foreach (var body in NodeAssignedBodies(node, variable, semanticModel, argumentMap))
+        {
+            resolvedAny = true;
+            ChaseExecutedBody(context, classifier, body, semanticModel, visitedCalls, visitedInvokes, argumentMap, reported);
+        }
+
+        return resolvedAny || ResolvesOutsideBodies(context, classifier, node, variable, semanticModel, visitedCalls, visitedInvokes, argumentMap, reported);
+    }
+
     // A candidate write whose right-hand side yields no walkable body can still be
-    // accounted for: a METADATA method-group target is a trusted external contract, and a
-    // same-tree delegate-returning call resolves through its return statements. Anything
-    // else stays unaccounted and gets flagged by the caller.
+    // accounted for via AccountsForValue; anything else stays unaccounted and gets flagged
+    // by the caller.
     private static bool ResolvesOutsideBodies(
         OperationAnalysisContext context,
         SendableSymbolClassifier classifier,
@@ -1101,14 +1190,7 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
 
         foreach (var value in AssignedValuesFor(assignment.Left, assignment.Right, variable, semanticModel))
         {
-            var resolvedValue = ResolveDelegateReference(value, semanticModel, argumentMap);
-            if (ResolveMethodReference(resolvedValue, semanticModel, visitedVariables: null) is { Method.DeclaringSyntaxReferences.Length: 0 })
-            {
-                return true;
-            }
-
-            if (Unwrap(resolvedValue) is IInvocationOperation callResult
-                && ChaseReturnedDelegateBodies(context, classifier, callResult, semanticModel, visitedCalls, visitedInvokes, argumentMap, reported))
+            if (AccountsForValue(context, classifier, ResolveDelegateReference(value, semanticModel, argumentMap), semanticModel, visitedCalls, visitedInvokes, argumentMap, reported))
             {
                 return true;
             }
@@ -1199,43 +1281,45 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         SemanticModel semanticModel,
         Dictionary<IParameterSymbol, IOperation>? argumentMap)
     {
-        switch (node)
+        if (node is not AssignmentExpressionSyntax assignment)
         {
-            case AssignmentExpressionSyntax assignment:
-                foreach (var value in AssignedValuesFor(assignment.Left, assignment.Right, variable, semanticModel))
-                {
-                    foreach (var body in ComputationLambdas.OfArgumentValue(ResolveDelegateReference(value, semanticModel, argumentMap), semanticModel))
-                    {
-                        yield return body;
-                    }
-                }
+            yield break;
+        }
 
-                break;
-
-            // `Provide(out later)` assembles the delegate inside the callee: the bodies come
-            // from the helper's assignments to its out/ref parameter.
-            case ArgumentSyntax argument:
-                foreach (var body in OutAssignedBodies(argument, semanticModel, argumentMap))
-                {
-                    yield return body;
-                }
-
-                break;
+        foreach (var value in AssignedValuesFor(assignment.Left, assignment.Right, variable, semanticModel))
+        {
+            foreach (var body in ComputationLambdas.OfArgumentValue(ResolveDelegateReference(value, semanticModel, argumentMap), semanticModel))
+            {
+                yield return body;
+            }
         }
     }
 
-    private static IEnumerable<ComputationLambdas.ComputationBody> OutAssignedBodies(
+    // The delegate bodies an out-helper hands back, with each surviving assignment BRANCH
+    // accounted for separately: a value resolving to nothing walkable (and not trusted
+    // metadata or a chased delegate-returning call) is reported on the spot, keyed on the
+    // out parameter -- a safe branch beside it must not silence it. Accounted=false only
+    // when the helper itself is unwalkable or never assigns, where the CALLER owns the
+    // report.
+    private static (List<ComputationLambdas.ComputationBody> Bodies, bool Accounted) OutAssignedBodies(
+        OperationAnalysisContext context,
+        SendableSymbolClassifier classifier,
         ArgumentSyntax argument,
         SemanticModel semanticModel,
-        Dictionary<IParameterSymbol, IOperation>? argumentMap)
+        HashSet<(SyntaxNode, IMethodSymbol, string)> visitedCalls,
+        HashSet<(SyntaxNode, string)> visitedInvokes,
+        Dictionary<IParameterSymbol, IOperation>? argumentMap,
+        HashSet<ISymbol> reported)
     {
+        var bodies = new List<ComputationLambdas.ComputationBody>();
+
         // The SEMANTIC parameter, not the syntactic position: named arguments reorder freely
         // (`Provide(second: out later, first: 0)`).
         if ((semanticModel.GetOperation(argument) as IArgumentOperation) is not { Parameter: { } parameter } argumentOperation
             || parameter.ContainingSymbol is not IMethodSymbol method
             || ComputationLambdas.ResolveMethodBody(method, semanticModel) is not { } helper)
         {
-            yield break;
+            return (bodies, false);
         }
 
         // The helper's OTHER parameters resolve through this call's own arguments:
@@ -1245,6 +1329,7 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
             ? ComputationLambdas.BuildArgumentMap(call, argumentMap)
             : argumentMap;
 
+        var assigned = false;
         var writes = ParameterWrites(helper.Scope, parameter, semanticModel);
         foreach (var assignment in writes)
         {
@@ -1256,14 +1341,28 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
                 continue;
             }
 
+            assigned = true;
             foreach (var value in AssignedValuesFor(assignment.Left, assignment.Right, parameter, semanticModel))
             {
-                foreach (var body in ComputationLambdas.OfArgumentValue(ResolveDelegateReference(value, semanticModel, callMap), semanticModel))
+                var resolvedValue = ResolveDelegateReference(value, semanticModel, callMap);
+                var count = bodies.Count;
+                bodies.AddRange(ComputationLambdas.OfArgumentValue(resolvedValue, semanticModel));
+                if (bodies.Count == count
+                    && !AccountsForValue(context, classifier, resolvedValue, semanticModel, visitedCalls, visitedInvokes, callMap, reported)
+                    && semanticModel.GetOperation(assignment) is { } writeOperation)
                 {
-                    yield return body;
+                    Report(
+                        context,
+                        writeOperation,
+                        parameter,
+                        parameter.Name,
+                        "the delegate it holds cannot be resolved from this call site, and a delegate can capture arbitrary mutable state (assemble the patch's callees from lambdas or same-tree methods)",
+                        reported);
                 }
             }
         }
+
+        return (bodies, assigned);
     }
 
     // ReassignmentTargets flattens deconstruction left sides, so `(d, _) = (...)` assembles

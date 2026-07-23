@@ -2808,6 +2808,141 @@ public class OptimisticPatchCaptureAnalyzerTests
     }
 
     [Fact]
+    public async Task MixedReturnBranches_UnresolvedOneIsStillFlagged()
+    {
+        // The same-tree factory returns a safe lambda on one branch and an unverifiable
+        // cross-file closure on the other: either can be the delegate the patch invokes.
+        var diagnostics = await AnalyzerTestHarness.AnalyzeAsync(new[]
+        {
+            """
+            public static class External
+            {
+                private static int hits;
+
+                public static System.Func<int> Get() => () => hits;
+            }
+            """,
+            """
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                private static Func<int> Get(int p)
+                {
+                    if (p > 0)
+                    {
+                        return External.Get();
+                    }
+
+                    return static () => 0;
+                }
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x => Get(x)());
+                    });
+                }
+            }
+            """,
+        }, new OptimisticPatchCaptureAnalyzer());
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR004", diagnostic.Id);
+        Assert.Contains("'Get'", diagnostic.GetMessage());
+        Assert.Contains("cannot be resolved", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task NameofMentionOfARebindingLocalFunction_DoesNotCountAsReassignment()
+    {
+        // The rebinding local function is only MENTIONED in nameof, never run: the write
+        // inside it cannot precede the Apply, so the safe initializer stays the delegate.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                private static int hits;
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        Func<int, int> patch = static x => x;
+                        void Rebind() => patch = x => x + hits;
+                        _ = nameof(Rebind);
+                        await ctx.Apply(state, patch);
+                    });
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task OutHelperMixedBranches_UnresolvedOneIsStillFlagged()
+    {
+        // One helper branch assembles a safe lambda, the other an unverifiable cross-file
+        // closure: the safe branch must not silence the other.
+        var diagnostics = await AnalyzerTestHarness.AnalyzeAsync(new[]
+        {
+            """
+            public static class External
+            {
+                private static int hits;
+
+                public static System.Func<int, int> Get() => x => x + hits;
+            }
+            """,
+            """
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                private static void Provide(out Func<int, int> d, int p)
+                {
+                    if (p > 0)
+                    {
+                        d = External.Get();
+                    }
+                    else
+                    {
+                        d = static x => x;
+                    }
+                }
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        Func<int, int> patch;
+                        Provide(out patch, p);
+                        await ctx.Apply(state, patch);
+                    });
+                }
+            }
+            """,
+        }, new OptimisticPatchCaptureAnalyzer());
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR004", diagnostic.Id);
+        Assert.Contains("'d'", diagnostic.GetMessage());
+        Assert.Contains("cannot be resolved", diagnostic.GetMessage());
+    }
+
+    [Fact]
     public async Task CoalesceAssignment_DoesNotStandInAsInitializer()
     {
         // `??=` can leave an older, externally supplied value in place: it must not be

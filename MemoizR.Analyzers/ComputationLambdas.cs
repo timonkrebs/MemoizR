@@ -803,8 +803,16 @@ internal static class ComputationLambdas
     {
         for (var current = node.Parent; current is not null; current = current.Parent)
         {
+            // An arrow body belongs to the declaration that carries it: attributing it to
+            // the OWNER lets an expression-bodied local function get the same
+            // reference-ordering as a block-bodied one instead of counting as unknowable.
+            if (current is ArrowExpressionClauseSyntax { Parent: { } owner })
+            {
+                return owner;
+            }
+
             if (current is AnonymousFunctionExpressionSyntax or LocalFunctionStatementSyntax
-                or BaseMethodDeclarationSyntax or AccessorDeclarationSyntax or ArrowExpressionClauseSyntax)
+                or BaseMethodDeclarationSyntax or AccessorDeclarationSyntax)
             {
                 return current;
             }
@@ -850,8 +858,24 @@ internal static class ComputationLambdas
         {
             if (identifier.Identifier.ValueText == symbol.Name
                 && !local.Span.Contains(identifier.Span)
+                && !IsInsideNameOfSyntax(identifier)
                 && SymbolEqualityComparer.Default.Equals(semanticModel.GetSymbolInfo(identifier).Symbol, symbol)
                 && ReferenceRunsBefore(identifier, reference, variable, semanticModel, visitedFunctions))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    // A name mentioned only inside nameof() is a compile-time string: it neither runs the
+    // function nor lets a delegate escape, so the ordering scans must not count it.
+    private static bool IsInsideNameOfSyntax(SyntaxNode node)
+    {
+        for (var current = node.Parent; current is not null; current = current.Parent)
+        {
+            if (current is InvocationExpressionSyntax { Expression: IdentifierNameSyntax { Identifier.ValueText: "nameof" } })
             {
                 return true;
             }
@@ -923,6 +947,7 @@ internal static class ComputationLambdas
         foreach (var name in semanticModel.SyntaxTree.GetRoot().DescendantNodes().OfType<IdentifierNameSyntax>())
         {
             if (name.Identifier.ValueText != lifted.Name
+                || IsInsideNameOfSyntax(name)
                 || !SymbolEqualityComparer.Default.Equals(semanticModel.GetSymbolInfo(name).Symbol, lifted))
             {
                 continue;
