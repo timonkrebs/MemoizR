@@ -545,6 +545,131 @@ internal static class ComputationLambdas
         return right;
     }
 
+    // The values a simple assignment gives THIS variable, deconstructions paired
+    // positionally (`(other, later) = (a, b)` assigns only `b` to `later`). WritesVariable,
+    // not plain symbol equality: an assignment through a ref alias rebinds the variable
+    // too. Shared by MZR004's delegate chases and the assembled-patch resolution below.
+    public static IEnumerable<IOperation> AssignedValuesFor(ExpressionSyntax left, ExpressionSyntax right, ISymbol variable, SemanticModel semanticModel)
+    {
+        if (left is TupleExpressionSyntax leftTuple && right is TupleExpressionSyntax rightTuple
+            && leftTuple.Arguments.Count == rightTuple.Arguments.Count)
+        {
+            for (var i = 0; i < leftTuple.Arguments.Count; i++)
+            {
+                foreach (var value in AssignedValuesFor(leftTuple.Arguments[i].Expression, rightTuple.Arguments[i].Expression, variable, semanticModel))
+                {
+                    yield return value;
+                }
+            }
+
+            yield break;
+        }
+
+        if (WritesVariable(left, variable, semanticModel)
+            && semanticModel.GetOperation(right) is { } operation)
+        {
+            yield return operation;
+        }
+    }
+
+    // Best-effort SUPPLEMENTAL bodies for an Apply patch argument beyond OfArgumentValue: a
+    // patch assembled by a same-tree out-helper (the sole dominating out handoff, following
+    // forwarded handoffs), or returned by a same-tree computed get-only delegate property.
+    // Resolution only -- MZR004 owns the unverifiable accounting for these shapes; MZR003
+    // needs the BODIES, because a Set inside them still throws under the evaluation lock.
+    public static IEnumerable<ComputationBody> AssembledPatchBodies(IOperation value, SemanticModel? semanticModel)
+    {
+        var reference = value;
+        while (reference is IConversionOperation conversion)
+        {
+            reference = conversion.Operand;
+        }
+
+        var variable = ReferencedVariable(reference);
+        if (variable is not null && EffectiveInitializerWrite(variable, semanticModel) is ArgumentSyntax outWrite)
+        {
+            foreach (var body in OutHandoffBodies(outWrite, semanticModel, new HashSet<SyntaxNode>()))
+            {
+                yield return body;
+            }
+        }
+
+        if (variable is IPropertySymbol { GetMethod: { } getter, SetMethod: null }
+            && ResolveMethodBody(getter, semanticModel) is { } getterBody)
+        {
+            foreach (var body in ReturnedBodies(getterBody, semanticModel))
+            {
+                yield return body;
+            }
+        }
+    }
+
+    private static IEnumerable<ComputationBody> ReturnedBodies(ComputationBody methodBody, SemanticModel? semanticModel)
+    {
+        foreach (var inner in DescendDirectExecution(methodBody.Body))
+        {
+            if (inner is not IReturnOperation { ReturnedValue: { } returned })
+            {
+                continue;
+            }
+
+            foreach (var body in OfArgumentValue(returned, semanticModel))
+            {
+                yield return body;
+            }
+        }
+    }
+
+    // The delegate bodies an out-helper binds to its parameter: direct assignments'
+    // paired values, plus FORWARDED out handoffs (`Provide(out d) { Build(out d); }`)
+    // followed recursively -- the visited set bounds forwarding cycles.
+    public static IEnumerable<ComputationBody> OutHandoffBodies(ArgumentSyntax argument, SemanticModel? semanticModel, HashSet<SyntaxNode> visited)
+    {
+        if (semanticModel is null || !visited.Add(argument)
+            || (semanticModel.GetOperation(argument) as IArgumentOperation)?.Parameter is not { } parameter
+            || parameter.ContainingSymbol is not IMethodSymbol method
+            || ResolveMethodBody(method, semanticModel) is not { } helper)
+        {
+            yield break;
+        }
+
+        foreach (var node in helper.Scope.DescendantNodes())
+        {
+            foreach (var body in OutHandoffNodeBodies(node, parameter, semanticModel, visited))
+            {
+                yield return body;
+            }
+        }
+    }
+
+    private static IEnumerable<ComputationBody> OutHandoffNodeBodies(SyntaxNode node, IParameterSymbol parameter, SemanticModel semanticModel, HashSet<SyntaxNode> visited)
+    {
+        switch (node)
+        {
+            case AssignmentExpressionSyntax assignment
+                when ReassignmentTargets(assignment) is { } targets
+                    && targets.Any(target => WritesVariable(target, parameter, semanticModel)):
+                foreach (var value in AssignedValuesFor(assignment.Left, assignment.Right, parameter, semanticModel))
+                {
+                    foreach (var body in OfArgumentValue(value, semanticModel))
+                    {
+                        yield return body;
+                    }
+                }
+
+                break;
+            case ArgumentSyntax forwarded
+                when forwarded.RefOrOutKeyword.IsKind(SyntaxKind.OutKeyword)
+                    && SymbolEqualityComparer.Default.Equals(semanticModel.GetSymbolInfo(forwarded.Expression).Symbol, parameter):
+                foreach (var body in OutHandoffBodies(forwarded, semanticModel, visited))
+                {
+                    yield return body;
+                }
+
+                break;
+        }
+    }
+
     // A ref-local ALIAS writes its referent: `ref var alias = ref patch; alias = ...` rebinds
     // patch just as directly. The alias chain resolves through `= ref` initializers; the
     // visited set breaks alias cycles. Shared by MZR004's delegate-reassignment scan and the

@@ -110,6 +110,13 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
             return;
         }
 
+        // A delegate variable initialized from a conditional stores whichever arm ran: the
+        // arms are accounted for separately, exactly like a conditional argument.
+        if (InspectConditionalInitializer(context, classifier, value, semanticModel, reported))
+        {
+            return;
+        }
+
         var methodReference = ResolveMethodReference(value, semanticModel, visitedVariables: null);
         if (methodReference is not null)
         {
@@ -141,7 +148,7 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
             && patchProperty.GetMethod is { } patchGetter
             && ComputationLambdas.ResolveMethodBody(patchGetter, semanticModel) is { } getterBody)
         {
-            bodyResolved = InspectPropertyPatchReturns(context, classifier, getterBody, patchProperty, semanticModel, reported);
+            bodyResolved = InspectReturnedPatchBodies(context, classifier, getterBody, patchProperty, argumentMap: null, semanticModel, reported);
         }
 
         // A SOURCE-declared method group whose body lives in another file cannot be walked:
@@ -221,32 +228,78 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         SemanticModel semanticModel,
         HashSet<ISymbol> reported)
     {
+        // A surviving OUT handoff routes through the out-helper resolver, walking its
+        // assembled bodies as patches.
+        if (node is ArgumentSyntax outWrite)
+        {
+            return InspectOutWrite(context, classifier, outWrite, semanticModel, reported);
+        }
+
         if (node is not AssignmentExpressionSyntax assignment)
         {
             return false;
         }
 
+        var paired = false;
         var handled = true;
-        foreach (var value in AssignedValuesFor(assignment.Left, assignment.Right, variable, semanticModel))
+        foreach (var value in ComputationLambdas.AssignedValuesFor(assignment.Left, assignment.Right, variable, semanticModel))
         {
-            var resolvedValue = ResolveDelegateReference(value, semanticModel, argumentMap: null);
-            var methodReference = ResolveMethodReference(resolvedValue, semanticModel, visitedVariables: null);
-            if (methodReference is not null)
-            {
-                InspectMethodGroupReceiver(context, classifier, methodReference, reported);
-            }
-
-            var resolvedAny = false;
-            foreach (var patch in ComputationLambdas.OfArgumentValue(resolvedValue, semanticModel))
-            {
-                resolvedAny = true;
-                InspectPatchBody(context, classifier, patch, semanticModel, reported);
-            }
-
-            handled &= resolvedAny || methodReference is { Method.DeclaringSyntaxReferences.Length: 0 };
+            paired = true;
+            handled &= InspectSurvivingValue(context, classifier, value, semanticModel, reported);
         }
 
-        return handled;
+        // An unpairable value (`(patch, _) = External.Pair();`) determines nothing walkable.
+        return paired && handled;
+    }
+
+    private static bool InspectSurvivingValue(
+        OperationAnalysisContext context,
+        SendableSymbolClassifier classifier,
+        IOperation value,
+        SemanticModel semanticModel,
+        HashSet<ISymbol> reported)
+    {
+        var resolvedValue = ResolveDelegateReference(value, semanticModel, argumentMap: null);
+        var methodReference = ResolveMethodReference(resolvedValue, semanticModel, visitedVariables: null);
+        if (methodReference is not null)
+        {
+            InspectMethodGroupReceiver(context, classifier, methodReference, reported);
+        }
+
+        var resolvedAny = false;
+        foreach (var patch in ComputationLambdas.OfArgumentValue(resolvedValue, semanticModel))
+        {
+            resolvedAny = true;
+            InspectPatchBody(context, classifier, patch, semanticModel, reported);
+        }
+
+        // A same-tree delegate FACTORY result resolves through its returns, walked as patch
+        // bodies; metadata method groups stay trusted external contracts.
+        if (!resolvedAny && Unwrap(resolvedValue) is IInvocationOperation factoryCall
+            && ComputationLambdas.ResolveMethodBody(factoryCall.TargetMethod, semanticModel) is { } factoryBody)
+        {
+            resolvedAny = InspectReturnedPatchBodies(context, classifier, factoryBody, factoryCall.TargetMethod, ComputationLambdas.BuildArgumentMap(factoryCall, outer: null), semanticModel, reported);
+        }
+
+        return resolvedAny || methodReference is { Method.DeclaringSyntaxReferences.Length: 0 };
+    }
+
+    private static bool InspectOutWrite(
+        OperationAnalysisContext context,
+        SendableSymbolClassifier classifier,
+        ArgumentSyntax outWrite,
+        SemanticModel semanticModel,
+        HashSet<ISymbol> reported)
+    {
+        var visitedCalls = new HashSet<(SyntaxNode, IMethodSymbol, string)>();
+        var visitedInvokes = new HashSet<(SyntaxNode, string)>();
+        var (bodies, accounted) = OutAssignedBodies(context, classifier, outWrite, semanticModel, visitedCalls, visitedInvokes, argumentMap: null, reported);
+        foreach (var patch in bodies)
+        {
+            InspectPatchBody(context, classifier, patch, semanticModel, reported);
+        }
+
+        return bodies.Count > 0 || accounted;
     }
 
     private static bool InspectOutAssembledPatch(
@@ -263,31 +316,24 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
             return false;
         }
 
-        var visitedCalls = new HashSet<(SyntaxNode, IMethodSymbol, string)>();
-        var visitedInvokes = new HashSet<(SyntaxNode, string)>();
-        var (bodies, accounted) = OutAssignedBodies(context, classifier, outWrite, semanticModel, visitedCalls, visitedInvokes, argumentMap: null, reported);
-        foreach (var patch in bodies)
-        {
-            InspectPatchBody(context, classifier, patch, semanticModel, reported);
-        }
-
-        return bodies.Count > 0 || accounted;
+        return InspectOutWrite(context, classifier, outWrite, semanticModel, reported);
     }
 
     // Each getter return is a CANDIDATE: walked as a patch body when it resolves, trusted
     // when it is a metadata target, reported otherwise -- a safe return must not silence an
     // unresolvable one. (The getter runs at the Apply call, once; only the RETURNED
     // delegate replays, so the getter's own statements need no per-replay walk here.)
-    private static bool InspectPropertyPatchReturns(
+    private static bool InspectReturnedPatchBodies(
         OperationAnalysisContext context,
         SendableSymbolClassifier classifier,
-        ComputationLambdas.ComputationBody getterBody,
-        IPropertySymbol property,
+        ComputationLambdas.ComputationBody methodBody,
+        ISymbol subject,
+        Dictionary<IParameterSymbol, IOperation>? argumentMap,
         SemanticModel? semanticModel,
         HashSet<ISymbol> reported)
     {
         var accounted = false;
-        foreach (var inner in ComputationLambdas.DescendDirectExecution(getterBody.Body))
+        foreach (var inner in ComputationLambdas.DescendDirectExecution(methodBody.Body))
         {
             if (inner is not IReturnOperation { ReturnedValue: { } returned })
             {
@@ -295,7 +341,7 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
             }
 
             accounted = true;
-            var resolvedValue = ResolveDelegateReference(returned, semanticModel, argumentMap: null);
+            var resolvedValue = ResolveDelegateReference(returned, semanticModel, argumentMap);
 
             // A returned method group stores its RECEIVER in the delegate the overlay keeps,
             // exactly like a method-group patch argument.
@@ -317,14 +363,26 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
                 Report(
                     context,
                     returned,
-                    property,
-                    property.Name,
+                    subject,
+                    subject.Name,
                     "the delegate it returns cannot be resolved from this call site, and a delegate can capture arbitrary mutable state (return a lambda or a method declared in this file)",
                     reported);
             }
         }
 
         return accounted;
+    }
+
+    private static bool InspectConditionalInitializer(
+        OperationAnalysisContext context,
+        SendableSymbolClassifier classifier,
+        IOperation value,
+        SemanticModel? semanticModel,
+        HashSet<ISymbol> reported)
+    {
+        return ReceiverSymbol(Unwrap(value)) is { } source
+            && ComputationLambdas.SameTreeInitializerOperation(source, semanticModel) is { } initializer
+            && InspectConditionalArms(context, classifier, initializer, semanticModel, reported);
     }
 
     private static bool InspectConditionalArms(
@@ -1440,7 +1498,7 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
             return false;
         }
 
-        foreach (var value in AssignedValuesFor(assignment.Left, assignment.Right, variable, semanticModel))
+        foreach (var value in ComputationLambdas.AssignedValuesFor(assignment.Left, assignment.Right, variable, semanticModel))
         {
             if (AccountsForValue(context, classifier, ResolveDelegateReference(value, semanticModel, argumentMap), semanticModel, visitedCalls, visitedInvokes, argumentMap, reported))
             {
@@ -1498,16 +1556,14 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         };
     }
 
-    // "Straight-line" = the killer sits in plain block statements between itself and wherever
-    // the value is observed (an invoke site, or an out-helper's own scope end); a killer
-    // inside an if/loop may not run, so it kills nothing -- and an exit statement between the
-    // two writes can leave the earlier value observable, so nothing is definite past one.
+    // "Straight-line" = the killer sits in plain statements between itself and wherever the
+    // value is observed (an invoke site, or an out-helper's own scope end); a killer inside
+    // an if/loop may not run, so it kills nothing -- and an exit statement between the two
+    // writes can leave the earlier value observable, so nothing is definite past one. The
+    // argument-list hop covers out-handoff killers; a conditional-access call stays rejected.
     private static bool DefinitelyOverwrites(SyntaxNode killer, SyntaxNode victim, SyntaxNode reference, ISymbol variable, SemanticModel semanticModel)
     {
-        if (killer is not AssignmentExpressionSyntax assignment
-            || !assignment.IsKind(SyntaxKind.SimpleAssignmentExpression)
-            || assignment.Left is TupleExpressionSyntax
-            || !ComputationLambdas.WritesVariable(assignment.Left, variable, semanticModel)
+        if (!IsDeterminingWrite(killer, variable, semanticModel)
             || killer.SpanStart <= victim.SpanStart
             || killer.SpanStart >= reference.Span.End
             || ExitsBetween(victim, killer))
@@ -1517,13 +1573,28 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
 
         for (var current = killer.Parent; current is not null && !current.Span.Contains(reference.Span); current = current.Parent)
         {
-            if (current is not (BlockSyntax or ExpressionStatementSyntax))
+            if (current is not (BlockSyntax or ExpressionStatementSyntax or ArgumentListSyntax or InvocationExpressionSyntax))
             {
                 return false;
             }
         }
 
         return true;
+    }
+
+    // A killer must fully DETERMINE the new value: a simple non-tuple assignment, or an
+    // `out` handoff (the language requires the callee to assign before returning).
+    private static bool IsDeterminingWrite(SyntaxNode killer, ISymbol variable, SemanticModel semanticModel)
+    {
+        return killer switch
+        {
+            AssignmentExpressionSyntax assignment => assignment.IsKind(SyntaxKind.SimpleAssignmentExpression)
+                && assignment.Left is not TupleExpressionSyntax
+                && ComputationLambdas.WritesVariable(assignment.Left, variable, semanticModel),
+            ArgumentSyntax argument => argument.RefOrOutKeyword.IsKind(SyntaxKind.OutKeyword)
+                && ComputationLambdas.WritesVariable(argument.Expression, variable, semanticModel),
+            _ => false,
+        };
     }
 
     // A return/throw/goto/break/continue/yield starting between the two writes diverts
@@ -1564,7 +1635,7 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
             yield break;
         }
 
-        foreach (var value in AssignedValuesFor(assignment.Left, assignment.Right, variable, semanticModel))
+        foreach (var value in ComputationLambdas.AssignedValuesFor(assignment.Left, assignment.Right, variable, semanticModel))
         {
             foreach (var body in ComputationLambdas.OfArgumentValue(ResolveDelegateReference(value, semanticModel, argumentMap), semanticModel))
             {
@@ -1607,6 +1678,13 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
             ? ComputationLambdas.BuildArgumentMap(call, argumentMap)
             : argumentMap;
 
+        // Forwarding chains re-reach argument sites; the guard keys per site and binding so
+        // cycles terminate while different bindings still re-walk.
+        if (!visitedCalls.Add((argument, method, ComputationLambdas.ArgumentMapKey(callMap))))
+        {
+            return (bodies, true);
+        }
+
         var assigned = false;
         var writes = ParameterWrites(helper.Scope, parameter, semanticModel);
         foreach (var assignment in writes)
@@ -1620,13 +1698,82 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
             }
 
             assigned = true;
-            foreach (var value in AssignedValuesFor(assignment.Left, assignment.Right, parameter, semanticModel))
+            ChaseOutAssignment(context, classifier, assignment, parameter, semanticModel, bodies, visitedCalls, visitedInvokes, callMap, reported);
+        }
+
+        // A FORWARDED handoff (`Provide(out d) { Build(out d); }`) assembles the delegate
+        // one helper deeper: chased recursively, with an unaccounted chain reported here.
+        foreach (var node in helper.Scope.DescendantNodes())
+        {
+            if (node is ArgumentSyntax forwarded
+                && forwarded.RefOrOutKeyword.IsKind(SyntaxKind.OutKeyword)
+                && SymbolEqualityComparer.Default.Equals(semanticModel.GetSymbolInfo(forwarded.Expression).Symbol, parameter))
             {
-                ChaseOutAssignedValue(context, classifier, value, assignment, parameter, semanticModel, bodies, visitedCalls, visitedInvokes, callMap, reported);
+                assigned = true;
+                ChaseForwardedHandoff(context, classifier, forwarded, parameter, semanticModel, bodies, visitedCalls, visitedInvokes, callMap, reported);
             }
         }
 
         return (bodies, assigned);
+    }
+
+    private static void ChaseOutAssignment(
+        OperationAnalysisContext context,
+        SendableSymbolClassifier classifier,
+        AssignmentExpressionSyntax assignment,
+        IParameterSymbol parameter,
+        SemanticModel semanticModel,
+        List<ComputationLambdas.ComputationBody> bodies,
+        HashSet<(SyntaxNode, IMethodSymbol, string)> visitedCalls,
+        HashSet<(SyntaxNode, string)> visitedInvokes,
+        Dictionary<IParameterSymbol, IOperation>? callMap,
+        HashSet<ISymbol> reported)
+    {
+        var paired = false;
+        foreach (var value in ComputationLambdas.AssignedValuesFor(assignment.Left, assignment.Right, parameter, semanticModel))
+        {
+            paired = true;
+            ChaseOutAssignedValue(context, classifier, value, assignment, parameter, semanticModel, bodies, visitedCalls, visitedInvokes, callMap, reported);
+        }
+
+        // A write whose value cannot be PAIRED (`(d, _) = External.Pair();`) binds the
+        // parameter to something nothing can walk: unverifiable means flagged.
+        if (!paired && semanticModel.GetOperation(assignment) is { } writeOperation)
+        {
+            Report(
+                context,
+                writeOperation,
+                parameter,
+                parameter.Name,
+                "the delegate it holds cannot be resolved from this call site, and a delegate can capture arbitrary mutable state (assemble the patch's callees from lambdas or same-tree methods)",
+                reported);
+        }
+    }
+
+    private static void ChaseForwardedHandoff(
+        OperationAnalysisContext context,
+        SendableSymbolClassifier classifier,
+        ArgumentSyntax forwarded,
+        IParameterSymbol parameter,
+        SemanticModel semanticModel,
+        List<ComputationLambdas.ComputationBody> bodies,
+        HashSet<(SyntaxNode, IMethodSymbol, string)> visitedCalls,
+        HashSet<(SyntaxNode, string)> visitedInvokes,
+        Dictionary<IParameterSymbol, IOperation>? callMap,
+        HashSet<ISymbol> reported)
+    {
+        var (nested, nestedAccounted) = OutAssignedBodies(context, classifier, forwarded, semanticModel, visitedCalls, visitedInvokes, callMap, reported);
+        bodies.AddRange(nested);
+        if (nested.Count == 0 && !nestedAccounted && semanticModel.GetOperation(forwarded) is { } forwardOperation)
+        {
+            Report(
+                context,
+                forwardOperation,
+                parameter,
+                parameter.Name,
+                "the delegate it holds cannot be resolved from this call site, and a delegate can capture arbitrary mutable state (assemble the patch's callees from lambdas or same-tree methods)",
+                reported);
+        }
     }
 
     private static void ChaseOutAssignedValue(
@@ -1684,31 +1831,6 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         }
 
         return writes;
-    }
-
-    private static IEnumerable<IOperation> AssignedValuesFor(ExpressionSyntax left, ExpressionSyntax right, ISymbol variable, SemanticModel semanticModel)
-    {
-        if (left is TupleExpressionSyntax leftTuple && right is TupleExpressionSyntax rightTuple
-            && leftTuple.Arguments.Count == rightTuple.Arguments.Count)
-        {
-            for (var i = 0; i < leftTuple.Arguments.Count; i++)
-            {
-                foreach (var value in AssignedValuesFor(leftTuple.Arguments[i].Expression, rightTuple.Arguments[i].Expression, variable, semanticModel))
-                {
-                    yield return value;
-                }
-            }
-
-            yield break;
-        }
-
-        // WritesVariable, not plain symbol equality: an assignment through a ref alias
-        // (`ref var alias = ref later; alias = () => hits;`) rebinds the delegate too.
-        if (ComputationLambdas.WritesVariable(left, variable, semanticModel)
-            && semanticModel.GetOperation(right) is { } operation)
-        {
-            yield return operation;
-        }
     }
 
     private static void ChaseExecutedBody(

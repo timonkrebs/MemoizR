@@ -830,6 +830,75 @@ public class SetInsideComputationAnalyzerTests
     }
 
     [Fact]
+    public async Task SetInsideAnOutAssembledPatch_IsFlagged()
+    {
+        // The patch assembled by the out-helper runs inside the view's evaluation lock: its
+        // Set throws exactly like an inline patch's.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var v = f.CreateSignal(1);
+                    var state = f.CreateOptimistic<int>(v);
+                    void Provide(out Func<int, int> d) => d = x => { _ = v.Set(2); return x; };
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        Func<int, int> patch;
+                        Provide(out patch);
+                        await ctx.Apply(state, patch);
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR003", diagnostic.Id);
+        Assert.Contains("Signal<int>.Set", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task SetInsideAComputedPropertyPatch_IsFlagged()
+    {
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                private readonly MemoFactory f = new();
+                private readonly Signal<int> v;
+
+                private Func<int, int> Patch
+                {
+                    get
+                    {
+                        return x => { _ = v.Set(2); return x; };
+                    }
+                }
+
+                public C()
+                {
+                    v = f.CreateSignal(1);
+                    var state = f.CreateOptimistic<int>(v);
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, Patch);
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR003", diagnostic.Id);
+        Assert.Contains("Signal<int>.Set", diagnostic.GetMessage());
+    }
+
+    [Fact]
     public async Task SetInsideAConditionalComputationArm_IsFlagged()
     {
         // The conditional picks one of two computations at build time: either arm can be

@@ -45,6 +45,21 @@ public sealed class SetInsideComputationAnalyzer : DiagnosticAnalyzer
             var visitedCalls = new HashSet<(SyntaxNode, IMethodSymbol, string)>();
             InspectExecutedBody(context, invocation, computation.Body, actorHost, visitedCalls, argumentMap: null);
         }
+
+        // Patch shapes resolved beyond plain arguments -- assembled by an out-helper, or
+        // returned by a computed delegate property -- still run under the evaluation lock,
+        // so their Sets throw exactly like an inline patch's.
+        if (FactoryMethods.IsOptimisticPatchHost(invocation.TargetMethod))
+        {
+            foreach (var argument in invocation.Arguments)
+            {
+                foreach (var body in ComputationLambdas.AssembledPatchBodies(argument.Value, invocation.SemanticModel))
+                {
+                    var visitedCalls = new HashSet<(SyntaxNode, IMethodSymbol, string)>();
+                    InspectExecutedBody(context, invocation, body.Body, actorHost, visitedCalls, argumentMap: null);
+                }
+            }
+        }
     }
 
     // Direct execution path only: a Set inside a callback the computation merely BUILDS (the
