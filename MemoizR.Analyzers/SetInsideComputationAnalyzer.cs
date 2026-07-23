@@ -96,7 +96,37 @@ public sealed class SetInsideComputationAnalyzer : DiagnosticAnalyzer
                 continue;
             }
 
+            if (operation is IInvocationOperation { TargetMethod.MethodKind: MethodKind.DelegateInvoke, Instance: { } callee })
+            {
+                InspectInvokedDelegate(context, host, callee, actorHost, visitedCalls, argumentMap);
+                continue;
+            }
+
             InspectExecutedCalls(context, host, operation, actorHost, visitedCalls, argumentMap);
+        }
+    }
+
+    // A delegate the computation synchronously INVOKES executes its body under the same
+    // evaluation lock: `d()` with a same-tree `Func<int> d = () => { _ = v.Set(1); ... };`
+    // throws exactly like the inline Set -- while a merely BUILT callback stays pruned
+    // (deferred execution holds no lock, and building one is this rule's own fix guidance).
+    // Aliases and parameter bindings resolve like the executed-call chase; anything
+    // unresolvable keeps the runtime backstop.
+    private static void InspectInvokedDelegate(
+        OperationAnalysisContext context,
+        IInvocationOperation host,
+        IOperation callee,
+        bool actorHost,
+        HashSet<(SyntaxNode, IMethodSymbol, string)> visitedCalls,
+        Dictionary<IParameterSymbol, IOperation>? argumentMap)
+    {
+        var resolved = ComputationLambdas.ResolveDelegateValue(callee, host.SemanticModel, argumentMap);
+        foreach (var body in ComputationLambdas.OfArgumentValue(resolved, host.SemanticModel))
+        {
+            if (visitedCalls.Add((body.Scope, host.TargetMethod, ComputationLambdas.ArgumentMapKey(argumentMap))))
+            {
+                InspectExecutedBody(context, host, body.Body, actorHost, visitedCalls, argumentMap);
+            }
         }
     }
 

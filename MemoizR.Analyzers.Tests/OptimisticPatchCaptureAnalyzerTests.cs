@@ -1208,8 +1208,11 @@ public class OptimisticPatchCaptureAnalyzerTests
     // Every link of the alias chain gets the reassignment check, against the site where its
     // value is READ: patch is never written again, but it copied p0 after p0's reassignment.
     [Fact]
-    public async Task ReassignedAlias_IsUnresolvable()
+    public async Task ReassignedAlias_SurvivingWriteIsWalked()
     {
+        // p0's initializer is definitely overwritten before patch copies it: the surviving
+        // write is the only closure the copy can hold, so it is walked as the patch body --
+        // and its capture of `shared` is what gets flagged, not the alias wholesale.
         var diagnostics = await AnalyzeAsync("""
             using System;
             using System.Collections.Generic;
@@ -1235,8 +1238,8 @@ public class OptimisticPatchCaptureAnalyzerTests
 
         var diagnostic = Assert.Single(diagnostics);
         Assert.Equal("MZR004", diagnostic.Id);
-        Assert.Contains("'p0'", diagnostic.GetMessage());
-        Assert.Contains("reassigned", diagnostic.GetMessage());
+        Assert.Contains("'shared'", diagnostic.GetMessage());
+        Assert.Contains("not Sendable", diagnostic.GetMessage());
     }
 
     [Fact]
@@ -4363,5 +4366,69 @@ public class OptimisticPatchCaptureAnalyzerTests
         Assert.Equal("MZR004", diagnostic.Id);
         Assert.Contains("'shared'", diagnostic.GetMessage());
         Assert.Contains("not Sendable", diagnostic.GetMessage());
+    }
+    [Fact]
+    public async Task OverwrittenAliasSource_SurvivingSafeWriteResolves()
+    {
+        // The unsafe initializer is definitely overwritten before the alias copies the
+        // source: only the safe surviving write can be stored, so nothing is flagged.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    var shared = new List<int>();
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        Func<int, int> src = x => x + shared.Count;
+                        src = static x => x;
+                        Func<int, int> patch = src;
+                        await ctx.Apply(state, patch);
+                    });
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task ForeignReceiverMemberRead_DoesNotTrustOwnWrite()
+    {
+        // The write initializes `this.patch`, but the patch is read off ANOTHER instance,
+        // whose copy may still be null or externally supplied: the synthesis must not pair
+        // them, and the unresolvable read keeps the flag.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                private Func<int, int> patch;
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    var other = new C();
+                    patch = static x => x;
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, other.patch);
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR004", diagnostic.Id);
+        Assert.Contains("'patch'", diagnostic.GetMessage());
+        Assert.Contains("cannot be resolved", diagnostic.GetMessage());
     }
 }

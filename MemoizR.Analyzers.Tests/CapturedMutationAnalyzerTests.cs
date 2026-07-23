@@ -1006,4 +1006,94 @@ public class CapturedMutationAnalyzerTests
         Assert.Equal("MZR002", diagnostic.Id);
         Assert.Contains("captured local 'applied'", diagnostic.GetMessage());
     }
+    [Fact]
+    public async Task InvokedCapturedDelegate_MutationIsFlagged()
+    {
+        // The patch synchronously invokes a captured delegate: its body runs on the
+        // computation's flows, so the captured-local write races like inline code.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    var applied = 0;
+                    Func<int, int> d = x => { applied++; return x; };
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x => d(x));
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR002", diagnostic.Id);
+        Assert.Contains("captured local 'applied'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task OverwrittenStaleInitializer_IsNotCharged()
+    {
+        // The mutating initializer is definitely overwritten before Apply: only the safe
+        // overwrite can be stored, so the stale write must not be charged to this call.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    var applied = 0;
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        Func<int, int> patch = x => { applied++; return x; };
+                        patch = static x => x;
+                        await ctx.Apply(state, patch);
+                    });
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task OverwrittenAliasSource_SurvivingMutationIsFlagged()
+    {
+        // The alias copies a source whose initializer is definitely overwritten: the
+        // surviving mutating write is what the overlay stores and replays.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    var applied = 0;
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        Func<int, int> src = static x => x;
+                        src = x => { applied++; return x; };
+                        Func<int, int> patch = src;
+                        await ctx.Apply(state, patch);
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR002", diagnostic.Id);
+        Assert.Contains("captured local 'applied'", diagnostic.GetMessage());
+    }
 }

@@ -64,14 +64,55 @@ public sealed class CapturedMutationAnalyzer : DiagnosticAnalyzer
     private static void InspectComputationBody(OperationAnalysisContext context, ComputationLambdas.ComputationBody computation, SemanticModel? semanticModel)
     {
         var visitedHelpers = new HashSet<(IMethodSymbol, IParameterSymbol?, bool)>(ChaseKeyComparer.Instance);
-        foreach (var operation in ComputationLambdas.Descend(computation.Body))
+        var visitedDelegates = new HashSet<SyntaxNode>();
+        InspectComputationOperations(context, computation, computation.Scope, semanticModel, visitedHelpers, visitedDelegates);
+    }
+
+    private static void InspectComputationOperations(
+        OperationAnalysisContext context,
+        ComputationLambdas.ComputationBody body,
+        SyntaxNode computationScope,
+        SemanticModel? semanticModel,
+        HashSet<(IMethodSymbol, IParameterSymbol?, bool)> visitedHelpers,
+        HashSet<SyntaxNode> visitedDelegates)
+    {
+        foreach (var operation in ComputationLambdas.Descend(body.Body))
         {
             foreach (var target in MutationTargets(operation))
             {
-                ReportIfShared(context, target, computation.Scope, computation.Scope, thisParameter: null, foreignThis: false);
+                ReportIfShared(context, target, body.Scope, computationScope, thisParameter: null, foreignThis: false);
             }
 
-            InspectCalledHelper(context, operation, computation.Scope, semanticModel, visitedHelpers, thisParameter: null, foreignThis: false);
+            InspectCalledHelper(context, operation, computationScope, semanticModel, visitedHelpers, thisParameter: null, foreignThis: false);
+            InspectInvokedDelegate(context, operation, computationScope, semanticModel, visitedHelpers, visitedDelegates);
+        }
+    }
+
+    // A delegate the computation synchronously INVOKES runs its body on the computation's
+    // flows: a captured lambda's write (`Func<int,int> d = x => { applied++; ... }` invoked
+    // by the body) races exactly like inline code. Only bodies declared OUTSIDE the
+    // computation need this chase -- one declared inside is already covered by the full
+    // walk above; the visited set bounds self-invoking delegates.
+    private static void InspectInvokedDelegate(
+        OperationAnalysisContext context,
+        IOperation operation,
+        SyntaxNode computationScope,
+        SemanticModel? semanticModel,
+        HashSet<(IMethodSymbol, IParameterSymbol?, bool)> visitedHelpers,
+        HashSet<SyntaxNode> visitedDelegates)
+    {
+        if (operation is not IInvocationOperation { TargetMethod.MethodKind: MethodKind.DelegateInvoke, Instance: { } callee })
+        {
+            return;
+        }
+
+        var resolved = ComputationLambdas.ResolveDelegateValue(callee, semanticModel, null);
+        foreach (var delegateBody in ComputationLambdas.OfArgumentValue(resolved, semanticModel))
+        {
+            if (!computationScope.Span.Contains(delegateBody.Scope.Span) && visitedDelegates.Add(delegateBody.Scope))
+            {
+                InspectComputationOperations(context, delegateBody, computationScope, semanticModel, visitedHelpers, visitedDelegates);
+            }
         }
     }
 

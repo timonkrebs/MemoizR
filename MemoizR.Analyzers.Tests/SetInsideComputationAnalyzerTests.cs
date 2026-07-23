@@ -1800,4 +1800,100 @@ public class SetInsideComputationAnalyzerTests
 
         Assert.Empty(diagnostics);
     }
+    [Fact]
+    public async Task SetInInvokedCapturedDelegate_IsFlagged()
+    {
+        // The patch synchronously invokes a captured delegate: its body executes under the
+        // same evaluation lock, so the Set throws exactly like an inline one.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var v = f.CreateSignal(1);
+                    var state = f.CreateOptimistic<int>(v);
+                    Func<int, int> d = x => { _ = v.Set(2); return x; };
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x => d(x));
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR003", diagnostic.Id);
+        Assert.Contains("Signal<int>.Set", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task SetInOverwrittenStaleInitializer_IsNotFlagged()
+    {
+        // The mutating initializer is definitely overwritten before Apply: the overlay can
+        // only store the safe overwrite, so the stale Set must not be charged to this call.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var v = f.CreateSignal(1);
+                    var state = f.CreateOptimistic<int>(v);
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        Func<int, int> patch = x => { _ = v.Set(2); return x; };
+                        patch = static x => x;
+                        await ctx.Apply(state, patch);
+                    });
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task NestedFactoryReturnedPatch_KeepsCallSiteProvenance()
+    {
+        // Make forwards its signal into Inner, whose returned patch writes it: the nested
+        // map proves the disjoint factory's signal safe, while the host factory's own stays
+        // flagged.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f1 = new MemoFactory();
+                    var f2 = new MemoFactory();
+                    var other = f2.CreateSignal(1);
+                    var mine = f1.CreateSignal(1);
+                    var state = f1.CreateOptimistic<int>(mine);
+                    Func<int, int> Inner(Signal<int> t) => x => { _ = t.Set(1); return x; };
+                    Func<int, int> Make(Signal<int> s) { return Inner(s); }
+                    f1.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, Make(other));
+                    });
+                    f1.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, Make(mine));
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR003", diagnostic.Id);
+        Assert.Contains("Signal<int>.Set", diagnostic.GetMessage());
+    }
 }

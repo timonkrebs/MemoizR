@@ -88,7 +88,7 @@ internal static class ComputationLambdas
 
                 break;
             case ILocalReferenceOperation or IFieldReferenceOperation or IPropertyReferenceOperation:
-                foreach (var body in BodiesFromVariableInitializer(ReferencedVariable(value), semanticModel, visitedVariables))
+                foreach (var body in BodiesFromVariableInitializer(ReferencedVariable(value), value, semanticModel, visitedVariables))
                 {
                     yield return body;
                 }
@@ -167,7 +167,7 @@ internal static class ComputationLambdas
     // chase -- the runtime checks cover what this cannot see, like the method-group rule
     // above). The visited set breaks initializer reference cycles (two fields initialized from
     // each other).
-    private static IEnumerable<ComputationBody> BodiesFromVariableInitializer(ISymbol? variable, SemanticModel? semanticModel, HashSet<ISymbol>? visitedVariables)
+    private static IEnumerable<ComputationBody> BodiesFromVariableInitializer(ISymbol? variable, IOperation reference, SemanticModel? semanticModel, HashSet<ISymbol>? visitedVariables)
     {
         visitedVariables ??= new HashSet<ISymbol>(SymbolEqualityComparer.Default);
         if (variable is null || !visitedVariables.Add(variable))
@@ -175,8 +175,13 @@ internal static class ComputationLambdas
             yield break;
         }
 
+        // A definitely-overwritten initializer can never be the stored value at THIS read:
+        // walking it would charge (or excuse) a closure the overwrite provably replaced --
+        // the surviving-write resolution owns that case. May-be-overwritten initializers
+        // keep the best-effort trust below.
         var operation = SameTreeInitializerOperation(variable, semanticModel);
-        if (operation is null)
+        if (operation is null
+            || (semanticModel is not null && InitializerDefinitelyOverwritten(variable, reference, semanticModel)))
         {
             yield break;
         }
@@ -324,7 +329,7 @@ internal static class ComputationLambdas
             return true;
         }
 
-        if (readSite is null)
+        if (readSite is null || !ReadsThroughOwnReceiver(readSite, variable))
         {
             return false;
         }
@@ -332,6 +337,16 @@ internal static class ComputationLambdas
         var function = EnclosingFunction(write);
         return function is not null
             && (ReferenceEquals(function, EnclosingFunction(readSite)) || function.Span.Contains(readSite.Span));
+    }
+
+    // The synthesis pairs a write through the member's OWN object with a read through it
+    // too: `other.Patch` reads some other instance, which the `this`-receiver write says
+    // nothing about -- that instance's copy may still be null or externally supplied.
+    // Statics have no receiver to mismatch.
+    private static bool ReadsThroughOwnReceiver(SyntaxNode readSite, ISymbol variable)
+    {
+        return variable.IsStatic
+            || readSite is IdentifierNameSyntax or MemberAccessExpressionSyntax { Expression: ThisExpressionSyntax };
     }
 
     // Only a write that fully DETERMINES the value qualifies: `x ??= ...` / `x += ...` can
@@ -622,15 +637,14 @@ internal static class ComputationLambdas
             }
         }
 
-        // A declaration initializer definitely OVERWRITTEN before this read leaves the
-        // surviving writes as the only closures the call can store: their values are patch
-        // bodies too (resolution-only, like everything here -- MZR004 owns the accounting).
-        if (variable is not null)
+        // A declaration initializer definitely OVERWRITTEN before its read leaves the
+        // surviving writes as the only closures the call can store -- at EVERY alias link:
+        // `src = safe; src = other; var patch = src;` stores src's surviving write even
+        // though the patch variable itself is never rebound. (Resolution-only, like
+        // everything here -- MZR004 owns the accounting.)
+        foreach (var body in AliasChainSurvivingBodies(reference, semanticModel))
         {
-            foreach (var body in SurvivingWriteBodies(variable, reference, semanticModel))
-            {
-                yield return body;
-            }
+            yield return body;
         }
 
         // An ALIAS resolves to its assembled source first: `Func<int,int> p = Patch;`
@@ -657,10 +671,9 @@ internal static class ComputationLambdas
         if (resolvedVariable is IPropertySymbol { GetMethod: { } getter, SetMethod: null }
             && ResolveMethodBody(getter, semanticModel) is { } getterBody)
         {
-            var propertyMap = BuildArgumentMap(source, null);
-            foreach (var body in ReturnedBodies(getterBody, semanticModel, propertyMap))
+            foreach (var entry in ReturnedBodies(getterBody, semanticModel, BuildArgumentMap(source, null)))
             {
-                yield return (body, propertyMap);
+                yield return entry;
             }
         }
 
@@ -671,10 +684,44 @@ internal static class ComputationLambdas
             ?? UnwrappedInitializerCall(resolvedVariable, semanticModel);
         if (call is not null && ResolveMethodBody(call.TargetMethod, semanticModel) is { } factoryBody)
         {
-            var callMap = BuildArgumentMap(call, null);
-            foreach (var body in ReturnedBodies(factoryBody, semanticModel, callMap))
+            foreach (var entry in ReturnedBodies(factoryBody, semanticModel, BuildArgumentMap(call, null)))
             {
-                yield return (body, callMap);
+                yield return entry;
+            }
+        }
+    }
+
+    // The surviving-write carve-out at every ALIAS LINK's read site, mirroring
+    // ResolveDelegateValue's hops: a link that was written owns its value (the chase below
+    // covers its definite-overwrite case), so the chain stops there.
+    private static IEnumerable<(ComputationBody Body, Dictionary<IParameterSymbol, IOperation>? ArgumentMap)> AliasChainSurvivingBodies(IOperation reference, SemanticModel? semanticModel)
+    {
+        var link = reference;
+        HashSet<ISymbol>? visited = null;
+        while (ReferencedVariable(link) is { } variable)
+        {
+            visited ??= new HashSet<ISymbol>(SymbolEqualityComparer.Default);
+            if (!visited.Add(variable))
+            {
+                yield break;
+            }
+
+            foreach (var body in SurvivingWriteBodies(variable, link, semanticModel))
+            {
+                yield return body;
+            }
+
+            if (SameTreeInitializerOperation(variable, semanticModel) is not { } next
+                || IsWrittenBefore(variable, link.Syntax, semanticModel)
+                || !IsReferenceShape(next))
+            {
+                yield break;
+            }
+
+            link = next;
+            while (link is IConversionOperation conversion)
+            {
+                link = conversion.Operand;
             }
         }
     }
@@ -720,7 +767,10 @@ internal static class ComputationLambdas
 
     private static bool InitializerDefinitelyOverwritten(ISymbol variable, IOperation reference, SemanticModel semanticModel)
     {
-        if (variable.DeclaringSyntaxReferences.FirstOrDefault() is not { } declaration
+        // A member read through some OTHER receiver observes that instance's storage: the
+        // own-receiver writes this scan counts say nothing definite about it.
+        if (!ReadsThroughOwnReceiver(reference.Syntax, variable)
+            || variable.DeclaringSyntaxReferences.FirstOrDefault() is not { } declaration
             || declaration.SyntaxTree != semanticModel.SyntaxTree
             || declaration.GetSyntax() is not VariableDeclaratorSyntax { Initializer: not null } declarator)
         {
@@ -801,7 +851,9 @@ internal static class ComputationLambdas
         return initializer as IInvocationOperation;
     }
 
-    public static IEnumerable<ComputationBody> ReturnedBodies(ComputationBody methodBody, SemanticModel? semanticModel, Dictionary<IParameterSymbol, IOperation>? argumentMap = null, HashSet<(IMethodSymbol, string)>? visitedFactories = null)
+    // Each body carries the ARGUMENT MAP that resolved it: a nested factory's returns bind
+    // that factory's own parameters, which the caller's map knows nothing about.
+    public static IEnumerable<(ComputationBody Body, Dictionary<IParameterSymbol, IOperation>? ArgumentMap)> ReturnedBodies(ComputationBody methodBody, SemanticModel? semanticModel, Dictionary<IParameterSymbol, IOperation>? argumentMap = null, HashSet<(IMethodSymbol, string)>? visitedFactories = null)
     {
         foreach (var inner in DescendDirectExecution(methodBody.Body))
         {
@@ -816,7 +868,7 @@ internal static class ComputationLambdas
             foreach (var body in OfArgumentValue(resolved, semanticModel))
             {
                 resolvedAny = true;
-                yield return body;
+                yield return (body, argumentMap);
             }
 
             if (resolvedAny)
@@ -825,16 +877,16 @@ internal static class ComputationLambdas
             }
 
             visitedFactories ??= new HashSet<(IMethodSymbol, string)>();
-            foreach (var body in NestedFactoryReturnedBodies(resolved, semanticModel, argumentMap, visitedFactories))
+            foreach (var entry in NestedFactoryReturnedBodies(resolved, semanticModel, argumentMap, visitedFactories))
             {
-                yield return body;
+                yield return entry;
             }
         }
     }
 
     // `return Make();` assembles one factory deeper: chased through the nested call's
     // returns with its own map, the visited set bounding recursive factories.
-    private static IEnumerable<ComputationBody> NestedFactoryReturnedBodies(
+    private static IEnumerable<(ComputationBody Body, Dictionary<IParameterSymbol, IOperation>? ArgumentMap)> NestedFactoryReturnedBodies(
         IOperation resolved,
         SemanticModel? semanticModel,
         Dictionary<IParameterSymbol, IOperation>? argumentMap,
@@ -857,9 +909,9 @@ internal static class ComputationLambdas
             yield break;
         }
 
-        foreach (var body in ReturnedBodies(nested, semanticModel, nestedMap, visitedFactories))
+        foreach (var entry in ReturnedBodies(nested, semanticModel, nestedMap, visitedFactories))
         {
-            yield return body;
+            yield return entry;
         }
     }
 
@@ -914,15 +966,18 @@ internal static class ComputationLambdas
 
     // A node that can BIND the variable: a (possibly deconstructing) assignment whose target
     // writes it, or an out-argument handoff naming it (ref aliases included on both). Shared
-    // by the out-helper kill filter and the surviving-write resolution.
+    // by the out-helper kill filter and the surviving-write resolution. Member writes count
+    // only through the member's OWN receiver -- `other.patch = safe;` on some other instance
+    // neither kills nor stands in for what a `this.patch` read observes.
     private static bool IsVariableWriteNode(SyntaxNode node, ISymbol variable, SemanticModel semanticModel)
     {
         return node switch
         {
             AssignmentExpressionSyntax assignment => ReassignmentTargets(assignment) is { } targets
-                && targets.Any(target => WritesVariable(target, variable, semanticModel)),
+                && targets.Any(target => WritesVariable(target, variable, semanticModel) && WritesThroughOwnReceiver(target, variable)),
             ArgumentSyntax argument => argument.RefOrOutKeyword.IsKind(SyntaxKind.OutKeyword)
-                && WritesVariable(argument.Expression, variable, semanticModel),
+                && WritesVariable(argument.Expression, variable, semanticModel)
+                && WritesThroughOwnReceiver(argument.Expression, variable),
             _ => false,
         };
     }

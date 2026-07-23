@@ -101,13 +101,13 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         if (value.Type is { TypeKind: TypeKind.Delegate }
             && FindReassignedLink(value, semanticModel) is { } reassigned)
         {
-            if (!InspectSurvivingWrites(context, classifier, value, reassigned, semanticModel, reported))
+            if (!InspectSurvivingWrites(context, classifier, reassigned.ReadSite, reassigned.Variable, semanticModel, reported))
             {
                 Report(
                     context,
                     value,
-                    reassigned,
-                    reassigned.Name,
+                    reassigned.Variable,
+                    reassigned.Variable.Name,
                     "it is reassigned after its initializer, so the delegate stored in the overlay cannot be resolved from this call site, and a delegate can capture arbitrary mutable state",
                     reported);
             }
@@ -171,22 +171,21 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         }
     }
 
-    // The reassigned-argument carve-out: when the read variable's OWN declaration
-    // initializer is definitely overwritten before this call, the surviving writes are the
-    // only closures the overlay can store -- each is walked like an inline patch body
-    // (method-group receivers included, metadata trusted). Any surviving write that resolves
-    // to nothing keeps the broad reassignment report instead.
+    // The reassigned-link carve-out, at the link's own READ SITE: when the declaration
+    // initializer is definitely overwritten before that read -- the Apply argument itself,
+    // or an alias link's initializer (`src = safe; var patch = src;`) -- the surviving
+    // writes are the only closures the overlay can store, and each is walked like an inline
+    // patch body (method-group receivers included, metadata trusted). Any surviving write
+    // that resolves to nothing keeps the broad reassignment report instead.
     private static bool InspectSurvivingWrites(
         OperationAnalysisContext context,
         SendableSymbolClassifier classifier,
-        IOperation value,
+        IOperation readSite,
         ISymbol variable,
         SemanticModel? semanticModel,
         HashSet<ISymbol> reported)
     {
-        if (semanticModel is null
-            || !SymbolEqualityComparer.Default.Equals(ReceiverSymbol(Unwrap(value)), variable)
-            || !InitializerOverwrittenBeforeInvoke(Unwrap(value), semanticModel))
+        if (semanticModel is null || !InitializerOverwrittenBeforeInvoke(readSite, semanticModel))
         {
             return false;
         }
@@ -194,7 +193,7 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         var writes = new List<SyntaxNode>();
         foreach (var node in semanticModel.SyntaxTree.GetRoot().DescendantNodes())
         {
-            if (WritesDelegateBeforeInvoke(node, variable, value, semanticModel))
+            if (WritesDelegateBeforeInvoke(node, variable, readSite, semanticModel))
             {
                 writes.Add(node);
             }
@@ -203,7 +202,7 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         var handled = true;
         foreach (var node in writes)
         {
-            if (!writes.Any(other => other != node && ComputationLambdas.DefinitelyOverwrites(other, node, value.Syntax, variable, semanticModel)))
+            if (!writes.Any(other => other != node && ComputationLambdas.DefinitelyOverwrites(other, node, readSite.Syntax, variable, semanticModel)))
             {
                 handled &= InspectSurvivingWrite(context, classifier, node, variable, semanticModel, reported);
             }
@@ -668,8 +667,10 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
     // The reassignment check applies to EVERY variable in the alias chain, each against the
     // site where its value is READ: `p0 = evil; Func<int,int> patch = p0;` stores p0's
     // post-reassignment closure even though patch itself is never written again. A link whose
-    // initializer is the computation itself (a lambda or method group) ends the chain.
-    private static ISymbol? FindReassignedLink(IOperation value, SemanticModel? semanticModel)
+    // initializer is the computation itself (a lambda or method group) ends the chain. The
+    // READ SITE returns with the link: the overwrite carve-out reasons at that site, not at
+    // the Apply argument.
+    private static (ISymbol Variable, IOperation ReadSite)? FindReassignedLink(IOperation value, SemanticModel? semanticModel)
     {
         var reference = Unwrap(value);
         HashSet<ISymbol>? visited = null;
@@ -677,7 +678,7 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         {
             if (IsReassignedBefore(variable, reference, semanticModel))
             {
-                return variable;
+                return (variable, reference);
             }
 
             visited ??= new HashSet<ISymbol>(SymbolEqualityComparer.Default);
