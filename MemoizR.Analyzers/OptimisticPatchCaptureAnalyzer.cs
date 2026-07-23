@@ -1656,7 +1656,7 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
             || ComputationLambdas.ReferencedVariable(Unwrap(resolved)) is not { } variable
             || variable.DeclaringSyntaxReferences.FirstOrDefault() is not { } declaration
             || declaration.SyntaxTree != semanticModel.SyntaxTree
-            || declaration.GetSyntax() is not VariableDeclaratorSyntax { Initializer: not null } declarator)
+            || ComputationLambdas.DeclaredInitializerSite(declaration.GetSyntax()) is not { } declarator)
         {
             return false;
         }
@@ -1685,10 +1685,11 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
                 && targets.Any(target => ComputationLambdas.WritesVariable(target, variable, semanticModel)
                     && WritesReadInstance(target, variable, readReference, semanticModel))
                 && ComputationLambdas.CanExecuteBefore(assignment, readReference.Syntax, variable, semanticModel),
+            // WritesVariable, not direct symbol equality: `Provide(out alias)` through a
+            // ref alias hands the delegate to the aliased variable just as directly.
             ArgumentSyntax argument =>
                 argument.RefOrOutKeyword.Kind() is SyntaxKind.OutKeyword or SyntaxKind.RefKeyword
-                && semanticModel.GetSymbolInfo(argument.Expression).Symbol is { } written
-                && SymbolEqualityComparer.Default.Equals(written, variable)
+                && ComputationLambdas.WritesVariable(argument.Expression, variable, semanticModel)
                 && ComputationLambdas.CanExecuteBefore(argument, readReference.Syntax, variable, semanticModel),
             _ => false,
         };

@@ -1987,4 +1987,192 @@ public class SetInsideComputationAnalyzerTests
 
         Assert.Empty(diagnostics);
     }
+    [Fact]
+    public async Task SetInInvokedComputedPropertyDelegate_IsFlagged()
+    {
+        // The patch invokes the delegate a computed property hands back: the getter-returned
+        // lambda executes under the same evaluation lock, so its Set throws.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                private readonly MemoFactory f = new();
+                private readonly Signal<int> v;
+
+                private Func<int> Step
+                {
+                    get
+                    {
+                        return () => { _ = v.Set(2); return 0; };
+                    }
+                }
+
+                public C()
+                {
+                    v = f.CreateSignal(1);
+                    var state = f.CreateOptimistic<int>(v);
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x => x + Step());
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR003", diagnostic.Id);
+        Assert.Contains("Signal<int>.Set", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task ConditionalReturnFactoryArm_IsChased()
+    {
+        // The factory's return picks an arm at Apply time: the direct safe arm must not
+        // silence the factory-call arm, whose returned lambda Sets under the lock.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var v = f.CreateSignal(1);
+                    var state = f.CreateOptimistic<int>(v);
+                    Func<int, int> Make() => x => { _ = v.Set(1); return x; };
+                    Func<int, int> Get(bool flag) { return flag ? Make() : static x => x; }
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, Get(true));
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR003", diagnostic.Id);
+        Assert.Contains("Signal<int>.Set", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task ConditionalPatchFactoryArm_IsChased()
+    {
+        // The Apply argument itself is conditional: the factory-call arm can be the stored
+        // patch, so its returns are chased even though the other arm resolves directly.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var v = f.CreateSignal(1);
+                    var state = f.CreateOptimistic<int>(v);
+                    Func<int, int> Make() => x => { _ = v.Set(1); return x; };
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, p > 0 ? Make() : static x => x);
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR003", diagnostic.Id);
+        Assert.Contains("Signal<int>.Set", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task ComputedIndexerState_KeepsCrossFactoryProof()
+    {
+        // The Apply state comes from a computed indexer: the getter's return resolves with
+        // the call-site factory bound to the index parameter, proving the Set cross-context.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+            using MemoizR.Reactive;
+
+            public class C
+            {
+                private OptimisticState<int> this[MemoFactory f] => f.CreateOptimistic<int>(f.CreateSignal(1));
+
+                public void M()
+                {
+                    var f1 = new MemoFactory();
+                    var f2 = new MemoFactory();
+                    var other = f2.CreateSignal(1);
+                    f1.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(this[f1], x => { _ = other.Set(2); return x; });
+                    });
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task ComputedSignalTargetProperty_KeepsCrossFactoryProof()
+    {
+        // The Set target is a computed signal property whose getter always builds on the
+        // disjoint unkeyed factory: the Set locks that other context and cannot throw here.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                private static readonly MemoFactory f2 = new MemoFactory();
+
+                private static Signal<int> Other => f2.CreateSignal(1);
+
+                public void M()
+                {
+                    var f1 = new MemoFactory();
+                    var state = f1.CreateOptimistic<int>(f1.CreateSignal(1));
+                    f1.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x => { _ = Other.Set(2); return x; });
+                    });
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task SetInDeconstructionOverwrittenInitializer_IsNotFlagged()
+    {
+        // The deconstruction definitely overwrites the mutating initializer before Apply:
+        // only the paired safe value can be stored, so the stale Set is not charged.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var v = f.CreateSignal(1);
+                    var state = f.CreateOptimistic<int>(v);
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        Func<int, int> patch = x => { _ = v.Set(2); return x; };
+                        (patch, _) = ((Func<int, int>)(static x => x), 0);
+                        await ctx.Apply(state, patch);
+                    });
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
 }

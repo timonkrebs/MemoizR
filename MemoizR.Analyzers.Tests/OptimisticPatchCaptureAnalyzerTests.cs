@@ -748,10 +748,11 @@ public class OptimisticPatchCaptureAnalyzerTests
     }
 
     [Fact]
-    public async Task DeconstructionReassignment_IsUnresolvable()
+    public async Task DeconstructionReassignment_SurvivingWriteIsWalked()
     {
-        // `(patch, _) = ...` writes `patch` just as much as `patch = ...`: the tuple
-        // left-hand side must be flattened before comparing symbols.
+        // `(patch, _) = ...` writes `patch` just as much as `patch = ...` -- and it also
+        // definitely OVERWRITES the initializer, so the paired surviving value is walked as
+        // the patch body and its capture of `shared` is what gets flagged.
         var diagnostics = await AnalyzeAsync("""
             using System;
             using System.Collections.Generic;
@@ -776,8 +777,8 @@ public class OptimisticPatchCaptureAnalyzerTests
 
         var diagnostic = Assert.Single(diagnostics);
         Assert.Equal("MZR004", diagnostic.Id);
-        Assert.Contains("'patch'", diagnostic.GetMessage());
-        Assert.Contains("reassigned", diagnostic.GetMessage());
+        Assert.Contains("'shared'", diagnostic.GetMessage());
+        Assert.Contains("not Sendable", diagnostic.GetMessage());
     }
 
     // A static read inside a callback the patch merely BUILDS runs later, off the overlay's
@@ -4453,6 +4454,37 @@ public class OptimisticPatchCaptureAnalyzerTests
                     f.CreateAction<int>(async (p, ctx) =>
                     {
                         await ctx.Apply(state, x => x + d());
+                    });
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+    [Fact]
+    public async Task RefAliasOutHandoff_SurvivingWriteIsWalked()
+    {
+        // The out handoff rebinds the patch THROUGH a ref alias, definitely overwriting the
+        // unsafe initializer: the helper's safe assignment is the only storable closure.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    var shared = new List<int>();
+                    static void Provide(out Func<int, int> d) => d = static x => x;
+                    Func<int, int> patch = x => x + shared.Count;
+                    ref var alias = ref patch;
+                    Provide(out alias);
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, patch);
                     });
                 }
             }

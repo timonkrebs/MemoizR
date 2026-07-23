@@ -647,6 +647,19 @@ internal static class ComputationLambdas
             reference = conversion.Operand;
         }
 
+        // A conditional patch stores whichever arm the flow picked: each arm resolves
+        // through this same supplemental chain separately, so a direct lambda arm cannot
+        // hide an assembled sibling.
+        if (reference is IConditionalOperation or ICoalesceOperation)
+        {
+            foreach (var body in ConditionalArmPatchBodies(reference, semanticModel))
+            {
+                yield return body;
+            }
+
+            yield break;
+        }
+
         var variable = ReferencedVariable(reference);
         if (variable is not null && EffectiveInitializerWrite(variable, semanticModel, reference.Syntax) is ArgumentSyntax outWrite)
         {
@@ -681,7 +694,18 @@ internal static class ComputationLambdas
         }
     }
 
-    private static IEnumerable<(ComputationBody Body, Dictionary<IParameterSymbol, IOperation>? ArgumentMap)> AssembledSourceBodies(IOperation source, SemanticModel? semanticModel)
+    private static IEnumerable<(ComputationBody Body, Dictionary<IParameterSymbol, IOperation>? ArgumentMap)> ConditionalArmPatchBodies(IOperation reference, SemanticModel? semanticModel)
+    {
+        foreach (var arm in ValueArms(reference))
+        {
+            foreach (var body in AssembledPatchBodies(arm, semanticModel))
+            {
+                yield return body;
+            }
+        }
+    }
+
+    private static IEnumerable<(ComputationBody Body, Dictionary<IParameterSymbol, IOperation>? ArgumentMap)> AssembledSourceBodies(IOperation source, SemanticModel? semanticModel, Dictionary<IParameterSymbol, IOperation>? outerMap = null)
     {
         var resolvedVariable = ReferencedVariable(source);
 
@@ -690,7 +714,7 @@ internal static class ComputationLambdas
         if (resolvedVariable is IPropertySymbol { GetMethod: { } getter, SetMethod: null }
             && ResolveMethodBody(getter, semanticModel) is { } getterBody)
         {
-            foreach (var entry in ReturnedBodies(getterBody, semanticModel, BuildArgumentMap(source, null)))
+            foreach (var entry in ReturnedBodies(getterBody, semanticModel, BuildArgumentMap(source, outerMap)))
             {
                 yield return entry;
             }
@@ -703,7 +727,7 @@ internal static class ComputationLambdas
             ?? UnwrappedInitializerCall(resolvedVariable, semanticModel);
         if (call is not null && ResolveMethodBody(call.TargetMethod, semanticModel) is { } factoryBody)
         {
-            foreach (var entry in ReturnedBodies(factoryBody, semanticModel, BuildArgumentMap(call, null)))
+            foreach (var entry in ReturnedBodies(factoryBody, semanticModel, BuildArgumentMap(call, outerMap)))
             {
                 yield return entry;
             }
@@ -791,7 +815,7 @@ internal static class ComputationLambdas
         if (!ReadsThroughOwnReceiver(reference.Syntax, variable)
             || variable.DeclaringSyntaxReferences.FirstOrDefault() is not { } declaration
             || declaration.SyntaxTree != semanticModel.SyntaxTree
-            || declaration.GetSyntax() is not VariableDeclaratorSyntax { Initializer: not null } declarator)
+            || DeclaredInitializerSite(declaration.GetSyntax()) is not { } declarator)
         {
             return false;
         }
@@ -800,6 +824,19 @@ internal static class ComputationLambdas
             IsVariableWriteNode(node, variable, semanticModel)
             && CanExecuteBefore(node, reference.Syntax, variable, semanticModel)
             && DefinitelyOverwrites(node, declarator, reference.Syntax, variable, semanticModel));
+    }
+
+    // Every declaration shape SameTreeInitializerOperation trusts can go stale the same way:
+    // a local/field declarator, an auto-property initializer, a deconstruction designation.
+    public static SyntaxNode? DeclaredInitializerSite(SyntaxNode declaration)
+    {
+        return declaration switch
+        {
+            VariableDeclaratorSyntax { Initializer: not null } => declaration,
+            PropertyDeclarationSyntax { Initializer: not null } => declaration,
+            SingleVariableDesignationSyntax => declaration,
+            _ => null,
+        };
     }
 
     // A delegate VALUE collapsed through variable-alias initializers and parameter-to-
@@ -881,25 +918,84 @@ internal static class ComputationLambdas
                 continue;
             }
 
-            // Aliases resolve too: `var q = p; return q;` hands back the call-site value.
-            var resolved = ResolveDelegateValue(returned, semanticModel, argumentMap);
-            var resolvedAny = false;
-            foreach (var body in OfArgumentValue(resolved, semanticModel))
+            // A conditional return stores whichever arm the flow picked: each arm is its
+            // own candidate, so a direct lambda arm cannot silence a factory-call one.
+            foreach (var arm in ValueArms(returned))
             {
-                resolvedAny = true;
-                yield return (body, argumentMap);
+                visitedFactories ??= new HashSet<(IMethodSymbol, string)>();
+                foreach (var entry in ReturnedArmBodies(arm, semanticModel, argumentMap, visitedFactories))
+                {
+                    yield return entry;
+                }
             }
+        }
+    }
 
-            if (resolvedAny)
-            {
-                continue;
-            }
+    private static IEnumerable<(ComputationBody Body, Dictionary<IParameterSymbol, IOperation>? ArgumentMap)> ReturnedArmBodies(
+        IOperation arm,
+        SemanticModel? semanticModel,
+        Dictionary<IParameterSymbol, IOperation>? argumentMap,
+        HashSet<(IMethodSymbol, string)> visitedFactories)
+    {
+        // Aliases resolve too: `var q = p; return q;` hands back the call-site value.
+        var resolved = ResolveDelegateValue(arm, semanticModel, argumentMap);
+        var resolvedAny = false;
+        foreach (var body in OfArgumentValue(resolved, semanticModel))
+        {
+            resolvedAny = true;
+            yield return (body, argumentMap);
+        }
 
-            visitedFactories ??= new HashSet<(IMethodSymbol, string)>();
-            foreach (var entry in NestedFactoryReturnedBodies(resolved, semanticModel, argumentMap, visitedFactories))
-            {
-                yield return entry;
-            }
+        if (resolvedAny)
+        {
+            yield break;
+        }
+
+        foreach (var entry in NestedFactoryReturnedBodies(resolved, semanticModel, argumentMap, visitedFactories))
+        {
+            yield return entry;
+        }
+    }
+
+    // The leaf ARMS of a conditional or coalesced value, conversions unwrapped: each is a
+    // candidate the flow can pick, and each resolves independently.
+    private static IEnumerable<IOperation> ValueArms(IOperation value)
+    {
+        var unwrapped = value;
+        while (unwrapped is IConversionOperation conversion)
+        {
+            unwrapped = conversion.Operand;
+        }
+
+        switch (unwrapped)
+        {
+            case IConditionalOperation { WhenFalse: { } whenFalse } conditional:
+                foreach (var arm in ValueArms(conditional.WhenTrue))
+                {
+                    yield return arm;
+                }
+
+                foreach (var arm in ValueArms(whenFalse))
+                {
+                    yield return arm;
+                }
+
+                break;
+            case ICoalesceOperation coalesce:
+                foreach (var arm in ValueArms(coalesce.Value))
+                {
+                    yield return arm;
+                }
+
+                foreach (var arm in ValueArms(coalesce.WhenNull))
+                {
+                    yield return arm;
+                }
+
+                break;
+            default:
+                yield return unwrapped;
+                break;
         }
     }
 
@@ -1015,12 +1111,9 @@ internal static class ComputationLambdas
                     && targets.Any(target => WritesVariable(target, variable, semanticModel)):
                 foreach (var value in AssignedValuesFor(assignment.Left, assignment.Right, variable, semanticModel))
                 {
-                    // The call-site map resolves a value forwarded from ANOTHER delegate
-                    // parameter (`Provide(source, out patch)` with `p = source`), aliases
-                    // included.
-                    foreach (var body in OfArgumentValue(ResolveDelegateValue(value, semanticModel, callMap), semanticModel))
+                    foreach (var body in AssignedValueBodies(value, semanticModel, callMap))
                     {
-                        yield return (body, callMap);
+                        yield return body;
                     }
                 }
 
@@ -1034,6 +1127,39 @@ internal static class ComputationLambdas
                 }
 
                 break;
+        }
+    }
+
+    // The call-site map resolves a value forwarded from ANOTHER delegate parameter
+    // (`Provide(source, out patch)` with `p = source`), aliases included -- and a value
+    // ASSEMBLED in place (`d = Make(v);` binds the factory's returns, `d = Step;` the
+    // computed property's) resolves through the assembled-source chain with the same map.
+    private static IEnumerable<(ComputationBody Body, Dictionary<IParameterSymbol, IOperation>? ArgumentMap)> AssignedValueBodies(
+        IOperation value,
+        SemanticModel? semanticModel,
+        Dictionary<IParameterSymbol, IOperation>? callMap)
+    {
+        var resolved = ResolveDelegateValue(value, semanticModel, callMap);
+        var resolvedAny = false;
+        foreach (var body in OfArgumentValue(resolved, semanticModel))
+        {
+            resolvedAny = true;
+            yield return (body, callMap);
+        }
+
+        if (resolvedAny)
+        {
+            yield break;
+        }
+
+        while (resolved is IConversionOperation conversion)
+        {
+            resolved = conversion.Operand;
+        }
+
+        foreach (var entry in AssembledSourceBodies(resolved, semanticModel, callMap))
+        {
+            yield return entry;
         }
     }
 
@@ -1063,15 +1189,17 @@ internal static class ComputationLambdas
         return true;
     }
 
-    // A killer must fully DETERMINE the new value: a simple non-tuple assignment, or an
-    // `out` handoff (the language requires the callee to assign before returning).
+    // A killer must fully DETERMINE the new value: a simple assignment -- deconstruction
+    // included, which assigns every target slot -- or an `out` handoff (the language
+    // requires the callee to assign before returning). `??=`/compound forms can keep the
+    // old value and stay excluded.
     private static bool IsDeterminingWrite(SyntaxNode killer, ISymbol variable, SemanticModel semanticModel)
     {
         return killer switch
         {
             AssignmentExpressionSyntax assignment => assignment.IsKind(SyntaxKind.SimpleAssignmentExpression)
-                && assignment.Left is not TupleExpressionSyntax
-                && WritesVariable(assignment.Left, variable, semanticModel),
+                && ReassignmentTargets(assignment) is { } targets
+                && targets.Any(target => WritesVariable(target, variable, semanticModel)),
             ArgumentSyntax argument => argument.RefOrOutKeyword.IsKind(SyntaxKind.OutKeyword)
                 && WritesVariable(argument.Expression, variable, semanticModel),
             _ => false,

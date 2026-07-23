@@ -25,6 +25,11 @@ internal static class ReceiverChains
     // creation or a dead end -- the visited set breaks initializer cycles.
     public static ISymbol? ResolveCreatingFactorySymbol(IOperation? nodeReference, SemanticModel? semanticModel, Dictionary<IParameterSymbol, IOperation>? argumentMap = null)
     {
+        return ResolveCreatingFactorySymbol(nodeReference, semanticModel, argumentMap, visitedGetters: null);
+    }
+
+    private static ISymbol? ResolveCreatingFactorySymbol(IOperation? nodeReference, SemanticModel? semanticModel, Dictionary<IParameterSymbol, IOperation>? argumentMap, HashSet<IMethodSymbol>? visitedGetters)
+    {
         var reference = nodeReference;
         var site = nodeReference?.Syntax;
         HashSet<ISymbol>? visited = null;
@@ -59,13 +64,60 @@ internal static class ReceiverChains
                     }
 
                     var initializer = InitializerOf(symbol, semanticModel);
-                    site = initializer?.Syntax ?? site;
+                    if (initializer is null)
+                    {
+                        // A get-only COMPUTED node property has no initializer: its getter's
+                        // returns are the provenance instead.
+                        return ResolveComputedGetterFactory(reference, symbol, semanticModel, argumentMap, visitedGetters);
+                    }
+
+                    site = initializer.Syntax;
                     reference = initializer;
                     continue;
                 default:
                     return null;
             }
         }
+    }
+
+    // A get-only computed node property (`Signal<int> Other => f2.CreateSignal(1);`, indexers
+    // included via the reference's argument map) resolves through its getter's returns --
+    // accepted only when EVERY return agrees on the creating factory: a getter that can hand
+    // back nodes from different factories stays unprovable, which keeps the diagnostic. The
+    // visited set bounds mutually recursive getters.
+    private static ISymbol? ResolveComputedGetterFactory(IOperation reference, ISymbol symbol, SemanticModel? semanticModel, Dictionary<IParameterSymbol, IOperation>? argumentMap, HashSet<IMethodSymbol>? visitedGetters)
+    {
+        if (symbol is not IPropertySymbol { GetMethod: { } getter, SetMethod: null }
+            || ComputationLambdas.ResolveMethodBody(getter, semanticModel) is not { } getterBody)
+        {
+            return null;
+        }
+
+        visitedGetters ??= new HashSet<IMethodSymbol>(SymbolEqualityComparer.Default);
+        if (!visitedGetters.Add(getter))
+        {
+            return null;
+        }
+
+        var propertyMap = ComputationLambdas.BuildArgumentMap(reference, argumentMap);
+        ISymbol? factory = null;
+        foreach (var inner in ComputationLambdas.DescendDirectExecution(getterBody.Body))
+        {
+            if (inner is not IReturnOperation { ReturnedValue: { } returned })
+            {
+                continue;
+            }
+
+            var resolved = ResolveCreatingFactorySymbol(returned, semanticModel, propertyMap, visitedGetters);
+            if (resolved is null || (factory is not null && !SymbolEqualityComparer.Default.Equals(factory, resolved)))
+            {
+                return null;
+            }
+
+            factory = resolved;
+        }
+
+        return factory;
     }
 
     // A node variable REASSIGNED where the assignment can execute before this READ no longer

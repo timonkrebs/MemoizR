@@ -137,9 +137,9 @@ public sealed class SetInsideComputationAnalyzer : DiagnosticAnalyzer
         }
     }
 
-    // `Get()(x)` executes whatever the same-tree factory returned, immediately and under
-    // the same lock: the returns are walked with their own maps, cycles bounded by the
-    // per-body visited guard.
+    // `Get()(x)` executes whatever the same-tree factory returned -- and `Step()` whatever
+    // the computed property's getter returned -- immediately and under the same lock: the
+    // returns are walked with their own maps, cycles bounded by the per-body visited guard.
     private static void InspectInvokedFactoryResult(
         OperationAnalysisContext context,
         IInvocationOperation host,
@@ -153,13 +153,29 @@ public sealed class SetInsideComputationAnalyzer : DiagnosticAnalyzer
             resolved = conversion.Operand;
         }
 
-        if (resolved is not IInvocationOperation call
-            || ComputationLambdas.ResolveMethodBody(call.TargetMethod, host.SemanticModel) is not { } factory)
+        if (resolved is IInvocationOperation call
+            && ComputationLambdas.ResolveMethodBody(call.TargetMethod, host.SemanticModel) is { } factory)
         {
+            InspectReturnedInvokedBodies(context, host, factory, ComputationLambdas.BuildArgumentMap(call, argumentMap), actorHost, visitedCalls);
             return;
         }
 
-        foreach (var (body, map) in ComputationLambdas.ReturnedBodies(factory, host.SemanticModel, ComputationLambdas.BuildArgumentMap(call, argumentMap)))
+        if (ComputationLambdas.ReferencedVariable(resolved) is IPropertySymbol { GetMethod: { } getter, SetMethod: null }
+            && ComputationLambdas.ResolveMethodBody(getter, host.SemanticModel) is { } getterBody)
+        {
+            InspectReturnedInvokedBodies(context, host, getterBody, ComputationLambdas.BuildArgumentMap(resolved, argumentMap), actorHost, visitedCalls);
+        }
+    }
+
+    private static void InspectReturnedInvokedBodies(
+        OperationAnalysisContext context,
+        IInvocationOperation host,
+        ComputationLambdas.ComputationBody source,
+        Dictionary<IParameterSymbol, IOperation>? sourceMap,
+        bool actorHost,
+        HashSet<(SyntaxNode, IMethodSymbol, string)> visitedCalls)
+    {
+        foreach (var (body, map) in ComputationLambdas.ReturnedBodies(source, host.SemanticModel, sourceMap))
         {
             if (visitedCalls.Add((body.Scope, host.TargetMethod, ComputationLambdas.ArgumentMapKey(map))))
             {
@@ -239,51 +255,13 @@ public sealed class SetInsideComputationAnalyzer : DiagnosticAnalyzer
     {
         if (FactoryMethods.IsOptimisticPatchHost(host.TargetMethod))
         {
+            // Computed state properties (indexers included) resolve inside the node
+            // resolver, through their getter's agreeing returns.
             var stateArgument = host.Arguments.FirstOrDefault(a => a.Parameter?.Ordinal == 0)?.Value;
-            return ReceiverChains.ResolveCreatingFactorySymbol(stateArgument, host.SemanticModel)
-                ?? ResolveComputedStateFactory(stateArgument, host.SemanticModel);
+            return ReceiverChains.ResolveCreatingFactorySymbol(stateArgument, host.SemanticModel);
         }
 
         return ReceiverChains.ResolveFactorySymbol(host, host.SemanticModel);
-    }
-
-    // A get-only computed STATE property (`OptimisticState<int> State => f1.CreateOptimistic(...)`)
-    // resolves through its getter's returns -- and only when EVERY return agrees on the
-    // creating factory: a getter that can hand back states from different factories keeps
-    // the host unprovable, which keeps the diagnostic.
-    private static ISymbol? ResolveComputedStateFactory(IOperation? stateArgument, SemanticModel? semanticModel)
-    {
-        var reference = stateArgument;
-        while (reference is IConversionOperation conversion)
-        {
-            reference = conversion.Operand;
-        }
-
-        if (reference is null
-            || ComputationLambdas.ReferencedVariable(reference) is not IPropertySymbol { GetMethod: { } getter, SetMethod: null }
-            || ComputationLambdas.ResolveMethodBody(getter, semanticModel) is not { } getterBody)
-        {
-            return null;
-        }
-
-        ISymbol? factory = null;
-        foreach (var inner in ComputationLambdas.DescendDirectExecution(getterBody.Body))
-        {
-            if (inner is not IReturnOperation { ReturnedValue: { } returned })
-            {
-                continue;
-            }
-
-            var resolved = ReceiverChains.ResolveCreatingFactorySymbol(returned, semanticModel);
-            if (resolved is null || (factory is not null && !SymbolEqualityComparer.Default.Equals(factory, resolved)))
-            {
-                return null;
-            }
-
-            factory = resolved;
-        }
-
-        return factory;
     }
 
     // A write API that throws in THIS host's engine: ActorSignal.Set inside an actor

@@ -129,8 +129,8 @@ public sealed class CapturedMutationAnalyzer : DiagnosticAnalyzer
         }
     }
 
-    // `Get()(x)` executes whatever the same-tree factory returned, with the returns' own
-    // argument maps.
+    // `Get()(x)` executes whatever the same-tree factory returned -- and `Step()` whatever
+    // the computed property's getter returned -- with the returns' own argument maps.
     private static void InspectInvokedFactoryResult(
         OperationAnalysisContext context,
         IOperation resolved,
@@ -144,13 +144,29 @@ public sealed class CapturedMutationAnalyzer : DiagnosticAnalyzer
             resolved = conversion.Operand;
         }
 
-        if (resolved is not IInvocationOperation call
-            || ComputationLambdas.ResolveMethodBody(call.TargetMethod, semanticModel) is not { } factory)
+        if (resolved is IInvocationOperation call
+            && ComputationLambdas.ResolveMethodBody(call.TargetMethod, semanticModel) is { } factory)
         {
+            InspectReturnedDelegateBodies(context, factory, ComputationLambdas.BuildArgumentMap(call, argumentMap), computationScope, semanticModel, walk);
             return;
         }
 
-        foreach (var (delegateBody, map) in ComputationLambdas.ReturnedBodies(factory, semanticModel, ComputationLambdas.BuildArgumentMap(call, argumentMap)))
+        if (ComputationLambdas.ReferencedVariable(resolved) is IPropertySymbol { GetMethod: { } getter, SetMethod: null }
+            && ComputationLambdas.ResolveMethodBody(getter, semanticModel) is { } getterBody)
+        {
+            InspectReturnedDelegateBodies(context, getterBody, ComputationLambdas.BuildArgumentMap(resolved, argumentMap), computationScope, semanticModel, walk);
+        }
+    }
+
+    private static void InspectReturnedDelegateBodies(
+        OperationAnalysisContext context,
+        ComputationLambdas.ComputationBody source,
+        Dictionary<IParameterSymbol, IOperation>? sourceMap,
+        SyntaxNode computationScope,
+        SemanticModel? semanticModel,
+        ChaseState walk)
+    {
+        foreach (var (delegateBody, map) in ComputationLambdas.ReturnedBodies(source, semanticModel, sourceMap))
         {
             InspectDelegateBody(context, delegateBody, computationScope, semanticModel, walk, map);
         }

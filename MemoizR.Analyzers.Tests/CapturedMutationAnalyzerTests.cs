@@ -1196,4 +1196,67 @@ public class CapturedMutationAnalyzerTests
         Assert.Equal("MZR002", diagnostic.Id);
         Assert.Contains("captured local 'applied'", diagnostic.GetMessage());
     }
+    [Fact]
+    public async Task OutAssignedFactoryCall_MutationIsFlagged()
+    {
+        // The out helper binds its parameter to a factory call: the overlay stores the
+        // factory's returned lambda, whose captured-local write races on every replay.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    var applied = 0;
+                    Func<int, int> Make() => x => { applied++; return x; };
+                    void Provide(out Func<int, int> d) => d = Make();
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        Func<int, int> patch;
+                        Provide(out patch);
+                        await ctx.Apply(state, patch);
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR002", diagnostic.Id);
+        Assert.Contains("captured local 'applied'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task OverwrittenAutoPropertyInitializer_IsNotCharged()
+    {
+        // The auto-property initializer is definitely overwritten before Apply: the stale
+        // mutating lambda can never be the stored patch, whatever declaration shape held it.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                private static int applied;
+
+                private static Func<int, int> Patch { get; set; } = x => { applied++; return x; };
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    Patch = static x => x;
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, Patch);
+                    });
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
 }
