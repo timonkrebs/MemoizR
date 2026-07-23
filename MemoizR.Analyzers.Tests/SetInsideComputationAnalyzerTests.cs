@@ -903,6 +903,143 @@ public class SetInsideComputationAnalyzerTests
     }
 
     [Fact]
+    public async Task SetInsideAnIndexerPatch_KeepsCallSiteProvenance()
+    {
+        // The indexer's returned lambda writes through the index parameter: the call-site
+        // signal decides, exactly like a helper argument.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                private Func<int, int> this[Signal<int> s]
+                {
+                    get
+                    {
+                        return x => { _ = s.Set(1); return x; };
+                    }
+                }
+
+                public void M()
+                {
+                    var f1 = new MemoFactory();
+                    var f2 = new MemoFactory();
+                    var other = f2.CreateSignal(1);
+                    var mine = f1.CreateSignal(1);
+                    var state = f1.CreateOptimistic<int>(mine);
+                    f1.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, this[other]);
+                    });
+                    f1.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, this[mine]);
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR003", diagnostic.Id);
+        Assert.Contains("Signal<int>.Set", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task SetInsideAForwardedDelegateParameter_IsFlagged()
+    {
+        // The out-helper hands back its OTHER delegate parameter: the call-site lambda with
+        // the Set is what the overlay stores.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var v = f.CreateSignal(1);
+                    var state = f.CreateOptimistic<int>(v);
+                    void Provide(Func<int, int> source, out Func<int, int> p) => p = source;
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        Func<int, int> patch;
+                        Provide(x => { _ = v.Set(2); return x; }, out patch);
+                        await ctx.Apply(state, patch);
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR003", diagnostic.Id);
+        Assert.Contains("Signal<int>.Set", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task SetInsideAFactoryReturnedPatch_IsFlagged()
+    {
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var mine = f.CreateSignal(1);
+                    var state = f.CreateOptimistic<int>(mine);
+                    Func<int, int> Make(Signal<int> s) => x => { _ = s.Set(1); return x; };
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, Make(mine));
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR003", diagnostic.Id);
+        Assert.Contains("Signal<int>.Set", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task OverwrittenOutHelperPatchBody_IsNotWalked()
+    {
+        // The helper's stale Set-lambda is definitely overwritten before it returns: only
+        // the safe second delegate can be the stored patch.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var v = f.CreateSignal(1);
+                    var state = f.CreateOptimistic<int>(v);
+                    void Provide(out Func<int, int> p)
+                    {
+                        p = x => { _ = v.Set(2); return x; };
+                        p = static x => x;
+                    }
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        Func<int, int> patch;
+                        Provide(out patch);
+                        await ctx.Apply(state, patch);
+                    });
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
     public async Task SetInsideAComputedPropertyPatch_IsFlagged()
     {
         var diagnostics = await AnalyzeAsync("""

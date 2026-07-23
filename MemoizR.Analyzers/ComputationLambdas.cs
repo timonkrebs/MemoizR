@@ -594,17 +594,45 @@ internal static class ComputationLambdas
             }
         }
 
+        // The INDEXER's argument map keeps the returned lambda's index-parameter references
+        // resolvable (`this[Signal<int> s] { get { return x => { s.Set(1); ... }; } }`).
         if (variable is IPropertySymbol { GetMethod: { } getter, SetMethod: null }
             && ResolveMethodBody(getter, semanticModel) is { } getterBody)
         {
-            foreach (var body in ReturnedBodies(getterBody, semanticModel))
+            var propertyMap = BuildArgumentMap(reference, null);
+            foreach (var body in ReturnedBodies(getterBody, semanticModel, propertyMap))
             {
-                yield return (body, null);
+                yield return (body, propertyMap);
+            }
+        }
+
+        // A patch produced by a same-tree delegate FACTORY -- called inline, or stored
+        // through the variable's initializer -- resolves through the factory's returns,
+        // with the call's own argument map.
+        var call = reference as IInvocationOperation
+            ?? UnwrappedInitializerCall(variable, semanticModel);
+        if (call is not null && ResolveMethodBody(call.TargetMethod, semanticModel) is { } factoryBody)
+        {
+            var callMap = BuildArgumentMap(call, null);
+            foreach (var body in ReturnedBodies(factoryBody, semanticModel, callMap))
+            {
+                yield return (body, callMap);
             }
         }
     }
 
-    private static IEnumerable<ComputationBody> ReturnedBodies(ComputationBody methodBody, SemanticModel? semanticModel)
+    private static IInvocationOperation? UnwrappedInitializerCall(ISymbol? variable, SemanticModel? semanticModel)
+    {
+        var initializer = SameTreeInitializerOperation(variable, semanticModel);
+        while (initializer is IConversionOperation conversion)
+        {
+            initializer = conversion.Operand;
+        }
+
+        return initializer as IInvocationOperation;
+    }
+
+    private static IEnumerable<ComputationBody> ReturnedBodies(ComputationBody methodBody, SemanticModel? semanticModel, Dictionary<IParameterSymbol, IOperation>? argumentMap = null)
     {
         foreach (var inner in DescendDirectExecution(methodBody.Body))
         {
@@ -613,7 +641,7 @@ internal static class ComputationLambdas
                 continue;
             }
 
-            foreach (var body in OfArgumentValue(returned, semanticModel))
+            foreach (var body in OfArgumentValue(SubstituteArguments(returned, argumentMap) ?? returned, semanticModel))
             {
                 yield return body;
             }
@@ -643,8 +671,28 @@ internal static class ComputationLambdas
             ? BuildArgumentMap(call, outerMap)
             : outerMap;
 
+        // The kill filter mirrors MZR004's accounting chase: an assignment definitely
+        // overwritten on the straight-line path to the helper's return can never be the
+        // delegate the caller receives.
+        var writes = new List<SyntaxNode>();
         foreach (var node in helper.Scope.DescendantNodes())
         {
+            if (node is AssignmentExpressionSyntax candidate
+                && ReassignmentTargets(candidate) is { } targets
+                && targets.Any(target => WritesVariable(target, parameter, semanticModel)))
+            {
+                writes.Add(candidate);
+            }
+        }
+
+        foreach (var node in helper.Scope.DescendantNodes())
+        {
+            if (node is AssignmentExpressionSyntax victim
+                && writes.Any(other => other != victim && DefinitelyOverwrites(other, victim, helper.Scope, parameter, semanticModel)))
+            {
+                continue;
+            }
+
             foreach (var body in OutHandoffNodeBodies(node, parameter, semanticModel, visited, callMap))
             {
                 yield return body;
@@ -666,7 +714,9 @@ internal static class ComputationLambdas
                     && targets.Any(target => WritesVariable(target, parameter, semanticModel)):
                 foreach (var value in AssignedValuesFor(assignment.Left, assignment.Right, parameter, semanticModel))
                 {
-                    foreach (var body in OfArgumentValue(value, semanticModel))
+                    // The call-site map resolves a value forwarded from ANOTHER delegate
+                    // parameter (`Provide(source, out patch)` with `p = source`).
+                    foreach (var body in OfArgumentValue(SubstituteArguments(value, callMap) ?? value, semanticModel))
                     {
                         yield return (body, callMap);
                     }
@@ -683,6 +733,93 @@ internal static class ComputationLambdas
 
                 break;
         }
+    }
+
+    // "Straight-line" = the killer sits in plain statements between itself and wherever the
+    // value is observed (an invoke site, or an out-helper's own scope end); a killer inside
+    // an if/loop may not run, so it kills nothing -- and an exit statement between the two
+    // writes can leave the earlier value observable, so nothing is definite past one. The
+    // argument-list hop covers out-handoff killers; a conditional-access call stays rejected.
+    public static bool DefinitelyOverwrites(SyntaxNode killer, SyntaxNode victim, SyntaxNode reference, ISymbol variable, SemanticModel semanticModel)
+    {
+        if (!IsDeterminingWrite(killer, variable, semanticModel)
+            || killer.SpanStart <= victim.SpanStart
+            || killer.SpanStart >= reference.Span.End
+            || ExitsBetween(victim, killer))
+        {
+            return false;
+        }
+
+        for (var current = killer.Parent; current is not null && !current.Span.Contains(reference.Span); current = current.Parent)
+        {
+            if (current is not (BlockSyntax or ExpressionStatementSyntax or ArgumentListSyntax or InvocationExpressionSyntax))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    // A killer must fully DETERMINE the new value: a simple non-tuple assignment, or an
+    // `out` handoff (the language requires the callee to assign before returning).
+    private static bool IsDeterminingWrite(SyntaxNode killer, ISymbol variable, SemanticModel semanticModel)
+    {
+        return killer switch
+        {
+            AssignmentExpressionSyntax assignment => assignment.IsKind(SyntaxKind.SimpleAssignmentExpression)
+                && assignment.Left is not TupleExpressionSyntax
+                && WritesVariable(assignment.Left, variable, semanticModel),
+            ArgumentSyntax argument => argument.RefOrOutKeyword.IsKind(SyntaxKind.OutKeyword)
+                && WritesVariable(argument.Expression, variable, semanticModel),
+            _ => false,
+        };
+    }
+
+    // A return/throw/goto/break/continue/yield starting between the two writes diverts
+    // control past the killer with the victim's value still bound (an early return in an
+    // out-helper hands that delegate to the caller). Only the killer's OWN function counts:
+    // an exit inside a nested lambda -- e.g. a `return` in the victim's own delegate body --
+    // diverts nothing here, and neither does a break/continue/case-goto whose OWN construct
+    // ends before the killer (control leaves the switch/loop and still reaches it).
+    private static bool ExitsBetween(SyntaxNode victim, SyntaxNode killer)
+    {
+        var function = killer.Ancestors().FirstOrDefault(IsFunctionBoundary) ?? killer.SyntaxTree.GetRoot();
+        foreach (var node in function.DescendantNodes(descendIntoChildren: n => ReferenceEquals(n, function) || !IsFunctionBoundary(n)))
+        {
+            if (node is ReturnStatementSyntax or ThrowStatementSyntax or GotoStatementSyntax
+                    or BreakStatementSyntax or ContinueStatementSyntax or YieldStatementSyntax
+                && victim.SpanStart < node.SpanStart && node.SpanStart < killer.SpanStart
+                && !(ExitTarget(node) is { } target && target.Span.End <= killer.SpanStart))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    // The construct a contained exit leaves: the nearest switch/loop for `break`, the
+    // nearest loop for `continue`, the nearest switch for `goto case`/`goto default`.
+    // Returns null for the truly divergent exits (return/throw/yield, labeled goto).
+    private static SyntaxNode? ExitTarget(SyntaxNode exit)
+    {
+        return exit switch
+        {
+            BreakStatementSyntax => exit.Ancestors().FirstOrDefault(static ancestor =>
+                ancestor is SwitchStatementSyntax or ForStatementSyntax or ForEachStatementSyntax or WhileStatementSyntax or DoStatementSyntax),
+            ContinueStatementSyntax => exit.Ancestors().FirstOrDefault(static ancestor =>
+                ancestor is ForStatementSyntax or ForEachStatementSyntax or WhileStatementSyntax or DoStatementSyntax),
+            GotoStatementSyntax @goto when @goto.IsKind(SyntaxKind.GotoCaseStatement) || @goto.IsKind(SyntaxKind.GotoDefaultStatement)
+                => exit.Ancestors().FirstOrDefault(static ancestor => ancestor is SwitchStatementSyntax),
+            _ => null,
+        };
+    }
+
+    private static bool IsFunctionBoundary(SyntaxNode node)
+    {
+        return node is AnonymousFunctionExpressionSyntax or LocalFunctionStatementSyntax
+            or BaseMethodDeclarationSyntax or AccessorDeclarationSyntax;
     }
 
     // A ref-local ALIAS writes its referent: `ref var alias = ref patch; alias = ...` rebinds

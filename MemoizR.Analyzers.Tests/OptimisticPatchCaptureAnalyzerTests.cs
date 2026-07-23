@@ -3827,6 +3827,86 @@ public class OptimisticPatchCaptureAnalyzerTests
     }
 
     [Fact]
+    public async Task CapturedMethodGroupDelegate_ReceiverIsChecked()
+    {
+        // The captured delegate already holds its method-group receiver: the stored patch
+        // shares that object across flows even though the target body is safe.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class Helper
+            {
+                public List<int> Items = new();
+
+                public int Patch(int x) => x;
+            }
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    var helper = new Helper();
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        Func<int, int> d = helper.Patch;
+                        await ctx.Apply(state, x => d(x));
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR004", diagnostic.Id);
+        Assert.Contains("'helper'", diagnostic.GetMessage());
+        Assert.Contains("not Sendable", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task CapturedConditionalDelegate_OpaqueArmKeepsTheTypeVerdict()
+    {
+        // One arm of the captured delegate's initializer is an opaque cross-file factory
+        // result: the safe arm cannot vouch for it, so the type verdict stands.
+        var diagnostics = await AnalyzerTestHarness.AnalyzeAsync(new[]
+        {
+            """
+            public static class External
+            {
+                private static int hits;
+
+                public static System.Func<int> Get() => () => hits;
+            }
+            """,
+            """
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                public void M(bool external)
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        Func<int> d = external ? External.Get() : static () => 0;
+                        await ctx.Apply(state, x => { _ = d; return x; });
+                    });
+                }
+            }
+            """,
+        }, new OptimisticPatchCaptureAnalyzer());
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR004", diagnostic.Id);
+        Assert.Contains("'d'", diagnostic.GetMessage());
+        Assert.Contains("not Sendable", diagnostic.GetMessage());
+    }
+
+    [Fact]
     public async Task CoalesceAssignment_DoesNotStandInAsInitializer()
     {
         // `??=` can leave an older, externally supplied value in place: it must not be

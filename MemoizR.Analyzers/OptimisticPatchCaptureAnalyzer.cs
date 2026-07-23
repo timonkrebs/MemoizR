@@ -203,7 +203,7 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         var handled = true;
         foreach (var node in writes)
         {
-            if (!writes.Any(other => other != node && DefinitelyOverwrites(other, node, value.Syntax, variable, semanticModel)))
+            if (!writes.Any(other => other != node && ComputationLambdas.DefinitelyOverwrites(other, node, value.Syntax, variable, semanticModel)))
             {
                 handled &= InspectSurvivingWrite(context, classifier, node, variable, semanticModel, reported);
             }
@@ -318,7 +318,7 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
             && patchProperty.GetMethod is { } patchGetter
             && ComputationLambdas.ResolveMethodBody(patchGetter, semanticModel) is { } getterBody)
         {
-            return InspectReturnedPatchBodies(context, classifier, getterBody, patchProperty, argumentMap: null, semanticModel, reported);
+            return InspectReturnedPatchBodies(context, classifier, getterBody, patchProperty, ComputationLambdas.BuildArgumentMap(Unwrap(value), outer: null), semanticModel, reported);
         }
 
         // A patch produced by a same-tree delegate FACTORY -- called inline, or stored
@@ -1467,7 +1467,7 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         {
             // A later straight-line simple assignment on the path to the invoke REPLACES the
             // value: the earlier write's body can never be the one invoked.
-            if (writes.Any(other => other != node && DefinitelyOverwrites(other, node, invokeSite, variable, semanticModel)))
+            if (writes.Any(other => other != node && ComputationLambdas.DefinitelyOverwrites(other, node, invokeSite, variable, semanticModel)))
             {
                 continue;
             }
@@ -1572,7 +1572,7 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         foreach (var node in semanticModel.SyntaxTree.GetRoot().DescendantNodes())
         {
             if (WritesDelegateBeforeInvoke(node, variable, resolved, semanticModel)
-                && DefinitelyOverwrites(node, declarator, resolved.Syntax, variable, semanticModel))
+                && ComputationLambdas.DefinitelyOverwrites(node, declarator, resolved.Syntax, variable, semanticModel))
             {
                 return true;
             }
@@ -1602,92 +1602,6 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         };
     }
 
-    // "Straight-line" = the killer sits in plain statements between itself and wherever the
-    // value is observed (an invoke site, or an out-helper's own scope end); a killer inside
-    // an if/loop may not run, so it kills nothing -- and an exit statement between the two
-    // writes can leave the earlier value observable, so nothing is definite past one. The
-    // argument-list hop covers out-handoff killers; a conditional-access call stays rejected.
-    private static bool DefinitelyOverwrites(SyntaxNode killer, SyntaxNode victim, SyntaxNode reference, ISymbol variable, SemanticModel semanticModel)
-    {
-        if (!IsDeterminingWrite(killer, variable, semanticModel)
-            || killer.SpanStart <= victim.SpanStart
-            || killer.SpanStart >= reference.Span.End
-            || ExitsBetween(victim, killer))
-        {
-            return false;
-        }
-
-        for (var current = killer.Parent; current is not null && !current.Span.Contains(reference.Span); current = current.Parent)
-        {
-            if (current is not (BlockSyntax or ExpressionStatementSyntax or ArgumentListSyntax or InvocationExpressionSyntax))
-            {
-                return false;
-            }
-        }
-
-        return true;
-    }
-
-    // A killer must fully DETERMINE the new value: a simple non-tuple assignment, or an
-    // `out` handoff (the language requires the callee to assign before returning).
-    private static bool IsDeterminingWrite(SyntaxNode killer, ISymbol variable, SemanticModel semanticModel)
-    {
-        return killer switch
-        {
-            AssignmentExpressionSyntax assignment => assignment.IsKind(SyntaxKind.SimpleAssignmentExpression)
-                && assignment.Left is not TupleExpressionSyntax
-                && ComputationLambdas.WritesVariable(assignment.Left, variable, semanticModel),
-            ArgumentSyntax argument => argument.RefOrOutKeyword.IsKind(SyntaxKind.OutKeyword)
-                && ComputationLambdas.WritesVariable(argument.Expression, variable, semanticModel),
-            _ => false,
-        };
-    }
-
-    // A return/throw/goto/break/continue/yield starting between the two writes diverts
-    // control past the killer with the victim's value still bound (an early return in an
-    // out-helper hands that delegate to the caller). Only the killer's OWN function counts:
-    // an exit inside a nested lambda -- e.g. a `return` in the victim's own delegate body --
-    // diverts nothing here, and neither does a break/continue/case-goto whose OWN construct
-    // ends before the killer (control leaves the switch/loop and still reaches it).
-    private static bool ExitsBetween(SyntaxNode victim, SyntaxNode killer)
-    {
-        var function = killer.Ancestors().FirstOrDefault(IsFunctionBoundary) ?? killer.SyntaxTree.GetRoot();
-        foreach (var node in function.DescendantNodes(descendIntoChildren: n => ReferenceEquals(n, function) || !IsFunctionBoundary(n)))
-        {
-            if (node is ReturnStatementSyntax or ThrowStatementSyntax or GotoStatementSyntax
-                    or BreakStatementSyntax or ContinueStatementSyntax or YieldStatementSyntax
-                && victim.SpanStart < node.SpanStart && node.SpanStart < killer.SpanStart
-                && !(ExitTarget(node) is { } target && target.Span.End <= killer.SpanStart))
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    // The construct a contained exit leaves: the nearest switch/loop for `break`, the
-    // nearest loop for `continue`, the nearest switch for `goto case`/`goto default`.
-    // Returns null for the truly divergent exits (return/throw/yield, labeled goto).
-    private static SyntaxNode? ExitTarget(SyntaxNode exit)
-    {
-        return exit switch
-        {
-            BreakStatementSyntax => exit.Ancestors().FirstOrDefault(static ancestor =>
-                ancestor is SwitchStatementSyntax or ForStatementSyntax or ForEachStatementSyntax or WhileStatementSyntax or DoStatementSyntax),
-            ContinueStatementSyntax => exit.Ancestors().FirstOrDefault(static ancestor =>
-                ancestor is ForStatementSyntax or ForEachStatementSyntax or WhileStatementSyntax or DoStatementSyntax),
-            GotoStatementSyntax @goto when @goto.IsKind(SyntaxKind.GotoCaseStatement) || @goto.IsKind(SyntaxKind.GotoDefaultStatement)
-                => exit.Ancestors().FirstOrDefault(static ancestor => ancestor is SwitchStatementSyntax),
-            _ => null,
-        };
-    }
-
-    private static bool IsFunctionBoundary(SyntaxNode node)
-    {
-        return node is AnonymousFunctionExpressionSyntax or LocalFunctionStatementSyntax
-            or BaseMethodDeclarationSyntax or AccessorDeclarationSyntax;
-    }
 
     private static IEnumerable<ComputationLambdas.ComputationBody> NodeAssignedBodies(
         SyntaxNode node,
@@ -1757,7 +1671,7 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
             // What the caller receives is the delegate bound when the helper RETURNS: a later
             // straight-line overwrite inside the helper kills this body exactly like one
             // before an invoke, with the helper's scope end as the observation point.
-            if (writes.Any(other => other != assignment && DefinitelyOverwrites(other, assignment, helper.Scope, parameter, semanticModel)))
+            if (writes.Any(other => other != assignment && ComputationLambdas.DefinitelyOverwrites(other, assignment, helper.Scope, parameter, semanticModel)))
             {
                 continue;
             }
@@ -1962,27 +1876,80 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
             return;
         }
 
-        // A captured DELEGATE whose same-tree bodies resolve is verified by WALKING those
-        // bodies as patch code -- their own captures included -- instead of rejected
-        // wholesale for its type: the stored closure is fully visible. Reassigned or
-        // unresolvable delegate captures keep the type verdict, and the reported-set add
-        // both dedupes and bounds self-referential delegate cycles.
+        // A captured DELEGATE whose same-tree candidates ALL resolve is verified by
+        // WALKING those bodies as patch code -- their own captures and method-group
+        // receivers included -- instead of rejected wholesale for its type: the stored
+        // closure is fully visible. A conditional initializer must account for EVERY arm (a
+        // safe arm cannot vouch for an opaque one); reassigned or unresolvable delegate
+        // captures keep the type verdict, and the reported-set add both dedupes and bounds
+        // self-referential delegate cycles.
         if (type.TypeKind == TypeKind.Delegate
             && !IsReassignedBefore(symbol, operation, semanticModel)
-            && ComputationLambdas.OfArgumentValue(operation, semanticModel).Any())
+            && ComputationLambdas.SameTreeInitializerOperation(symbol, semanticModel) is { } initializer
+            && CapturedDelegateArmsResolve(initializer, semanticModel))
         {
             if (reported.Add(symbol))
             {
-                foreach (var body in ComputationLambdas.OfArgumentValue(operation, semanticModel))
-                {
-                    InspectPatchBody(context, classifier, body, semanticModel, reported);
-                }
+                WalkCapturedDelegateArms(context, classifier, initializer, semanticModel, reported);
             }
 
             return;
         }
 
         ReportIfNotSendable(context, classifier, operation, symbol, type, reported);
+    }
+
+    private static bool CapturedDelegateArmsResolve(IOperation value, SemanticModel? semanticModel)
+    {
+        switch (Unwrap(value))
+        {
+            case IConditionalOperation conditional:
+                return CapturedDelegateArmsResolve(conditional.WhenTrue, semanticModel)
+                    && conditional.WhenFalse is { } whenFalse
+                    && CapturedDelegateArmsResolve(whenFalse, semanticModel);
+            case ICoalesceOperation coalesce:
+                return CapturedDelegateArmsResolve(coalesce.Value, semanticModel)
+                    && CapturedDelegateArmsResolve(coalesce.WhenNull, semanticModel);
+            default:
+                return ComputationLambdas.OfArgumentValue(value, semanticModel).Any()
+                    || ResolveMethodReference(value, semanticModel, visitedVariables: null) is { Method.DeclaringSyntaxReferences.Length: 0 };
+        }
+    }
+
+    private static void WalkCapturedDelegateArms(
+        OperationAnalysisContext context,
+        SendableSymbolClassifier classifier,
+        IOperation value,
+        SemanticModel? semanticModel,
+        HashSet<ISymbol> reported)
+    {
+        switch (Unwrap(value))
+        {
+            case IConditionalOperation conditional:
+                WalkCapturedDelegateArms(context, classifier, conditional.WhenTrue, semanticModel, reported);
+                if (conditional.WhenFalse is { } whenFalse)
+                {
+                    WalkCapturedDelegateArms(context, classifier, whenFalse, semanticModel, reported);
+                }
+
+                return;
+            case ICoalesceOperation coalesce:
+                WalkCapturedDelegateArms(context, classifier, coalesce.Value, semanticModel, reported);
+                WalkCapturedDelegateArms(context, classifier, coalesce.WhenNull, semanticModel, reported);
+                return;
+        }
+
+        // A method-group candidate already CAPTURED its receiver: the stored patch shares
+        // it across flows even when the target body itself is safe.
+        if (ResolveMethodReference(value, semanticModel, visitedVariables: null) is { } methodReference)
+        {
+            InspectMethodGroupReceiver(context, classifier, methodReference, reported);
+        }
+
+        foreach (var body in ComputationLambdas.OfArgumentValue(value, semanticModel))
+        {
+            InspectPatchBody(context, classifier, body, semanticModel, reported);
+        }
     }
 
     // A value type with directly writable instance state. Enums have no user state (their
