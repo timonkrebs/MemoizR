@@ -935,28 +935,24 @@ internal static class ComputationLambdas
             return CanExecuteBefore(invocation, reference, variable, semanticModel, visitedFunctions);
         }
 
-        var lifted = current.Parent switch
-        {
-            EqualsValueClauseSyntax { Parent: VariableDeclaratorSyntax declarator } => semanticModel.GetDeclaredSymbol(declarator),
-            AssignmentExpressionSyntax assignment when assignment.Right == current && assignment.IsKind(SyntaxKind.SimpleAssignmentExpression)
-                => semanticModel.GetSymbolInfo(assignment.Left).Symbol,
-            _ => null,
-        };
-
+        var lifted = LiftTargetVariable(current, semanticModel);
         return lifted is null || LiftedDelegateRunsBefore(lifted, reference, variable, semanticModel, visitedFunctions);
     }
 
     // A direct CALL runs the function at the call's own position. A method-group LIFT runs it
     // wherever the receiving delegate variable is invoked -- so those invocation sites become
-    // the ordering points; a lift that escapes anywhere else stays unknowable.
+    // the ordering points; a lift that escapes anywhere else stays unknowable. Casts and
+    // parentheses change neither: `(Action)Rebind` lifted into a variable is still ordered by
+    // that variable's invocation sites.
     private static bool ReferenceRunsBefore(IdentifierNameSyntax use, SyntaxNode reference, ISymbol variable, SemanticModel semanticModel, HashSet<SyntaxNode> visitedFunctions)
     {
-        if (use.Parent is InvocationExpressionSyntax { Expression: { } invoked } && invoked == use)
+        var current = UnwrapCastsAndParentheses(use);
+        if (current.Parent is InvocationExpressionSyntax { Expression: { } invoked } && invoked == current)
         {
-            return CanExecuteBefore(use, reference, variable, semanticModel, visitedFunctions);
+            return CanExecuteBefore(current, reference, variable, semanticModel, visitedFunctions);
         }
 
-        var lifted = LiftTargetVariable(use, semanticModel);
+        var lifted = LiftTargetVariable(current, semanticModel);
         if (lifted is null)
         {
             return true;
@@ -965,7 +961,17 @@ internal static class ComputationLambdas
         return LiftedDelegateRunsBefore(lifted, reference, variable, semanticModel, visitedFunctions);
     }
 
-    private static ISymbol? LiftTargetVariable(IdentifierNameSyntax use, SemanticModel semanticModel)
+    private static SyntaxNode UnwrapCastsAndParentheses(SyntaxNode node)
+    {
+        while (node.Parent is ParenthesizedExpressionSyntax or CastExpressionSyntax)
+        {
+            node = node.Parent;
+        }
+
+        return node;
+    }
+
+    private static ISymbol? LiftTargetVariable(SyntaxNode use, SemanticModel semanticModel)
     {
         return use.Parent switch
         {
@@ -987,9 +993,10 @@ internal static class ComputationLambdas
                 continue;
             }
 
-            if (name.Parent is InvocationExpressionSyntax { Expression: { } invoked } && invoked == name)
+            var current = UnwrapCastsAndParentheses(name);
+            if (current.Parent is InvocationExpressionSyntax { Expression: { } invoked } && invoked == current)
             {
-                if (CanExecuteBefore(name, reference, variable, semanticModel, visitedFunctions))
+                if (CanExecuteBefore(current, reference, variable, semanticModel, visitedFunctions))
                 {
                     return true;
                 }
@@ -997,12 +1004,16 @@ internal static class ComputationLambdas
                 continue;
             }
 
-            // A write to the variable is not a use of the delegate; anything else lets the
-            // delegate escape to unknowable invocation sites.
-            if (name.Parent is not AssignmentExpressionSyntax { } write || write.Left != name)
+            // A write to the variable is not a use of the delegate, and a DISCARD
+            // (`_ = unused;`) provably drops it; anything else lets the delegate escape to
+            // unknowable invocation sites.
+            if (current.Parent is AssignmentExpressionSyntax write
+                && (write.Left == current || semanticModel.GetSymbolInfo(write.Left).Symbol is IDiscardSymbol))
             {
-                return true;
+                continue;
             }
+
+            return true;
         }
 
         return false;
