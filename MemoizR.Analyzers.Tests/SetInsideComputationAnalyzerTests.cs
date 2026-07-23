@@ -830,6 +830,38 @@ public class SetInsideComputationAnalyzerTests
     }
 
     [Fact]
+    public async Task FactoryAliasInsideHelper_KeepsCallSiteProvenance()
+    {
+        // The helper aliases its factory parameter before creating the signal: the
+        // call-site factory is still the provenance, so the disjoint call is suppressed
+        // while the host factory's own call stays flagged.
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f1 = new MemoFactory();
+                    var f2 = new MemoFactory();
+                    void Write(MemoFactory f)
+                    {
+                        var host = f;
+                        var s = host.CreateSignal(0);
+                        _ = s.Set(1);
+                    }
+                    f1.CreateMemoizR(async () => { Write(f2); return 0; });
+                    f1.CreateMemoizR(async () => { Write(f1); return 0; });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR003", diagnostic.Id);
+        Assert.Contains("Signal<int>.Set", diagnostic.GetMessage());
+    }
+
+    [Fact]
     public async Task IndexerSetterArguments_KeepCallSiteProvenance()
     {
         // The Set target is the indexer's index parameter: the call-site index argument (a

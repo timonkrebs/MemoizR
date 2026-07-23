@@ -46,7 +46,7 @@ internal static class ReceiverChains
                 case IParameterReferenceOperation parameterReference
                     when argumentMap?.TryGetValue(parameterReference.Parameter, out var mapped) == true
                         && site is not null
-                        && !IsWrittenBefore(parameterReference.Parameter, site, semanticModel):
+                        && !ComputationLambdas.IsWrittenBefore(parameterReference.Parameter, site, semanticModel):
                     reference = mapped;
                     site = mapped.Syntax;
                     continue;
@@ -108,30 +108,6 @@ internal static class ReceiverChains
         return false;
     }
 
-    // Any same-tree write to the symbol that can execute before the read -- unlike
-    // IsReassignedBefore, WITHOUT the effective-initializer excuse, because the caller uses
-    // this for parameters, whose declaration itself binds the value. Unverifiable (no model)
-    // counts as written: the hop must rest on proof.
-    private static bool IsWrittenBefore(ISymbol variable, SyntaxNode reference, SemanticModel? semanticModel)
-    {
-        if (semanticModel is null)
-        {
-            return true;
-        }
-
-        foreach (var node in semanticModel.SyntaxTree.GetRoot().DescendantNodes())
-        {
-            if (ComputationLambdas.ReassignmentTargets(node) is { } targets
-                && targets.Any(target => ComputationLambdas.WritesVariable(target, variable, semanticModel))
-                && ComputationLambdas.CanExecuteBefore(node, reference, variable, semanticModel))
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
     // Only a RECOGNIZED creation proves provenance: an arbitrary helper that merely RETURNS a
     // node (`f1.MakeState()`) says nothing about which factory created what it returns, so
     // resolving its receiver would claim f1 and enable a suppression the runtime contradicts.
@@ -176,7 +152,7 @@ internal static class ReceiverChains
             // through the effective-initializer machinery below instead.
             case IParameterReferenceOperation parameterReference
                 when argumentMap?.TryGetValue(parameterReference.Parameter, out var mapped) == true
-                    && !IsWrittenBefore(parameterReference.Parameter, receiver.Syntax, semanticModel):
+                    && !ComputationLambdas.IsWrittenBefore(parameterReference.Parameter, receiver.Syntax, semanticModel):
                 return ResolveReceiverSymbol(mapped, semanticModel, depth + 1, argumentMap);
             case ILocalReferenceOperation or IFieldReferenceOperation or IParameterReferenceOperation or IPropertyReferenceOperation:
                 // An intermediate (a stored ReactionBuilder, a factory alias) resolves through
@@ -192,7 +168,7 @@ internal static class ReceiverChains
                 }
 
                 var initialized = InitializerOf(symbol, semanticModel);
-                if (initialized is not null && ResolveReceiverSymbol(initialized, semanticModel, depth + 1) is { } through)
+                if (initialized is not null && ResolveReceiverSymbol(initialized, semanticModel, depth + 1, argumentMap) is { } through)
                 {
                     return through;
                 }

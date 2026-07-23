@@ -2618,6 +2618,196 @@ public class OptimisticPatchCaptureAnalyzerTests
     }
 
     [Fact]
+    public async Task OutHelperAssembledPatchArgument_IsWalked()
+    {
+        // The patch is definitely assembled by a same-tree out-helper before Apply: the
+        // helper's assignment is the body the overlay stores, and it is safe.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                private static void Provide(out Func<int, int> d) => d = static x => x;
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        Func<int, int> patch;
+                        Provide(out patch);
+                        await ctx.Apply(state, patch);
+                    });
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task OutHelperAssembledPatchArgument_ChasesTheAssembledBody()
+    {
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                private static int hits;
+
+                private static void Provide(out Func<int, int> d) => d = x => x + hits;
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        Func<int, int> patch;
+                        Provide(out patch);
+                        await ctx.Apply(state, patch);
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR004", diagnostic.Id);
+        Assert.Contains("hits", diagnostic.GetMessage());
+        Assert.Contains("writable static state", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task ReboundDelegateParameter_ChasesTheRebind()
+    {
+        // The helper rebinds its delegate parameter before invoking it: the rebinding
+        // closure is what runs, and the safe call-site lambda must not stand in for it.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                private static int hits;
+
+                private static int Run(Func<int> f)
+                {
+                    f = () => hits;
+                    return f();
+                }
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x => x + Run(static () => 0));
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR004", diagnostic.Id);
+        Assert.Contains("hits", diagnostic.GetMessage());
+        Assert.Contains("writable static state", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task MixedDelegateWrites_UnresolvedBranchIsStillFlagged()
+    {
+        // One branch assembles a safe lambda, the other an unverifiable cross-file closure:
+        // either can be the one invoked, so the safe branch must not silence the other.
+        var diagnostics = await AnalyzerTestHarness.AnalyzeAsync(new[]
+        {
+            """
+            public static class External
+            {
+                private static int hits;
+
+                public static System.Func<int> Get() => () => hits;
+            }
+            """,
+            """
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x =>
+                        {
+                            Func<int> later;
+                            if (p > 0)
+                            {
+                                later = External.Get();
+                            }
+                            else
+                            {
+                                later = static () => 0;
+                            }
+
+                            return x + later();
+                        });
+                    });
+                }
+            }
+            """,
+        }, new OptimisticPatchCaptureAnalyzer());
+
+        Assert.Equal(2, diagnostics.Length);
+        Assert.All(diagnostics, d => Assert.Equal("MZR004", d.Id));
+        Assert.Contains(diagnostics, d => d.GetMessage().Contains("'Get'") && d.GetMessage().Contains("another file"));
+        Assert.Contains(diagnostics, d => d.GetMessage().Contains("'later'") && d.GetMessage().Contains("cannot be resolved"));
+    }
+
+    [Fact]
+    public async Task ForeignInstanceDelegateWrite_IsNotChasedForTheInvoke()
+    {
+        // The write rebinds the field on a provably different instance: the delegate this
+        // patch invokes is still the initializer, so the foreign lambda's static read must
+        // not be charged to it. (The writable-field capture itself is still reported --
+        // that is the capture rule, not the write chase.)
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                private static int hits;
+
+                private Func<int, int> patch = static x => x;
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    var otherObject = new C();
+                    otherObject.patch = x => x + hits;
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x => patch(x));
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR004", diagnostic.Id);
+        Assert.Contains("'patch'", diagnostic.GetMessage());
+        Assert.DoesNotContain("hits", diagnostic.GetMessage());
+    }
+
+    [Fact]
     public async Task CoalesceAssignment_DoesNotStandInAsInitializer()
     {
         // `??=` can leave an older, externally supplied value in place: it must not be

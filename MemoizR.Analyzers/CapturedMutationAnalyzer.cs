@@ -75,7 +75,7 @@ public sealed class CapturedMutationAnalyzer : DiagnosticAnalyzer
         IParameterSymbol? thisParameter,
         bool foreignThis)
     {
-        foreach (var method in ChaseableMethods(operation))
+        foreach (var method in ChaseableMethods(operation, thisParameter, foreignThis))
         {
             if (ComputationLambdas.IsInsideNameOf(operation)
                 || (method.MethodKind == MethodKind.LocalFunction && !ComputationLambdas.IsDeclaredOutside(method, computationScope))
@@ -103,7 +103,7 @@ public sealed class CapturedMutationAnalyzer : DiagnosticAnalyzer
         }
     }
 
-    private static IEnumerable<IMethodSymbol> ChaseableMethods(IOperation operation)
+    private static IEnumerable<IMethodSymbol> ChaseableMethods(IOperation operation, IParameterSymbol? thisParameter, bool foreignThis)
     {
         switch (operation)
         {
@@ -113,13 +113,33 @@ public sealed class CapturedMutationAnalyzer : DiagnosticAnalyzer
             case IMethodReferenceOperation { Method.MethodKind: MethodKind.LocalFunction } reference:
                 yield return reference.Method;
                 break;
+            case IPropertyReferenceOperation property:
+                foreach (var accessor in ChaseableAccessors(property, thisParameter, foreignThis))
+                {
+                    yield return accessor;
+                }
 
-            // A property READ runs its getter like an invoked helper. Writes need no chase:
-            // the property itself is already the mutation target the direct walk reports.
-            case IPropertyReferenceOperation property
-                when ComputationLambdas.PropertyUsage(property).Reads && property.Property.GetMethod is { } getter:
-                yield return getter;
                 break;
+        }
+    }
+
+    // A property READ runs its getter like an invoked helper, on any receiver. A WRITE on
+    // the computation's own instance (or a static) needs no chase -- the property itself is
+    // the mutation target the direct walk reports -- but on a FOREIGN receiver nothing else
+    // looks at the setter body, whose side effects (`set { hits++; }`) still run on every
+    // replay.
+    private static IEnumerable<IMethodSymbol> ChaseableAccessors(IPropertyReferenceOperation property, IParameterSymbol? thisParameter, bool foreignThis)
+    {
+        var (reads, writes) = ComputationLambdas.PropertyUsage(property);
+        if (reads && property.Property.GetMethod is { } getter)
+        {
+            yield return getter;
+        }
+
+        if (writes && property.Property.SetMethod is { } setter
+            && property.Instance is { } instance && !IsComputationInstance(instance, thisParameter, foreignThis))
+        {
+            yield return setter;
         }
     }
 
@@ -172,14 +192,41 @@ public sealed class CapturedMutationAnalyzer : DiagnosticAnalyzer
     }
 
     // The operation refers to the COMPUTATION's enclosing instance: a direct `this` -- only
-    // while walking code whose `this` IS that instance -- or the current body's this-bound
-    // parameter.
+    // while walking code whose `this` IS that instance -- the current body's this-bound
+    // parameter, or a local ALIAS resolving to either through its same-tree initializer
+    // chain (`var alias = c; Mutate(alias);` hands the instance on). An alias written
+    // before its use no longer proves the binding and stays untrusted.
     private static bool IsComputationInstance(IOperation? receiver, IParameterSymbol? thisParameter, bool foreignThis)
     {
-        return (receiver is IInstanceReferenceOperation { ReferenceKind: InstanceReferenceKind.ContainingTypeInstance } && !foreignThis)
-            || (receiver is IParameterReferenceOperation parameter
-                && thisParameter is not null
-                && SymbolEqualityComparer.Default.Equals(parameter.Parameter, thisParameter));
+        var current = receiver;
+        HashSet<ISymbol>? visited = null;
+        while (true)
+        {
+            switch (current)
+            {
+                case IConversionOperation conversion:
+                    current = conversion.Operand;
+                    continue;
+                case IInstanceReferenceOperation { ReferenceKind: InstanceReferenceKind.ContainingTypeInstance }:
+                    return !foreignThis;
+                case IParameterReferenceOperation parameter when thisParameter is not null
+                    && SymbolEqualityComparer.Default.Equals(parameter.Parameter, thisParameter):
+                    return true;
+                case ILocalReferenceOperation local:
+                    visited ??= new HashSet<ISymbol>(SymbolEqualityComparer.Default);
+                    if (!visited.Add(local.Local)
+                        || ComputationLambdas.IsWrittenBefore(local.Local, current.Syntax, current.SemanticModel)
+                        || ComputationLambdas.SameTreeInitializerOperation(local.Local, current.SemanticModel) is not { } initializer)
+                    {
+                        return false;
+                    }
+
+                    current = initializer;
+                    continue;
+                default:
+                    return false;
+            }
+        }
     }
 
     private sealed class ChaseKeyComparer : IEqualityComparer<(IMethodSymbol Method, IParameterSymbol? This, bool Foreign)>

@@ -108,6 +108,21 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
             InspectPatchBody(context, classifier, patch, semanticModel, reported);
         }
 
+        // A patch definitely ASSEMBLED by a same-tree out-helper (`Provide(out patch)` as
+        // the sole dominating write) resolves to the helper's assignments -- each walked
+        // like an inline patch body; an unresolvable helper falls through to the
+        // unverifiable report below.
+        if (!bodyResolved && semanticModel is not null
+            && ReceiverSymbol(Unwrap(value)) is { } assembled
+            && ComputationLambdas.EffectiveInitializerWrite(assembled, semanticModel) is ArgumentSyntax outWrite)
+        {
+            foreach (var patch in OutAssignedBodies(outWrite, semanticModel, argumentMap: null))
+            {
+                bodyResolved = true;
+                InspectPatchBody(context, classifier, patch, semanticModel, reported);
+            }
+        }
+
         // A SOURCE-declared method group whose body lives in another file cannot be walked:
         // nothing checks the statics it executes, so unverifiable means flagged -- while
         // metadata targets (Math.Abs) stay trusted like every other external contract.
@@ -234,12 +249,13 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
             return false;
         }
 
-        // The sole assignment standing in for a missing initializer is initialization, not a
-        // rebind (`Func<int,int> patch; patch = static x => x;` is the declaration in two
+        // The sole WRITE standing in for a missing initializer is initialization, not a
+        // rebind (`Func<int,int> patch; patch = static x => x;` -- or `Provide(out patch)`,
+        // whose bodies the out-helper machinery resolves -- is the declaration in two
         // steps) -- but only when it can actually RUN before this read: a future write proves
         // nothing about the value read here (a constructor- or externally-supplied delegate
         // would slip through on its strength).
-        var effectiveInitializer = ComputationLambdas.EffectiveInitializerAssignment(variable, semanticModel);
+        var effectiveInitializer = ComputationLambdas.EffectiveInitializerWrite(variable, semanticModel);
         if (effectiveInitializer is not null
             && !ComputationLambdas.CanExecuteBefore(effectiveInitializer, readReference.Syntax, variable, semanticModel))
         {
@@ -815,17 +831,28 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
             ChaseExecutedBody(context, classifier, body, semanticModel, visitedCalls, visitedInvokes, argumentMap, reported);
         }
 
-        var variable = ComputationLambdas.ReferencedVariable(Unwrap(resolved));
-        if (variable is not null && semanticModel is not null)
+        var unwrapped = Unwrap(resolved);
+
+        // A REBOUND parameter stops the hop, but what the caller handed in can still run
+        // when the rebind is conditional: both stay candidates.
+        if (unwrapped is IParameterReferenceOperation
+            && ComputationLambdas.SubstituteArguments(unwrapped, argumentMap) is { } handed
+            && !ReferenceEquals(handed, unwrapped))
         {
-            foreach (var body in AssignedDelegateBodies(variable, resolved.Syntax, semanticModel, argumentMap))
+            foreach (var body in ComputationLambdas.OfArgumentValue(handed, semanticModel))
             {
                 found = true;
                 ChaseExecutedBody(context, classifier, body, semanticModel, visitedCalls, visitedInvokes, argumentMap, reported);
             }
         }
 
-        if (!found && Unwrap(resolved) is IInvocationOperation callResult)
+        var variable = ComputationLambdas.ReferencedVariable(unwrapped) ?? (unwrapped as IParameterReferenceOperation)?.Parameter;
+        if (variable is not null && semanticModel is not null)
+        {
+            found |= ChaseAssignedDelegates(context, classifier, variable, resolved, semanticModel, visitedCalls, visitedInvokes, argumentMap, reported);
+        }
+
+        if (!found && unwrapped is IInvocationOperation callResult)
         {
             found = ChaseReturnedDelegateBodies(context, classifier, callResult, semanticModel, visitedCalls, visitedInvokes, argumentMap, reported);
         }
@@ -879,8 +906,8 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
     // The invoked reference, collapsed through parameter-to-argument hops (the map) and
     // variable-to-variable alias initializers. Hops stop at anything the body resolution can
     // consume directly (a lambda, a method group, a variable holding one) so no shape is
-    // lost, and at any alias REASSIGNED before its read -- there the assignment scan owns
-    // the chase, and hopping past it would resurrect the stale initializer.
+    // lost, and at any alias or parameter WRITTEN before its read -- there the assignment
+    // scan owns the chase, and hopping past the write would resurrect a stale value.
     private static IOperation ResolveDelegateReference(
         IOperation callee,
         SemanticModel? semanticModel,
@@ -890,6 +917,13 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         HashSet<ISymbol>? visited = null;
         while (true)
         {
+            if (Unwrap(current) is IParameterReferenceOperation rebound
+                && argumentMap?.ContainsKey(rebound.Parameter) == true
+                && ComputationLambdas.IsWrittenBefore(rebound.Parameter, current.Syntax, semanticModel))
+            {
+                return current;
+            }
+
             if (ComputationLambdas.SubstituteArguments(current, argumentMap) is { } substituted
                 && !ReferenceEquals(substituted, current))
             {
@@ -978,25 +1012,35 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
     }
 
     // A delegate assembled by ASSIGNMENT (`Func<int> later; later = () => hits;`, including
-    // through deconstruction) has no initializer to resolve, so every same-tree assignment's
-    // right-hand side that can EXECUTE before the invocation is a body that might be the one
-    // invoked. Deconstructions pair positionally: `(other, later) = (a, b)` assigns only `b`
-    // to `later`, so `a` must not be chased.
-    private static IEnumerable<ComputationLambdas.ComputationBody> AssignedDelegateBodies(
+    // through deconstruction or an out-helper) has no initializer to resolve, so every
+    // same-tree write that can EXECUTE before the invocation is a CANDIDATE -- and each
+    // candidate is accounted for separately: one write resolving to a safe body must not
+    // silence another that resolves to nothing (`if (external) later = External.Get(); else
+    // later = static () => 0;` can leave either closure to run), so an unaccounted write
+    // gets the unverifiable report itself. Killed writes (definitely overwritten on the way
+    // to the invoke) stay out; deconstructions pair positionally.
+    private static bool ChaseAssignedDelegates(
+        OperationAnalysisContext context,
+        SendableSymbolClassifier classifier,
         ISymbol variable,
-        SyntaxNode invokeSite,
+        IOperation readReference,
         SemanticModel semanticModel,
-        Dictionary<IParameterSymbol, IOperation>? argumentMap)
+        HashSet<(SyntaxNode, IMethodSymbol, string)> visitedCalls,
+        HashSet<(SyntaxNode, string)> visitedInvokes,
+        Dictionary<IParameterSymbol, IOperation>? argumentMap,
+        HashSet<ISymbol> reported)
     {
+        var invokeSite = readReference.Syntax;
         var writes = new List<SyntaxNode>();
         foreach (var node in semanticModel.SyntaxTree.GetRoot().DescendantNodes())
         {
-            if (WritesDelegateBeforeInvoke(node, variable, invokeSite, semanticModel))
+            if (WritesDelegateBeforeInvoke(node, variable, readReference, semanticModel))
             {
                 writes.Add(node);
             }
         }
 
+        var found = false;
         foreach (var node in writes)
         {
             // A later straight-line simple assignment on the path to the invoke REPLACES the
@@ -1006,26 +1050,90 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
                 continue;
             }
 
+            var resolvedAny = false;
             foreach (var body in NodeAssignedBodies(node, variable, semanticModel, argumentMap))
             {
-                yield return body;
+                resolvedAny = true;
+                ChaseExecutedBody(context, classifier, body, semanticModel, visitedCalls, visitedInvokes, argumentMap, reported);
             }
+
+            if (!resolvedAny)
+            {
+                resolvedAny = ResolvesOutsideBodies(context, classifier, node, variable, semanticModel, visitedCalls, visitedInvokes, argumentMap, reported);
+            }
+
+            if (!resolvedAny && semanticModel.GetOperation(node) is { } writeOperation)
+            {
+                Report(
+                    context,
+                    writeOperation,
+                    variable,
+                    variable.Name,
+                    "the delegate it holds cannot be resolved from this call site, and a delegate can capture arbitrary mutable state (assemble the patch's callees from lambdas or same-tree methods)",
+                    reported);
+            }
+
+            found |= resolvedAny;
         }
+
+        return found;
     }
 
-    private static bool WritesDelegateBeforeInvoke(SyntaxNode node, ISymbol variable, SyntaxNode invokeSite, SemanticModel semanticModel)
+    // A candidate write whose right-hand side yields no walkable body can still be
+    // accounted for: a METADATA method-group target is a trusted external contract, and a
+    // same-tree delegate-returning call resolves through its return statements. Anything
+    // else stays unaccounted and gets flagged by the caller.
+    private static bool ResolvesOutsideBodies(
+        OperationAnalysisContext context,
+        SendableSymbolClassifier classifier,
+        SyntaxNode write,
+        ISymbol variable,
+        SemanticModel semanticModel,
+        HashSet<(SyntaxNode, IMethodSymbol, string)> visitedCalls,
+        HashSet<(SyntaxNode, string)> visitedInvokes,
+        Dictionary<IParameterSymbol, IOperation>? argumentMap,
+        HashSet<ISymbol> reported)
+    {
+        if (write is not AssignmentExpressionSyntax assignment)
+        {
+            return false;
+        }
+
+        foreach (var value in AssignedValuesFor(assignment.Left, assignment.Right, variable, semanticModel))
+        {
+            var resolvedValue = ResolveDelegateReference(value, semanticModel, argumentMap);
+            if (ResolveMethodReference(resolvedValue, semanticModel, visitedVariables: null) is { Method.DeclaringSyntaxReferences.Length: 0 })
+            {
+                return true;
+            }
+
+            if (Unwrap(resolvedValue) is IInvocationOperation callResult
+                && ChaseReturnedDelegateBodies(context, classifier, callResult, semanticModel, visitedCalls, visitedInvokes, argumentMap, reported))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool WritesDelegateBeforeInvoke(SyntaxNode node, ISymbol variable, IOperation readReference, SemanticModel semanticModel)
     {
         return node switch
         {
+            // WritesReadInstance keeps writes on provably-different instances out: a fresh
+            // `other.patch = evil;` cannot rebind the field this invoke reads through
+            // some other receiver.
             AssignmentExpressionSyntax assignment =>
                 ComputationLambdas.ReassignmentTargets(assignment) is { } targets
-                && targets.Any(target => ComputationLambdas.WritesVariable(target, variable, semanticModel))
-                && ComputationLambdas.CanExecuteBefore(assignment, invokeSite, variable, semanticModel),
+                && targets.Any(target => ComputationLambdas.WritesVariable(target, variable, semanticModel)
+                    && WritesReadInstance(target, variable, readReference, semanticModel))
+                && ComputationLambdas.CanExecuteBefore(assignment, readReference.Syntax, variable, semanticModel),
             ArgumentSyntax argument =>
                 argument.RefOrOutKeyword.Kind() is SyntaxKind.OutKeyword or SyntaxKind.RefKeyword
                 && semanticModel.GetSymbolInfo(argument.Expression).Symbol is { } written
                 && SymbolEqualityComparer.Default.Equals(written, variable)
-                && ComputationLambdas.CanExecuteBefore(argument, invokeSite, variable, semanticModel),
+                && ComputationLambdas.CanExecuteBefore(argument, readReference.Syntax, variable, semanticModel),
             _ => false,
         };
     }

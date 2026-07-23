@@ -219,11 +219,21 @@ internal static class ComputationLambdas
         return null;
     }
 
-    // The single same-tree assignment standing in for a missing declaration initializer, or
-    // null when the declaration has one, there are several writes (ambiguous), or the one
-    // write is not a plain `x = value`. Reassignment scans EXCLUDE this node: it is the
-    // initialization, not a rebind.
+    // The effective initializer narrowed to the shapes whose right-hand side resolves to a
+    // single operation; an out-argument handoff has no RHS here (its bodies come from the
+    // callee's assignments, which MZR004 resolves itself).
     public static AssignmentExpressionSyntax? EffectiveInitializerAssignment(ISymbol variable, SemanticModel? semanticModel)
+    {
+        return EffectiveInitializerWrite(variable, semanticModel) as AssignmentExpressionSyntax;
+    }
+
+    // The single same-tree WRITE standing in for a missing declaration initializer -- a
+    // plain `x = value` (or simple deconstruction), or an OUT-argument handoff
+    // (`Provide(out patch)`, which the language requires to assign) -- or null when the
+    // declaration has an initializer, there are several writes (ambiguous), or the one
+    // write does not fully determine the value. Reassignment scans EXCLUDE this node: it is
+    // the initialization, not a rebind.
+    public static SyntaxNode? EffectiveInitializerWrite(ISymbol variable, SemanticModel? semanticModel)
     {
         if (semanticModel is null || variable.DeclaringSyntaxReferences.FirstOrDefault()?.GetSyntax()
                 is VariableDeclaratorSyntax { Initializer: not null }
@@ -233,7 +243,7 @@ internal static class ComputationLambdas
             return null;
         }
 
-        AssignmentExpressionSyntax? sole = null;
+        SyntaxNode? sole = null;
         foreach (var node in semanticModel.SyntaxTree.GetRoot().DescendantNodes())
         {
             // WritesVariable, not plain symbol equality: the reassignment scans count a
@@ -251,22 +261,29 @@ internal static class ComputationLambdas
                 continue;
             }
 
-            // Only a plain `x = value` fully DETERMINES the value: `x ??= ...` / `x += ...`
-            // can leave (or combine with) an older value supplied elsewhere. A simple
-            // DECONSTRUCTION qualifies too -- the variable's slot is fully determined by its
-            // tuple element, which SameTreeInitializerOperation extracts.
-            if (sole is not null
-                || !WritesThroughOwnReceiver(target, variable)
-                || node is not AssignmentExpressionSyntax assignment
-                || !assignment.IsKind(SyntaxKind.SimpleAssignmentExpression))
+            if (sole is not null || !WritesThroughOwnReceiver(target, variable) || !IsInitializingWriteShape(node))
             {
                 return null;
             }
 
-            sole = assignment;
+            sole = node;
         }
 
         return sole is not null && DominatesItsFunction(sole, variable) ? sole : null;
+    }
+
+    // Only a write that fully DETERMINES the value qualifies: `x ??= ...` / `x += ...` can
+    // leave (or combine with) an older value supplied elsewhere, and a `ref` argument may
+    // never assign -- while an `out` argument must, and a simple deconstruction determines
+    // the variable's slot (SameTreeInitializerOperation extracts the element).
+    private static bool IsInitializingWriteShape(SyntaxNode node)
+    {
+        return node switch
+        {
+            AssignmentExpressionSyntax assignment => assignment.IsKind(SyntaxKind.SimpleAssignmentExpression),
+            ArgumentSyntax argument => argument.RefOrOutKeyword.IsKind(SyntaxKind.OutKeyword),
+            _ => false,
+        };
     }
 
     // For an instance member, only a write through the member's OWN object initializes what
@@ -288,15 +305,16 @@ internal static class ComputationLambdas
     // (a field, a property, a parameter) can still hold a value supplied elsewhere when an
     // assignment nested in a conditional never runs. Locals need no check -- definite
     // assignment already forbids reading them on a path that skipped the write. "Dominates"
-    // = plain block statements all the way up to the assignment's own function.
-    private static bool DominatesItsFunction(AssignmentExpressionSyntax assignment, ISymbol variable)
+    // = plain statements all the way up to the write's own function (the argument-list hop
+    // covers the out-argument shape; a conditional-access call stays rejected).
+    private static bool DominatesItsFunction(SyntaxNode write, ISymbol variable)
     {
         if (variable is ILocalSymbol)
         {
             return true;
         }
 
-        for (SyntaxNode? current = assignment.Parent; current is not null; current = current.Parent)
+        for (SyntaxNode? current = write.Parent; current is not null; current = current.Parent)
         {
             if (current is AnonymousFunctionExpressionSyntax or LocalFunctionStatementSyntax
                 or BaseMethodDeclarationSyntax or AccessorDeclarationSyntax or ArrowExpressionClauseSyntax
@@ -305,13 +323,39 @@ internal static class ComputationLambdas
                 return true;
             }
 
-            if (current is not (BlockSyntax or ExpressionStatementSyntax or GlobalStatementSyntax))
+            if (current is not (BlockSyntax or ExpressionStatementSyntax or GlobalStatementSyntax
+                or ArgumentListSyntax or InvocationExpressionSyntax))
             {
                 return false;
             }
         }
 
         return true;
+    }
+
+    // Any same-tree write to the symbol that can execute before the read -- unlike the
+    // reassignment checks, WITHOUT the effective-initializer excuse: used where the
+    // declaration itself binds the value (a parameter, an aliased local), so every write is
+    // a rebind. Unverifiable (no model) counts as written: callers hop or trust only on
+    // proof.
+    public static bool IsWrittenBefore(ISymbol variable, SyntaxNode reference, SemanticModel? semanticModel)
+    {
+        if (semanticModel is null)
+        {
+            return true;
+        }
+
+        foreach (var node in semanticModel.SyntaxTree.GetRoot().DescendantNodes())
+        {
+            if (ReassignmentTargets(node) is { } targets
+                && targets.Any(target => WritesVariable(target, variable, semanticModel))
+                && CanExecuteBefore(node, reference, variable, semanticModel))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     // Call-site arguments substitute for a chased helper's parameters: maps are built

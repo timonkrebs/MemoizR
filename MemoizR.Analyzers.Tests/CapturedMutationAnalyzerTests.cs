@@ -845,6 +845,79 @@ public class CapturedMutationAnalyzerTests
     }
 
     [Fact]
+    public async Task ForeignSetterHiddenStaticWrite_IsFlagged()
+    {
+        // The assignment target itself is a computation-local object, but the setter body
+        // still mutates a static on every recomputation.
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public class Box
+            {
+                public static int hits;
+
+                public int Value
+                {
+                    get => 0;
+                    set { hits++; }
+                }
+            }
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    f.CreateMemoizR(async () =>
+                    {
+                        var box = new Box();
+                        box.Value = 1;
+                        return 0;
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR002", diagnostic.Id);
+        Assert.Contains("static field 'hits'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task ThisAliasInsideHelper_KeepsTheBinding()
+    {
+        // The helper stores the received instance in a local before handing it on: the
+        // alias resolves to the this-bound parameter, so the nested write is still the
+        // enclosing object's.
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public class C
+            {
+                public int Counter;
+
+                private static void Mutate(C c) => c.Counter++;
+
+                private static void Wrapper(C c)
+                {
+                    var alias = c;
+                    Mutate(alias);
+                }
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    f.CreateMemoizR(async () => { Wrapper(this); return 0; });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR002", diagnostic.Id);
+        Assert.Contains("field 'Counter'", diagnostic.GetMessage());
+    }
+
+    [Fact]
     public async Task ExtensionMethodOnAnotherReceiver_IsNotChasedForMutation()
     {
         // The same extension on some OTHER object mutates that object's state -- a
