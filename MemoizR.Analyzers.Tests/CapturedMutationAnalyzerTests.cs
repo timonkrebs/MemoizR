@@ -976,4 +976,34 @@ public class CapturedMutationAnalyzerTests
         Assert.Equal("MZR002", diagnostic.Id);
         Assert.Contains("captured local 'applied'", diagnostic.GetMessage());
     }
+    [Fact]
+    public async Task SurvivingRebindPatch_MutationIsFlagged()
+    {
+        // The declaration initializer is definitely overwritten before Apply: the surviving
+        // write's lambda is the stored patch, and its captured-local write races on replay.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    var applied = 0;
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        Func<int, int> patch = static x => x;
+                        patch = x => { applied++; return x; };
+                        await ctx.Apply(state, patch);
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR002", diagnostic.Id);
+        Assert.Contains("captured local 'applied'", diagnostic.GetMessage());
+    }
 }

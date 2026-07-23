@@ -1695,4 +1695,109 @@ public class SetInsideComputationAnalyzerTests
         Assert.Equal("MZR003", diagnostic.Id);
         Assert.Contains("Signal<int>.Set", diagnostic.GetMessage());
     }
+    [Fact]
+    public async Task AliasedComputedPropertyPatch_SetIsFlagged()
+    {
+        // The patch is copied out of the computed property before Apply: the alias resolves
+        // to the getter's returned lambda, whose Set throws under the evaluation lock.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                private readonly MemoFactory f = new();
+                private readonly Signal<int> v;
+
+                private Func<int, int> Patch
+                {
+                    get
+                    {
+                        return x => { _ = v.Set(2); return x; };
+                    }
+                }
+
+                public C()
+                {
+                    v = f.CreateSignal(1);
+                    var state = f.CreateOptimistic<int>(v);
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        Func<int, int> patch = Patch;
+                        await ctx.Apply(state, patch);
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR003", diagnostic.Id);
+        Assert.Contains("Signal<int>.Set", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task SetInSurvivingRebindPatch_IsFlagged()
+    {
+        // The declaration initializer is definitely overwritten before Apply: the surviving
+        // write's lambda is the stored patch, and its Set throws exactly like an inline one.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var v = f.CreateSignal(1);
+                    var state = f.CreateOptimistic<int>(v);
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        Func<int, int> patch = static x => x;
+                        patch = x => { _ = v.Set(2); return x; };
+                        await ctx.Apply(state, patch);
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR003", diagnostic.Id);
+        Assert.Contains("Signal<int>.Set", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task SetInsideOverwrittenForwardedHandoff_IsNotFlagged()
+    {
+        // Build's assembled delegate is definitely overwritten before Provide returns: its
+        // Set can never be the stored patch, so it must not be flagged.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var v = f.CreateSignal(1);
+                    var state = f.CreateOptimistic<int>(v);
+                    void Build(out Func<int, int> d) => d = x => { _ = v.Set(2); return x; };
+                    void Provide(out Func<int, int> d)
+                    {
+                        Build(out d);
+                        d = static x => x;
+                    }
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        Func<int, int> patch;
+                        Provide(out patch);
+                        await ctx.Apply(state, patch);
+                    });
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
 }

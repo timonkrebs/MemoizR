@@ -622,12 +622,42 @@ internal static class ComputationLambdas
             }
         }
 
+        // A declaration initializer definitely OVERWRITTEN before this read leaves the
+        // surviving writes as the only closures the call can store: their values are patch
+        // bodies too (resolution-only, like everything here -- MZR004 owns the accounting).
+        if (variable is not null)
+        {
+            foreach (var body in SurvivingWriteBodies(variable, reference, semanticModel))
+            {
+                yield return body;
+            }
+        }
+
+        // An ALIAS resolves to its assembled source first: `Func<int,int> p = Patch;`
+        // stores whatever the computed property's getter (or the stored factory call)
+        // returned.
+        var source = ResolveDelegateValue(reference, semanticModel, null);
+        while (source is IConversionOperation sourceConversion)
+        {
+            source = sourceConversion.Operand;
+        }
+
+        foreach (var body in AssembledSourceBodies(source, semanticModel))
+        {
+            yield return body;
+        }
+    }
+
+    private static IEnumerable<(ComputationBody Body, Dictionary<IParameterSymbol, IOperation>? ArgumentMap)> AssembledSourceBodies(IOperation source, SemanticModel? semanticModel)
+    {
+        var resolvedVariable = ReferencedVariable(source);
+
         // The INDEXER's argument map keeps the returned lambda's index-parameter references
         // resolvable (`this[Signal<int> s] { get { return x => { s.Set(1); ... }; } }`).
-        if (variable is IPropertySymbol { GetMethod: { } getter, SetMethod: null }
+        if (resolvedVariable is IPropertySymbol { GetMethod: { } getter, SetMethod: null }
             && ResolveMethodBody(getter, semanticModel) is { } getterBody)
         {
-            var propertyMap = BuildArgumentMap(reference, null);
+            var propertyMap = BuildArgumentMap(source, null);
             foreach (var body in ReturnedBodies(getterBody, semanticModel, propertyMap))
             {
                 yield return (body, propertyMap);
@@ -637,8 +667,8 @@ internal static class ComputationLambdas
         // A patch produced by a same-tree delegate FACTORY -- called inline, or stored
         // through the variable's initializer -- resolves through the factory's returns,
         // with the call's own argument map.
-        var call = reference as IInvocationOperation
-            ?? UnwrappedInitializerCall(variable, semanticModel);
+        var call = source as IInvocationOperation
+            ?? UnwrappedInitializerCall(resolvedVariable, semanticModel);
         if (call is not null && ResolveMethodBody(call.TargetMethod, semanticModel) is { } factoryBody)
         {
             var callMap = BuildArgumentMap(call, null);
@@ -647,6 +677,60 @@ internal static class ComputationLambdas
                 yield return (body, callMap);
             }
         }
+    }
+
+    // The reassignment carve-out, resolution-only: when the declaration initializer is
+    // definitely overwritten on the straight-line path to this read, only the surviving
+    // writes can be the stored closure -- each write that no other candidate definitely
+    // kills resolves like an out-helper's assignment (values through aliases, forwarded
+    // handoffs recursively). MZR002/MZR003 walk these; MZR004's own carve-out accounts.
+    private static IEnumerable<(ComputationBody Body, Dictionary<IParameterSymbol, IOperation>? ArgumentMap)> SurvivingWriteBodies(
+        ISymbol variable,
+        IOperation reference,
+        SemanticModel? semanticModel)
+    {
+        if (semanticModel is null || !InitializerDefinitelyOverwritten(variable, reference, semanticModel))
+        {
+            yield break;
+        }
+
+        var writes = new List<SyntaxNode>();
+        foreach (var node in semanticModel.SyntaxTree.GetRoot().DescendantNodes())
+        {
+            if (IsVariableWriteNode(node, variable, semanticModel)
+                && CanExecuteBefore(node, reference.Syntax, variable, semanticModel))
+            {
+                writes.Add(node);
+            }
+        }
+
+        foreach (var write in writes)
+        {
+            if (writes.Any(other => other != write && DefinitelyOverwrites(other, write, reference.Syntax, variable, semanticModel)))
+            {
+                continue;
+            }
+
+            foreach (var body in OutHandoffNodeBodies(write, variable, semanticModel, new HashSet<SyntaxNode>(), callMap: null))
+            {
+                yield return body;
+            }
+        }
+    }
+
+    private static bool InitializerDefinitelyOverwritten(ISymbol variable, IOperation reference, SemanticModel semanticModel)
+    {
+        if (variable.DeclaringSyntaxReferences.FirstOrDefault() is not { } declaration
+            || declaration.SyntaxTree != semanticModel.SyntaxTree
+            || declaration.GetSyntax() is not VariableDeclaratorSyntax { Initializer: not null } declarator)
+        {
+            return false;
+        }
+
+        return semanticModel.SyntaxTree.GetRoot().DescendantNodes().Any(node =>
+            IsVariableWriteNode(node, variable, semanticModel)
+            && CanExecuteBefore(node, reference.Syntax, variable, semanticModel)
+            && DefinitelyOverwrites(node, declarator, reference.Syntax, variable, semanticModel));
     }
 
     // A delegate VALUE collapsed through variable-alias initializers and parameter-to-
@@ -717,7 +801,7 @@ internal static class ComputationLambdas
         return initializer as IInvocationOperation;
     }
 
-    public static IEnumerable<ComputationBody> ReturnedBodies(ComputationBody methodBody, SemanticModel? semanticModel, Dictionary<IParameterSymbol, IOperation>? argumentMap = null)
+    public static IEnumerable<ComputationBody> ReturnedBodies(ComputationBody methodBody, SemanticModel? semanticModel, Dictionary<IParameterSymbol, IOperation>? argumentMap = null, HashSet<(IMethodSymbol, string)>? visitedFactories = null)
     {
         foreach (var inner in DescendDirectExecution(methodBody.Body))
         {
@@ -727,10 +811,55 @@ internal static class ComputationLambdas
             }
 
             // Aliases resolve too: `var q = p; return q;` hands back the call-site value.
-            foreach (var body in OfArgumentValue(ResolveDelegateValue(returned, semanticModel, argumentMap), semanticModel))
+            var resolved = ResolveDelegateValue(returned, semanticModel, argumentMap);
+            var resolvedAny = false;
+            foreach (var body in OfArgumentValue(resolved, semanticModel))
+            {
+                resolvedAny = true;
+                yield return body;
+            }
+
+            if (resolvedAny)
+            {
+                continue;
+            }
+
+            visitedFactories ??= new HashSet<(IMethodSymbol, string)>();
+            foreach (var body in NestedFactoryReturnedBodies(resolved, semanticModel, argumentMap, visitedFactories))
             {
                 yield return body;
             }
+        }
+    }
+
+    // `return Make();` assembles one factory deeper: chased through the nested call's
+    // returns with its own map, the visited set bounding recursive factories.
+    private static IEnumerable<ComputationBody> NestedFactoryReturnedBodies(
+        IOperation resolved,
+        SemanticModel? semanticModel,
+        Dictionary<IParameterSymbol, IOperation>? argumentMap,
+        HashSet<(IMethodSymbol, string)> visitedFactories)
+    {
+        while (resolved is IConversionOperation conversion)
+        {
+            resolved = conversion.Operand;
+        }
+
+        if (resolved is not IInvocationOperation call
+            || ResolveMethodBody(call.TargetMethod, semanticModel) is not { } nested)
+        {
+            yield break;
+        }
+
+        var nestedMap = BuildArgumentMap(call, argumentMap);
+        if (!visitedFactories.Add((call.TargetMethod, ArgumentMapKey(nestedMap))))
+        {
+            yield break;
+        }
+
+        foreach (var body in ReturnedBodies(nested, semanticModel, nestedMap, visitedFactories))
+        {
+            yield return body;
         }
     }
 
@@ -757,24 +886,21 @@ internal static class ComputationLambdas
             ? BuildArgumentMap(call, outerMap)
             : outerMap;
 
-        // The kill filter mirrors MZR004's accounting chase: an assignment definitely
-        // overwritten on the straight-line path to the helper's return can never be the
-        // delegate the caller receives.
+        // The kill filter mirrors MZR004's accounting chase: a write -- assignment or
+        // forwarded handoff -- definitely overwritten on the straight-line path to the
+        // helper's return can never be the delegate the caller receives.
         var writes = new List<SyntaxNode>();
         foreach (var node in helper.Scope.DescendantNodes())
         {
-            if (node is AssignmentExpressionSyntax candidate
-                && ReassignmentTargets(candidate) is { } targets
-                && targets.Any(target => WritesVariable(target, parameter, semanticModel)))
+            if (IsVariableWriteNode(node, parameter, semanticModel))
             {
-                writes.Add(candidate);
+                writes.Add(node);
             }
         }
 
-        foreach (var node in helper.Scope.DescendantNodes())
+        foreach (var node in writes)
         {
-            if (node is AssignmentExpressionSyntax victim
-                && writes.Any(other => other != victim && DefinitelyOverwrites(other, victim, helper.Scope, parameter, semanticModel)))
+            if (writes.Any(other => other != node && DefinitelyOverwrites(other, node, helper.Scope, parameter, semanticModel)))
             {
                 continue;
             }
@@ -786,9 +912,24 @@ internal static class ComputationLambdas
         }
     }
 
+    // A node that can BIND the variable: a (possibly deconstructing) assignment whose target
+    // writes it, or an out-argument handoff naming it (ref aliases included on both). Shared
+    // by the out-helper kill filter and the surviving-write resolution.
+    private static bool IsVariableWriteNode(SyntaxNode node, ISymbol variable, SemanticModel semanticModel)
+    {
+        return node switch
+        {
+            AssignmentExpressionSyntax assignment => ReassignmentTargets(assignment) is { } targets
+                && targets.Any(target => WritesVariable(target, variable, semanticModel)),
+            ArgumentSyntax argument => argument.RefOrOutKeyword.IsKind(SyntaxKind.OutKeyword)
+                && WritesVariable(argument.Expression, variable, semanticModel),
+            _ => false,
+        };
+    }
+
     private static IEnumerable<(ComputationBody Body, Dictionary<IParameterSymbol, IOperation>? ArgumentMap)> OutHandoffNodeBodies(
         SyntaxNode node,
-        IParameterSymbol parameter,
+        ISymbol variable,
         SemanticModel semanticModel,
         HashSet<SyntaxNode> visited,
         Dictionary<IParameterSymbol, IOperation>? callMap)
@@ -797,8 +938,8 @@ internal static class ComputationLambdas
         {
             case AssignmentExpressionSyntax assignment
                 when ReassignmentTargets(assignment) is { } targets
-                    && targets.Any(target => WritesVariable(target, parameter, semanticModel)):
-                foreach (var value in AssignedValuesFor(assignment.Left, assignment.Right, parameter, semanticModel))
+                    && targets.Any(target => WritesVariable(target, variable, semanticModel)):
+                foreach (var value in AssignedValuesFor(assignment.Left, assignment.Right, variable, semanticModel))
                 {
                     // The call-site map resolves a value forwarded from ANOTHER delegate
                     // parameter (`Provide(source, out patch)` with `p = source`), aliases
@@ -812,7 +953,7 @@ internal static class ComputationLambdas
                 break;
             case ArgumentSyntax forwarded
                 when forwarded.RefOrOutKeyword.IsKind(SyntaxKind.OutKeyword)
-                    && SymbolEqualityComparer.Default.Equals(semanticModel.GetSymbolInfo(forwarded.Expression).Symbol, parameter):
+                    && WritesVariable(forwarded.Expression, variable, semanticModel):
                 foreach (var body in OutHandoffBodies(forwarded, semanticModel, visited, callMap))
                 {
                     yield return body;
@@ -997,6 +1138,34 @@ internal static class ComputationLambdas
             }
 
             foreach (var descendant in Descend(child))
+            {
+                yield return descendant;
+            }
+        }
+    }
+
+    // The unpruned walk for STORED-closure facts (MZR004's capture verdicts): a nested
+    // computation host's delegate is still BUILT by this body, so what it captures is pinned
+    // in this body's display chain even though the nested invocation's own analysis covers it
+    // for the mutation/Set rules. Only a nested OPTIMISTIC PATCH is skipped -- its own Apply
+    // analysis repeats exactly this capture walk on the same operations.
+    public static IEnumerable<IOperation> DescendStoredClosure(IOperation root)
+    {
+        foreach (var child in root.ChildOperations)
+        {
+            yield return child;
+
+            if (child is IInvocationOperation invocation && FactoryMethods.IsOptimisticPatchHost(invocation.TargetMethod))
+            {
+                foreach (var descendant in DescendNestedHostArguments(invocation, DescendStoredClosure))
+                {
+                    yield return descendant;
+                }
+
+                continue;
+            }
+
+            foreach (var descendant in DescendStoredClosure(child))
             {
                 yield return descendant;
             }

@@ -4234,4 +4234,134 @@ public class OptimisticPatchCaptureAnalyzerTests
         Assert.Contains("'patch'", diagnostic.GetMessage());
         Assert.Contains("cannot be resolved", diagnostic.GetMessage());
     }
+    [Fact]
+    public async Task AliasedComputedPropertyPatch_IsResolved()
+    {
+        // The patch is copied out of a computed delegate property first: the alias resolves
+        // to the property, whose getter returns are the stored closure -- fully walkable.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                private static Func<int, int> Patch => static x => x;
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        Func<int, int> patch = Patch;
+                        await ctx.Apply(state, patch);
+                    });
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task GetterReturningFactoryCall_IsResolved()
+    {
+        // The computed patch property returns a same-tree factory call: the factory's own
+        // returns are the stored closure, chased one level deeper instead of reported opaque.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                private static Func<int, int> Make() => static x => x;
+                private static Func<int, int> Patch { get { return Make(); } }
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, Patch);
+                    });
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task OverwrittenForwardedHandoff_IsNotWalked()
+    {
+        // The forwarded handoff's delegate is definitely overwritten before the helper
+        // returns: whatever Build assembled can never reach the caller, so its closure must
+        // not be charged to this patch.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                private static int hits;
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    static void Build(out Func<int, int> d) => d = x => x + hits;
+                    void Provide(out Func<int, int> d)
+                    {
+                        Build(out d);
+                        d = static x => x;
+                    }
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        Func<int, int> patch;
+                        Provide(out patch);
+                        await ctx.Apply(state, patch);
+                    });
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task NestedComputationHostLambda_CapturesAreStillPatchCaptures()
+    {
+        // The patch builds a nested computation on every replay: the nested lambda lives in
+        // the patch's own display chain, so what it captures is stored patch state even
+        // though the nested computation's execution is analyzed separately.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    var shared = new List<int>();
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x =>
+                        {
+                            f.CreateMemoizR(async () => shared.Count);
+                            return x;
+                        });
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR004", diagnostic.Id);
+        Assert.Contains("'shared'", diagnostic.GetMessage());
+        Assert.Contains("not Sendable", diagnostic.GetMessage());
+    }
 }

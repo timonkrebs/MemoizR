@@ -321,20 +321,25 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
             return InspectSurvivingWrite(context, classifier, stepwiseWrite, stepwise, semanticModel, reported);
         }
 
+        // An ALIAS resolves to its assembled source first: `Func<int,int> p = Patch;`
+        // stores whatever the computed property's getter (or the stored factory call)
+        // returned, so the alias must not hide the source the branches below resolve.
+        var resolved = ResolveDelegateReference(value, semanticModel, argumentMap: null);
+
         // A same-tree computed get-only delegate PROPERTY resolves through its getter's
         // returns, like a delegate-returning helper: each return is walked as a patch body,
         // with unresolvable returns reported.
-        if (ReceiverSymbol(Unwrap(value)) is IPropertySymbol patchProperty
+        if (ReceiverSymbol(Unwrap(resolved)) is IPropertySymbol patchProperty
             && !IsSettable(patchProperty) && !HasBackingStorage(patchProperty)
             && patchProperty.GetMethod is { } patchGetter
             && ComputationLambdas.ResolveMethodBody(patchGetter, semanticModel) is { } getterBody)
         {
-            return InspectReturnedPatchBodies(context, classifier, getterBody, patchProperty, ComputationLambdas.BuildArgumentMap(Unwrap(value), outer: null), semanticModel, reported);
+            return InspectReturnedPatchBodies(context, classifier, getterBody, patchProperty, ComputationLambdas.BuildArgumentMap(Unwrap(resolved), outer: null), semanticModel, reported);
         }
 
         // A patch produced by a same-tree delegate FACTORY -- called inline, or stored
         // through a variable initializer -- resolves through the factory's returns.
-        if (FactoryCallOf(value, semanticModel) is { } factoryCall
+        if (FactoryCallOf(resolved, semanticModel) is { } factoryCall
             && ComputationLambdas.ResolveMethodBody(factoryCall.TargetMethod, semanticModel) is { } factoryBody)
         {
             return InspectReturnedPatchBodies(context, classifier, factoryBody, factoryCall.TargetMethod, ComputationLambdas.BuildArgumentMap(factoryCall, outer: null), semanticModel, reported);
@@ -371,7 +376,8 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         ISymbol subject,
         Dictionary<IParameterSymbol, IOperation>? argumentMap,
         SemanticModel? semanticModel,
-        HashSet<ISymbol> reported)
+        HashSet<ISymbol> reported,
+        HashSet<(IMethodSymbol, string)>? visitedFactories = null)
     {
         var accounted = false;
         foreach (var inner in ComputationLambdas.DescendDirectExecution(methodBody.Body))
@@ -382,36 +388,63 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
             }
 
             accounted = true;
-            var resolvedValue = ResolveDelegateReference(returned, semanticModel, argumentMap);
-
-            // A returned method group stores its RECEIVER in the delegate the overlay keeps,
-            // exactly like a method-group patch argument.
-            if (ResolveMethodReference(resolvedValue, semanticModel, visitedVariables: null) is { } returnedReference)
-            {
-                InspectMethodGroupReceiver(context, classifier, returnedReference, reported);
-            }
-
-            var resolvedAny = false;
-            foreach (var patch in ComputationLambdas.OfArgumentValue(resolvedValue, semanticModel))
-            {
-                resolvedAny = true;
-                InspectPatchBody(context, classifier, patch, semanticModel, reported);
-            }
-
-            if (!resolvedAny
-                && ResolveMethodReference(resolvedValue, semanticModel, visitedVariables: null) is not { Method.DeclaringSyntaxReferences.Length: 0 })
-            {
-                Report(
-                    context,
-                    returned,
-                    subject,
-                    subject.Name,
-                    "the delegate it returns cannot be resolved from this call site, and a delegate can capture arbitrary mutable state (return a lambda or a method declared in this file)",
-                    reported);
-            }
+            visitedFactories ??= new HashSet<(IMethodSymbol, string)>();
+            InspectReturnedPatchValue(context, classifier, returned, subject, argumentMap, semanticModel, reported, visitedFactories);
         }
 
         return accounted;
+    }
+
+    private static void InspectReturnedPatchValue(
+        OperationAnalysisContext context,
+        SendableSymbolClassifier classifier,
+        IOperation returned,
+        ISymbol subject,
+        Dictionary<IParameterSymbol, IOperation>? argumentMap,
+        SemanticModel? semanticModel,
+        HashSet<ISymbol> reported,
+        HashSet<(IMethodSymbol, string)> visitedFactories)
+    {
+        var resolvedValue = ResolveDelegateReference(returned, semanticModel, argumentMap);
+
+        // A returned method group stores its RECEIVER in the delegate the overlay keeps,
+        // exactly like a method-group patch argument.
+        if (ResolveMethodReference(resolvedValue, semanticModel, visitedVariables: null) is { } returnedReference)
+        {
+            InspectMethodGroupReceiver(context, classifier, returnedReference, reported);
+        }
+
+        var resolvedAny = false;
+        foreach (var patch in ComputationLambdas.OfArgumentValue(resolvedValue, semanticModel))
+        {
+            resolvedAny = true;
+            InspectPatchBody(context, classifier, patch, semanticModel, reported);
+        }
+
+        // `return Make();` assembles one factory deeper: the nested call's returns get this
+        // same per-return accounting, the visited set bounding recursive factories (a cycle
+        // resolving to nothing still falls through to the report below).
+        if (!resolvedAny && Unwrap(resolvedValue) is IInvocationOperation nestedCall
+            && ComputationLambdas.ResolveMethodBody(nestedCall.TargetMethod, semanticModel) is { } nestedBody)
+        {
+            var nestedMap = ComputationLambdas.BuildArgumentMap(nestedCall, argumentMap);
+            if (visitedFactories.Add((nestedCall.TargetMethod, ComputationLambdas.ArgumentMapKey(nestedMap))))
+            {
+                resolvedAny = InspectReturnedPatchBodies(context, classifier, nestedBody, nestedCall.TargetMethod, nestedMap, semanticModel, reported, visitedFactories);
+            }
+        }
+
+        if (!resolvedAny
+            && ResolveMethodReference(resolvedValue, semanticModel, visitedVariables: null) is not { Method.DeclaringSyntaxReferences.Length: 0 })
+        {
+            Report(
+                context,
+                returned,
+                subject,
+                subject.Name,
+                "the delegate it returns cannot be resolved from this call site, and a delegate can capture arbitrary mutable state (return a lambda or a method declared in this file)",
+                reported);
+        }
     }
 
     // The invocation producing this patch value: the argument itself, or the variable's
@@ -952,10 +985,12 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
 
     // Two walks with different reach. Closure CONTENTS (captures, receivers, `this`) are
     // storage facts -- a callback the patch merely builds still pins them in the stored
-    // display chain -- so they use the FULL walk, chasing outside local functions wherever
-    // they are referenced. Static READS happen only on execution: one inside a built callback
-    // runs later, off the overlay's re-execution, on whatever flow invokes it -- so statics
-    // (and the helper chase that finds them) follow MZR003's direct-execution pruning.
+    // display chain, and so does a NESTED computation host's delegate (the patch builds it
+    // on every replay from the same display chain) -- so they use the unpruned stored-closure
+    // walk, chasing outside local functions wherever they are referenced. Static READS
+    // happen only on execution: one inside a built callback runs later, off the overlay's
+    // re-execution, on whatever flow invokes it -- so statics (and the helper chase that
+    // finds them) follow MZR003's direct-execution pruning.
     private static void InspectPatchBody(
         OperationAnalysisContext context,
         SendableSymbolClassifier classifier,
@@ -964,7 +999,7 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         HashSet<ISymbol> reported)
     {
         var visitedLocalFunctions = new HashSet<IMethodSymbol>(SymbolEqualityComparer.Default);
-        foreach (var operation in ComputationLambdas.Descend(patch.Body))
+        foreach (var operation in ComputationLambdas.DescendStoredClosure(patch.Body))
         {
             InspectCapture(context, classifier, operation, patch.Scope, patch.Scope, semanticModel, reported);
             InspectCapturedLocalFunction(context, classifier, operation, patch.Scope, semanticModel, visitedLocalFunctions, reported);
@@ -1007,7 +1042,7 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
             return;
         }
 
-        foreach (var inner in ComputationLambdas.Descend(helper.Body))
+        foreach (var inner in ComputationLambdas.DescendStoredClosure(helper.Body))
         {
             InspectCapture(context, classifier, inner, helper.Scope, patchScope, semanticModel, reported);
             InspectCapturedLocalFunction(context, classifier, inner, patchScope, semanticModel, visited, reported);
@@ -1687,14 +1722,17 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
             return (bodies, true);
         }
 
+        // What the caller receives is the delegate bound when the helper RETURNS: a later
+        // straight-line overwrite inside the helper -- a direct assignment or a forwarded
+        // handoff, in either role -- kills the earlier write exactly like one before an
+        // invoke, with the helper's scope end as the observation point.
         var assigned = false;
         var writes = ParameterWrites(helper.Scope, parameter, semanticModel);
+        var handoffs = ForwardedHandoffs(helper.Scope, parameter, semanticModel);
+        var candidates = writes.Concat<SyntaxNode>(handoffs).ToList();
         foreach (var assignment in writes)
         {
-            // What the caller receives is the delegate bound when the helper RETURNS: a later
-            // straight-line overwrite inside the helper kills this body exactly like one
-            // before an invoke, with the helper's scope end as the observation point.
-            if (writes.Any(other => other != assignment && ComputationLambdas.DefinitelyOverwrites(other, assignment, helper.Scope, parameter, semanticModel)))
+            if (IsOverwrittenWithin(assignment, candidates, helper.Scope, parameter, semanticModel))
             {
                 continue;
             }
@@ -1705,18 +1743,39 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
 
         // A FORWARDED handoff (`Provide(out d) { Build(out d); }`) assembles the delegate
         // one helper deeper: chased recursively, with an unaccounted chain reported here.
-        foreach (var node in helper.Scope.DescendantNodes())
+        foreach (var forwarded in handoffs)
+        {
+            if (IsOverwrittenWithin(forwarded, candidates, helper.Scope, parameter, semanticModel))
+            {
+                continue;
+            }
+
+            assigned = true;
+            ChaseForwardedHandoff(context, classifier, forwarded, parameter, semanticModel, bodies, visitedCalls, visitedInvokes, callMap, reported);
+        }
+
+        return (bodies, assigned);
+    }
+
+    private static bool IsOverwrittenWithin(SyntaxNode write, List<SyntaxNode> candidates, SyntaxNode scope, ISymbol variable, SemanticModel semanticModel)
+    {
+        return candidates.Any(other => other != write && ComputationLambdas.DefinitelyOverwrites(other, write, scope, variable, semanticModel));
+    }
+
+    private static List<ArgumentSyntax> ForwardedHandoffs(SyntaxNode scope, IParameterSymbol parameter, SemanticModel semanticModel)
+    {
+        var handoffs = new List<ArgumentSyntax>();
+        foreach (var node in scope.DescendantNodes())
         {
             if (node is ArgumentSyntax forwarded
                 && forwarded.RefOrOutKeyword.IsKind(SyntaxKind.OutKeyword)
                 && SymbolEqualityComparer.Default.Equals(semanticModel.GetSymbolInfo(forwarded.Expression).Symbol, parameter))
             {
-                assigned = true;
-                ChaseForwardedHandoff(context, classifier, forwarded, parameter, semanticModel, bodies, visitedCalls, visitedInvokes, callMap, reported);
+                handoffs.Add(forwarded);
             }
         }
 
-        return (bodies, assigned);
+        return handoffs;
     }
 
     private static void ChaseOutAssignment(
