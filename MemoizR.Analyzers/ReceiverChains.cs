@@ -42,6 +42,11 @@ internal static class ReceiverChains
                     continue;
                 case IInvocationOperation creation:
                     return ResolveKnownCreationFactory(creation, semanticModel, argumentMap);
+                // A conditional node (`flag ? f.CreateSignal(1) : other`) is provable only
+                // when every arm agrees on the factory -- the same all-must-agree rule the
+                // computed getters below apply to their returns.
+                case IConditionalOperation or ICoalesceOperation:
+                    return AgreedFactory(ComputationLambdas.ConditionalArms(reference)!, semanticModel, argumentMap, visitedGetters);
                 // A chased helper's PARAMETER hops to the call-site argument: `var a = s;
                 // a.Set(...)` inside `Write(other)` is `other`'s provenance. Not when the
                 // helper WROTE the parameter first, though -- a parameter binds the caller's
@@ -99,11 +104,26 @@ internal static class ReceiverChains
             return null;
         }
 
-        var propertyMap = ComputationLambdas.BuildArgumentMap(reference, argumentMap);
+        return AgreedFactory(
+            ComputationLambdas.ReturnedValues(getterBody.Body),
+            semanticModel,
+            ComputationLambdas.BuildArgumentMap(reference, argumentMap),
+            visitedGetters);
+    }
+
+    // The one factory every candidate resolves to, or null when any is unprovable or they
+    // disagree: a value that can come from two factories proves nothing about the context a
+    // Set would lock, and unprovable keeps the diagnostic.
+    private static ISymbol? AgreedFactory(
+        IEnumerable<IOperation> candidates,
+        SemanticModel? semanticModel,
+        Dictionary<IParameterSymbol, IOperation>? argumentMap,
+        HashSet<IMethodSymbol>? visitedGetters)
+    {
         ISymbol? factory = null;
-        foreach (var returned in ComputationLambdas.ReturnedValues(getterBody.Body))
+        foreach (var candidate in candidates)
         {
-            var resolved = ResolveCreatingFactorySymbol(returned, semanticModel, propertyMap, visitedGetters);
+            var resolved = ResolveCreatingFactorySymbol(candidate, semanticModel, argumentMap, visitedGetters);
             if (resolved is null || (factory is not null && !SymbolEqualityComparer.Default.Equals(factory, resolved)))
             {
                 return null;

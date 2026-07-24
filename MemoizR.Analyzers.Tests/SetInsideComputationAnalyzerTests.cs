@@ -2175,4 +2175,105 @@ public class SetInsideComputationAnalyzerTests
 
         Assert.Empty(diagnostics);
     }
+    [Fact]
+    public async Task ConditionalComputedStateGetter_KeepsCrossFactoryProof()
+    {
+        // Every arm of the computed state getter builds on f1: the host context is provable
+        // even though the getter returns a conditional, so the disjoint Set cannot throw.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+            using MemoizR.Reactive;
+
+            public class C
+            {
+                private static readonly MemoFactory f1 = new MemoFactory();
+
+                private bool flag;
+
+                private OptimisticState<int> State => flag
+                    ? f1.CreateOptimistic<int>(f1.CreateSignal(1))
+                    : f1.CreateOptimistic<int>(f1.CreateSignal(2));
+
+                public void M()
+                {
+                    var f2 = new MemoFactory();
+                    var other = f2.CreateSignal(1);
+                    f1.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(State, x => { _ = other.Set(2); return x; });
+                    });
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task InvokedDelegateSignalArgument_KeepsCallSiteProvenance()
+    {
+        // The invoked delegate's parameter binds to the call's argument: the disjoint
+        // factory's signal is proven cross-context, while the host's own stays flagged.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f1 = new MemoFactory();
+                    var f2 = new MemoFactory();
+                    var other = f2.CreateSignal(1);
+                    var mine = f1.CreateSignal(1);
+                    var state = f1.CreateOptimistic<int>(mine);
+                    Action<Signal<int>> step = s => { _ = s.Set(2); };
+                    f1.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x => { step(other); return x; });
+                    });
+                    f1.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x => { step(mine); return x; });
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR003", diagnostic.Id);
+        Assert.Contains("Signal<int>.Set", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task InvokedFactoryInitializedDelegate_SetIsFlagged()
+    {
+        // The invoked local was initialized from a same-tree factory: the returned lambda
+        // executes under the evaluation lock, so its Set throws.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var v = f.CreateSignal(1);
+                    var state = f.CreateOptimistic<int>(v);
+                    Func<int, int> Make() => x => { _ = v.Set(2); return x; };
+                    Func<int, int> d = Make();
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x => d(x));
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR003", diagnostic.Id);
+        Assert.Contains("Signal<int>.Set", diagnostic.GetMessage());
+    }
 }

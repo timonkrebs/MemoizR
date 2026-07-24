@@ -1259,4 +1259,154 @@ public class CapturedMutationAnalyzerTests
 
         Assert.Empty(diagnostics);
     }
+    [Fact]
+    public async Task InvokedDelegateArgument_BindsTheInstance()
+    {
+        // The patch invokes a delegate handing it the enclosing instance: the delegate's own
+        // parameter IS that instance for the walked body, so the write is the same race.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                public int Counter;
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    Action<C> step = c => c.Counter++;
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x => { step(this); return x; });
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR002", diagnostic.Id);
+        Assert.Contains("field 'Counter'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task SecondThisArgument_IsTracked()
+    {
+        // The instance is handed to two parameters and written through the second: every
+        // proven binding counts, not just the first.
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public class C
+            {
+                public int Counter;
+
+                private static void Mutate(C first, C second) => second.Counter++;
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    f.CreateMemoizR(async () => { Mutate(this, this); return 0; });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR002", diagnostic.Id);
+        Assert.Contains("field 'Counter'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task ReboundThisParameter_IsNotTheInstance()
+    {
+        // The helper rebinds the parameter to a fresh object before writing: that storage is
+        // recreated per replay and shared with nobody.
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public class C
+            {
+                public int Counter;
+
+                private static void Mutate(C c)
+                {
+                    c = new C();
+                    c.Counter++;
+                }
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    f.CreateMemoizR(async () => { Mutate(this); return 0; });
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task DisposeWritingItsOwnField_IsNotFlagged()
+    {
+        // The using resource's Dispose writes the resource's own storage, which is fresh per
+        // evaluation -- only statics and captures inside it are shared.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public sealed class Writer : IDisposable
+            {
+                public int mine;
+
+                public void Dispose() => mine++;
+            }
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    f.CreateMemoizR(async () =>
+                    {
+                        using var w = new Writer();
+                        return 0;
+                    });
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task InvokedFactoryInitializedDelegate_MutationIsFlagged()
+    {
+        // The invoked local was initialized from a same-tree factory: the returned lambda is
+        // what replays, and its captured-local write races.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    var applied = 0;
+                    Func<int, int> Make() => x => { applied++; return x; };
+                    Func<int, int> d = Make();
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x => d(x));
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR002", diagnostic.Id);
+        Assert.Contains("captured local 'applied'", diagnostic.GetMessage());
+    }
 }

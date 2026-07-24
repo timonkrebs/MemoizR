@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Collections.Immutable;
 using System.Linq;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
@@ -931,16 +932,21 @@ internal static class ComputationLambdas
     // get-only property's. Resolution only: the callers own what they do per body, and
     // MZR004 keeps its accounting-rich chase.
     public static IEnumerable<(ComputationBody Body, Dictionary<IParameterSymbol, IOperation>? ArgumentMap)> InvokedDelegateBodies(
-        IOperation callee,
+        IInvocationOperation invoke,
         SemanticModel? semanticModel,
         Dictionary<IParameterSymbol, IOperation>? argumentMap)
     {
+        if (invoke.Instance is not { } callee)
+        {
+            yield break;
+        }
+
         var resolved = ResolveDelegateValue(ResolveConditionalReceiver(callee), semanticModel, argumentMap);
         var found = false;
         foreach (var body in OfArgumentValue(resolved, semanticModel))
         {
             found = true;
-            yield return (body, argumentMap);
+            yield return (body, BindInvokedParameters(body, invoke, argumentMap, semanticModel));
         }
 
         if (found)
@@ -948,30 +954,53 @@ internal static class ComputationLambdas
             yield break;
         }
 
-        foreach (var entry in InvokedSourceBodies(Unwrap(resolved), semanticModel, argumentMap))
+        // `Get()(x)` runs whatever the factory returned, `Step()` whatever the getter did,
+        // and `Func<int,int> d = Make(v); d(x)` whatever the INITIALIZER's factory did --
+        // the same three sources an assembled patch argument resolves through.
+        foreach (var (body, map) in AssembledSourceBodies(Unwrap(resolved), semanticModel, argumentMap))
         {
-            yield return entry;
+            yield return (body, BindInvokedParameters(body, invoke, map, semanticModel));
         }
     }
 
-    private static IEnumerable<(ComputationBody Body, Dictionary<IParameterSymbol, IOperation>? ArgumentMap)> InvokedSourceBodies(
-        IOperation resolved,
-        SemanticModel? semanticModel,
-        Dictionary<IParameterSymbol, IOperation>? argumentMap)
+    // The invoked delegate's OWN parameters bind to the call's arguments, exactly like a
+    // called helper's: `Action<C> step = c => c.Counter++; step(this);` writes the
+    // computation's instance, and `step(otherSignal)` carries that signal's provenance.
+    // Positional, because a delegate invoke has no named arguments to reorder.
+    private static Dictionary<IParameterSymbol, IOperation>? BindInvokedParameters(
+        ComputationBody body,
+        IInvocationOperation invoke,
+        Dictionary<IParameterSymbol, IOperation>? outer,
+        SemanticModel? semanticModel)
     {
-        // `Get()(x)` runs whatever the factory returned; `Step()` whatever the getter did.
-        if (resolved is IInvocationOperation call && ResolveMethodBody(call.TargetMethod, semanticModel) is { } factory)
+        var parameters = BodyParameters(body, semanticModel);
+        if (parameters.IsDefaultOrEmpty || invoke.Arguments.Length == 0)
         {
-            return ReturnedBodies(factory, semanticModel, BuildArgumentMap(call, argumentMap));
+            return outer;
         }
 
-        if (ReferencedVariable(resolved) is IPropertySymbol { GetMethod: { } getter, SetMethod: null }
-            && ResolveMethodBody(getter, semanticModel) is { } getterBody)
+        var map = CopyOf(outer);
+        for (var i = 0; i < parameters.Length && i < invoke.Arguments.Length; i++)
         {
-            return ReturnedBodies(getterBody, semanticModel, BuildArgumentMap(resolved, argumentMap));
+            map[parameters[i]] = invoke.Arguments[i].Value;
         }
 
-        return Enumerable.Empty<(ComputationBody, Dictionary<IParameterSymbol, IOperation>?)>();
+        return map;
+    }
+
+    // The parameters of a resolved body, whether it came from a lambda (its scope is the
+    // anonymous function) or a method group / local function (a declaration).
+    private static ImmutableArray<IParameterSymbol> BodyParameters(ComputationBody body, SemanticModel? semanticModel)
+    {
+        if (semanticModel is null || body.Scope.SyntaxTree != semanticModel.SyntaxTree)
+        {
+            return ImmutableArray<IParameterSymbol>.Empty;
+        }
+
+        var symbol = semanticModel.GetSymbolInfo(body.Scope).Symbol as IMethodSymbol
+            ?? semanticModel.GetDeclaredSymbol(body.Scope) as IMethodSymbol;
+
+        return symbol?.Parameters ?? ImmutableArray<IParameterSymbol>.Empty;
     }
 
     // How far an alias chain may be followed is the ONE thing the two callers disagree on:

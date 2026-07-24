@@ -96,9 +96,9 @@ public sealed class SetInsideComputationAnalyzer : DiagnosticAnalyzer
                 continue;
             }
 
-            if (operation is IInvocationOperation { TargetMethod.MethodKind: MethodKind.DelegateInvoke, Instance: { } callee })
+            if (operation is IInvocationOperation { TargetMethod.MethodKind: MethodKind.DelegateInvoke } invoke)
             {
-                InspectInvokedDelegate(context, host, callee, actorHost, visitedCalls, argumentMap);
+                InspectInvokedDelegate(context, host, invoke, actorHost, visitedCalls, argumentMap);
                 continue;
             }
 
@@ -114,12 +114,12 @@ public sealed class SetInsideComputationAnalyzer : DiagnosticAnalyzer
     private static void InspectInvokedDelegate(
         OperationAnalysisContext context,
         IInvocationOperation host,
-        IOperation callee,
+        IInvocationOperation invoke,
         bool actorHost,
         HashSet<(SyntaxNode, IMethodSymbol, string)> visitedCalls,
         Dictionary<IParameterSymbol, IOperation>? argumentMap)
     {
-        foreach (var (body, map) in ComputationLambdas.InvokedDelegateBodies(callee, host.SemanticModel, argumentMap))
+        foreach (var (body, map) in ComputationLambdas.InvokedDelegateBodies(invoke, host.SemanticModel, argumentMap))
         {
             if (visitedCalls.Add((body.Scope, host.TargetMethod, ComputationLambdas.ArgumentMapKey(map))))
             {
