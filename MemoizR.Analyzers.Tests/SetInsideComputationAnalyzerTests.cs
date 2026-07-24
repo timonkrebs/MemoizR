@@ -2276,4 +2276,67 @@ public class SetInsideComputationAnalyzerTests
         Assert.Equal("MZR003", diagnostic.Id);
         Assert.Contains("Signal<int>.Set", diagnostic.GetMessage());
     }
+    [Fact]
+    public async Task ConditionalInvokedCalleeFactoryArm_IsChased()
+    {
+        // One callee arm resolves directly; the other is a factory call whose returned
+        // lambda Sets. The resolvable arm must not account for its sibling.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var v = f.CreateSignal(1);
+                    var state = f.CreateOptimistic<int>(v);
+                    Func<int> Make() => () => { _ = v.Set(2); return 0; };
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x => x + (p > 0 ? static () => 0 : Make())());
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR003", diagnostic.Id);
+        Assert.Contains("Signal<int>.Set", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task NamedInvokeArguments_BindByParameter()
+    {
+        // The invoke names its arguments out of declaration order: `mine` must bind to the
+        // host factory's signal, which is what makes this Set throw.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public delegate void Step(Signal<int> mine, Signal<int> other);
+
+            public class C
+            {
+                public void M()
+                {
+                    var f1 = new MemoFactory();
+                    var f2 = new MemoFactory();
+                    var remote = f2.CreateSignal(1);
+                    var local = f1.CreateSignal(1);
+                    var state = f1.CreateOptimistic<int>(local);
+                    Step step = (mine, other) => { _ = mine.Set(2); };
+                    f1.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x => { step(other: remote, mine: local); return x; });
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR003", diagnostic.Id);
+        Assert.Contains("Signal<int>.Set", diagnostic.GetMessage());
+    }
 }

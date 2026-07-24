@@ -4492,4 +4492,39 @@ public class OptimisticPatchCaptureAnalyzerTests
 
         Assert.Empty(diagnostics);
     }
+    [Fact]
+    public async Task UnreachableOutWrite_IsNotACandidate()
+    {
+        // The second assignment sits after an unconditional return: the caller can never
+        // receive that delegate, so its capture must not be charged to this patch.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    var shared = new List<int>();
+                    void Provide(out Func<int, int> d)
+                    {
+                        d = static x => x;
+                        return;
+                        d = x => x + shared.Count;
+                    }
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        Func<int, int> patch;
+                        Provide(out patch);
+                        await ctx.Apply(state, patch);
+                    });
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
 }

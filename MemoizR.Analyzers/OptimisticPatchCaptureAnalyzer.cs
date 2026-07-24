@@ -1616,6 +1616,11 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
 
     private static bool WritesDelegateBeforeInvoke(SyntaxNode node, ISymbol variable, IOperation readReference, SemanticModel semanticModel)
     {
+        if (!ComputationLambdas.IsReachable(node, semanticModel))
+        {
+            return false;
+        }
+
         return node switch
         {
             // WritesReadInstance keeps writes on provably-different instances out: a fresh
@@ -1740,6 +1745,7 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         {
             if (node is ArgumentSyntax forwarded
                 && forwarded.RefOrOutKeyword.IsKind(SyntaxKind.OutKeyword)
+                && ComputationLambdas.IsReachable(forwarded, semanticModel)
                 && SymbolEqualityComparer.Default.Equals(semanticModel.GetSymbolInfo(forwarded.Expression).Symbol, parameter))
             {
                 handoffs.Add(forwarded);
@@ -1855,6 +1861,7 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         foreach (var node in scope.DescendantNodes())
         {
             if (node is AssignmentExpressionSyntax assignment
+                && ComputationLambdas.IsReachable(assignment, semanticModel)
                 && ComputationLambdas.ReassignmentTargets(assignment) is { } targets
                 && targets.Any(target => ComputationLambdas.WritesVariable(target, parameter, semanticModel)))
             {

@@ -73,7 +73,7 @@ public sealed class CapturedMutationAnalyzer : DiagnosticAnalyzer
     private sealed class ChaseState
     {
         public readonly HashSet<(IMethodSymbol, ImmutableArray<IParameterSymbol>, bool, string)> VisitedHelpers = new(ChaseKeyComparer.Instance);
-        public readonly HashSet<SyntaxNode> VisitedDelegates = new();
+        public readonly HashSet<(SyntaxNode, string, bool)> VisitedDelegates = new();
         public readonly HashSet<SyntaxNode> ReportedTargets = new();
     }
 
@@ -117,11 +117,19 @@ public sealed class CapturedMutationAnalyzer : DiagnosticAnalyzer
             return;
         }
 
+        // A method group's body runs on the RECEIVER the delegate captured
+        // (`Action step = other.Touch;`), never on the computation's instance unless that
+        // receiver provably is it -- its own field writes are then MZR001's territory.
+        var receiver = ComputationLambdas.InvokedDelegateReceiver(invoke, semanticModel, argumentMap);
+        var calleeForeign = receiver is null
+            ? foreignThis
+            : !IsComputationInstance(ComputationLambdas.Unwrap(receiver), thisParameters, foreignThis);
+
         foreach (var (delegateBody, map) in ComputationLambdas.InvokedDelegateBodies(invoke, semanticModel, argumentMap))
         {
             // The invoke's arguments bind the delegate's parameters exactly like a helper
             // call's: one handed the enclosing instance IS `this` for the walked body.
-            InspectDelegateBody(context, delegateBody, computationScope, semanticModel, walk, map, BoundThisParameters(map, thisParameters, foreignThis), foreignThis);
+            InspectDelegateBody(context, delegateBody, computationScope, semanticModel, walk, map, BoundThisParameters(map, thisParameters, calleeForeign), calleeForeign);
         }
     }
 
@@ -153,7 +161,8 @@ public sealed class CapturedMutationAnalyzer : DiagnosticAnalyzer
         ImmutableArray<IParameterSymbol> thisParameters,
         bool foreignThis)
     {
-        if (!computationScope.Span.Contains(delegateBody.Scope.Span) && walk.VisitedDelegates.Add(delegateBody.Scope))
+        var key = (delegateBody.Scope, ComputationLambdas.ArgumentMapKey(argumentMap), foreignThis);
+        if (!computationScope.Span.Contains(delegateBody.Scope.Span) && walk.VisitedDelegates.Add(key))
         {
             InspectComputationOperations(context, delegateBody, computationScope, semanticModel, walk, argumentMap, thisParameters, foreignThis);
         }

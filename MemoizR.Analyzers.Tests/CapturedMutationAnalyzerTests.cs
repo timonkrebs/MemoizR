@@ -1409,4 +1409,67 @@ public class CapturedMutationAnalyzerTests
         Assert.Equal("MZR002", diagnostic.Id);
         Assert.Contains("captured local 'applied'", diagnostic.GetMessage());
     }
+    [Fact]
+    public async Task SecondInvocationBinding_IsWalked()
+    {
+        // The same delegate body runs under two receivers: the first walk must not mark it
+        // visited for the second, which is the one that writes the computation's instance.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                public int Counter;
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    var other = new C();
+                    Action<C> step = c => c.Counter++;
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x => { step(other); step(this); return x; });
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR002", diagnostic.Id);
+        Assert.Contains("field 'Counter'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task MethodGroupDelegateOnOtherReceiver_IsNotFlagged()
+    {
+        // The delegate captured another object: its own field write belongs to that object,
+        // which is MZR001's territory, not a write to the computation's instance.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                public int Counter;
+
+                private void Touch() => Counter++;
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    var other = new C();
+                    Action step = other.Touch;
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x => { step(); return x; });
+                    });
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
 }

@@ -942,6 +942,25 @@ internal static class ComputationLambdas
         }
 
         var resolved = ResolveDelegateValue(ResolveConditionalReceiver(callee), semanticModel, argumentMap);
+
+        // A conditional callee runs whichever arm the flow picked: each is resolved on its
+        // own, so a directly-resolvable arm cannot stop the assembled chase for a sibling.
+        foreach (var arm in ValueArms(resolved))
+        {
+            foreach (var entry in InvokedArmBodies(arm, invoke, semanticModel, argumentMap))
+            {
+                yield return entry;
+            }
+        }
+    }
+
+    private static IEnumerable<(ComputationBody Body, Dictionary<IParameterSymbol, IOperation>? ArgumentMap)> InvokedArmBodies(
+        IOperation arm,
+        IInvocationOperation invoke,
+        SemanticModel? semanticModel,
+        Dictionary<IParameterSymbol, IOperation>? argumentMap)
+    {
+        var resolved = ResolveDelegateValue(arm, semanticModel, argumentMap);
         var found = false;
         foreach (var body in OfArgumentValue(resolved, semanticModel))
         {
@@ -963,6 +982,49 @@ internal static class ComputationLambdas
         }
     }
 
+    // The RECEIVER a method-group callee captured (`Action step = other.Touch;`), or null
+    // when the callee is a lambda or a static target. MZR002 needs it: that body's `this`
+    // is the captured object, not the computation's.
+    public static IOperation? InvokedDelegateReceiver(IInvocationOperation invoke, SemanticModel? semanticModel, Dictionary<IParameterSymbol, IOperation>? argumentMap)
+    {
+        if (invoke.Instance is not { } callee)
+        {
+            return null;
+        }
+
+        // Follows the same hops that FIND the body: the alias collapse stops at a variable
+        // whose initializer is a method GROUP (not a reference shape), so the initializer
+        // chain is walked here too, delegate-creation wrappers unwrapped.
+        var current = Unwrap(ResolveDelegateValue(ResolveConditionalReceiver(callee), semanticModel, argumentMap));
+        HashSet<ISymbol>? visited = null;
+        while (true)
+        {
+            if (current is IDelegateCreationOperation creation)
+            {
+                current = Unwrap(creation.Target);
+                continue;
+            }
+
+            if (current is IMethodReferenceOperation methodReference)
+            {
+                return methodReference.Instance;
+            }
+
+            if (ReferencedVariable(current) is not { } variable)
+            {
+                return null;
+            }
+
+            visited ??= new HashSet<ISymbol>(SymbolEqualityComparer.Default);
+            if (!visited.Add(variable) || SameTreeInitializerOperation(variable, semanticModel) is not { } initializer)
+            {
+                return null;
+            }
+
+            current = Unwrap(initializer);
+        }
+    }
+
     // The invoked delegate's OWN parameters bind to the call's arguments, exactly like a
     // called helper's: `Action<C> step = c => c.Counter++; step(this);` writes the
     // computation's instance, and `step(otherSignal)` carries that signal's provenance.
@@ -979,10 +1041,16 @@ internal static class ComputationLambdas
             return outer;
         }
 
+        // The ARGUMENT's own parameter decides its slot, so `step(other: a, mine: b)` binds
+        // by name; the delegate's Invoke parameters line up positionally with the resolved
+        // body's, which is what carries the value to the lambda's own parameter symbol.
         var map = CopyOf(outer);
-        for (var i = 0; i < parameters.Length && i < invoke.Arguments.Length; i++)
+        foreach (var argument in invoke.Arguments)
         {
-            map[parameters[i]] = invoke.Arguments[i].Value;
+            if (argument.Parameter is { Ordinal: var ordinal } && ordinal < parameters.Length)
+            {
+                map[parameters[ordinal]] = argument.Value;
+            }
         }
 
         return map;
@@ -1190,8 +1258,28 @@ internal static class ComputationLambdas
     // by the out-helper kill filter and the surviving-write resolution. Member writes count
     // only through the member's OWN receiver -- `other.patch = safe;` on some other instance
     // neither kills nor stands in for what a `this.patch` read observes.
+    // A write the flow can never reach -- one after an unconditional `return`/`throw` --
+    // binds nothing the caller can observe, so it is no candidate and kills nothing.
+    // Roslyn answers this exactly; anything it cannot analyse counts as reachable.
+    public static bool IsReachable(SyntaxNode node, SemanticModel semanticModel)
+    {
+        var statement = node.FirstAncestorOrSelf<StatementSyntax>();
+        if (statement is null || statement.Parent is not BlockSyntax || statement.SyntaxTree != semanticModel.SyntaxTree)
+        {
+            return true;
+        }
+
+        var flow = semanticModel.AnalyzeControlFlow(statement);
+        return !flow.Succeeded || flow.StartPointIsReachable;
+    }
+
     private static bool IsVariableWriteNode(SyntaxNode node, ISymbol variable, SemanticModel semanticModel)
     {
+        if (!IsReachable(node, semanticModel))
+        {
+            return false;
+        }
+
         return node switch
         {
             AssignmentExpressionSyntax assignment => ReassignmentTargets(assignment) is { } targets
