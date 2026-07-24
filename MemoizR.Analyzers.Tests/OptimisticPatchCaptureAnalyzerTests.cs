@@ -4527,4 +4527,66 @@ public class OptimisticPatchCaptureAnalyzerTests
 
         Assert.Empty(diagnostics);
     }
+    [Fact]
+    public async Task GenericFactoryCapture_UsesTheCallSiteType()
+    {
+        // The returned patch captures the factory's parameter: what it actually stores is
+        // the call-site List, so the declared type parameter must not wave it through.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                private static Func<int, int> Make<T>(T p) => x => x + p!.GetHashCode();
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, Make(new List<int>()));
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR004", diagnostic.Id);
+        Assert.Contains("not Sendable", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task SurvivingComputedPropertyWrite_IsResolved()
+    {
+        // The unsafe initializer is definitely overwritten by a store of a computed
+        // property: the getter's returned patch is the only storable closure, and it is safe.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                private static Func<int, int> Safe => static x => x;
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    var shared = new List<int>();
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        Func<int, int> patch = x => x + shared.Count;
+                        patch = Safe;
+                        await ctx.Apply(state, patch);
+                    });
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
 }

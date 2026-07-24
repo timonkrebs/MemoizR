@@ -612,6 +612,27 @@ internal static class ComputationLambdas
             : new Dictionary<IParameterSymbol, IOperation>(outer, SymbolEqualityComparer.Default);
     }
 
+    // The value bound to a parameter, tolerating GENERIC construction: a map built from
+    // `Make<List<int>>` is keyed by that method's constructed parameters, while the walked
+    // body references `Make<T>`'s originals, and the two are not symbol-equal.
+    public static IOperation? MappedValue(Dictionary<IParameterSymbol, IOperation>? argumentMap, IParameterSymbol parameter)
+    {
+        if (argumentMap is null)
+        {
+            return null;
+        }
+
+        if (argumentMap.TryGetValue(parameter, out var value))
+        {
+            return value;
+        }
+
+        return argumentMap
+            .Where(entry => SymbolEqualityComparer.Default.Equals(entry.Key.OriginalDefinition, parameter.OriginalDefinition))
+            .Select(entry => entry.Value)
+            .FirstOrDefault();
+    }
+
     public static IOperation? SubstituteArguments(IOperation? reference, Dictionary<IParameterSymbol, IOperation>? argumentMap)
     {
         if (reference is null)
@@ -707,7 +728,7 @@ internal static class ComputationLambdas
             yield break;
         }
 
-        var variable = ReferencedVariable(reference);
+        var variable = ReferencedSymbol(reference);
         if (variable is not null && EffectiveInitializerWrite(variable, semanticModel, reference.Syntax) is ArgumentSyntax outWrite)
         {
             foreach (var body in OutHandoffBodies(outWrite, semanticModel, new HashSet<SyntaxNode>(), outerMap: null))
@@ -750,30 +771,60 @@ internal static class ComputationLambdas
 
     private static IEnumerable<(ComputationBody Body, Dictionary<IParameterSymbol, IOperation>? ArgumentMap)> AssembledSourceBodies(IOperation source, SemanticModel? semanticModel, Dictionary<IParameterSymbol, IOperation>? outerMap = null)
     {
-        var resolvedVariable = ReferencedVariable(source);
+        var resolvedVariable = ReferencedSymbol(source);
 
         // The INDEXER's argument map keeps the returned lambda's index-parameter references
         // resolvable (`this[Signal<int> s] { get { return x => { s.Set(1); ... }; } }`).
         if (resolvedVariable is IPropertySymbol { GetMethod: { } getter, SetMethod: null }
             && ResolveMethodBody(getter, semanticModel) is { } getterBody)
         {
-            foreach (var entry in ReturnedBodies(getterBody, semanticModel, BuildArgumentMap(source, outerMap)))
+            return ReturnedBodies(getterBody, semanticModel, BuildArgumentMap(source, outerMap));
+        }
+
+        var stored = Unwrap(SameTreeInitializerOperation(resolvedVariable, semanticModel));
+
+        // A CONDITIONAL initializer stores whichever arm ran, so each arm is an assembled
+        // source of its own (`Func<int,int> patch = flag ? safe : Make(v);`).
+        if (stored is not null && ConditionalArms(stored) is not null)
+        {
+            return ConditionalInitializerBodies(stored, semanticModel, outerMap);
+        }
+
+        return AssembledCallBodies(source, stored, semanticModel, outerMap);
+    }
+
+    private static IEnumerable<(ComputationBody Body, Dictionary<IParameterSymbol, IOperation>? ArgumentMap)> ConditionalInitializerBodies(
+        IOperation stored,
+        SemanticModel? semanticModel,
+        Dictionary<IParameterSymbol, IOperation>? outerMap)
+    {
+        foreach (var arm in ValueArms(stored))
+        {
+            foreach (var entry in AssembledSourceBodies(Unwrap(arm), semanticModel, outerMap))
             {
                 yield return entry;
             }
         }
+    }
 
+    private static IEnumerable<(ComputationBody Body, Dictionary<IParameterSymbol, IOperation>? ArgumentMap)> AssembledCallBodies(
+        IOperation source,
+        IOperation? stored,
+        SemanticModel? semanticModel,
+        Dictionary<IParameterSymbol, IOperation>? outerMap)
+    {
         // A patch produced by a same-tree delegate FACTORY -- called inline, or stored
-        // through the variable's initializer -- resolves through the factory's returns,
-        // with the call's own argument map.
-        var call = source as IInvocationOperation
-            ?? UnwrappedInitializerCall(resolvedVariable, semanticModel);
-        if (call is not null && ResolveMethodBody(call.TargetMethod, semanticModel) is { } factoryBody)
+        // through the variable's initializer (a parameter's initializing write included) --
+        // resolves through the factory's returns, with the call's own argument map.
+        var call = source as IInvocationOperation ?? stored as IInvocationOperation;
+        if (call is null || ResolveMethodBody(call.TargetMethod, semanticModel) is not { } factoryBody)
         {
-            foreach (var entry in ReturnedBodies(factoryBody, semanticModel, BuildArgumentMap(call, outerMap)))
-            {
-                yield return entry;
-            }
+            yield break;
+        }
+
+        foreach (var entry in ReturnedBodies(factoryBody, semanticModel, BuildArgumentMap(call, outerMap)))
+        {
+            yield return entry;
         }
     }
 
@@ -966,6 +1017,18 @@ internal static class ComputationLambdas
         {
             found = true;
             yield return (body, BindInvokedParameters(body, invoke, argumentMap, semanticModel));
+        }
+
+        // A REBOUND parameter stops the hop, but what the caller handed in still runs when
+        // the rebind is conditional: both stay candidates.
+        if (Unwrap(resolved) is IParameterReferenceOperation rebound
+            && argumentMap?.TryGetValue(rebound.Parameter, out var handed) == true)
+        {
+            foreach (var body in OfArgumentValue(handed, semanticModel))
+            {
+                found = true;
+                yield return (body, BindInvokedParameters(body, invoke, argumentMap, semanticModel));
+            }
         }
 
         if (found)

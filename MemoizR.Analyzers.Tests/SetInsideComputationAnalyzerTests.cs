@@ -2339,4 +2339,73 @@ public class SetInsideComputationAnalyzerTests
         Assert.Equal("MZR003", diagnostic.Id);
         Assert.Contains("Signal<int>.Set", diagnostic.GetMessage());
     }
+    [Fact]
+    public async Task ParameterAssignedPatch_SetIsFlagged()
+    {
+        // The patch lives in a PARAMETER slot assigned before Apply: the assignment
+        // dominates the read, so the factory-returned body is what replays.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                private readonly MemoFactory f = new();
+
+                public void M(Func<int, int> patch)
+                {
+                    var v = f.CreateSignal(1);
+                    var state = f.CreateOptimistic<int>(v);
+                    Func<int, int> Make(Signal<int> s) => x => { _ = s.Set(2); return x; };
+                    patch = Make(v);
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, patch);
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR003", diagnostic.Id);
+        Assert.Contains("Signal<int>.Set", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task ConditionallyReboundInvokedParameter_KeepsTheCallerDelegate()
+    {
+        // The helper rebinds its delegate parameter only on one path: the caller's delegate
+        // still runs on the other, so its Set is a candidate.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var v = f.CreateSignal(1);
+                    var state = f.CreateOptimistic<int>(v);
+                    static int Run(Func<int> g, bool replace)
+                    {
+                        if (replace)
+                        {
+                            g = static () => 0;
+                        }
+
+                        return g();
+                    }
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x => x + Run(() => { _ = v.Set(2); return 0; }, false));
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR003", diagnostic.Id);
+        Assert.Contains("Signal<int>.Set", diagnostic.GetMessage());
+    }
 }

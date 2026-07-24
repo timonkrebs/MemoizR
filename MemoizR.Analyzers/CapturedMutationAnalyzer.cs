@@ -53,18 +53,32 @@ public sealed class CapturedMutationAnalyzer : DiagnosticAnalyzer
                     continue;
                 }
 
-                foreach (var (body, _) in ComputationLambdas.AssembledPatchBodies(argument.Value, invocation.SemanticModel))
+                foreach (var (body, map) in ComputationLambdas.AssembledPatchBodies(argument.Value, invocation.SemanticModel))
                 {
-                    InspectComputationBody(context, body, invocation.SemanticModel);
+                    InspectComputationBody(context, body, invocation.SemanticModel, map);
                 }
             }
         }
     }
 
-    private static void InspectComputationBody(OperationAnalysisContext context, ComputationLambdas.ComputationBody computation, SemanticModel? semanticModel)
+    // The assembled body carries the map that RESOLVED it: a factory parameter bound to the
+    // enclosing instance (`Make(this)`) is `this` for the walked patch, exactly as at a
+    // helper call.
+    private static void InspectComputationBody(
+        OperationAnalysisContext context,
+        ComputationLambdas.ComputationBody computation,
+        SemanticModel? semanticModel,
+        Dictionary<IParameterSymbol, IOperation>? argumentMap = null)
     {
         var walk = new ChaseState();
-        InspectComputationOperations(context, computation, computation.Scope, semanticModel, walk, argumentMap: null);
+        InspectComputationOperations(
+            context,
+            computation,
+            computation.Scope,
+            semanticModel,
+            walk,
+            argumentMap,
+            BoundThisParameters(argumentMap, default, foreignThis: false));
     }
 
     // Per-computation walk state: the visited sets bound helper/delegate cycles, and the

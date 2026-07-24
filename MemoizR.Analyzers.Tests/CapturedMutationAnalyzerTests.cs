@@ -1472,4 +1472,67 @@ public class CapturedMutationAnalyzerTests
 
         Assert.Empty(diagnostics);
     }
+    [Fact]
+    public async Task AssembledPatchFactoryBinding_IsFlagged()
+    {
+        // The factory was handed the enclosing instance: inside the returned patch `c` IS
+        // `this`, so the replayed write races on the computation's own object.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                public int Counter;
+
+                private static Func<int, int> Make(C c) => x => { c.Counter++; return x; };
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, Make(this));
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR002", diagnostic.Id);
+        Assert.Contains("field 'Counter'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task ConditionalInitializerFactoryArm_MutationIsFlagged()
+    {
+        // The patch variable's initializer picks an arm: the factory-call arm can be stored,
+        // and its returned lambda mutates captured state on every replay.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    var applied = 0;
+                    var flag = true;
+                    Func<int, int> Make() => x => { applied++; return x; };
+                    Func<int, int> patch = flag ? static x => x : Make();
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, patch);
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR002", diagnostic.Id);
+        Assert.Contains("captured local 'applied'", diagnostic.GetMessage());
+    }
 }

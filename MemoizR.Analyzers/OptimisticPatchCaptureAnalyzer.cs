@@ -279,6 +279,13 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
             resolvedAny = InspectReturnedPatchBodies(context, classifier, factoryBody, factoryCall.TargetMethod, ComputationLambdas.BuildArgumentMap(factoryCall, outer: null), semanticModel, reported);
         }
 
+        // A surviving write can store a computed PROPERTY's delegate too (`patch = Safe;`):
+        // its getter returns are the stored closure, like any other patch source.
+        if (!resolvedAny && ComputedGetterBody(Unwrap(resolvedValue), semanticModel) is { } computed)
+        {
+            resolvedAny = InspectReturnedPatchBodies(context, classifier, computed.Body, computed.Property, ComputationLambdas.BuildArgumentMap(Unwrap(resolvedValue), outer: null), semanticModel, reported);
+        }
+
         return resolvedAny || methodReference is { Method.DeclaringSyntaxReferences.Length: 0 };
     }
 
@@ -417,7 +424,7 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         foreach (var patch in ComputationLambdas.OfArgumentValue(resolvedValue, semanticModel))
         {
             resolvedAny = true;
-            InspectPatchBody(context, classifier, patch, semanticModel, reported);
+            InspectPatchBody(context, classifier, patch, semanticModel, reported, argumentMap);
         }
 
         // `return Make();` assembles one factory deeper: the nested call's returns get this
@@ -714,15 +721,23 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         SyntaxNode patchScope,
         SemanticModel? semanticModel,
         HashSet<ISymbol> reported,
-        HashSet<IMethodSymbol>? visitedGetters = null)
+        HashSet<IMethodSymbol>? visitedGetters = null,
+        Dictionary<IParameterSymbol, IOperation>? argumentMap = null)
     {
         switch (operation)
         {
             case ILocalReferenceOperation local when IsSharedCapture(local.Local, scope, patchScope):
                 ReportCapturedVariable(context, classifier, operation, local.Local, local.Local.Type, semanticModel, reported);
                 break;
+            // A factory PARAMETER captured by the returned patch holds the CALL-SITE value:
+            // `Make<T>(T p) => x => p.GetHashCode()` stores whatever `Make(new List<int>())`
+            // handed in, so the argument's type is what must be Sendable -- the declared one
+            // can be a type parameter the classifier would wave through.
             case IParameterReferenceOperation parameter when IsSharedCapture(parameter.Parameter, scope, patchScope):
-                ReportCapturedVariable(context, classifier, operation, parameter.Parameter, parameter.Parameter.Type, semanticModel, reported);
+                var captured = ComputationLambdas.MappedValue(argumentMap, parameter.Parameter) is { } handed
+                    ? ComputationLambdas.Unwrap(handed).Type ?? parameter.Parameter.Type
+                    : parameter.Parameter.Type;
+                ReportCapturedVariable(context, classifier, operation, parameter.Parameter, captured, semanticModel, reported);
                 break;
 
             // A member access on the enclosing object captures `this`. The per-member verdicts
@@ -987,12 +1002,13 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         SendableSymbolClassifier classifier,
         ComputationLambdas.ComputationBody patch,
         SemanticModel? semanticModel,
-        HashSet<ISymbol> reported)
+        HashSet<ISymbol> reported,
+        Dictionary<IParameterSymbol, IOperation>? argumentMap = null)
     {
         var visitedLocalFunctions = new HashSet<IMethodSymbol>(SymbolEqualityComparer.Default);
         foreach (var operation in ComputationLambdas.DescendStoredClosure(patch.Body))
         {
-            InspectCapture(context, classifier, operation, patch.Scope, patch.Scope, semanticModel, reported);
+            InspectCapture(context, classifier, operation, patch.Scope, patch.Scope, semanticModel, reported, argumentMap: argumentMap);
             InspectCapturedLocalFunction(context, classifier, operation, patch.Scope, semanticModel, visitedLocalFunctions, reported);
         }
 
