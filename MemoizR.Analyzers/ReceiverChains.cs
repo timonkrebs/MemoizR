@@ -57,13 +57,13 @@ internal static class ReceiverChains
                     continue;
                 case ILocalReferenceOperation or IFieldReferenceOperation or IParameterReferenceOperation or IPropertyReferenceOperation:
                     visited ??= new HashSet<ISymbol>(SymbolEqualityComparer.Default);
-                    var symbol = SymbolOf(reference);
+                    var symbol = ComputationLambdas.ReferencedSymbol(reference);
                     if (symbol is null || !visited.Add(symbol) || site is null || IsReassignedBefore(symbol, site, semanticModel))
                     {
                         return null;
                     }
 
-                    var initializer = InitializerOf(symbol, semanticModel);
+                    var initializer = ComputationLambdas.SameTreeInitializerOperation(symbol, semanticModel);
                     if (initializer is null)
                     {
                         // A get-only COMPUTED node property has no initializer: its getter's
@@ -101,13 +101,8 @@ internal static class ReceiverChains
 
         var propertyMap = ComputationLambdas.BuildArgumentMap(reference, argumentMap);
         ISymbol? factory = null;
-        foreach (var inner in ComputationLambdas.DescendDirectExecution(getterBody.Body))
+        foreach (var returned in ComputationLambdas.ReturnedValues(getterBody.Body))
         {
-            if (inner is not IReturnOperation { ReturnedValue: { } returned })
-            {
-                continue;
-            }
-
             var resolved = ResolveCreatingFactorySymbol(returned, semanticModel, propertyMap, visitedGetters);
             if (resolved is null || (factory is not null && !SymbolEqualityComparer.Default.Equals(factory, resolved)))
             {
@@ -208,13 +203,13 @@ internal static class ReceiverChains
                 // factory by construction. A variable REASSIGNED before this use proves
                 // nothing (`var host = f1; host = f2; host.CreateOptimistic(...)` holds f2,
                 // not its initializer) -- unprovable keeps the diagnostic.
-                var symbol = SymbolOf(receiver);
+                var symbol = ComputationLambdas.ReferencedSymbol(receiver);
                 if (symbol is null || IsReassignedBefore(symbol, receiver.Syntax, semanticModel))
                 {
                     return null;
                 }
 
-                var initialized = InitializerOf(symbol, semanticModel);
+                var initialized = ComputationLambdas.SameTreeInitializerOperation(symbol, semanticModel);
                 if (initialized is not null && ResolveReceiverSymbol(initialized, semanticModel, depth + 1, argumentMap) is { } through)
                 {
                     return through;
@@ -232,13 +227,9 @@ internal static class ReceiverChains
     // visible creation, or a non-constant key).
     public static (bool Resolved, object? ContextKey) ResolveFactoryContextKey(ISymbol factorySymbol, SemanticModel? semanticModel)
     {
-        var initializer = InitializerOf(factorySymbol, semanticModel);
-        while (initializer is IConversionOperation conversion)
-        {
-            initializer = conversion.Operand;
-        }
+        var declared = ComputationLambdas.SameTreeInitializerOperation(factorySymbol, semanticModel);
 
-        if (initializer is not IObjectCreationOperation creation
+        if (declared is null || ComputationLambdas.Unwrap(declared) is not IObjectCreationOperation creation
             || creation.Type is not INamedTypeSymbol { Name: "MemoFactory" } named
             || named.ContainingNamespace?.ToDisplayString() != "MemoizR")
         {
@@ -268,23 +259,4 @@ internal static class ReceiverChains
         return (true, null);
     }
 
-    private static ISymbol? SymbolOf(IOperation? reference)
-    {
-        return reference switch
-        {
-            ILocalReferenceOperation local => local.Local,
-            IFieldReferenceOperation field => field.Field,
-            IParameterReferenceOperation parameter => parameter.Parameter,
-            IPropertyReferenceOperation property => property.Property,
-            _ => null,
-        };
-    }
-
-    // The shared resolver covers ordinary variable/property initializers AND deconstruction
-    // designations (`var (state, _) = (f1.CreateOptimistic(...), 0)`), so provenance chases
-    // the same shapes the delegate resolution does.
-    private static IOperation? InitializerOf(ISymbol? variable, SemanticModel? semanticModel)
-    {
-        return ComputationLambdas.SameTreeInitializerOperation(variable, semanticModel);
-    }
 }

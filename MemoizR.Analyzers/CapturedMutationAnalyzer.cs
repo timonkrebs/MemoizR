@@ -83,25 +83,25 @@ public sealed class CapturedMutationAnalyzer : DiagnosticAnalyzer
         SyntaxNode computationScope,
         SemanticModel? semanticModel,
         ChaseState walk,
-        Dictionary<IParameterSymbol, IOperation>? argumentMap)
+        Dictionary<IParameterSymbol, IOperation>? argumentMap,
+        IParameterSymbol? thisParameter = null,
+        bool foreignThis = false)
     {
         foreach (var operation in ComputationLambdas.Descend(body.Body))
         {
             foreach (var target in MutationTargets(operation))
             {
-                ReportIfShared(context, target, body.Scope, computationScope, thisParameter: null, foreignThis: false, walk.ReportedTargets);
+                ReportIfShared(context, target, body.Scope, computationScope, thisParameter, foreignThis, walk.ReportedTargets);
             }
 
-            InspectCalledHelper(context, operation, computationScope, semanticModel, walk, thisParameter: null, foreignThis: false, argumentMap);
+            InspectCalledHelper(context, operation, computationScope, semanticModel, walk, thisParameter, foreignThis, argumentMap);
             InspectInvokedDelegate(context, operation, computationScope, semanticModel, walk, argumentMap);
         }
     }
 
     // A delegate the computation synchronously INVOKES runs its body on the computation's
-    // flows: a captured lambda's write (`Func<int,int> d = x => { applied++; ... }` invoked
-    // by the body) races exactly like inline code. Only bodies declared OUTSIDE the
-    // computation need this chase -- one declared inside is already covered by the full
-    // walk above; the visited set bounds self-invoking delegates.
+    // flows: a captured lambda's write (`Func<int,int> d = x => { applied++; return x; }`
+    // invoked by the body) races exactly like inline code.
     private static void InspectInvokedDelegate(
         OperationAnalysisContext context,
         IOperation operation,
@@ -115,58 +115,7 @@ public sealed class CapturedMutationAnalyzer : DiagnosticAnalyzer
             return;
         }
 
-        var resolved = ComputationLambdas.ResolveDelegateValue(ComputationLambdas.ResolveConditionalReceiver(callee), semanticModel, argumentMap);
-        var found = false;
-        foreach (var delegateBody in ComputationLambdas.OfArgumentValue(resolved, semanticModel))
-        {
-            found = true;
-            InspectDelegateBody(context, delegateBody, computationScope, semanticModel, walk, argumentMap);
-        }
-
-        if (!found)
-        {
-            InspectInvokedFactoryResult(context, resolved, computationScope, semanticModel, walk, argumentMap);
-        }
-    }
-
-    // `Get()(x)` executes whatever the same-tree factory returned -- and `Step()` whatever
-    // the computed property's getter returned -- with the returns' own argument maps.
-    private static void InspectInvokedFactoryResult(
-        OperationAnalysisContext context,
-        IOperation resolved,
-        SyntaxNode computationScope,
-        SemanticModel? semanticModel,
-        ChaseState walk,
-        Dictionary<IParameterSymbol, IOperation>? argumentMap)
-    {
-        while (resolved is IConversionOperation conversion)
-        {
-            resolved = conversion.Operand;
-        }
-
-        if (resolved is IInvocationOperation call
-            && ComputationLambdas.ResolveMethodBody(call.TargetMethod, semanticModel) is { } factory)
-        {
-            InspectReturnedDelegateBodies(context, factory, ComputationLambdas.BuildArgumentMap(call, argumentMap), computationScope, semanticModel, walk);
-            return;
-        }
-
-        if (ComputationLambdas.ReferencedVariable(resolved) is IPropertySymbol { GetMethod: { } getter, SetMethod: null }
-            && ComputationLambdas.ResolveMethodBody(getter, semanticModel) is { } getterBody)
-        {
-            InspectReturnedDelegateBodies(context, getterBody, ComputationLambdas.BuildArgumentMap(resolved, argumentMap), computationScope, semanticModel, walk);
-        }
-    }
-
-    private static void InspectReturnedDelegateBodies(
-        OperationAnalysisContext context,
-        ComputationLambdas.ComputationBody source,
-        Dictionary<IParameterSymbol, IOperation>? sourceMap,
-        SyntaxNode computationScope,
-        SemanticModel? semanticModel,
-        ChaseState walk)
-    {
-        foreach (var (delegateBody, map) in ComputationLambdas.ReturnedBodies(source, semanticModel, sourceMap))
+        foreach (var (delegateBody, map) in ComputationLambdas.InvokedDelegateBodies(callee, semanticModel, argumentMap))
         {
             InspectDelegateBody(context, delegateBody, computationScope, semanticModel, walk, map);
         }
@@ -234,16 +183,7 @@ public sealed class CapturedMutationAnalyzer : DiagnosticAnalyzer
                 continue;
             }
 
-            foreach (var inner in ComputationLambdas.Descend(helper.Body))
-            {
-                foreach (var target in MutationTargets(inner))
-                {
-                    ReportIfShared(context, target, helper.Scope, computationScope, nestedThis, nestedForeign, walk.ReportedTargets);
-                }
-
-                InspectCalledHelper(context, inner, computationScope, semanticModel, walk, nestedThis, nestedForeign, nestedMap);
-                InspectInvokedDelegate(context, inner, computationScope, semanticModel, walk, nestedMap);
-            }
+            InspectComputationOperations(context, helper, computationScope, semanticModel, walk, nestedMap, nestedThis, nestedForeign);
         }
     }
 
@@ -349,11 +289,7 @@ public sealed class CapturedMutationAnalyzer : DiagnosticAnalyzer
 
         foreach (var argument in call.Arguments)
         {
-            var value = argument.Value;
-            while (value is IConversionOperation conversion)
-            {
-                value = conversion.Operand;
-            }
+            var value = ComputationLambdas.Unwrap(argument.Value);
 
             if (IsComputationInstance(value, thisParameter, foreignThis) && argument.Parameter is { } parameter)
             {
@@ -545,9 +481,9 @@ public sealed class CapturedMutationAnalyzer : DiagnosticAnalyzer
     {
         switch (target)
         {
-            case ILocalReferenceOperation local when IsDeclaredOutside(local.Local, scope):
+            case ILocalReferenceOperation local when ComputationLambdas.IsDeclaredOutside(local.Local, scope):
                 return ("captured local", local.Local);
-            case IParameterReferenceOperation parameter when IsDeclaredOutside(parameter.Parameter, scope):
+            case IParameterReferenceOperation parameter when ComputationLambdas.IsDeclaredOutside(parameter.Parameter, scope):
                 return ("captured parameter", parameter.Parameter);
             case IFieldReferenceOperation { Field.IsStatic: true } staticField:
                 return ("static field", staticField.Field);
@@ -578,9 +514,9 @@ public sealed class CapturedMutationAnalyzer : DiagnosticAnalyzer
         {
             case var enclosing when IsComputationInstance(enclosing, thisParameter, foreignThis):
                 return (memberKind, member);
-            case ILocalReferenceOperation { Local.Type.IsValueType: true } local when IsDeclaredOutside(local.Local, scope):
+            case ILocalReferenceOperation { Local.Type.IsValueType: true } local when ComputationLambdas.IsDeclaredOutside(local.Local, scope):
                 return ("captured local", local.Local);
-            case IParameterReferenceOperation { Parameter.Type.IsValueType: true } parameter when IsDeclaredOutside(parameter.Parameter, scope):
+            case IParameterReferenceOperation { Parameter.Type.IsValueType: true } parameter when ComputationLambdas.IsDeclaredOutside(parameter.Parameter, scope):
                 return ("captured parameter", parameter.Parameter);
             case IFieldReferenceOperation { Type.IsValueType: true } outerField:
                 return ResolveSharedRoot(outerField, scope, thisParameter, foreignThis);
@@ -591,9 +527,4 @@ public sealed class CapturedMutationAnalyzer : DiagnosticAnalyzer
         }
     }
 
-    // Shared with MZR004; see ComputationLambdas.IsDeclaredOutside for the span-test rationale.
-    private static bool IsDeclaredOutside(ISymbol symbol, SyntaxNode scope)
-    {
-        return ComputationLambdas.IsDeclaredOutside(symbol, scope);
-    }
 }

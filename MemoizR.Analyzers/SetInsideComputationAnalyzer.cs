@@ -110,8 +110,7 @@ public sealed class SetInsideComputationAnalyzer : DiagnosticAnalyzer
     // evaluation lock: `d()` with a same-tree `Func<int> d = () => { _ = v.Set(1); ... };`
     // throws exactly like the inline Set -- while a merely BUILT callback stays pruned
     // (deferred execution holds no lock, and building one is this rule's own fix guidance).
-    // Aliases and parameter bindings resolve like the executed-call chase; anything
-    // unresolvable keeps the runtime backstop.
+    // Anything the shared resolution cannot reach keeps the runtime backstop.
     private static void InspectInvokedDelegate(
         OperationAnalysisContext context,
         IInvocationOperation host,
@@ -120,62 +119,7 @@ public sealed class SetInsideComputationAnalyzer : DiagnosticAnalyzer
         HashSet<(SyntaxNode, IMethodSymbol, string)> visitedCalls,
         Dictionary<IParameterSymbol, IOperation>? argumentMap)
     {
-        var resolved = ComputationLambdas.ResolveDelegateValue(ComputationLambdas.ResolveConditionalReceiver(callee), host.SemanticModel, argumentMap);
-        var found = false;
-        foreach (var body in ComputationLambdas.OfArgumentValue(resolved, host.SemanticModel))
-        {
-            found = true;
-            if (visitedCalls.Add((body.Scope, host.TargetMethod, ComputationLambdas.ArgumentMapKey(argumentMap))))
-            {
-                InspectExecutedBody(context, host, body.Body, actorHost, visitedCalls, argumentMap);
-            }
-        }
-
-        if (!found)
-        {
-            InspectInvokedFactoryResult(context, host, resolved, actorHost, visitedCalls, argumentMap);
-        }
-    }
-
-    // `Get()(x)` executes whatever the same-tree factory returned -- and `Step()` whatever
-    // the computed property's getter returned -- immediately and under the same lock: the
-    // returns are walked with their own maps, cycles bounded by the per-body visited guard.
-    private static void InspectInvokedFactoryResult(
-        OperationAnalysisContext context,
-        IInvocationOperation host,
-        IOperation resolved,
-        bool actorHost,
-        HashSet<(SyntaxNode, IMethodSymbol, string)> visitedCalls,
-        Dictionary<IParameterSymbol, IOperation>? argumentMap)
-    {
-        while (resolved is IConversionOperation conversion)
-        {
-            resolved = conversion.Operand;
-        }
-
-        if (resolved is IInvocationOperation call
-            && ComputationLambdas.ResolveMethodBody(call.TargetMethod, host.SemanticModel) is { } factory)
-        {
-            InspectReturnedInvokedBodies(context, host, factory, ComputationLambdas.BuildArgumentMap(call, argumentMap), actorHost, visitedCalls);
-            return;
-        }
-
-        if (ComputationLambdas.ReferencedVariable(resolved) is IPropertySymbol { GetMethod: { } getter, SetMethod: null }
-            && ComputationLambdas.ResolveMethodBody(getter, host.SemanticModel) is { } getterBody)
-        {
-            InspectReturnedInvokedBodies(context, host, getterBody, ComputationLambdas.BuildArgumentMap(resolved, argumentMap), actorHost, visitedCalls);
-        }
-    }
-
-    private static void InspectReturnedInvokedBodies(
-        OperationAnalysisContext context,
-        IInvocationOperation host,
-        ComputationLambdas.ComputationBody source,
-        Dictionary<IParameterSymbol, IOperation>? sourceMap,
-        bool actorHost,
-        HashSet<(SyntaxNode, IMethodSymbol, string)> visitedCalls)
-    {
-        foreach (var (body, map) in ComputationLambdas.ReturnedBodies(source, host.SemanticModel, sourceMap))
+        foreach (var (body, map) in ComputationLambdas.InvokedDelegateBodies(callee, host.SemanticModel, argumentMap))
         {
             if (visitedCalls.Add((body.Scope, host.TargetMethod, ComputationLambdas.ArgumentMapKey(map))))
             {
@@ -224,18 +168,28 @@ public sealed class SetInsideComputationAnalyzer : DiagnosticAnalyzer
             return false;
         }
 
+        // Each resolution walks alias chains, so the chain is ordered to stop at the first
+        // unprovable link rather than resolving both sides and then discarding one.
         var hostFactory = ResolveHostFactory(host);
+        if (hostFactory is null)
+        {
+            return false;
+        }
+
         var targetFactory = ReceiverChains.ResolveCreatingFactorySymbol(setInvocation.Instance, setInvocation.SemanticModel, argumentMap);
-        if (hostFactory is null
-            || targetFactory is null
-            || SymbolEqualityComparer.Default.Equals(hostFactory, targetFactory))
+        if (targetFactory is null || SymbolEqualityComparer.Default.Equals(hostFactory, targetFactory))
         {
             return false;
         }
 
         var hostContext = ReceiverChains.ResolveFactoryContextKey(hostFactory, host.SemanticModel);
+        if (!hostContext.Resolved)
+        {
+            return false;
+        }
+
         var targetContext = ReceiverChains.ResolveFactoryContextKey(targetFactory, setInvocation.SemanticModel);
-        if (!hostContext.Resolved || !targetContext.Resolved)
+        if (!targetContext.Resolved)
         {
             return false;
         }

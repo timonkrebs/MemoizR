@@ -168,6 +168,18 @@ internal static class ComputationLambdas
         return callee;
     }
 
+    // An operation stripped of its implicit/explicit conversion wrappers -- the shape every
+    // resolution here actually wants to match on.
+    public static IOperation Unwrap(IOperation value)
+    {
+        while (value is IConversionOperation conversion)
+        {
+            value = conversion.Operand;
+        }
+
+        return value;
+    }
+
     // Shared with MZR004's method-group receiver resolution.
     public static ISymbol? ReferencedVariable(IOperation reference)
     {
@@ -178,6 +190,43 @@ internal static class ComputationLambdas
             IPropertyReferenceOperation property => property.Property,
             _ => null,
         };
+    }
+
+    // ReferencedVariable widened to PARAMETERS, for the chases that hop through a callee's
+    // binding as readily as through storage. Deliberately a separate function: the
+    // initializer resolutions below must NOT treat a parameter as declared storage.
+    public static ISymbol? ReferencedSymbol(IOperation? reference)
+    {
+        return reference switch
+        {
+            IParameterReferenceOperation parameter => parameter.Parameter,
+            null => null,
+            _ => ReferencedVariable(reference),
+        };
+    }
+
+    // The leaf ARMS of a conditional or coalesced value: each is a candidate the flow can
+    // pick, and each resolves independently. Null when the value is neither -- callers
+    // distinguish "not a conditional" from "one arm".
+    public static IReadOnlyList<IOperation>? ConditionalArms(IOperation value)
+    {
+        return value switch
+        {
+            IConditionalOperation { WhenFalse: { } whenFalse } conditional => new[] { conditional.WhenTrue, whenFalse },
+            IConditionalOperation conditional => new[] { conditional.WhenTrue },
+            ICoalesceOperation coalesce => new[] { coalesce.Value, coalesce.WhenNull },
+            _ => null,
+        };
+    }
+
+    // Every value a body RETURNS, on its own execution path (built callbacks' returns
+    // belong to the callback, not to this body -- hence the pruned walk).
+    public static IEnumerable<IOperation> ReturnedValues(IOperation body)
+    {
+        return DescendDirectExecution(body)
+            .OfType<IReturnOperation>()
+            .Select(returnOperation => returnOperation.ReturnedValue)
+            .OfType<IOperation>();
     }
 
     // `Func<Task<int>> compute = async () => ...; f.CreateMemoizR(compute);` is the same
@@ -564,11 +613,12 @@ internal static class ComputationLambdas
 
     public static IOperation? SubstituteArguments(IOperation? reference, Dictionary<IParameterSymbol, IOperation>? argumentMap)
     {
-        var current = reference;
-        while (current is IConversionOperation conversion)
+        if (reference is null)
         {
-            current = conversion.Operand;
+            return null;
         }
+
+        var current = Unwrap(reference);
 
         return current is IParameterReferenceOperation parameterReference
             && argumentMap?.TryGetValue(parameterReference.Parameter, out var argument) == true
@@ -641,11 +691,7 @@ internal static class ComputationLambdas
     // needs the BODIES, because a Set inside them still throws under the evaluation lock.
     public static IEnumerable<(ComputationBody Body, Dictionary<IParameterSymbol, IOperation>? ArgumentMap)> AssembledPatchBodies(IOperation value, SemanticModel? semanticModel)
     {
-        var reference = value;
-        while (reference is IConversionOperation conversion)
-        {
-            reference = conversion.Operand;
-        }
+        var reference = Unwrap(value);
 
         // A conditional patch stores whichever arm the flow picked: each arm resolves
         // through this same supplemental chain separately, so a direct lambda arm cannot
@@ -682,11 +728,7 @@ internal static class ComputationLambdas
         // An ALIAS resolves to its assembled source first: `Func<int,int> p = Patch;`
         // stores whatever the computed property's getter (or the stored factory call)
         // returned.
-        var source = ResolveDelegateValue(reference, semanticModel, null);
-        while (source is IConversionOperation sourceConversion)
-        {
-            source = sourceConversion.Operand;
-        }
+        var source = Unwrap(ResolveDelegateValue(reference, semanticModel, null));
 
         foreach (var body in AssembledSourceBodies(source, semanticModel))
         {
@@ -762,10 +804,7 @@ internal static class ComputationLambdas
             }
 
             link = next;
-            while (link is IConversionOperation conversion)
-            {
-                link = conversion.Operand;
-            }
+            link = Unwrap(link);
         }
     }
 
@@ -796,7 +835,7 @@ internal static class ComputationLambdas
 
         foreach (var write in writes)
         {
-            if (writes.Any(other => other != write && DefinitelyOverwrites(other, write, reference.Syntax, variable, semanticModel)))
+            if (IsOverwrittenWithin(write, writes, reference.Syntax, variable, semanticModel))
             {
                 continue;
             }
@@ -843,17 +882,17 @@ internal static class ComputationLambdas
     // argument hops -- the resolution-only mirror of MZR004's invoked-delegate resolver,
     // with a strict rebind guard: a written alias or parameter stays put, because the
     // write (not the initializer or the call site) owns the value.
-    public static IOperation ResolveDelegateValue(IOperation value, SemanticModel? semanticModel, Dictionary<IParameterSymbol, IOperation>? argumentMap)
+    public static IOperation ResolveDelegateValue(
+        IOperation value,
+        SemanticModel? semanticModel,
+        Dictionary<IParameterSymbol, IOperation>? argumentMap,
+        Func<ISymbol, IOperation, bool>? aliasRebound = null)
     {
         var current = value;
         HashSet<ISymbol>? visited = null;
         while (true)
         {
-            var unwrapped = current;
-            while (unwrapped is IConversionOperation conversion)
-            {
-                unwrapped = conversion.Operand;
-            }
+            var unwrapped = Unwrap(current);
 
             if (unwrapped is IParameterReferenceOperation rebound
                 && argumentMap?.ContainsKey(rebound.Parameter) == true
@@ -875,9 +914,8 @@ internal static class ComputationLambdas
 
             visited ??= new HashSet<ISymbol>(SymbolEqualityComparer.Default);
             var initializer = SameTreeInitializerOperation(variable, semanticModel);
-            if (!visited.Add(variable) || initializer is null
-                || IsWrittenBefore(variable, current.Syntax, semanticModel)
-                || !IsReferenceShape(initializer))
+            if (!visited.Add(variable) || initializer is null || !IsReferenceShape(initializer)
+                || AliasRebound(variable, current, semanticModel, aliasRebound))
             {
                 return current;
             }
@@ -886,38 +924,84 @@ internal static class ComputationLambdas
         }
     }
 
-    private static bool IsReferenceShape(IOperation operation)
+    // The bodies a synchronously INVOKED delegate runs, with the argument map each resolved
+    // under. Direct resolutions (a same-tree lambda or method group, through aliases and
+    // parameter bindings, null-conditional invokes unwrapped) come first; only when none
+    // resolve does the callee's own SOURCE decide -- a factory call's returns, or a computed
+    // get-only property's. Resolution only: the callers own what they do per body, and
+    // MZR004 keeps its accounting-rich chase.
+    public static IEnumerable<(ComputationBody Body, Dictionary<IParameterSymbol, IOperation>? ArgumentMap)> InvokedDelegateBodies(
+        IOperation callee,
+        SemanticModel? semanticModel,
+        Dictionary<IParameterSymbol, IOperation>? argumentMap)
     {
-        while (operation is IConversionOperation conversion)
+        var resolved = ResolveDelegateValue(ResolveConditionalReceiver(callee), semanticModel, argumentMap);
+        var found = false;
+        foreach (var body in OfArgumentValue(resolved, semanticModel))
         {
-            operation = conversion.Operand;
+            found = true;
+            yield return (body, argumentMap);
         }
 
-        return operation is IParameterReferenceOperation || ReferencedVariable(operation) is not null;
+        if (found)
+        {
+            yield break;
+        }
+
+        foreach (var entry in InvokedSourceBodies(Unwrap(resolved), semanticModel, argumentMap))
+        {
+            yield return entry;
+        }
+    }
+
+    private static IEnumerable<(ComputationBody Body, Dictionary<IParameterSymbol, IOperation>? ArgumentMap)> InvokedSourceBodies(
+        IOperation resolved,
+        SemanticModel? semanticModel,
+        Dictionary<IParameterSymbol, IOperation>? argumentMap)
+    {
+        // `Get()(x)` runs whatever the factory returned; `Step()` whatever the getter did.
+        if (resolved is IInvocationOperation call && ResolveMethodBody(call.TargetMethod, semanticModel) is { } factory)
+        {
+            return ReturnedBodies(factory, semanticModel, BuildArgumentMap(call, argumentMap));
+        }
+
+        if (ReferencedVariable(resolved) is IPropertySymbol { GetMethod: { } getter, SetMethod: null }
+            && ResolveMethodBody(getter, semanticModel) is { } getterBody)
+        {
+            return ReturnedBodies(getterBody, semanticModel, BuildArgumentMap(resolved, argumentMap));
+        }
+
+        return Enumerable.Empty<(ComputationBody, Dictionary<IParameterSymbol, IOperation>?)>();
+    }
+
+    // How far an alias chain may be followed is the ONE thing the two callers disagree on:
+    // resolution-only chases stop at any same-tree write, while MZR004 excuses the write
+    // that stands in for a missing initializer (its own IsReassignedBefore).
+    private static bool AliasRebound(ISymbol variable, IOperation at, SemanticModel? semanticModel, Func<ISymbol, IOperation, bool>? custom)
+    {
+        return custom is null
+            ? IsWrittenBefore(variable, at.Syntax, semanticModel)
+            : custom(variable, at);
+    }
+
+    public static bool IsReferenceShape(IOperation operation)
+    {
+        return ReferencedSymbol(Unwrap(operation)) is not null;
     }
 
     private static IInvocationOperation? UnwrappedInitializerCall(ISymbol? variable, SemanticModel? semanticModel)
     {
         var initializer = SameTreeInitializerOperation(variable, semanticModel);
-        while (initializer is IConversionOperation conversion)
-        {
-            initializer = conversion.Operand;
-        }
 
-        return initializer as IInvocationOperation;
+        return initializer is null ? null : Unwrap(initializer) as IInvocationOperation;
     }
 
     // Each body carries the ARGUMENT MAP that resolved it: a nested factory's returns bind
     // that factory's own parameters, which the caller's map knows nothing about.
     public static IEnumerable<(ComputationBody Body, Dictionary<IParameterSymbol, IOperation>? ArgumentMap)> ReturnedBodies(ComputationBody methodBody, SemanticModel? semanticModel, Dictionary<IParameterSymbol, IOperation>? argumentMap = null, HashSet<(IMethodSymbol, string)>? visitedFactories = null)
     {
-        foreach (var inner in DescendDirectExecution(methodBody.Body))
+        foreach (var returned in ReturnedValues(methodBody.Body))
         {
-            if (inner is not IReturnOperation { ReturnedValue: { } returned })
-            {
-                continue;
-            }
-
             // A conditional return stores whichever arm the flow picked: each arm is its
             // own candidate, so a direct lambda arm cannot silence a factory-call one.
             foreach (var arm in ValueArms(returned))
@@ -961,11 +1045,7 @@ internal static class ComputationLambdas
     // candidate the flow can pick, and each resolves independently.
     private static IEnumerable<IOperation> ValueArms(IOperation value)
     {
-        var unwrapped = value;
-        while (unwrapped is IConversionOperation conversion)
-        {
-            unwrapped = conversion.Operand;
-        }
+        var unwrapped = Unwrap(value);
 
         switch (unwrapped)
         {
@@ -1007,10 +1087,7 @@ internal static class ComputationLambdas
         Dictionary<IParameterSymbol, IOperation>? argumentMap,
         HashSet<(IMethodSymbol, string)> visitedFactories)
     {
-        while (resolved is IConversionOperation conversion)
-        {
-            resolved = conversion.Operand;
-        }
+        resolved = Unwrap(resolved);
 
         if (resolved is not IInvocationOperation call
             || ResolveMethodBody(call.TargetMethod, semanticModel) is not { } nested)
@@ -1067,7 +1144,7 @@ internal static class ComputationLambdas
 
         foreach (var node in writes)
         {
-            if (writes.Any(other => other != node && DefinitelyOverwrites(other, node, helper.Scope, parameter, semanticModel)))
+            if (IsOverwrittenWithin(node, writes, helper.Scope, parameter, semanticModel))
             {
                 continue;
             }
@@ -1152,15 +1229,19 @@ internal static class ComputationLambdas
             yield break;
         }
 
-        while (resolved is IConversionOperation conversion)
-        {
-            resolved = conversion.Operand;
-        }
+        resolved = Unwrap(resolved);
 
         foreach (var entry in AssembledSourceBodies(resolved, semanticModel, callMap))
         {
             yield return entry;
         }
+    }
+
+    // Whether ANOTHER candidate write definitely kills this one before the value is
+    // observed -- the survivor test every write-collecting scan applies.
+    public static bool IsOverwrittenWithin(SyntaxNode write, IReadOnlyCollection<SyntaxNode> candidates, SyntaxNode observedAt, ISymbol variable, SemanticModel semanticModel)
+    {
+        return candidates.Any(other => other != write && DefinitelyOverwrites(other, write, observedAt, variable, semanticModel));
     }
 
     // "Straight-line" = the killer sits in plain statements between itself and wherever the
@@ -1170,9 +1251,11 @@ internal static class ComputationLambdas
     // argument-list hop covers out-handoff killers; a conditional-access call stays rejected.
     public static bool DefinitelyOverwrites(SyntaxNode killer, SyntaxNode victim, SyntaxNode reference, ISymbol variable, SemanticModel semanticModel)
     {
-        if (!IsDeterminingWrite(killer, variable, semanticModel)
-            || killer.SpanStart <= victim.SpanStart
+        // Span order first: it rejects most candidate pairs outright, while the write test
+        // below issues semantic queries and the exit walk covers a whole function.
+        if (killer.SpanStart <= victim.SpanStart
             || killer.SpanStart >= reference.Span.End
+            || !IsDeterminingWrite(killer, variable, semanticModel)
             || ExitsBetween(victim, killer))
         {
             return false;
@@ -1902,12 +1985,7 @@ internal static class ComputationLambdas
 
     private static ITypeSymbol? UnwrappedType(IOperation? value)
     {
-        while (value is IConversionOperation conversion)
-        {
-            value = conversion.Operand;
-        }
-
-        return value?.Type;
+        return value is null ? null : Unwrap(value).Type;
     }
 
     // How an access uses the property: a plain read runs the getter, an assignment target
