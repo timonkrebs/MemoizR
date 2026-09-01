@@ -8,95 +8,61 @@ using MemoizR;
 // allocation-free?
 class Bench
 {
-    // Main and the scenario groups are split because SonarSource cognitive complexity (S3776)
-    // attributes every measurement lambda's loop to the containing method.
     static async Task Main()
     {
-        await MeasureCorePaths();
+        await Measure("signal.Set (distinct values)", 1_000_000, n => SetDistinct(new MemoFactory(), n));
+        await Measure("signal.Set (same value)", 1_000_000, n => SetSame(new MemoFactory(), n));
+        await Measure("memo.Get (clean, untracked fast path)", 2_000_000, n => CleanGet(new MemoFactory(), n));
+        await Measure("chain recompute (Set + Get through 3 memos)", 50_000, n => ChainRecompute(new MemoFactory(), n));
+        await Measure("diamond recompute (Set + Get, c = a + b)", 50_000, n => DiamondRecompute(new MemoFactory(), n));
 
         // The stamps-disabled variants quantify what MemoFactoryOptions.DisableCausalityStamps
-        // saves. Resolved at runtime so this harness still compiles against builds that predate
-        // the flag (they simply skip these rows).
+        // saves, on the SAME scenarios. Resolved at runtime so this harness still compiles
+        // against builds that predate the flag (they simply skip these rows).
         if (Enum.TryParse<MemoFactoryOptions>("DisableCausalityStamps", out var noStamps))
         {
-            await MeasureStampsDisabledPaths(noStamps);
+            await Measure("signal.Set (distinct, stamps disabled)", 1_000_000, n => SetDistinct(new MemoFactory(options: noStamps), n));
+            await Measure("chain recompute (stamps disabled)", 50_000, n => ChainRecompute(new MemoFactory(options: noStamps), n));
+            await Measure("diamond recompute (stamps disabled)", 50_000, n => DiamondRecompute(new MemoFactory(options: noStamps), n));
         }
     }
 
-    static async Task MeasureCorePaths()
+    static async Task SetDistinct(MemoFactory f, int n)
     {
-        await Measure("signal.Set (distinct values)", 1_000_000, async n =>
-        {
-            var f = new MemoFactory();
-            var s = f.CreateSignal(0);
-            for (var i = 1; i <= n; i++) await s.Set(i);
-        });
-
-        await Measure("signal.Set (same value)", 1_000_000, async n =>
-        {
-            var f = new MemoFactory();
-            var s = f.CreateSignal(42);
-            for (var i = 0; i < n; i++) await s.Set(42);
-        });
-
-        await Measure("memo.Get (clean, untracked fast path)", 2_000_000, async n =>
-        {
-            var f = new MemoFactory();
-            var s = f.CreateSignal(1);
-            var m = f.CreateMemoizR(async () => await s.Get() + 1);
-            await m.Get();
-            for (var i = 0; i < n; i++) await m.Get();
-        });
-
-        await Measure("chain recompute (Set + Get through 3 memos)", 50_000, async n =>
-        {
-            var f = new MemoFactory();
-            var s = f.CreateSignal(0);
-            var m1 = f.CreateMemoizR(async () => await s.Get() + 1);
-            var m2 = f.CreateMemoizR(async () => await m1.Get() + 1);
-            var m3 = f.CreateMemoizR(async () => await m2.Get() + 1);
-            for (var i = 1; i <= n; i++) { await s.Set(i); await m3.Get(); }
-        });
-
-        await Measure("diamond recompute (Set + Get, c = a + b)", 50_000, async n =>
-        {
-            var f = new MemoFactory();
-            var s = f.CreateSignal(0);
-            var a = f.CreateMemoizR(async () => await s.Get() + 1);
-            var b = f.CreateMemoizR(async () => await s.Get() * 2);
-            var c = f.CreateMemoizR(async () => await a.Get() + await b.Get());
-            for (var i = 1; i <= n; i++) { await s.Set(i); await c.Get(); }
-        });
+        var s = f.CreateSignal(0);
+        for (var i = 1; i <= n; i++) await s.Set(i);
     }
 
-    static async Task MeasureStampsDisabledPaths(MemoFactoryOptions noStamps)
+    static async Task SetSame(MemoFactory f, int n)
     {
-        await Measure("signal.Set (distinct, stamps disabled)", 1_000_000, async n =>
-        {
-            var f = new MemoFactory(options: noStamps);
-            var s = f.CreateSignal(0);
-            for (var i = 1; i <= n; i++) await s.Set(i);
-        });
+        var s = f.CreateSignal(42);
+        for (var i = 0; i < n; i++) await s.Set(42);
+    }
 
-        await Measure("chain recompute (stamps disabled)", 50_000, async n =>
-        {
-            var f = new MemoFactory(options: noStamps);
-            var s = f.CreateSignal(0);
-            var m1 = f.CreateMemoizR(async () => await s.Get() + 1);
-            var m2 = f.CreateMemoizR(async () => await m1.Get() + 1);
-            var m3 = f.CreateMemoizR(async () => await m2.Get() + 1);
-            for (var i = 1; i <= n; i++) { await s.Set(i); await m3.Get(); }
-        });
+    static async Task CleanGet(MemoFactory f, int n)
+    {
+        var s = f.CreateSignal(1);
+        var m = f.CreateMemoizR(async () => await s.Get() + 1);
+        await m.Get();
+        for (var i = 0; i < n; i++) await m.Get();
+    }
 
-        await Measure("diamond recompute (stamps disabled)", 50_000, async n =>
-        {
-            var f = new MemoFactory(options: noStamps);
-            var s = f.CreateSignal(0);
-            var a = f.CreateMemoizR(async () => await s.Get() + 1);
-            var b = f.CreateMemoizR(async () => await s.Get() * 2);
-            var c = f.CreateMemoizR(async () => await a.Get() + await b.Get());
-            for (var i = 1; i <= n; i++) { await s.Set(i); await c.Get(); }
-        });
+    static async Task ChainRecompute(MemoFactory f, int n)
+    {
+        var s = f.CreateSignal(0);
+        var m1 = f.CreateMemoizR(async () => await s.Get() + 1);
+        var m2 = f.CreateMemoizR(async () => await m1.Get() + 1);
+        var m3 = f.CreateMemoizR(async () => await m2.Get() + 1);
+        for (var i = 1; i <= n; i++) { await s.Set(i); await m3.Get(); }
+    }
+
+    static async Task DiamondRecompute(MemoFactory f, int n)
+    {
+        var s = f.CreateSignal(0);
+        var a = f.CreateMemoizR(async () => await s.Get() + 1);
+        var b = f.CreateMemoizR(async () => await s.Get() * 2);
+        var c = f.CreateMemoizR(async () => await a.Get() + await b.Get());
+        for (var i = 1; i <= n; i++) { await s.Set(i); await c.Get(); }
     }
 
     static async Task Measure(string name, int n, Func<int, Task> run)

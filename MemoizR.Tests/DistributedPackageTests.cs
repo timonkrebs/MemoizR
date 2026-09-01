@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using MemoizR.Distributed;
 using Microsoft.Extensions.Time.Testing;
 
@@ -7,6 +8,22 @@ namespace MemoizR.Tests;
 // unverifiability) and the self-healing glitch barrier, wired over in-proc delegates.
 public class DistributedPackageTests
 {
+    private const long Epoch1 = 11;
+    private const long Epoch2 = 22;
+    private const long Epoch3 = 33;
+    private const int NodeId = 1000;
+
+    private static readonly Func<Task<ValuePayload<int>>> NoPull =
+        () => throw new InvalidOperationException("no pull in this test");
+
+    // One publication of the exported node: the stamp's trigger is the sequence, so a payload's
+    // ordering header and evidence always agree unless a test builds the mismatch on purpose.
+    private static ValuePayload<int> Payload(long epoch, long sequence, int value) =>
+        new(NodeId, epoch, sequence, value, CausalityStamp.ForSignal(NodeId, sequence, epoch).Serialize(), false);
+
+    private static StaleNotification Stale(long epoch, long sequence) =>
+        new(NodeId, epoch, sequence, CausalityStamp.Empty.Serialize());
+
     // ── export side ──────────────────────────────────────────────────────────────────────
 
     [Fact]
@@ -16,15 +33,15 @@ public class DistributedPackageTests
         var temperature = host.CreateSignal(20.0);
         var comfort = host.CreateMemoizR("comfort", async () => await temperature.Get() + 1);
 
-        var advertisements = new List<StaleNotification>();
+        var advertisements = new ConcurrentQueue<StaleNotification>();
         using var export = host.Export(comfort, n =>
         {
-            lock (advertisements) { advertisements.Add(n); }
+            advertisements.Enqueue(n);
             return Task.CompletedTask;
         });
 
         await temperature.Set(25.0);
-        await TestHelpers.WaitForConvergenceAsync(() => { lock (advertisements) { return advertisements.Count > 0; } });
+        await TestHelpers.WaitForConvergenceAsync(() => !advertisements.IsEmpty);
 
         var payload = await export.PullAsync();
         Assert.Equal(comfort.Id, payload.NodeId);
@@ -73,7 +90,7 @@ public class DistributedPackageTests
         // render torn origin snapshots as consistent. Multi-hop bridging is wire-v3 work.
         var consumer = new MemoFactory();
         var mirror = consumer.CreateRemoteSignal<int>("mirror", 0,
-            () => throw new InvalidOperationException("no pull in this test"));
+            NoPull);
         var ex = Assert.Throws<InvalidOperationException>(
             () => consumer.Export(mirror.Local, _ => Task.CompletedTask));
         Assert.Contains("re-exported", ex.Message);
@@ -114,7 +131,7 @@ public class DistributedPackageTests
         // removed.
         var consumer = new MemoFactory();
         var mirror = consumer.CreateRemoteSignal<int>("mirror", 0,
-            () => throw new InvalidOperationException("no pull in this test"));
+            NoPull);
 
         var derived = consumer.CreateMemoizR("derived", async () => await mirror.Local.Get() + 1);
         await derived.Get(); // wire the sources
@@ -410,7 +427,7 @@ public class DistributedPackageTests
         var emptyStamp = CausalityStamp.Empty.Serialize();
 
         var consumer = new MemoFactory();
-        var mirror = consumer.CreateRemoteSignal("mirror", 0, () => throw new InvalidOperationException("no pull in this test"));
+        var mirror = consumer.CreateRemoteSignal("mirror", 0, NoPull);
 
         await mirror.OnValueAsync(new ValuePayload<int>(s.Id, epoch, 1, 100, stamp, false));
         await mirror.OnValueAsync(new ValuePayload<int>(s.Id, epoch, 2, 200, emptyStamp, false)); // honest empty publication
@@ -464,13 +481,11 @@ public class DistributedPackageTests
     [Fact]
     public async Task RemoteSignal_PeerReset_DiscardsEvidence_RunsHook_AndDropsDeadEpochTraffic()
     {
-        var epoch1 = 11L;
-        var epoch2 = 22L;
-        var stamp1 = CausalityStamp.ForSignal(1000, 5, epoch1).Serialize();
-        var stamp2 = CausalityStamp.ForSignal(1000, 1, epoch2).Serialize();
+        var stamp1 = CausalityStamp.ForSignal(1000, 5, Epoch1).Serialize();
+        var stamp2 = CausalityStamp.ForSignal(1000, 1, Epoch2).Serialize();
 
         // The host's current truth, as the mirror's verification pull will see it.
-        var hostPayload = new ValuePayload<int>(1000, epoch1, 9, 111, stamp1, false);
+        var hostPayload = new ValuePayload<int>(1000, Epoch1, 9, 111, stamp1, false);
 
         var resets = 0;
         var consumer = new MemoFactory();
@@ -484,14 +499,14 @@ public class DistributedPackageTests
         // The restarted peer's sequence starts over BELOW the old one: the epoch change, not
         // the sequence, is what admits it -- committed through the verification pull that
         // answers the unsolicited epoch-mismatch delivery.
-        hostPayload = new ValuePayload<int>(1000, epoch2, 1, 222, stamp2, false);
+        hostPayload = new ValuePayload<int>(1000, Epoch2, 1, 222, stamp2, false);
         await mirror.OnValueAsync(hostPayload);
         Assert.Equal(222, await mirror.Local.Get());
         Assert.Equal(1, Volatile.Read(ref resets));
-        Assert.Equal(epoch2, mirror.RemoteStamp.Epoch);
+        Assert.Equal(Epoch2, mirror.RemoteStamp.Epoch);
 
         // Late traffic from the dead incarnation -- even with a huge sequence -- is dropped.
-        await mirror.OnValueAsync(new ValuePayload<int>(1000, epoch1, 999, 333, stamp1, false));
+        await mirror.OnValueAsync(new ValuePayload<int>(1000, Epoch1, 999, 333, stamp1, false));
         Assert.Equal(222, await mirror.Local.Get());
         Assert.Equal(1, Volatile.Read(ref resets));
     }
@@ -505,7 +520,7 @@ public class DistributedPackageTests
 
         var consumer = new MemoFactory();
         var mirror = consumer.CreateRemoteSignal<int>("mirror", 0,
-            () => throw new InvalidOperationException("no pull in this test"));
+            NoPull);
 
         await mirror.OnValueAsync(new ValuePayload<int>(1000, epoch, 1, 10, verified, false));
         Assert.False(mirror.Unverifiable);
@@ -533,7 +548,7 @@ public class DistributedPackageTests
     {
         var consumer = new MemoFactory();
         var mirror = consumer.CreateRemoteSignal<int>("mirror", 0,
-            () => throw new InvalidOperationException("no pull in this test"));
+            NoPull);
 
         await Assert.ThrowsAnyAsync<Exception>(
             () => mirror.OnValueAsync(new ValuePayload<int>(1, 1, 1, 1, [0xFF, 0xFF], false)));
@@ -567,29 +582,26 @@ public class DistributedPackageTests
         var dewMirror = consumer.CreateRemoteSignal("dew", 0.0, dewExport.PullAsync);
         var heatMirror = consumer.CreateRemoteSignal("heat", 0.0, heatExport.PullAsync);
 
-        var renders = new List<(double Dew, double Heat)>();
+        var renders = new ConcurrentQueue<(double Dew, double Heat)>();
         var reaction = DistributedBarrier.CreateConsistentReaction(
             consumer, dewMirror, heatMirror,
-            (d, h) => { lock (renders) { renders.Add((d, h)); } });
+            (d, h) => renders.Enqueue((d, h)));
 
         // Initial sync on the pre-write snapshot.
         await dewMirror.PullAsync();
         await heatMirror.PullAsync();
-        await TestHelpers.WaitForConvergenceAsync(() => { lock (renders) { return renders.Contains((15.0, 25.0)); } });
+        await TestHelpers.WaitForConvergenceAsync(() => renders.Contains((15.0, 25.0)));
 
         // The write; only dew's fresh publication is delivered -- heat is now lagging.
         await temperature.Set(30.0);
         await dewMirror.OnValueAsync(await dewExport.PullAsync());
 
         // The barrier re-pulls heat itself and renders the healed snapshot.
-        await TestHelpers.WaitForConvergenceAsync(() => { lock (renders) { return renders.Contains((25.0, 35.0)); } });
+        await TestHelpers.WaitForConvergenceAsync(() => renders.Contains((25.0, 35.0)));
 
         // The torn pairs (fresh dew with stale heat, or the reverse) must never have rendered.
-        lock (renders)
-        {
-            Assert.DoesNotContain((25.0, 25.0), renders);
-            Assert.DoesNotContain((15.0, 35.0), renders);
-        }
+        Assert.DoesNotContain((25.0, 25.0), renders);
+        Assert.DoesNotContain((15.0, 35.0), renders);
         GC.KeepAlive(reaction);
     }
 
@@ -602,7 +614,7 @@ public class DistributedPackageTests
         var verified = CausalityStamp.ForSignal(1000, 1, epoch);
         var consumer = new MemoFactory();
         var mirror = consumer.CreateRemoteSignal<int>("mirror", 0,
-            () => throw new InvalidOperationException("no pull in this test"));
+            NoPull);
 
         Assert.Null(mirror.Publication);
 
@@ -632,28 +644,26 @@ public class DistributedPackageTests
         // itself must have committed: otherwise the ordering state would claim the sequence
         // while the local signal never published, and every redelivery would be dropped as a
         // duplicate -- wedging the mirror on the old value until an unrelated new publication.
-        var epoch1 = 11L;
-        var epoch2 = 22L;
-        var resetPayload = new ValuePayload<int>(1000, epoch2, 1, 222, CausalityStamp.ForSignal(1000, 1, epoch2).Serialize(), false);
+        var resetPayload = Payload(Epoch2, 1, 222);
         var consumer = new MemoFactory();
         var mirror = consumer.CreateRemoteSignal<int>("mirror", 0,
             () => Task.FromResult(resetPayload),
             onPeerReset: () => throw new InvalidOperationException("resubscribe transport down"));
 
-        await mirror.OnValueAsync(new ValuePayload<int>(1000, epoch1, 5, 111, CausalityStamp.ForSignal(1000, 5, epoch1).Serialize(), false));
+        await mirror.OnValueAsync(Payload(Epoch1, 5, 111));
 
         await Assert.ThrowsAsync<InvalidOperationException>(() => mirror.OnValueAsync(resetPayload));
 
         // The reset payload WAS adopted; only the resubscription failed.
         Assert.Equal(222, await mirror.Local.Get());
-        Assert.Equal(epoch2, mirror.RemoteStamp.Epoch);
+        Assert.Equal(Epoch2, mirror.RemoteStamp.Epoch);
 
         // Its redelivery is an ordinary duplicate (no reset, no hook, no throw) ...
         await mirror.OnValueAsync(resetPayload);
         Assert.Equal(222, await mirror.Local.Get());
 
         // ... and newer publications keep flowing.
-        await mirror.OnValueAsync(new ValuePayload<int>(1000, epoch2, 2, 333, CausalityStamp.ForSignal(1000, 2, epoch2).Serialize(), false));
+        await mirror.OnValueAsync(Payload(Epoch2, 2, 333));
         Assert.Equal(333, await mirror.Local.Get());
     }
 
@@ -663,18 +673,16 @@ public class DistributedPackageTests
         // The documented resubscribe path: a bridge answering a reset by pulling the mirror's
         // current truth. The hook runs outside the adoption gate, so the nested pull re-enters
         // the adoption path instead of deadlocking on the gate.
-        var epoch1 = 11L;
-        var epoch2 = 22L;
         RemoteSignal<int>? mirror = null;
         var consumer = new MemoFactory();
         mirror = consumer.CreateRemoteSignal("mirror", 0,
-            () => Task.FromResult(new ValuePayload<int>(1000, epoch2, 2, 999, CausalityStamp.ForSignal(1000, 2, epoch2).Serialize(), false)),
+            () => Task.FromResult(Payload(Epoch2, 2, 999)),
             onPeerReset: () => mirror!.PullAsync());
 
-        await mirror.OnValueAsync(new ValuePayload<int>(1000, epoch1, 5, 111, CausalityStamp.ForSignal(1000, 5, epoch1).Serialize(), false));
+        await mirror.OnValueAsync(Payload(Epoch1, 5, 111));
 
         // A deadlock here must fail the test, not hang the suite.
-        await mirror.OnValueAsync(new ValuePayload<int>(1000, epoch2, 1, 222, CausalityStamp.ForSignal(1000, 1, epoch2).Serialize(), false))
+        await mirror.OnValueAsync(Payload(Epoch2, 1, 222))
             .WaitAsync(TimeSpan.FromSeconds(10));
 
         Assert.Equal(999, await mirror.Local.Get());
@@ -687,8 +695,6 @@ public class DistributedPackageTests
         // point at the dead incarnation. An epoch-changing answer from a pull issued inside
         // that window must be refused: committing it would abandon the epoch the mirror JUST
         // adopted and wedge it on a dead incarnation.
-        var epoch1 = 11L;
-        var epoch2 = 22L;
         var deadEpoch = 33L;
         var hookStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var releaseHook = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -700,13 +706,13 @@ public class DistributedPackageTests
                 var n = Interlocked.Increment(ref pulls);
                 return Task.FromResult(n switch
                 {
-                    // The verification pull that commits the reset to epoch2.
-                    1 => new ValuePayload<int>(1000, epoch2, 1, 222, CausalityStamp.ForSignal(1000, 1, epoch2).Serialize(), false),
+                    // The verification pull that commits the reset to Epoch2.
+                    1 => Payload(Epoch2, 1, 222),
                     // The not-yet-resubscribed channel answers a window-issued pull with a
                     // dead incarnation's payload.
-                    2 => new ValuePayload<int>(1000, deadEpoch, 9, 999, CausalityStamp.ForSignal(1000, 9, deadEpoch).Serialize(), false),
+                    2 => Payload(deadEpoch, 9, 999),
                     // The live truth, after the window closed.
-                    _ => new ValuePayload<int>(1000, epoch2, 3, 333, CausalityStamp.ForSignal(1000, 3, epoch2).Serialize(), false),
+                    _ => Payload(Epoch2, 3, 333),
                 });
             },
             onPeerReset: async () =>
@@ -715,23 +721,23 @@ public class DistributedPackageTests
                 await releaseHook.Task;
             });
 
-        await mirror.OnValueAsync(new ValuePayload<int>(1000, epoch1, 5, 111, CausalityStamp.ForSignal(1000, 5, epoch1).Serialize(), false));
+        await mirror.OnValueAsync(Payload(Epoch1, 5, 111));
 
-        // Unsolicited epoch change -> verification pull commits epoch2 -> the hook starts.
-        var delivery = mirror.OnValueAsync(new ValuePayload<int>(1000, epoch2, 1, 222, CausalityStamp.ForSignal(1000, 1, epoch2).Serialize(), false));
+        // Unsolicited epoch change -> verification pull commits Epoch2 -> the hook starts.
+        var delivery = mirror.OnValueAsync(Payload(Epoch2, 1, 222));
         await hookStarted.Task.WaitAsync(TimeSpan.FromSeconds(10));
 
         // A pull issued inside the resubscription window: its dead-incarnation answer is
         // refused, and the just-adopted live epoch survives.
         await mirror.PullAsync().WaitAsync(TimeSpan.FromSeconds(10));
-        Assert.Equal(epoch2, mirror.Publication!.Epoch);
+        Assert.Equal(Epoch2, mirror.Publication!.Epoch);
         Assert.Equal(222, await mirror.Local.Get());
 
         releaseHook.SetResult();
         await delivery.WaitAsync(TimeSpan.FromSeconds(10));
 
         // The mirror is not stuck: the live epoch keeps flowing after the window closes.
-        await mirror.OnStaleAsync(new StaleNotification(1000, epoch2, 3, CausalityStamp.Empty.Serialize()));
+        await mirror.OnStaleAsync(Stale(Epoch2, 3));
         Assert.Equal(333, await mirror.Local.Get());
     }
 
@@ -743,9 +749,6 @@ public class DistributedPackageTests
         // channel) -- but it may have been the new incarnation's ONLY advertisement, so
         // closing the window must answer it with one fresh verification pull instead of
         // pinning the mirror to the now-dead epoch. Hook runs stay strictly sequential.
-        var epoch1 = 11L;
-        var epoch2 = 22L;
-        var epoch3 = 33L;
         var releaseFirstHook = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var hookRuns = 0;
         var pulls = 0;
@@ -755,10 +758,10 @@ public class DistributedPackageTests
             {
                 var n = Interlocked.Increment(ref pulls);
                 return Task.FromResult(n == 1
-                    // The verification pull that commits the first reset (epoch1 -> epoch2).
-                    ? new ValuePayload<int>(1000, epoch2, 1, 222, CausalityStamp.ForSignal(1000, 1, epoch2).Serialize(), false)
+                    // The verification pull that commits the first reset (Epoch1 -> Epoch2).
+                    ? Payload(Epoch2, 1, 222)
                     // Every later pull answers the live truth: the second restart's incarnation.
-                    : new ValuePayload<int>(1000, epoch3, 1, 333, CausalityStamp.ForSignal(1000, 1, epoch3).Serialize(), false));
+                    : Payload(Epoch3, 1, 333));
             },
             onPeerReset: async () =>
             {
@@ -768,17 +771,17 @@ public class DistributedPackageTests
                 }
             });
 
-        await mirror.OnValueAsync(new ValuePayload<int>(1000, epoch1, 5, 111, CausalityStamp.ForSignal(1000, 5, epoch1).Serialize(), false));
+        await mirror.OnValueAsync(Payload(Epoch1, 5, 111));
 
         // First restart: the unsolicited delivery triggers the verification pull, the reset
         // commits, and hook 1 blocks -- the resubscription window is open.
-        var delivery = mirror.OnValueAsync(new ValuePayload<int>(1000, epoch2, 1, 222, CausalityStamp.ForSignal(1000, 1, epoch2).Serialize(), false));
+        var delivery = mirror.OnValueAsync(Payload(Epoch2, 1, 222));
         await TestHelpers.WaitForConvergenceAsync(() => Volatile.Read(ref hookRuns) == 1);
 
         // Second restart mid-resubscription: its single-shot delivery is refused (and no
         // second hook starts -- windows are single-flight), but remembered.
-        await mirror.OnValueAsync(new ValuePayload<int>(1000, epoch3, 1, 333, CausalityStamp.ForSignal(1000, 1, epoch3).Serialize(), false));
-        Assert.Equal(epoch2, mirror.Publication!.Epoch);
+        await mirror.OnValueAsync(Payload(Epoch3, 1, 333));
+        Assert.Equal(Epoch2, mirror.Publication!.Epoch);
         Assert.Equal(1, Volatile.Read(ref hookRuns));
 
         releaseFirstHook.SetResult();
@@ -787,7 +790,7 @@ public class DistributedPackageTests
         // Closing the window verifies the refused epoch change by pull and adopts the live
         // incarnation, running its hook in sequence.
         await TestHelpers.WaitForConvergenceAsync(() => Volatile.Read(ref hookRuns) == 2);
-        Assert.Equal(epoch3, mirror.Publication!.Epoch);
+        Assert.Equal(Epoch3, mirror.Publication!.Epoch);
         Assert.Equal(333, await mirror.Local.Get());
     }
 
@@ -802,8 +805,8 @@ public class DistributedPackageTests
         var epoch = 11L;
         var consumer = new MemoFactory();
         var mirror = consumer.CreateRemoteSignal<int>("mirror", 0,
-            () => throw new InvalidOperationException("no pull in this test"));
-        var payload = new ValuePayload<int>(1000, epoch, 1, 111, CausalityStamp.ForSignal(1000, 1, epoch).Serialize(), false);
+            NoPull);
+        var payload = Payload(epoch, 1, 111);
 
         var poke = consumer.CreateSignal(0);
         Task? adoptInsideReaction = null;
@@ -832,9 +835,6 @@ public class DistributedPackageTests
         // commits first (it was live when it answered), superseding the newer restart's
         // answer. Dropping that answer silently would pin the mirror to the now-dead epoch
         // when its delivery was a one-shot -- it must re-enter the verification path instead.
-        var epoch1 = 11L;
-        var epoch2 = 22L;
-        var epoch3 = 33L;
         var firstAnswer = new TaskCompletionSource<ValuePayload<int>>(TaskCreationOptions.RunContinuationsAsynchronously);
         var secondAnswer = new TaskCompletionSource<ValuePayload<int>>(TaskCreationOptions.RunContinuationsAsynchronously);
         var pulls = 0;
@@ -845,24 +845,24 @@ public class DistributedPackageTests
                 1 => firstAnswer.Task,
                 2 => secondAnswer.Task,
                 // The re-verification and anything later answers the live incarnation.
-                _ => Task.FromResult(new ValuePayload<int>(1000, epoch3, 2, 333, CausalityStamp.ForSignal(1000, 2, epoch3).Serialize(), false)),
+                _ => Task.FromResult(Payload(Epoch3, 2, 333)),
             });
 
-        await mirror.OnValueAsync(new ValuePayload<int>(1000, epoch1, 5, 111, CausalityStamp.ForSignal(1000, 5, epoch1).Serialize(), false));
+        await mirror.OnValueAsync(Payload(Epoch1, 5, 111));
 
         // Two one-shot deliveries from two successive restarts, each triggering a pull.
-        var delivery2 = mirror.OnValueAsync(new ValuePayload<int>(1000, epoch2, 1, 222, CausalityStamp.ForSignal(1000, 1, epoch2).Serialize(), false));
-        var delivery3 = mirror.OnValueAsync(new ValuePayload<int>(1000, epoch3, 1, 333, CausalityStamp.ForSignal(1000, 1, epoch3).Serialize(), false));
+        var delivery2 = mirror.OnValueAsync(Payload(Epoch2, 1, 222));
+        var delivery3 = mirror.OnValueAsync(Payload(Epoch3, 1, 333));
 
         // The older restart's answer arrives first and commits (it was live at answer time)...
-        firstAnswer.SetResult(new ValuePayload<int>(1000, epoch2, 1, 222, CausalityStamp.ForSignal(1000, 1, epoch2).Serialize(), false));
+        firstAnswer.SetResult(Payload(Epoch2, 1, 222));
         await delivery2.WaitAsync(TimeSpan.FromSeconds(10));
-        Assert.Equal(epoch2, mirror.Publication!.Epoch);
+        Assert.Equal(Epoch2, mirror.Publication!.Epoch);
 
         // ... superseding the newer restart's answer, which must be re-verified, not dropped.
-        secondAnswer.SetResult(new ValuePayload<int>(1000, epoch3, 1, 333, CausalityStamp.ForSignal(1000, 1, epoch3).Serialize(), false));
+        secondAnswer.SetResult(Payload(Epoch3, 1, 333));
         await delivery3.WaitAsync(TimeSpan.FromSeconds(10));
-        Assert.Equal(epoch3, mirror.Publication!.Epoch);
+        Assert.Equal(Epoch3, mirror.Publication!.Epoch);
         Assert.Equal(333, await mirror.Local.Get());
     }
 
@@ -875,9 +875,6 @@ public class DistributedPackageTests
         // epoch answered by that fresh-generation pull could commit. While the channel is
         // suspect, superseded stale answers are dropped without self-solicitation; a real
         // delivery (the repaired bridge's advertisement) still verifies and heals normally.
-        var epoch1 = 11L;
-        var epoch2 = 22L;
-        var epoch3 = 33L;
         var deadEpoch = 99L;
         var failHook = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var windowAnswer = new TaskCompletionSource<ValuePayload<int>>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -890,9 +887,9 @@ public class DistributedPackageTests
                 var n = Interlocked.Increment(ref pulls);
                 return n switch
                 {
-                    1 => Task.FromResult(new ValuePayload<int>(1000, epoch2, 1, 222, CausalityStamp.ForSignal(1000, 1, epoch2).Serialize(), false)),
+                    1 => Task.FromResult(Payload(Epoch2, 1, 222)),
                     2 => windowAnswer.Task,
-                    _ => Task.FromResult(new ValuePayload<int>(1000, epoch3, 1, 333, CausalityStamp.ForSignal(1000, 1, epoch3).Serialize(), false)),
+                    _ => Task.FromResult(Payload(Epoch3, 1, 333)),
                 };
             },
             onPeerReset: async () =>
@@ -904,9 +901,9 @@ public class DistributedPackageTests
                 }
             });
 
-        await mirror.OnValueAsync(new ValuePayload<int>(1000, epoch1, 5, 111, CausalityStamp.ForSignal(1000, 5, epoch1).Serialize(), false));
+        await mirror.OnValueAsync(Payload(Epoch1, 5, 111));
 
-        var delivery = mirror.OnValueAsync(new ValuePayload<int>(1000, epoch2, 1, 222, CausalityStamp.ForSignal(1000, 1, epoch2).Serialize(), false));
+        var delivery = mirror.OnValueAsync(Payload(Epoch2, 1, 222));
         await TestHelpers.WaitForConvergenceAsync(() => Volatile.Read(ref hookRuns) == 1);
 
         // A pull issued inside the window, still awaiting its answer when the hook fails.
@@ -916,15 +913,15 @@ public class DistributedPackageTests
 
         // The delayed in-window answer (a dead incarnation) arrives superseded: dropped, and
         // NOT re-verified -- no self-initiated pull touches the broken channel.
-        windowAnswer.SetResult(new ValuePayload<int>(1000, deadEpoch, 7, 999, CausalityStamp.ForSignal(1000, 7, deadEpoch).Serialize(), false));
+        windowAnswer.SetResult(Payload(deadEpoch, 7, 999));
         await windowPull.WaitAsync(TimeSpan.FromSeconds(10));
         await Task.Delay(100);
         Assert.Equal(2, Volatile.Read(ref pulls));
-        Assert.Equal(epoch2, mirror.Publication!.Epoch);
+        Assert.Equal(Epoch2, mirror.Publication!.Epoch);
 
         // The repaired bridge's advertisement heals normally (and re-trusts the channel).
-        await mirror.OnStaleAsync(new StaleNotification(1000, epoch3, 1, CausalityStamp.Empty.Serialize()));
-        Assert.Equal(epoch3, mirror.Publication!.Epoch);
+        await mirror.OnStaleAsync(Stale(Epoch3, 1));
+        Assert.Equal(Epoch3, mirror.Publication!.Epoch);
         Assert.Equal(333, await mirror.Local.Get());
     }
 
@@ -936,9 +933,6 @@ public class DistributedPackageTests
         // sets no pending verification: the single-shot advert would be lost and the mirror
         // pinned to the dead incarnation. The advert must be remembered and followed up by
         // the close's verification pull on the repaired channel.
-        var epoch1 = 11L;
-        var epoch2 = 22L;
-        var epoch3 = 33L;
         var releaseHook = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var channelRepaired = false;
         var hookRuns = 0;
@@ -951,8 +945,8 @@ public class DistributedPackageTests
                 // The un-resubscribed channel answers the CURRENT epoch; the repaired channel
                 // answers the live restarted incarnation.
                 return Task.FromResult(Volatile.Read(ref channelRepaired)
-                    ? new ValuePayload<int>(1000, epoch3, 1, 333, CausalityStamp.ForSignal(1000, 1, epoch3).Serialize(), false)
-                    : new ValuePayload<int>(1000, epoch2, 1, 222, CausalityStamp.ForSignal(1000, 1, epoch2).Serialize(), false));
+                    ? Payload(Epoch3, 1, 333)
+                    : Payload(Epoch2, 1, 222));
             },
             onPeerReset: async () =>
             {
@@ -963,22 +957,22 @@ public class DistributedPackageTests
                 }
             });
 
-        await mirror.OnValueAsync(new ValuePayload<int>(1000, epoch1, 5, 111, CausalityStamp.ForSignal(1000, 5, epoch1).Serialize(), false));
+        await mirror.OnValueAsync(Payload(Epoch1, 5, 111));
 
-        // First restart: the verification pull commits epoch2, hook 1 blocks (window open).
-        var delivery = mirror.OnValueAsync(new ValuePayload<int>(1000, epoch2, 1, 222, CausalityStamp.ForSignal(1000, 1, epoch2).Serialize(), false));
+        // First restart: the verification pull commits Epoch2, hook 1 blocks (window open).
+        var delivery = mirror.OnValueAsync(Payload(Epoch2, 1, 222));
         await TestHelpers.WaitForConvergenceAsync(() => Volatile.Read(ref hookRuns) == 1);
         var pullsBeforeAdvert = Volatile.Read(ref pulls);
 
         // The second restart's single-shot advertisement mid-window: remembered, NOT chased.
-        await mirror.OnStaleAsync(new StaleNotification(1000, epoch3, 1, CausalityStamp.Empty.Serialize()));
+        await mirror.OnStaleAsync(Stale(Epoch3, 1));
         Assert.Equal(pullsBeforeAdvert, Volatile.Read(ref pulls));
 
         releaseHook.SetResult();
         await delivery.WaitAsync(TimeSpan.FromSeconds(10));
 
         // The close's verification pull runs on the repaired channel and adopts the live epoch.
-        await TestHelpers.WaitForConvergenceAsync(() => mirror.Publication?.Epoch == epoch3);
+        await TestHelpers.WaitForConvergenceAsync(() => mirror.Publication?.Epoch == Epoch3);
         Assert.Equal(333, await mirror.Local.Get());
     }
 
@@ -989,9 +983,6 @@ public class DistributedPackageTests
         // that reset's OnPeerReset fails there is no delivering caller to surface to -- the
         // failure must land in LastBackgroundError instead of vanishing (the value is still
         // adopted, like every hook failure).
-        var epoch1 = 11L;
-        var epoch2 = 22L;
-        var epoch3 = 33L;
         var releaseFirstHook = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var hookRuns = 0;
         var pulls = 0;
@@ -1001,8 +992,8 @@ public class DistributedPackageTests
             {
                 var n = Interlocked.Increment(ref pulls);
                 return Task.FromResult(n == 1
-                    ? new ValuePayload<int>(1000, epoch2, 1, 222, CausalityStamp.ForSignal(1000, 1, epoch2).Serialize(), false)
-                    : new ValuePayload<int>(1000, epoch3, 1, 333, CausalityStamp.ForSignal(1000, 1, epoch3).Serialize(), false));
+                    ? Payload(Epoch2, 1, 222)
+                    : Payload(Epoch3, 1, 333));
             },
             onPeerReset: async () =>
             {
@@ -1014,20 +1005,20 @@ public class DistributedPackageTests
                 throw new InvalidOperationException("resubscribe to the newest incarnation failed");
             });
 
-        await mirror.OnValueAsync(new ValuePayload<int>(1000, epoch1, 5, 111, CausalityStamp.ForSignal(1000, 5, epoch1).Serialize(), false));
+        await mirror.OnValueAsync(Payload(Epoch1, 5, 111));
 
-        var delivery = mirror.OnValueAsync(new ValuePayload<int>(1000, epoch2, 1, 222, CausalityStamp.ForSignal(1000, 1, epoch2).Serialize(), false));
+        var delivery = mirror.OnValueAsync(Payload(Epoch2, 1, 222));
         await TestHelpers.WaitForConvergenceAsync(() => Volatile.Read(ref hookRuns) == 1);
 
         // A third incarnation's one-shot delivery is refused mid-window and remembered.
-        await mirror.OnValueAsync(new ValuePayload<int>(1000, epoch3, 1, 333, CausalityStamp.ForSignal(1000, 1, epoch3).Serialize(), false));
+        await mirror.OnValueAsync(Payload(Epoch3, 1, 333));
 
         releaseFirstHook.SetResult(); // hook 1 succeeds; the close queues the verification
         await delivery.WaitAsync(TimeSpan.FromSeconds(10));
 
-        // The queued verification adopts epoch3; its hook throws; the failure is recorded.
+        // The queued verification adopts Epoch3; its hook throws; the failure is recorded.
         await TestHelpers.WaitForConvergenceAsync(() => mirror.LastBackgroundError is InvalidOperationException);
-        Assert.Equal(epoch3, mirror.Publication!.Epoch);
+        Assert.Equal(Epoch3, mirror.Publication!.Epoch);
         Assert.Equal(333, await mirror.Local.Get());
     }
 
@@ -1038,9 +1029,6 @@ public class DistributedPackageTests
         // just reported broken, so closing the window must NOT actively pull it -- soliciting
         // it could commit exactly the stale answers the window exists to refuse. Recovery is
         // the bridge's own retry plus the next advertisement, which heals normally.
-        var epoch1 = 11L;
-        var epoch2 = 22L;
-        var epoch3 = 33L;
         var failFirstHook = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var hookRuns = 0;
         var pulls = 0;
@@ -1050,8 +1038,8 @@ public class DistributedPackageTests
             {
                 var n = Interlocked.Increment(ref pulls);
                 return Task.FromResult(n == 1
-                    ? new ValuePayload<int>(1000, epoch2, 1, 222, CausalityStamp.ForSignal(1000, 1, epoch2).Serialize(), false)
-                    : new ValuePayload<int>(1000, epoch3, 1, 333, CausalityStamp.ForSignal(1000, 1, epoch3).Serialize(), false));
+                    ? Payload(Epoch2, 1, 222)
+                    : Payload(Epoch3, 1, 333));
             },
             onPeerReset: async () =>
             {
@@ -1062,24 +1050,24 @@ public class DistributedPackageTests
                 }
             });
 
-        await mirror.OnValueAsync(new ValuePayload<int>(1000, epoch1, 5, 111, CausalityStamp.ForSignal(1000, 5, epoch1).Serialize(), false));
+        await mirror.OnValueAsync(Payload(Epoch1, 5, 111));
 
-        var delivery = mirror.OnValueAsync(new ValuePayload<int>(1000, epoch2, 1, 222, CausalityStamp.ForSignal(1000, 1, epoch2).Serialize(), false));
+        var delivery = mirror.OnValueAsync(Payload(Epoch2, 1, 222));
         await TestHelpers.WaitForConvergenceAsync(() => Volatile.Read(ref hookRuns) == 1);
 
         // A second restart's one-shot delivery is refused during the window...
-        await mirror.OnValueAsync(new ValuePayload<int>(1000, epoch3, 1, 333, CausalityStamp.ForSignal(1000, 1, epoch3).Serialize(), false));
+        await mirror.OnValueAsync(Payload(Epoch3, 1, 333));
 
         // ... and the hook then FAILS: the window closes without soliciting the broken channel.
         failFirstHook.SetResult();
         await Assert.ThrowsAsync<InvalidOperationException>(() => delivery.WaitAsync(TimeSpan.FromSeconds(10)));
         await Task.Delay(100); // no detached verification pull may sneak in
         Assert.Equal(1, Volatile.Read(ref pulls));
-        Assert.Equal(epoch2, mirror.Publication!.Epoch);
+        Assert.Equal(Epoch2, mirror.Publication!.Epoch);
 
         // The bridge repairs its channel; the next advertisement heals the mirror normally.
-        await mirror.OnStaleAsync(new StaleNotification(1000, epoch3, 1, CausalityStamp.Empty.Serialize()));
-        Assert.Equal(epoch3, mirror.Publication!.Epoch);
+        await mirror.OnStaleAsync(Stale(Epoch3, 1));
+        Assert.Equal(Epoch3, mirror.Publication!.Epoch);
         Assert.Equal(333, await mirror.Local.Get());
     }
 
@@ -1106,11 +1094,11 @@ public class DistributedPackageTests
                 1000, liveEpoch, hostSequence, hostValue, CausalityStamp.ForSignal(1000, hostSequence, liveEpoch).Serialize(), false));
         });
 
-        await mirror.OnValueAsync(new ValuePayload<int>(1000, liveEpoch, 1, 300, CausalityStamp.ForSignal(1000, 1, liveEpoch).Serialize(), false));
+        await mirror.OnValueAsync(Payload(liveEpoch, 1, 300));
         Assert.Equal(300, await mirror.Local.Get());
 
         // The delayed dead-incarnation payload: discarded, answered by one verification pull.
-        await mirror.OnValueAsync(new ValuePayload<int>(1000, deadEpoch, 7, 200, CausalityStamp.ForSignal(1000, 7, deadEpoch).Serialize(), false));
+        await mirror.OnValueAsync(Payload(deadEpoch, 7, 200));
         Assert.Equal(1, Volatile.Read(ref pulls));
         Assert.Equal(999, await mirror.Local.Get()); // the pull's answer, never the dead value
         Assert.Equal(liveEpoch, mirror.Publication!.Epoch);
@@ -1118,7 +1106,7 @@ public class DistributedPackageTests
         // The live epoch keeps flowing -- the mirror is not wedged.
         hostSequence = 3;
         hostValue = 1000;
-        await mirror.OnStaleAsync(new StaleNotification(1000, liveEpoch, 3, CausalityStamp.Empty.Serialize()));
+        await mirror.OnStaleAsync(Stale(liveEpoch, 3));
         Assert.Equal(1000, await mirror.Local.Get());
     }
 
@@ -1129,8 +1117,6 @@ public class DistributedPackageTests
         // still carries the live incarnation's truth, and no epoch change committed since it
         // was issued, so it must commit -- invalidating older pulls optimistically at issue
         // time would defer this recovery to an unrelated heartbeat or advertisement.
-        var epoch1 = 11L;
-        var epoch2 = 22L;
         var firstAnswer = new TaskCompletionSource<ValuePayload<int>>(TaskCreationOptions.RunContinuationsAsynchronously);
         var pulls = 0;
         var consumer = new MemoFactory();
@@ -1139,17 +1125,17 @@ public class DistributedPackageTests
                 ? firstAnswer.Task
                 : throw new InvalidOperationException("transport blip"));
 
-        await mirror.OnValueAsync(new ValuePayload<int>(1000, epoch1, 5, 111, CausalityStamp.ForSignal(1000, 5, epoch1).Serialize(), false));
+        await mirror.OnValueAsync(Payload(Epoch1, 5, 111));
 
         var olderPull = mirror.PullAsync();
         await Assert.ThrowsAsync<InvalidOperationException>(() => mirror.PullAsync());
 
         // The host restarted; the older pull's answer reflects the live incarnation.
-        firstAnswer.SetResult(new ValuePayload<int>(1000, epoch2, 1, 222, CausalityStamp.ForSignal(1000, 1, epoch2).Serialize(), false));
+        firstAnswer.SetResult(Payload(Epoch2, 1, 222));
         await olderPull.WaitAsync(TimeSpan.FromSeconds(10));
 
         Assert.Equal(222, await mirror.Local.Get());
-        Assert.Equal(epoch2, mirror.Publication!.Epoch);
+        Assert.Equal(Epoch2, mirror.Publication!.Epoch);
     }
 
     [Fact]
@@ -1167,7 +1153,7 @@ public class DistributedPackageTests
             () =>
             {
                 Interlocked.Increment(ref pulls);
-                return Task.FromResult(new ValuePayload<int>(1000, epoch, 9, 9, CausalityStamp.ForSignal(1000, 9, epoch).Serialize(), false));
+                return Task.FromResult(Payload(epoch, 9, 9));
             },
             nodeId: 1000);
 
@@ -1175,7 +1161,7 @@ public class DistributedPackageTests
             () => bound.OnValueAsync(new ValuePayload<int>(2000, epoch, 1, 5, CausalityStamp.ForSignal(2000, 1, epoch).Serialize(), false)));
         Assert.False(bound.HasEvidence);
 
-        await bound.OnValueAsync(new ValuePayload<int>(1000, epoch, 1, 10, CausalityStamp.ForSignal(1000, 1, epoch).Serialize(), false));
+        await bound.OnValueAsync(Payload(epoch, 1, 10));
         Assert.Equal(10, await bound.Local.Get());
 
         // A foreign advertisement on a broadcast bus is ignored, not treated as an error --
@@ -1185,8 +1171,8 @@ public class DistributedPackageTests
 
         // Without an explicit id, the first delivered payload pins the binding.
         var pinned = consumer.CreateRemoteSignal<int>("pinned", 0,
-            () => throw new InvalidOperationException("no pull in this test"));
-        await pinned.OnValueAsync(new ValuePayload<int>(1000, epoch, 1, 10, CausalityStamp.ForSignal(1000, 1, epoch).Serialize(), false));
+            NoPull);
+        await pinned.OnValueAsync(Payload(epoch, 1, 10));
         await Assert.ThrowsAsync<ArgumentException>(
             () => pinned.OnValueAsync(new ValuePayload<int>(2000, epoch, 2, 20, CausalityStamp.ForSignal(2000, 2, epoch).Serialize(), false)));
         Assert.Equal(10, await pinned.Local.Get());
@@ -1199,35 +1185,30 @@ public class DistributedPackageTests
         // stamps are vacuously consistent with anything -- the barrier must still refuse to
         // combine it with the other mirror's pre-restart state (the header epoch, not the
         // stamp, carries the incarnation identity), and must re-pull BOTH sides to converge.
-        var epoch1 = 11L;
-        var epoch2 = 22L;
         var consumer = new MemoFactory();
         var a = consumer.CreateRemoteSignal("a", 0,
-            () => Task.FromResult(new ValuePayload<int>(1000, epoch2, 1, 10, CausalityStamp.Empty.Serialize(), false)));
+            () => Task.FromResult(new ValuePayload<int>(1000, Epoch2, 1, 10, CausalityStamp.Empty.Serialize(), false)));
         var b = consumer.CreateRemoteSignal("b", 0,
-            () => Task.FromResult(new ValuePayload<int>(1001, epoch2, 1, 20, CausalityStamp.ForSignal(1001, 1, epoch2).Serialize(), false)));
+            () => Task.FromResult(new ValuePayload<int>(1001, Epoch2, 1, 20, CausalityStamp.ForSignal(1001, 1, Epoch2).Serialize(), false)));
 
-        var renders = new List<(int A, int B)>();
+        var renders = new ConcurrentQueue<(int A, int B)>();
         var reaction = DistributedBarrier.CreateConsistentReaction(
-            consumer, a, b, (va, vb) => { lock (renders) { renders.Add((va, vb)); } });
+            consumer, a, b, (va, vb) => renders.Enqueue((va, vb)));
 
         // Pre-restart snapshot: disjoint verified stamps of the same incarnation.
-        await a.OnValueAsync(new ValuePayload<int>(1000, epoch1, 1, 1, CausalityStamp.ForSignal(1000, 1, epoch1).Serialize(), false));
-        await b.OnValueAsync(new ValuePayload<int>(1001, epoch1, 1, 2, CausalityStamp.ForSignal(1001, 1, epoch1).Serialize(), false));
-        await TestHelpers.WaitForConvergenceAsync(() => { lock (renders) { return renders.Contains((1, 2)); } });
+        await a.OnValueAsync(Payload(Epoch1, 1, 1));
+        await b.OnValueAsync(new ValuePayload<int>(1001, Epoch1, 1, 2, CausalityStamp.ForSignal(1001, 1, Epoch1).Serialize(), false));
+        await TestHelpers.WaitForConvergenceAsync(() => renders.Contains((1, 2)));
 
         // The restart: only mirror a receives the new incarnation's (empty-stamped) truth.
-        await a.OnValueAsync(new ValuePayload<int>(1000, epoch2, 1, 10, CausalityStamp.Empty.Serialize(), false));
+        await a.OnValueAsync(new ValuePayload<int>(1000, Epoch2, 1, 10, CausalityStamp.Empty.Serialize(), false));
 
         // The barrier re-pulls both sides itself and renders the post-restart snapshot.
-        await TestHelpers.WaitForConvergenceAsync(() => { lock (renders) { return renders.Contains((10, 20)); } });
+        await TestHelpers.WaitForConvergenceAsync(() => renders.Contains((10, 20)));
 
         // Cross-incarnation mixes must never have rendered.
-        lock (renders)
-        {
-            Assert.DoesNotContain((10, 2), renders);
-            Assert.DoesNotContain((1, 20), renders);
-        }
+        Assert.DoesNotContain((10, 2), renders);
+        Assert.DoesNotContain((1, 20), renders);
         GC.KeepAlive(reaction);
     }
 
@@ -1253,32 +1234,32 @@ public class DistributedPackageTests
         var qMirror = consumer.CreateRemoteSignal("q", 0, qExport.PullAsync);
         var cMirror = consumer.CreateRemoteSignal("c", 0, cExport.PullAsync);
 
-        var renders = new List<(int Q, int C)>();
+        var renders = new ConcurrentQueue<(int Q, int C)>();
         var reaction = DistributedBarrier.CreateConsistentReaction(
-            consumer, qMirror, cMirror, (vq, vc) => { lock (renders) { renders.Add((vq, vc)); } });
+            consumer, qMirror, cMirror, (vq, vc) => renders.Enqueue((vq, vc)));
 
         await qMirror.PullAsync();
         await cMirror.PullAsync();
-        await TestHelpers.WaitForConvergenceAsync(() => { lock (renders) { return renders.Contains((4, 20)); } });
+        await TestHelpers.WaitForConvergenceAsync(() => renders.Contains((4, 20)));
 
         // s: 4 -> 5. q recomputes (4 -> 5, fresh stamp); half recomputes to the SAME 2, so c's
         // scan skips the recompute and keeps its old stamp and sequence. Deliver only q's
         // update: the barrier sees the spurious glitch, re-pulls, both hosts affirm, renders.
         await s.Set(5);
         await qMirror.PullAsync();
-        await TestHelpers.WaitForConvergenceAsync(() => { lock (renders) { return renders.Contains((5, 20)); } });
+        await TestHelpers.WaitForConvergenceAsync(() => renders.Contains((5, 20)));
 
         // The pair moves on with a REAL change (both sides advance consistently), which
         // expires the affirmation ...
         await s.Set(6); // half: 2 -> 3, so c recomputes too
         await qMirror.PullAsync();
         await cMirror.PullAsync();
-        await TestHelpers.WaitForConvergenceAsync(() => { lock (renders) { return renders.Contains((6, 30)); } });
+        await TestHelpers.WaitForConvergenceAsync(() => renders.Contains((6, 30)));
 
         // ... and a NEW under-claim glitch earns its own heal round and still converges.
         await s.Set(7); // half stays 3: c scan-skips again
         await qMirror.PullAsync();
-        await TestHelpers.WaitForConvergenceAsync(() => { lock (renders) { return renders.Contains((7, 30)); } });
+        await TestHelpers.WaitForConvergenceAsync(() => renders.Contains((7, 30)));
         GC.KeepAlive(reaction);
     }
 
@@ -1301,20 +1282,20 @@ public class DistributedPackageTests
         var raceMirror = consumer.CreateRemoteSignal("race", 0, raceExport.PullAsync);
         var cMirror = consumer.CreateRemoteSignal("c", 0, cExport.PullAsync);
 
-        var renders = new List<(int Race, int C)>();
+        var renders = new ConcurrentQueue<(int Race, int C)>();
         var reaction = DistributedBarrier.CreateConsistentReaction(
-            consumer, raceMirror, cMirror, (r, v) => { lock (renders) { renders.Add((r, v)); } });
+            consumer, raceMirror, cMirror, (r, v) => renders.Enqueue((r, v)));
 
         await raceMirror.PullAsync();
         await cMirror.PullAsync();
-        await TestHelpers.WaitForConvergenceAsync(() => { lock (renders) { return renders.Contains((4, 20)); } });
+        await TestHelpers.WaitForConvergenceAsync(() => renders.Contains((4, 20)));
 
         // s: 4 -> 5. The race re-evaluates to 5 with a fresh stamp; c's scan-skip keeps its
         // old stamp. Deliver only the race's update: a spurious glitch whose every re-pull of
         // the race answers equal content under a new sequence -- it must still affirm.
         await s.Set(5);
         await raceMirror.PullAsync();
-        await TestHelpers.WaitForConvergenceAsync(() => { lock (renders) { return renders.Contains((5, 20)); } });
+        await TestHelpers.WaitForConvergenceAsync(() => renders.Contains((5, 20)));
         GC.KeepAlive(reaction);
     }
 
@@ -1335,26 +1316,23 @@ public class DistributedPackageTests
         var dewMirror = consumer.CreateRemoteSignal("dew", 0.0, dewExport.PullAsync);
         var heatMirror = consumer.CreateRemoteSignal("heat", 0.0, heatExport.PullAsync);
 
-        var renders = new List<(double Dew, double Heat)>();
-        var reported = new List<Exception>();
+        var renders = new ConcurrentQueue<(double Dew, double Heat)>();
+        var reported = new ConcurrentQueue<Exception>();
         var reaction = DistributedBarrier.CreateConsistentReaction(
             consumer, dewMirror, heatMirror,
-            (d, h) => { lock (renders) { renders.Add((d, h)); } },
-            onRepullError: ex => { lock (reported) { reported.Add(ex); } },
+            (d, h) => renders.Enqueue((d, h)),
+            onRepullError: reported.Enqueue,
             onGlitch: (_, _) => throw new InvalidOperationException("glitch sink down"));
 
         await dewMirror.PullAsync();
         await heatMirror.PullAsync();
-        await TestHelpers.WaitForConvergenceAsync(() => { lock (renders) { return renders.Contains((15.0, 25.0)); } });
+        await TestHelpers.WaitForConvergenceAsync(() => renders.Contains((15.0, 25.0)));
 
         await temperature.Set(30.0);
         await dewMirror.OnValueAsync(await dewExport.PullAsync());
 
-        await TestHelpers.WaitForConvergenceAsync(() => { lock (renders) { return renders.Contains((25.0, 35.0)); } });
-        lock (reported)
-        {
-            Assert.Contains(reported, ex => ex is InvalidOperationException { Message: "glitch sink down" });
-        }
+        await TestHelpers.WaitForConvergenceAsync(() => renders.Contains((25.0, 35.0)));
+        Assert.Contains(reported, ex => ex is InvalidOperationException { Message: "glitch sink down" });
         GC.KeepAlive(reaction);
     }
 

@@ -17,70 +17,60 @@ internal static class MirrorLocals
 
     private static readonly ConditionalWeakTable<SignalHandlR, object> Registry = new();
     private static readonly object Present = new();
+    private static volatile bool anyRegistered;
 
-    internal static void Register(SignalHandlR local) => Registry.AddOrUpdate(local, Present);
+    internal static void Register(SignalHandlR local)
+    {
+        Registry.AddOrUpdate(local, Present);
+        anyRegistered = true;
+    }
 
     internal static bool IsMirrorLocal(SignalHandlR node) => Registry.TryGetValue(node, out _);
 
     // Whether the node is a mirror local or (transitively) depends on one: a memo built over a
     // mirror carries stamps captured from the consumer-local trigger, so re-exporting it is
-    // the same unsoundness one hop removed. Walks the CURRENT wiring from BOTH ends -- a lazy
-    // memo has none until its first evaluation, which is why the pull re-checks at the wire
-    // egress.
-    internal static bool TouchesMirrorLocal(SignalHandlR node)
-    {
-        return IsMirrorLocal(node) || SourcesTouchMirrorLocal(node) || ObservedByMirrorLocal(node);
-    }
+    // the same unsoundness one hop removed. Walks the CURRENT wiring from both ends: a memo
+    // wires source up-links, but a ConcurrentRace wires observer down-links only (its update
+    // never populates its own Sources), so the source walk alone cannot see through a race. A
+    // lazy memo has no wiring until its first evaluation, which is why the pull re-checks at
+    // the wire egress. A pure host (no mirror ever created) pays one field read per pull.
+    internal static bool TouchesMirrorLocal(SignalHandlR node) =>
+        anyRegistered
+        && (IsMirrorLocal(node)
+            || Reaches([node], n => n.Sources.OfType<SignalHandlR>(), IsMirrorLocal)
+            || Reaches(Registry.Select(entry => entry.Key), Observed, n => ReferenceEquals(n, node)));
 
-    private static bool SourcesTouchMirrorLocal(SignalHandlR node)
+    private static IEnumerable<SignalHandlR> Observed(SignalHandlR node)
     {
-        var visited = new HashSet<SignalHandlR>();
-        var pending = new Stack<SignalHandlR>();
-        pending.Push(node);
-        while (pending.Count > 0)
+        foreach (var weak in node.Observers)
         {
-            foreach (var source in pending.Pop().Sources)
+            if (weak.TryGetTarget(out var observer) && observer is SignalHandlR handle)
             {
-                if (source is SignalHandlR handle && visited.Add(handle))
-                {
-                    if (IsMirrorLocal(handle))
-                    {
-                        return true;
-                    }
-                    pending.Push(handle);
-                }
+                yield return handle;
             }
         }
-        return false;
     }
 
-    // The observer-side half of the same walk: a ConcurrentRace consumes its inputs without
-    // ever populating its own Sources (its update publishes without rewiring source links; it
-    // registers on the input as an OBSERVER only), so the source walk cannot see through it.
-    // The observer down-links carry the missing direction -- walk DOWN from every live mirror
-    // local and refuse when the exported node is reachable. The registry stays small (one
-    // entry per live mirror) and observer fans are the consumer's own graph, so the sweep is
-    // cheap at export/pull frequency.
-    private static bool ObservedByMirrorLocal(SignalHandlR node)
+    private static bool Reaches(
+        IEnumerable<SignalHandlR> seeds,
+        Func<SignalHandlR, IEnumerable<SignalHandlR>> next,
+        Func<SignalHandlR, bool> hit)
     {
         var visited = new HashSet<SignalHandlR>();
-        var pending = new Stack<SignalHandlR>();
-        foreach (var (local, _) in Registry)
+        var pending = new Stack<SignalHandlR>(seeds);
+        while (pending.TryPop(out var current))
         {
-            pending.Push(local);
-        }
-        while (pending.Count > 0)
-        {
-            foreach (var weak in pending.Pop().Observers)
+            foreach (var neighbour in next(current))
             {
-                if (weak.TryGetTarget(out var observer) && observer is SignalHandlR handle && visited.Add(handle))
+                if (!visited.Add(neighbour))
                 {
-                    if (ReferenceEquals(handle, node))
-                    {
-                        return true;
-                    }
-                    pending.Push(handle);
+                    continue;
                 }
+                if (hit(neighbour))
+                {
+                    return true;
+                }
+                pending.Push(neighbour);
             }
         }
         return false;

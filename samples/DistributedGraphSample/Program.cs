@@ -117,7 +117,6 @@ await dewMirror.OnValueAsync(staleDewPayload);
 Console.WriteLine($"   [B] dewMirror still {await dewMirror.Local.Get():F2} (dead-incarnation delivery dropped)");
 
 Console.WriteLine("\ndone.");
-GC.KeepAlive(comfort);
 
 // ───────────────────────── demo plumbing ─────────────────────────
 
@@ -139,18 +138,16 @@ sealed class AdvertisementBuffer
 
     public async Task<StaleNotification> WaitForAdvertisementAfter(int nodeId, long sequence)
     {
-        for (var i = 0; i < 500; i++)
+        await Poll.UntilAsync(() => LatestAfter(nodeId, sequence) != null, "the export did not advertise");
+        return LatestAfter(nodeId, sequence)!;
+    }
+
+    private StaleNotification? LatestAfter(int nodeId, long sequence)
+    {
+        lock (latest)
         {
-            lock (latest)
-            {
-                if (latest.TryGetValue(nodeId, out var advertisement) && advertisement.Sequence > sequence)
-                {
-                    return advertisement;
-                }
-            }
-            await Task.Delay(10);
+            return latest.TryGetValue(nodeId, out var advertisement) && advertisement.Sequence > sequence ? advertisement : null;
         }
-        throw new TimeoutException("the export did not advertise");
     }
 }
 
@@ -168,19 +165,25 @@ sealed class RenderLog
         }
     }
 
-    public async Task WaitFor(double dew, double heat)
+    public Task WaitFor(double dew, double heat) =>
+        Poll.UntilAsync(() => { lock (rendered) { return rendered.Contains((dew, heat)); } },
+            $"the barrier never rendered ({dew:F2}, {heat:F2})");
+}
+
+// The demo's one synchronization primitive: the bridge is asynchronous end to end, so the
+// script polls for the state it narrates instead of assuming delivery order.
+static class Poll
+{
+    public static async Task UntilAsync(Func<bool> condition, string timeoutMessage)
     {
         for (var i = 0; i < 500; i++)
         {
-            lock (rendered)
+            if (condition())
             {
-                if (rendered.Contains((dew, heat)))
-                {
-                    return;
-                }
+                return;
             }
             await Task.Delay(10);
         }
-        throw new TimeoutException($"the barrier never rendered ({dew:F2}, {heat:F2})");
+        throw new TimeoutException(timeoutMessage);
     }
 }

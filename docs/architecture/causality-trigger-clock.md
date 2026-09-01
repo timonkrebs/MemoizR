@@ -8,8 +8,9 @@ locking layers already guarantee glitch-freedom (see
 [concurrency.md](concurrency.md)); stamps make that property *checkable* where locks cannot
 reach — across process boundaries, in dynamically changing graphs.
 
-A runnable two-peer bridge built on this — the stale/pull protocol, the glitch barrier,
-late-delivery dropping and reset detection — lives in
+The bridge layer built on this — the stale/pull protocol, remote-signal adoption (sequence
+ordering, epochs, unverifiability) and the self-healing glitch barrier — is the
+`MemoizR.Distributed` package (section 5c); a runnable two-peer demo of it lives in
 [samples/DistributedGraphSample](../../samples/DistributedGraphSample).
 
 Phase 1 delivers the semantics: node identity, per-signal trigger counters, per-node stamps
@@ -175,7 +176,10 @@ concurrency.md §7 covers the whole snapshot unchanged — no reader can ever pa
 with an old stamp (`GetWithStamp_ReturnsThePairOfOnePublication` stresses this through the
 public read path) or a fresh `Stamp` with the previous evaluation's `SourceStamps`. The
 per-source map is wrapped read-only before it becomes reachable, so the public reference cannot
-be downcast and mutated (`PublishedEvidence_CannotBeMutatedThroughThePublicSurface`).
+be downcast and mutated (`PublishedEvidence_CannotBeMutatedThroughThePublicSurface`). The box
+also carries the node's **publication sequence** — a plain increment on the publishing flow,
+since a node is never both a signal and a recompute — the per-node total order stamps
+deliberately do not provide (section 5c).
 
 Signal trigger bumps are a read-modify-write of that box under the signal's own `Lock`,
 **including the value-unchanged check** — the same monitor serializes racing `Set` flows, so a
@@ -245,6 +249,37 @@ agree on it (a mismatch throws at construction), because a context where only so
 evidence would publish stamps silently omitting real dependencies — over-claiming, the one
 thing §2 forbids. And a disabled context must not be exported to peers: its advertisements
 would carry no ordering evidence at all.
+
+## 5c. The bridge layer v0: `MemoizR.Distributed`
+
+The package is a friend assembly that puts the sync-layer pieces of section 5 on the wire
+without changing the core's claims:
+
+- **Ordering is the publication sequence, not the stamp.** Every payload carries the node's
+  sequence (section 4) beside the stamp; within one incarnation the sequence totally orders
+  deliveries, including the shapes stamps cannot order (a dependency set oscillating through
+  empty re-publishes an earlier stamp on a newer value) and equally during unverifiable
+  spells (a recovery is a new publication). Incarnations are random **epochs**, never
+  compared for order: an epoch change is committed only through the mirror's own latest pull,
+  because a delayed payload from a skipped dead incarnation is indistinguishable by
+  inspection from a live restart.
+- **Pulls answer the host's current best claim.** The core's conservative under-claims can
+  make a lazily-clean node keep a no-claim (unverifiable) or fault-parked publication
+  indefinitely, and re-serving it would be duplicate-dropped by every mirror forever; a pull
+  that observes either shape forces one fresh evaluation of the suspect chain through the
+  ordinary invalidation entry — exactly what an upstream write would do — and answers with
+  the outcome, honestly unverifiable if the spell is live.
+- **The barrier renders only consistent, verified snapshots — and affirms under-claims.**
+  Each mirror exposes value and evidence as one atomic publication; the barrier compares
+  epochs first (an honestly-empty stamp is epoch-agnostic) and stamps second, and re-pulls
+  the lagging side itself. A re-pull round that changes nothing on either side is both hosts
+  affirming the pair: the disagreement is then the documented conservative stamp, not a lag,
+  and the pair renders — otherwise a value-insensitive derivation would block rendering
+  until an unrelated value change.
+- **Re-exporting a mirror is refused.** A mirror's local stamps are peer-local; until
+  wire-format v3 splices origin evidence into local stamps, a re-exported mirror would
+  advertise consumer-local triggers as evidence and a downstream barrier would render torn
+  origin snapshots as consistent.
 
 ## 6. The encoding (phase 2): a canonical event tree
 

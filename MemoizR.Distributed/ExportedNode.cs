@@ -57,8 +57,7 @@ public sealed class ExportedNode<T> : IDisposable
             throw new InvalidOperationException(MirrorLocals.ReExportMessage);
         }
 
-        var (value, evidence, sequence) = node.ValueEvidenceAndSequence;
-        if (evidence.Unverifiable || node.stateCell.State != CacheState.CacheClean)
+        if (node.Evidence.Unverifiable || node.stateCell.State != CacheState.CacheClean)
         {
             // Two shapes the plain read cannot answer honestly, both cured by ONE fresh
             // evaluation of the suspect chain (through the ordinary invalidation entry --
@@ -85,8 +84,8 @@ public sealed class ExportedNode<T> : IDisposable
             // returns with the next value-changing publication.
             await RefreshUnverifiableChainAsync(node);
             await node.ReadWithEvidence();
-            (value, evidence, sequence) = node.ValueEvidenceAndSequence;
         }
+        var (value, evidence, sequence) = node.ValueEvidenceAndSequence;
         return new ValuePayload<T>(node.Id, node.Context.Epoch, sequence, value, evidence.Stamp.Serialize(), evidence.Unverifiable);
     }
 
@@ -150,19 +149,7 @@ public sealed class ExportedNode<T> : IDisposable
         // signal (an outbox, a local mirror) would inherit that scope and be refused as a
         // recursive exclusive acquisition -- the advertisement silently lost to
         // LastPublishError until the next value change or heartbeat.
-        DetachedFlow.Run(() => PublishSafelyAsync(notification));
-    }
-
-    private async Task PublishSafelyAsync(StaleNotification notification)
-    {
-        try
-        {
-            await publishStale(notification);
-        }
-        catch (Exception ex)
-        {
-            lastPublishError = ex;
-        }
+        DetachedFlow.Run(() => publishStale(notification), ex => lastPublishError = ex);
     }
 
     /// <summary>

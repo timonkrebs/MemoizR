@@ -1,3 +1,5 @@
+using Nito.AsyncEx;
+
 namespace MemoizR.Distributed;
 
 /// <summary>
@@ -53,48 +55,47 @@ public sealed record AdoptedPublication<T>(T Value, long Epoch, CausalityStamp S
 /// </summary>
 public sealed class RemoteSignal<T>
 {
-    private readonly SemaphoreSlim adoptionGate = new(1, 1);
+    private readonly AsyncLock adoptionGate = new();
     private readonly Func<Task<ValuePayload<T>>> pull;
     private readonly HashSet<long> abandonedEpochs = [];
     private readonly EagerRelativeSignal<T> local;
-    private int expectedNodeId;
-    private bool nodeIdPinned;
-    private long currentEpoch;
+    private int? boundNodeId;
     private long lastSequence;
+    private volatile AdoptedPublication<T>? publication;
+    private volatile Exception? lastBackgroundError;
+
     // Incremented when any epoch change commits (a reset or the first-contact pin), and again
     // when a reset's resubscription window closes. A pull captures the generation at issue,
-    // and its answer may commit an epoch change only if the generation is unchanged -- i.e. no
-    // epoch change committed since the pull was issued, so a delayed response from a pull
-    // issued before the mirror learned the current incarnation can never abandon it.
-    // Deliberately NOT bumped at pull issue: overlapping verification pulls must not
-    // invalidate each other optimistically, or a failed newer pull would strand an older
-    // pull's perfectly live answer until a heartbeat retries.
+    // and its answer may commit an epoch change only if the generation is unchanged -- so a
+    // delayed response from a pull issued before the mirror learned the current incarnation
+    // can never abandon it. Deliberately NOT bumped at pull issue: overlapping verification
+    // pulls must not invalidate each other optimistically, or a failed newer pull would strand
+    // an older pull's perfectly live answer until a heartbeat retries.
     private long epochGeneration;
 
-    // Gate-guarded: true from a reset's commit until its OnPeerReset attempt finished. While a
-    // resubscription is in flight the pull channel may still point at the dead incarnation, so
-    // epoch-changing answers are refused outright; closing the window bumps the generation so
-    // pulls ISSUED inside it can never commit later either. Mirrors without a hook never open
-    // the window: declaring no resubscription means the channel is address-stable, and a fresh
-    // pull's answer always reflects whoever is actually alive.
-    private bool resettling;
+    // Gate-guarded trust in the pull channel (see the reset bullet of the class doc). Only
+    // these four states are reachable: a refused epoch exists only inside a window, and a
+    // window can only open from a trusted or suspect channel. Mirrors without a hook stay
+    // Trusted forever -- declaring no resubscription means the channel is address-stable, so
+    // a fresh pull's answer always reflects whoever is actually alive.
+    private enum ChannelState
+    {
+        Trusted,
+        // The last window closed on a FAILED hook: the channel may still be routed to a dead
+        // incarnation, so superseded stale answers (zero fresh evidence) never solicit it.
+        Suspect,
+        // A reset committed and its OnPeerReset is in flight: epoch-changing answers are
+        // refused, since they may have travelled the not-yet-resubscribed channel.
+        Resettling,
+        // ... and an epoch change was refused (or a foreign restart advertised) meanwhile:
+        // closing the window follows it up with one verification pull.
+        ResettlingRefusedEpoch,
+    }
+    private ChannelState channel;
 
-    // Gate-guarded: an epoch change was refused -- or a foreign-epoch restart was ADVERTISED
-    // -- while the window was open (the peer restarted again mid-resubscription). Closing the
-    // window answers it with one verification pull; the refused delivery or advertisement may
-    // have been that incarnation's only announcement.
-    private bool pendingEpochVerification;
+    private enum AdoptionVerdict { Drop, Adopt, AdoptReset, VerifyByPull }
 
-    // Gate-guarded: the last resubscription window closed on a FAILED hook, so the pull
-    // channel may still be routed to a dead incarnation. While suspect, the mirror never
-    // initiates verification pulls from superseded stale answers (zero fresh evidence) -- a
-    // broken channel answering a self-solicited pull with a dead epoch could commit it and
-    // abandon the live one. Cleared by the next successful resubscription or by any pull
-    // answer that gets adopted (the channel demonstrably served accepted truth); fresh pulls
-    // triggered by real deliveries stay allowed, so a repaired bridge heals normally.
-    private bool pullChannelSuspect;
-
-    private volatile Exception? lastBackgroundError;
+    private long CurrentEpoch => publication?.Epoch ?? 0;
 
     /// <summary>
     /// The last error a background recovery step threw -- the queued verification pull after
@@ -106,9 +107,6 @@ public sealed class RemoteSignal<T>
     /// retries.
     /// </summary>
     public Exception? LastBackgroundError => lastBackgroundError;
-    private volatile AdoptedPublication<T>? publication;
-
-    private enum AdoptionVerdict { Drop, Adopt, AdoptReset, VerifyByPull }
 
     /// <summary>
     /// The local signal carrying the mirrored value: wire reactions and memos to this. It is
@@ -145,30 +143,18 @@ public sealed class RemoteSignal<T>
     /// (re-entering the adoption path), and if it throws, the failure surfaces to the
     /// delivering caller while the value stays adopted -- redeliveries drop as duplicates and
     /// only the resubscription itself needs retrying. Hook runs are SINGLE-FLIGHT: while one
-    /// is in flight, no further epoch change can commit (refused deliveries are re-verified by
-    /// pull once the resubscription attempt finishes), so back-to-back restarts run their
-    /// hooks strictly in sequence. The abandoned-epoch set stays bounded by the number of
-    /// restarts this mirror lived through.
+    /// is in flight, no further epoch change can commit, so back-to-back restarts run their
+    /// hooks strictly in sequence. A reset is observed per mirror: a restarted host invalidates
+    /// every mirror of it, and the bridge resubscribes them together. The abandoned-epoch set
+    /// stays bounded by the number of restarts this mirror lived through.
     /// </summary>
     public Func<Task>? OnPeerReset { get; init; }
-
-    // Re-run downstream reactions on the CURRENT value and publication: the barrier's
-    // affirmation path needs a graph trigger after a re-pull round that adopted nothing (an
-    // eager relative signal always propagates, even for an identical value). Harmless against
-    // concurrent adoptions -- the publication swap rides inside the adopting Set's own
-    // exclusive-locked callback, so this republication observes either the old or the new
-    // snapshot whole, never a torn one.
-    internal Task RepublishLocalAsync() => local.Set(value => value);
 
     internal RemoteSignal(EagerRelativeSignal<T> local, Func<Task<ValuePayload<T>>> pull, int? nodeId)
     {
         this.local = local;
         this.pull = pull;
-        if (nodeId is { } id)
-        {
-            expectedNodeId = id;
-            nodeIdPinned = true;
-        }
+        boundNodeId = nodeId;
     }
 
     /// <summary>Pull the host's current truth and adopt it (subject to the ordering rules).</summary>
@@ -183,41 +169,31 @@ public sealed class RemoteSignal<T>
     /// different epoch (a reset is discovered on the pulled payload), a sequence above the
     /// last adopted one, or any advertisement at all while the mirror is unverifiable. An
     /// advertisement for a different node than this mirror is bound to is ignored (a fan-out
-    /// bus may broadcast advertisements; only value adoption treats misrouting as an error).
-    /// A restart advertised while a resubscription window is open is remembered instead of
-    /// chased: a mid-window pull may still travel the not-yet-resubscribed channel and answer
-    /// with the old epoch (or fault), silently discarding a single-shot advertisement -- the
-    /// window's closing verification pull follows it up on the repaired channel.
+    /// bus may broadcast advertisements; only value adoption treats misrouting as an error),
+    /// and a restart advertised while a resubscription window is open is remembered for the
+    /// window's closing verification pull instead of chased on the not-yet-resubscribed channel.
     /// </summary>
     public async Task OnStaleAsync(StaleNotification notification)
     {
         ArgumentNullException.ThrowIfNull(notification);
         bool shouldPull;
-        await adoptionGate.WaitAsync();
-        try
+        using (await adoptionGate.LockAsync())
         {
-            if (nodeIdPinned && notification.NodeId != expectedNodeId)
+            var foreignLiveEpoch = notification.Epoch != CurrentEpoch && !abandonedEpochs.Contains(notification.Epoch);
+            if (boundNodeId is { } bound && notification.NodeId != bound)
             {
                 shouldPull = false;
             }
-            else if (resettling
-                && !abandonedEpochs.Contains(notification.Epoch)
-                && notification.Epoch != currentEpoch)
+            else if (foreignLiveEpoch && channel is ChannelState.Resettling or ChannelState.ResettlingRefusedEpoch)
             {
-                // The advertisement itself is the restart evidence; keep it for the close.
-                pendingEpochVerification = true;
+                channel = ChannelState.ResettlingRefusedEpoch; // the advertisement is the restart evidence
                 shouldPull = false;
             }
             else
             {
-                shouldPull = (publication?.Unverifiable ?? false)
-                    || (!abandonedEpochs.Contains(notification.Epoch)
-                        && (notification.Epoch != currentEpoch || notification.Sequence > lastSequence));
+                shouldPull = Unverifiable || foreignLiveEpoch
+                    || (notification.Epoch == CurrentEpoch && notification.Sequence > lastSequence);
             }
-        }
-        finally
-        {
-            adoptionGate.Release();
         }
 
         if (shouldPull)
@@ -240,8 +216,7 @@ public sealed class RemoteSignal<T>
         var incoming = ValidateProtocol(payload);
 
         AdoptionVerdict verdict;
-        await adoptionGate.WaitAsync();
-        try
+        using (await adoptionGate.LockAsync())
         {
             verdict = Classify(payload, pulledAtGeneration);
             if (verdict is AdoptionVerdict.Adopt or AdoptionVerdict.AdoptReset)
@@ -256,23 +231,16 @@ public sealed class RemoteSignal<T>
                     // to acquire at all (a bridge delivering from a same-context reaction flow
                     // is refused as a recursive acquisition) leaves the ordering untouched --
                     // the redelivery must adopt, not be duplicate-dropped against a sequence
-                    // the graph never published. The callback still runs inside the adoption
-                    // gate, so the ordering fields stay gate-consistent for Classify/OnStale.
+                    // the graph never published.
                     publication = CommitOrdering(payload, incoming, isReset);
                     return payload.Value;
                 });
 
-                if (pulledAtGeneration is not null)
+                if (pulledAtGeneration is not null && channel == ChannelState.Suspect)
                 {
-                    // The pull channel served an answer this mirror adopted: demonstrably
-                    // healthy again, so mirror-initiated re-verification is re-enabled.
-                    pullChannelSuspect = false;
+                    channel = ChannelState.Trusted; // the channel served an answer this mirror adopted
                 }
             }
-        }
-        finally
-        {
-            adoptionGate.Release();
         }
 
         if (verdict == AdoptionVerdict.VerifyByPull)
@@ -281,10 +249,9 @@ public sealed class RemoteSignal<T>
             return;
         }
 
-        // The resubscription hook runs with the adoption fully committed and the gate free: a
-        // hook that pulls or feeds this same mirror re-enters cleanly instead of deadlocking on
-        // the gate, and a hook that throws cannot leave the ordering state claiming a value the
-        // local signal never published.
+        // The hook runs with the adoption fully committed and the gate free, so it may
+        // re-enter this mirror; its window closes whether it succeeded or threw (either way
+        // the delivering caller knows).
         if (verdict == AdoptionVerdict.AdoptReset && OnPeerReset != null)
         {
             var resubscribed = false;
@@ -300,53 +267,27 @@ public sealed class RemoteSignal<T>
         }
     }
 
-    // The resubscription attempt is over (success or failure -- either way the delivering
-    // caller knows): close the window and invalidate every pull issued inside it, whose
-    // answers may have travelled the dead incarnation's channel. Windows are SINGLE-FLIGHT by
-    // construction -- while one is open, no epoch change can commit, so no second hook can
-    // start -- which is what makes this unconditional close pair 1:1 with the hook invocation
-    // that opened the window (no per-reset window identity needed). If an epoch change was
-    // refused while the window was open, verify it now on a detached best-effort pull: that
-    // refusal may have been the dead-epoch delivery's ONLY advertisement (no heartbeat), and
-    // dropping it silently would pin the mirror to a dead incarnation. Only after a SUCCESSFUL
-    // resubscription, though: a failed hook just reported the channel broken, and actively
-    // pulling it would solicit exactly the stale answers the window exists to refuse --
-    // recovery is then the bridge's own retry plus the next advertisement or heartbeat.
+    // Closes the window and invalidates every pull issued inside it. A refused epoch change
+    // is followed up with one detached verification pull -- only after a SUCCESSFUL
+    // resubscription: a failed hook just reported the channel broken, and actively pulling it
+    // would solicit exactly the stale answers the window exists to refuse; recovery is then
+    // the bridge's own retry plus the next advertisement or heartbeat.
     private async Task CloseResettlingWindowAsync(bool resubscribed)
     {
         bool verify;
-        await adoptionGate.WaitAsync();
-        try
+        using (await adoptionGate.LockAsync())
         {
-            resettling = false;
-            verify = pendingEpochVerification && resubscribed;
-            pendingEpochVerification = false;
-            pullChannelSuspect = !resubscribed;
+            verify = channel == ChannelState.ResettlingRefusedEpoch && resubscribed;
+            channel = resubscribed ? ChannelState.Trusted : ChannelState.Suspect;
             Interlocked.Increment(ref epochGeneration);
-        }
-        finally
-        {
-            adoptionGate.Release();
         }
 
         if (verify)
         {
-            DetachedFlow.Run(async () =>
-            {
-                try
-                {
-                    await PullAsync();
-                }
-                catch (Exception ex)
-                {
-                    // Best-effort recovery of a refused single-shot advertisement, with no
-                    // delivering caller to surface to: record instead of swallowing -- this
-                    // can be an OnPeerReset failure for the reset this pull just committed,
-                    // which the bridge must be able to learn about. A plain transport fault
-                    // is retried by the next advertisement or heartbeat.
-                    lastBackgroundError = ex;
-                }
-            });
+            // No delivering caller to surface to: recorded, not swallowed -- this can be an
+            // OnPeerReset failure for the reset this pull commits, which the bridge must be
+            // able to learn about.
+            DetachedFlow.Run(PullAsync, ex => lastBackgroundError = ex);
         }
     }
 
@@ -373,55 +314,43 @@ public sealed class RemoteSignal<T>
     // Must be called under the adoption gate.
     private AdoptionVerdict Classify(ValuePayload<T> payload, long? pulledAtGeneration)
     {
-        if (nodeIdPinned && payload.NodeId != expectedNodeId)
+        if (boundNodeId is { } bound && payload.NodeId != bound)
         {
-            throw new ArgumentException($"The value payload describes node {payload.NodeId}, but this mirror is bound to node {expectedNodeId}.", nameof(payload));
+            throw new ArgumentException($"The value payload describes node {payload.NodeId}, but this mirror is bound to node {bound}.", nameof(payload));
         }
-        nodeIdPinned = true;
-        expectedNodeId = payload.NodeId;
+        boundNodeId = payload.NodeId;
 
         if (abandonedEpochs.Contains(payload.Epoch))
         {
             return AdoptionVerdict.Drop; // late traffic from a dead incarnation
         }
-        if (currentEpoch == 0)
+        if (CurrentEpoch == 0)
         {
             return AdoptionVerdict.Adopt; // first contact pins the incarnation
         }
-        if (payload.Epoch == currentEpoch)
+        if (payload.Epoch == CurrentEpoch)
         {
-            // The sequence totally orders publications within an epoch; at or below the last
-            // adopted one is a late or duplicated delivery.
             return payload.Sequence > lastSequence ? AdoptionVerdict.Adopt : AdoptionVerdict.Drop;
         }
 
-        // An epoch change: only a pull issued after the last committed epoch change may commit
-        // it -- and never while a reset's resubscription is still in flight (the answer may
-        // have travelled the dead incarnation's channel). A refusal during the window is
-        // remembered and answered with a verification pull when the window closes: the peer
-        // may have restarted AGAIN mid-resubscription, and this delivery may have been the new
-        // incarnation's only advertisement. Otherwise an unsolicited payload gets a
-        // verification pull directly -- and so does a SUPERSEDED pull answer (an epoch change
-        // committed since it was issued) that still claims a different epoch than the one
-        // committed: with racing verification pulls under one generation, the older restart's
-        // answer can commit first, and silently dropping the newer restart's answer would pin
-        // the mirror to a dead epoch when its delivery was a one-shot. Each such re-verify
-        // costs one pull and requires a real interleaved commit, so the chain terminates; late
-        // answers from epochs this mirror ABANDONED never reach this branch.
-        if (resettling)
+        // An epoch change (see the reset bullet of the class doc).
+        if (channel is ChannelState.Resettling or ChannelState.ResettlingRefusedEpoch)
         {
-            pendingEpochVerification = true;
+            channel = ChannelState.ResettlingRefusedEpoch;
             return AdoptionVerdict.Drop;
         }
         if (pulledAtGeneration == Volatile.Read(ref epochGeneration))
         {
             return AdoptionVerdict.AdoptReset;
         }
-        // A superseded stale answer carries zero fresh evidence: while the channel is suspect
-        // (the last resubscription FAILED), re-verifying from it would actively solicit the
-        // possibly-still-broken channel -- drop instead; deliveries and advertisements keep
-        // their verification pulls, so a repaired bridge heals normally.
-        if (pulledAtGeneration is not null && pullChannelSuspect)
+        // A SUPERSEDED pull answer (an epoch change committed since it was issued) that still
+        // claims a different epoch than the one committed re-verifies too: with racing
+        // verification pulls under one generation, the older restart's answer can commit
+        // first, and silently dropping the newer restart's answer would pin the mirror to a
+        // dead epoch when its delivery was a one-shot. Each re-verify costs one pull and needs
+        // a real interleaved commit, so the chain terminates -- unless the channel is suspect,
+        // where such a zero-fresh-evidence answer must not solicit it.
+        if (pulledAtGeneration is not null && channel == ChannelState.Suspect)
         {
             return AdoptionVerdict.Drop;
         }
@@ -432,19 +361,18 @@ public sealed class RemoteSignal<T>
     // publication snapshot; the caller makes it visible inside the local graph write.
     private AdoptedPublication<T> CommitOrdering(ValuePayload<T> payload, CausalityStamp incoming, bool isReset)
     {
-        CausalityStamp heldVerifiedStamp;
+        // Held evidence is never merged across incarnations.
+        var heldVerifiedStamp = isReset ? CausalityStamp.Empty : publication?.Stamp ?? CausalityStamp.Empty;
         if (isReset)
         {
-            abandonedEpochs.Add(currentEpoch);
-            heldVerifiedStamp = CausalityStamp.Empty; // never merged across incarnations
-            resettling = OnPeerReset != null;
-        }
-        else
-        {
-            heldVerifiedStamp = publication?.Stamp ?? CausalityStamp.Empty;
+            abandonedEpochs.Add(CurrentEpoch);
+            if (OnPeerReset != null)
+            {
+                channel = ChannelState.Resettling;
+            }
         }
 
-        if (payload.Epoch != currentEpoch)
+        if (payload.Epoch != CurrentEpoch)
         {
             // Any committed epoch change (a reset or the first-contact pin) invalidates every
             // in-flight pull: their answers describe a world from before the mirror learned
@@ -452,7 +380,6 @@ public sealed class RemoteSignal<T>
             Interlocked.Increment(ref epochGeneration);
         }
 
-        currentEpoch = payload.Epoch;
         lastSequence = payload.Sequence;
         return new AdoptedPublication<T>(
             payload.Value,
