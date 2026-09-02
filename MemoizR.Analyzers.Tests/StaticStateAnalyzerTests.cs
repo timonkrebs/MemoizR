@@ -281,13 +281,13 @@ public class StaticStateAnalyzerTests
     }
 
     [Fact]
-    public async Task UnmanagedTypeParameters_AreSendableForEveryInstantiation()
+    public async Task UnmanagedTypeParameters_StayUnverifiable_PointersSatisfyTheConstraint()
     {
-        // `where T : unmanaged` guarantees a no-reference value type however the generic is
-        // closed (reads hand out copies that can alias nothing), and `where T : Enum`
-        // guarantees immutable values or immutable boxes: neither slot needs a creation-site
-        // check. A plain `struct` constraint gives no such guarantee -- a struct can carry
-        // references to mutable objects.
+        // `where T : unmanaged` is NOT a proof: an `unsafe struct` with a pointer field
+        // satisfies it, and a copied pointer still aliases writable memory (the runtime
+        // rejects pointer fields). Only `where T : Enum` guarantees immutable values or
+        // immutable boxes for every instantiation; a plain `struct` constraint promises even
+        // less -- a struct can carry references to mutable objects.
         var diagnostics = await AnalyzeAsync("""
             using MemoizR;
 
@@ -325,8 +325,9 @@ public class StaticStateAnalyzerTests
             }
             """);
 
-        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR004");
-        Assert.Contains("type parameter", diagnostic.GetMessage());
+        Assert.Equal(2, diagnostics.Length);
+        Assert.All(diagnostics, d => Assert.Equal("MZR004", d.Id));
+        Assert.All(diagnostics, d => Assert.Contains("type parameter", d.GetMessage()));
     }
 
     [Fact]

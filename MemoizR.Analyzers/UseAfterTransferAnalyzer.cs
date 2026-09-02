@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.Linq;
 using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.Diagnostics;
 using Microsoft.CodeAnalysis.Operations;
@@ -550,7 +551,10 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             // are in the clone; a variable operand stays a leaf (its object is not handed
             // off, only copied from).
             IWithOperation withOperation => WithCarriedParts(withOperation),
-            IConversionOperation conversion => new[] { conversion.Operand },
+            // A built-in conversion (upcast, boxing) keeps the alias; a USER-DEFINED one
+            // manufactures a new value the operand never becomes -- a leaf the sender still
+            // owns exclusively.
+            IConversionOperation { OperatorMethod: null } conversion => new[] { conversion.Operand },
             // Tuple.Create(list) is the constructor spelling of a framework value carrier,
             // and the immutable/frozen collection factories' Create store their ARGUMENTS
             // as elements the same way (ImmutableArray.Create(list) retains the list).
@@ -1201,6 +1205,16 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         {
             read = SiblingArgumentRead(outArgument, variable, floorPosition);
             return outArgument;
+        }
+
+        // A DYNAMIC call binds no parameters, so its `out` argument shows only in syntax: the
+        // runtime binder assigns it whenever the call returns normally (the call itself is
+        // the reset, so its failure window is the call's).
+        if (reference.Parent is IDynamicInvocationOperation dynamicCall
+            && reference.Syntax.Parent is ArgumentSyntax argument && argument.RefOrOutKeyword.IsKind(SyntaxKind.OutKeyword))
+        {
+            read = SiblingRead(dynamicCall.Arguments.Where(sibling => !ReferenceEquals(sibling, reference)), variable, floorPosition);
+            return dynamicCall;
         }
 
         if (DeconstructionOf(reference) is { } deconstruction)
@@ -2176,16 +2190,16 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             _ => ImmutableArray<IArgumentOperation>.Empty,
         };
 
-        return SiblingArgumentRead(arguments.Where(argument => !ReferenceEquals(argument, outArgument)), variable, transferPosition);
+        return SiblingRead(arguments.Where(argument => !ReferenceEquals(argument, outArgument)).Select(argument => argument.Value), variable, transferPosition);
     }
 
     // Position-filtered: when the same invocation performs the handoff
     // (Reset(Sending.Transfer(list), out list)), the reference inside the transfer
     // argument itself is the handoff, not a post-transfer read.
-    private static IOperation? SiblingArgumentRead(IEnumerable<IArgumentOperation> arguments, ISymbol variable, int transferPosition)
+    private static IOperation? SiblingRead(IEnumerable<IOperation> expressions, ISymbol variable, int transferPosition)
     {
-        return arguments
-            .SelectMany(argument => ReadsOf(argument.Value, variable))
+        return expressions
+            .SelectMany(expression => ReadsOf(expression, variable))
             .FirstOrDefault(operation => operation.Syntax.SpanStart >= transferPosition);
     }
 
@@ -2412,9 +2426,10 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             or ILoopOperation or IConditionalAccessOperation;
     }
 
+    // Built-in conversions only: a user-defined conversion yields a new value, not its operand.
     private static IOperation? PeelConversions(IOperation? operation)
     {
-        while (operation is IConversionOperation conversion)
+        while (operation is IConversionOperation { OperatorMethod: null } conversion)
         {
             operation = conversion.Operand;
         }

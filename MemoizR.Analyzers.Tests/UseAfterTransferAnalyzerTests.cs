@@ -4530,4 +4530,97 @@ public class UseAfterTransferAnalyzerTests
 
         AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
+
+
+    [Fact]
+    public async Task DynamicOutArguments_AreResets()
+    {
+        // A dynamic call binds no parameters, but its `out` argument is assigned by the
+        // runtime binder whenever the call returns normally: the variable is fresh after it.
+        var diagnostics = await InClassC("""
+                public void M(dynamic dyn)
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(list);
+                    dyn.Reset(out list);
+                    list.Add(1);
+                }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task DynamicOutArguments_KeepTheThrowWindow()
+    {
+        // The dynamic call can fail before assigning: the catch still observes the
+        // transferred value, and the report lands on that read -- not on the out argument.
+        var diagnostics = await InClassC("""
+                public void M(dynamic dyn)
+                {
+                    var list = new List<int> { 1 };
+                    try
+                    {
+                        var sending = Sending.Transfer(list);
+                        dyn.Reset(out list);
+                    }
+                    catch
+                    {
+                        list.Add(1);
+                    }
+                }
+            """);
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        var line = diagnostic.Location.GetLineSpan().StartLinePosition.Line;
+        Assert.Contains("Add", diagnostic.Location.SourceTree!.GetText().Lines[line].ToString());
+    }
+
+    [Fact]
+    public async Task UserDefinedConversions_ProduceUnrelatedValues()
+    {
+        // The receiver retains only the string the operator manufactured; the sender still
+        // owns the operand exclusively.
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public sealed class Mutable
+            {
+                public int Count;
+
+                public void Touch() => Count++;
+
+                public static implicit operator string(Mutable _) => "";
+            }
+
+            public class C
+            {
+                public void M()
+                {
+                    var mutable = new Mutable();
+                    var sending = Sending.Transfer((string)mutable);
+                    mutable.Touch();
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task ReferenceConversions_StillCarryTheOperand()
+    {
+        // An upcast preserves the alias: the receiver owns the same list.
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer((object)list);
+                    list.Add(1);
+                }
+            """);
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
 }

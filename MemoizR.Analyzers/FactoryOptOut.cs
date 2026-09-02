@@ -21,11 +21,19 @@ namespace MemoizR.Analyzers;
 //    strict at runtime,
 //  - and no reassignment of the receiver symbol anywhere in the file, so the initializer is
 //    actually the value the creation runs on.
+//
+// A receiver picked at runtime (`flag ? laxA : laxB`, `lax ?? fallback`, a switch expression)
+// opts out only when EVERY arm meets the above: checks are then disabled on every path.
 internal static class FactoryOptOut
 {
     public static bool DisablesSendableChecks(IInvocationOperation invocation)
     {
-        return PeelFluentCalls(ReceiverOf(invocation)) switch
+        return ReceiverOptsOut(ReceiverOf(invocation), invocation);
+    }
+
+    private static bool ReceiverOptsOut(IOperation? receiver, IInvocationOperation invocation)
+    {
+        return PeelFluentCalls(receiver) switch
         {
             IObjectCreationOperation creation => OptsOut(creation),
             ILocalReferenceOperation local => SymbolOptsOut(local.Local, invocation),
@@ -36,6 +44,12 @@ internal static class FactoryOptOut
             // dispatch elsewhere may vouch for its initializer.
             IPropertyReferenceOperation { Property: { SetMethod: null, IsVirtual: false, IsAbstract: false, IsOverride: false } } property
                 => ContainingTypeFullyInSight(property.Property, invocation) && SymbolOptsOut(property.Property, invocation),
+            IConditionalOperation { WhenFalse: { } whenFalse } conditional
+                => ReceiverOptsOut(conditional.WhenTrue, invocation) && ReceiverOptsOut(whenFalse, invocation),
+            ICoalesceOperation coalesce
+                => ReceiverOptsOut(coalesce.Value, invocation) && ReceiverOptsOut(coalesce.WhenNull, invocation),
+            ISwitchExpressionOperation switchExpression
+                => switchExpression.Arms.Length > 0 && switchExpression.Arms.All(arm => ReceiverOptsOut(arm.Value, invocation)),
             _ => false,
         };
     }

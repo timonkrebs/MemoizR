@@ -875,4 +875,38 @@ public class SendableTypeArgumentAnalyzerTests
 
         Assert.Empty(diagnostics);
     }
+
+
+    [Fact]
+    public async Task ConditionalReceivers_KeepTheOptOut_WhenEveryArmOptsOut()
+    {
+        // Whichever factory the runtime picks has its checks disabled: the escape hatch holds
+        // on every path.
+        var diagnostics = await InClassC("""
+                public void M(bool flag)
+                {
+                    var laxA = new MemoFactory(options: MemoFactoryOptions.DisableSendableChecks);
+                    var laxB = new MemoFactory(options: MemoFactoryOptions.DisableSendableChecks);
+                    (flag ? laxA : laxB).CreateSignal(new List<int>());
+                }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task ConditionalReceivers_WithAStrictArm_StayChecked()
+    {
+        // One arm may run strict: the opt-out is not definite, so the rule stands.
+        var diagnostics = await InClassC("""
+                public void M(bool flag)
+                {
+                    var lax = new MemoFactory(options: MemoFactoryOptions.DisableSendableChecks);
+                    var strict = new MemoFactory();
+                    (flag ? lax : strict).CreateSignal(new List<int>());
+                }
+            """);
+
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR001");
+    }
 }

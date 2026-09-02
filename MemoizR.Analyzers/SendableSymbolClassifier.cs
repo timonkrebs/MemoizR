@@ -151,12 +151,14 @@ internal sealed class SendableSymbolClassifier
     // The type-parameter exemption above (Check) is deliberate for creation sites, whose
     // closed instantiation is checked later; rules WITHOUT such a later site (MZR004's
     // statics, MZR005's generic transfer helpers) track a type parameter unless its
-    // constraints prove it harmless: `unmanaged` copies, and an Enum is immutable -- a plain
-    // `struct` constraint promises neither.
+    // constraints prove it harmless. Only `where T : Enum` does: an enum is immutable for
+    // every instantiation. `unmanaged` is NOT enough -- an `unsafe struct` with a pointer
+    // field satisfies it, and a copied pointer still aliases writable memory (the runtime
+    // rejects pointer fields, so the closed type fails there too); a plain `struct`
+    // constraint promises even less.
     internal static bool IsProvenSendableByConstraints(ITypeParameterSymbol parameter)
     {
-        return parameter.HasUnmanagedTypeConstraint
-            || parameter.ConstraintTypes.Any(constraint => constraint.SpecialType == SpecialType.System_Enum);
+        return parameter.ConstraintTypes.Any(constraint => constraint.SpecialType == SpecialType.System_Enum);
     }
 
     // The green-list of the runtime checker: immutable (or, for CancellationToken/Task,
