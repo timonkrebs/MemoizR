@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.Linq;
 using Microsoft.CodeAnalysis;
@@ -92,18 +93,18 @@ public sealed class SubclassSmugglingAnalyzer : DiagnosticAnalyzer
             : " (ValidateWrittenValues cannot see it: the runtime check covers the written instance's own type, not contents nested inside it)";
     }
 
-    internal static System.Collections.Generic.IEnumerable<(INamedTypeSymbol Named, int Depth)> NamedTypesIn(ITypeSymbol type, int depth)
+    internal static IEnumerable<(INamedTypeSymbol Named, int Depth)> NamedTypesIn(ITypeSymbol type, int depth)
     {
         return NamedTypesIn(
             type,
             depth,
-            new System.Collections.Generic.HashSet<ITypeSymbol>(SymbolEqualityComparer.Default),
-            new System.Collections.Generic.List<INamedTypeSymbol>());
+            new HashSet<ITypeSymbol>(SymbolEqualityComparer.Default),
+            new List<INamedTypeSymbol>());
     }
 
-    private static System.Collections.Generic.IEnumerable<(INamedTypeSymbol Named, int Depth)> NamedTypesIn(
-        ITypeSymbol type, int depth, System.Collections.Generic.HashSet<ITypeSymbol> visited,
-        System.Collections.Generic.List<INamedTypeSymbol> path)
+    private static IEnumerable<(INamedTypeSymbol Named, int Depth)> NamedTypesIn(
+        ITypeSymbol type, int depth, HashSet<ITypeSymbol> visited,
+        List<INamedTypeSymbol> path)
     {
         if (type is not INamedTypeSymbol named || !visited.Add(type))
         {
@@ -130,16 +131,7 @@ public sealed class SubclassSmugglingAnalyzer : DiagnosticAnalyzer
             }
         }
 
-        // Member re-instantiation can construct fresh symbols forever (Box<T> exposing
-        // Box<List<T>>), so the member walk needs a divergence bound -- counted on the
-        // recursion PATH, not globally: sibling instantiations of one declaration are not
-        // recursion and must all be walked, while a divergent chain stacks same-definition
-        // ancestors.
-        var definition = (INamedTypeSymbol)named.OriginalDefinition;
-        var priorNonShrinking = path.Count(other =>
-            SymbolEqualityComparer.Default.Equals(other.OriginalDefinition, definition)
-            && SendableSymbolClassifier.TypeSize(other) <= SendableSymbolClassifier.TypeSize(named));
-        if (priorNonShrinking >= 2)
+        if (SendableSymbolClassifier.IsDivergentReinstantiation(named, path))
         {
             yield break;
         }
@@ -147,7 +139,7 @@ public sealed class SubclassSmugglingAnalyzer : DiagnosticAnalyzer
         path.Add(named);
         try
         {
-            foreach (var memberType in StoredMemberTypesOf(named))
+            foreach (var memberType in SendableSymbolClassifier.StoredInstanceMemberTypesOf(named))
             {
                 foreach (var nested in NamedTypesIn(memberType, depth + 1, visited, path))
                 {
@@ -158,39 +150,6 @@ public sealed class SubclassSmugglingAnalyzer : DiagnosticAnalyzer
         finally
         {
             path.RemoveAt(path.Count - 1);
-        }
-    }
-
-    // A sealed Sendable DTO hides the same hole in a MEMBER type (sealed record
-    // Box(OpenBase Value)): the classifier trusted OpenBase's declared structure, so the walk
-    // must visit the member types it trusted -- INHERITED ones included (the classifier walks
-    // base types), and only STORED ones (explicit fields and auto-properties; a computed
-    // member holds no slot). Source-declared types only -- metadata members are
-    // import-limited, and framework internals are not the user's smuggle surface (green-listed
-    // containers already expose their payload via type arguments).
-    private static System.Collections.Generic.IEnumerable<ITypeSymbol> StoredMemberTypesOf(INamedTypeSymbol named)
-    {
-        if (!named.Locations.Any(location => location.IsInSource))
-        {
-            yield break;
-        }
-
-        for (var current = named; current is not null && current.SpecialType != SpecialType.System_Object; current = current.BaseType)
-        {
-            foreach (var member in current.GetMembers())
-            {
-                var memberType = member switch
-                {
-                    IFieldSymbol { IsStatic: false, IsImplicitlyDeclared: false } field => field.Type,
-                    IPropertySymbol { IsStatic: false } property when SendableSymbolClassifier.HasBackingSlot(property) => property.Type,
-                    _ => null,
-                };
-
-                if (memberType is not null)
-                {
-                    yield return memberType;
-                }
-            }
         }
     }
 
@@ -206,7 +165,8 @@ public sealed class SubclassSmugglingAnalyzer : DiagnosticAnalyzer
     // declared type, and ValidateWrittenValues is the net that catches the instance.
     internal static bool IsSmuggleSurface(INamedTypeSymbol named)
     {
-        if (named.SpecialType == SpecialType.System_Object
+        if (named.IsValueType || named is { TypeKind: TypeKind.Class, IsAbstract: false, IsSealed: true }
+            || named.SpecialType == SpecialType.System_Object
             || (SendableSymbolClassifier.IsFrameworkGreenListed(named)
                 && !SendableSymbolClassifier.HasAGreenListedGenericSubclass(named)))
         {
@@ -216,14 +176,13 @@ public sealed class SubclassSmugglingAnalyzer : DiagnosticAnalyzer
         return named.TypeKind switch
         {
             TypeKind.Class when !named.IsAbstract => !named.IsSealed,
-            TypeKind.Class => SendableSymbolClassifier.HasSendableAttribute(named),
-            TypeKind.Interface => SendableSymbolClassifier.HasSendableAttribute(named),
+            TypeKind.Class or TypeKind.Interface => SendableSymbolClassifier.HasSendableAttribute(named),
             _ => false,
         };
     }
 
     private static bool IsSignalCreation(IMethodSymbol method)
     {
-        return method.Name is "CreateSignal" or "CreateEagerRelativeSignal" or "CreateActorSignal";
+        return FactoryMethods.IsSignalCreation(method);
     }
 }

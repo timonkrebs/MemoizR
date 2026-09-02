@@ -76,9 +76,8 @@ internal static class FactoryOptOut
     {
         return method.Name is "AddExecutor" or "AddSynchronizationContext" or "AddTimeProvider" or "AddWpfDispatcher" or "AddBlazorDispatcher"
             && method.Arity == 0
-            && method.ReturnType is INamedTypeSymbol { Name: "MemoFactory" } factoryType
-            && factoryType.ContainingNamespace?.ToDisplayString() == "MemoizR"
-            && FactoryMethods.IsLibraryType(factoryType)
+            && method.ReturnType is INamedTypeSymbol factoryType
+            && FactoryMethods.IsLibraryType(factoryType, "MemoizR", "MemoFactory")
             && method.ContainingType is { } containingType
             && FactoryMethods.IsLibraryType(containingType);
     }
@@ -186,17 +185,16 @@ internal static class FactoryOptOut
 
     private static bool OptsOut(IObjectCreationOperation factoryCreation)
     {
-        if (factoryCreation.Type is not INamedTypeSymbol { Name: "MemoFactory" } factoryType
-            || factoryType.ContainingNamespace?.ToDisplayString() != "MemoizR"
-            || !FactoryMethods.IsLibraryType(factoryType))
+        if (factoryCreation.Type is not INamedTypeSymbol factoryType
+            || !FactoryMethods.IsLibraryType(factoryType, "MemoizR", "MemoFactory"))
         {
             return false;
         }
 
         foreach (var argument in factoryCreation.Arguments)
         {
-            if (argument.Parameter?.Type is not INamedTypeSymbol { TypeKind: TypeKind.Enum, Name: "MemoFactoryOptions" } optionsType
-                || !FactoryMethods.IsLibraryType(optionsType))
+            if (argument.Parameter?.Type is not INamedTypeSymbol { TypeKind: TypeKind.Enum } optionsType
+                || !FactoryMethods.IsLibraryType(optionsType, "MemoizR", "MemoFactoryOptions"))
             {
                 continue;
             }

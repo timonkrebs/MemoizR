@@ -110,12 +110,6 @@ internal sealed class SendableSymbolClassifier
         return IsKnownImmutable(type);
     }
 
-    // The green-list of the runtime checker: immutable (or, for CancellationToken/Task,
-    // internally synchronized) BCL types whose structure hides caches/arrays behind an
-    // immutable API. Framework-assembly gated like the collection list: a source-declared
-    // lookalike (`namespace System { class Uri { public int State; } }`) binds over the BCL
-    // type and must go through the structural walk, as the runtime's typeof identity would
-    // reject it.
     // Whether the type is on any framework green-list (known immutables, Task<T>, the known
     // collections): used by MZR006 to avoid nagging about non-sealed BCL types like Uri, whose
     // accidental subclassing is not a plausible failure mode.
@@ -154,6 +148,23 @@ internal sealed class SendableSymbolClassifier
         return false;
     }
 
+    // The type-parameter exemption above (Check) is deliberate for creation sites, whose
+    // closed instantiation is checked later; rules WITHOUT such a later site (MZR004's
+    // statics, MZR005's generic transfer helpers) track a type parameter unless its
+    // constraints prove it harmless: `unmanaged` copies, and an Enum is immutable -- a plain
+    // `struct` constraint promises neither.
+    internal static bool IsProvenSendableByConstraints(ITypeParameterSymbol parameter)
+    {
+        return parameter.HasUnmanagedTypeConstraint
+            || parameter.ConstraintTypes.Any(constraint => constraint.SpecialType == SpecialType.System_Enum);
+    }
+
+    // The green-list of the runtime checker: immutable (or, for CancellationToken/Task,
+    // internally synchronized) BCL types whose structure hides caches/arrays behind an
+    // immutable API. Framework-assembly gated like the collection list: a source-declared
+    // lookalike (`namespace System { class Uri { public int State; } }`) binds over the BCL
+    // type and must go through the structural walk, as the runtime's typeof identity would
+    // reject it.
     private static bool IsKnownImmutable(ITypeSymbol type)
     {
         if (type is not INamedTypeSymbol named || named.Arity != 0 || !IsDeclaredInFrameworkAssembly(named))
@@ -323,20 +334,9 @@ internal sealed class SendableSymbolClassifier
             return null;
         }
 
-        // POLYMORPHIC recursion constructs a FRESH closed symbol per level (Box<T> exposing a
-        // Box<List<T>> member), which the re-entry check above can never catch. Its signature
-        // is a NON-SHRINKING re-occurrence of the same definition: finite hand-written nesting
-        // (Box<Box<Box<List<int>>>>) strictly shrinks at every recursive step and is walked to
-        // the bottom however deep it goes. A divergent expansion is walked through its FIRST
-        // re-instantiation -- substituted members can flip the verdict exactly one level down
-        // (Box<T> { Box<List<T>> Next; T Value; } hides the List in the second level's Value)
-        // -- and cut at the second, landing on the cycle assumption above. Kept in lockstep
-        // with the runtime checker.
-        if (named.IsGenericType
-            && inProgress.Count(entry => entry is INamedTypeSymbol { IsGenericType: true } other
-                && !SymbolEqualityComparer.Default.Equals(other, named)
-                && SymbolEqualityComparer.Default.Equals(other.OriginalDefinition, named.OriginalDefinition)
-                && TypeSize(other) <= TypeSize(named)) >= 2)
+        // Polymorphic recursion, which the re-entry check above can never catch, is cut by
+        // the shared divergence bound and lands on the cycle assumption.
+        if (named.IsGenericType && IsDivergentReinstantiation(named, inProgress))
         {
             inProgress.Remove(named);
             return null;
@@ -462,9 +462,28 @@ internal sealed class SendableSymbolClassifier
             : $"settable property '{property.Name}' (use init or get-only)";
     }
 
-    private static bool IsRootType(INamedTypeSymbol type)
+    internal static bool IsRootType(INamedTypeSymbol type)
     {
-        return type.SpecialType == SpecialType.System_Object || type.SpecialType == SpecialType.System_ValueType;
+        return type.SpecialType is SpecialType.System_Object or SpecialType.System_ValueType;
+    }
+
+    // POLYMORPHIC recursion constructs a FRESH closed symbol per level (Box<T> exposing a
+    // Box<List<T>> member), which a visited set can never catch. Its signature is a
+    // NON-SHRINKING re-occurrence of the same definition on the recursion PATH: finite
+    // hand-written nesting (Box<Box<Box<List<int>>>>) strictly shrinks at every recursive
+    // step and is walked to the bottom however deep it goes. A divergent expansion is walked
+    // through its FIRST re-instantiation -- substituted members can flip the verdict exactly
+    // one level down (Box<T> { Box<List<T>> Next; T Value; } hides the List in the second
+    // level's Value) -- and cut at the second. Counted on the path, not globally: sibling
+    // instantiations of one definition are not recursion and must all be walked. Shared by
+    // the classifier's field walk and the MZR004/MZR006 type-graph walks; kept in lockstep
+    // with the runtime checker.
+    internal static bool IsDivergentReinstantiation(INamedTypeSymbol named, IEnumerable<ITypeSymbol> priorOnPath)
+    {
+        return priorOnPath.Count(prior => prior is INamedTypeSymbol other
+            && !SymbolEqualityComparer.Default.Equals(other, named)
+            && SymbolEqualityComparer.Default.Equals(other.OriginalDefinition, named.OriginalDefinition)
+            && TypeSize(other) <= TypeSize(named)) >= 2;
     }
 
     // The number of type nodes in the constructed reference: Box<List<int>> is 3. Finite
@@ -515,6 +534,37 @@ internal sealed class SendableSymbolClassifier
     {
         return property.ContainingType.GetMembers().OfType<IFieldSymbol>()
             .Any(field => SymbolEqualityComparer.Default.Equals(field.AssociatedSymbol, property));
+    }
+
+    // The member types a SOURCE-DECLARED type stores, base chain included: explicit fields and
+    // auto-properties (a computed member holds no slot), inherited ones storing state exactly
+    // like declared ones. Metadata members are import-limited, and framework internals are not
+    // the user's surface (green-listed containers expose their payload via type arguments), so
+    // metadata types contribute nothing.
+    internal static IEnumerable<ITypeSymbol> StoredInstanceMemberTypesOf(INamedTypeSymbol named)
+    {
+        if (!named.Locations.Any(location => location.IsInSource))
+        {
+            yield break;
+        }
+
+        for (var current = named; current is not null && !IsRootType(current); current = current.BaseType)
+        {
+            foreach (var member in current.GetMembers())
+            {
+                var memberType = member switch
+                {
+                    IFieldSymbol { IsStatic: false, IsImplicitlyDeclared: false } field => field.Type,
+                    IPropertySymbol { IsStatic: false } property when HasBackingSlot(property) => property.Type,
+                    _ => null,
+                };
+
+                if (memberType is not null)
+                {
+                    yield return memberType;
+                }
+            }
+        }
     }
 
     internal static string Display(ITypeSymbol type)

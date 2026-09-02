@@ -18,20 +18,12 @@ public sealed class ActorSignal<T> : ActorValueNode<T>
         : base(value, context, CacheState.CacheClean)
     {
         this.validateWrittenValues = validateWrittenValues;
-        ValidateWrittenValue(value);
-    }
-
-    private void ValidateWrittenValue(T value)
-    {
-        if (validateWrittenValues && value is not null)
-        {
-            SendableChecker.EnsureSendable(value.GetType());
-        }
+        SendableChecker.EnsureWrittenValueSendable(validateWrittenValues, value);
     }
 
     public Task Set(T value)
     {
-        ValidateWrittenValue(value);
+        SendableChecker.EnsureWrittenValueSendable(validateWrittenValues, value);
 
         // The actor engine's equivalent of the lock engine's exclusive-inside-upgradeable
         // rejection: a Set from inside a computation is a feedback loop -- it would invalidate

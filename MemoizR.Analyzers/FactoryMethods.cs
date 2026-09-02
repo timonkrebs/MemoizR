@@ -63,6 +63,13 @@ internal static class FactoryMethods
         return IsMemoFactoryMethod(method, "CreateActorMemoizR");
     }
 
+    // The signal creations whose written instances MemoFactoryOptions.ValidateWrittenValues
+    // checks at runtime (MZR006's mitigation hint).
+    public static bool IsSignalCreation(IMethodSymbol method)
+    {
+        return IsMemoFactoryMethod(method, "CreateSignal", "CreateEagerRelativeSignal", "CreateActorSignal");
+    }
+
     private static bool IsMemoFactoryMethod(IMethodSymbol method, params string[] names)
     {
         return IsOn(method, "MemoizR", "MemoFactory", names);
@@ -86,22 +93,18 @@ internal static class FactoryMethods
 
     private static bool IsOn(IMethodSymbol method, string namespaceName, string typeName, string[] names)
     {
-        var type = method.ContainingType;
-        if (type is null || type.Name != typeName || type.ContainingNamespace?.ToDisplayString() != namespaceName
-            || !IsLibraryType(type))
-        {
-            return false;
-        }
+        return method.ContainingType is { } type
+            && IsLibraryType(type, namespaceName, typeName)
+            && names.Contains(method.Name);
+    }
 
-        foreach (var name in names)
-        {
-            if (method.Name == name)
-            {
-                return true;
-            }
-        }
-
-        return false;
+    // THE library's type of that name: namespace and assembly identity both hold, so a
+    // source-declared lookalike never matches.
+    internal static bool IsLibraryType(INamedTypeSymbol type, string namespaceName, string name)
+    {
+        return type.Name == name
+            && type.ContainingNamespace?.ToDisplayString() == namespaceName
+            && IsLibraryType(type);
     }
 
     // A source-shadowed lookalike (a project's own MemoizR.MemoFactory, which source-wins over

@@ -1,4 +1,6 @@
+using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.Linq;
 using Microsoft.CodeAnalysis;
@@ -194,25 +196,19 @@ public sealed class StaticStateAnalyzer : DiagnosticAnalyzer
     {
         return HasUnshieldedTypeParameter(
             type,
-            new System.Collections.Generic.HashSet<ITypeSymbol>(SymbolEqualityComparer.Default),
-            new System.Collections.Generic.List<INamedTypeSymbol>());
+            new HashSet<ITypeSymbol>(SymbolEqualityComparer.Default),
+            new List<INamedTypeSymbol>());
     }
 
     private static bool HasUnshieldedTypeParameter(
         ITypeSymbol type,
-        System.Collections.Generic.HashSet<ITypeSymbol> visited,
-        System.Collections.Generic.List<INamedTypeSymbol> path)
+        HashSet<ITypeSymbol> visited,
+        List<INamedTypeSymbol> path)
     {
         switch (type)
         {
             case ITypeParameterSymbol parameter:
-                // `where T : unmanaged` guarantees a no-reference value type for EVERY closed
-                // instantiation (reads hand out copies that can alias nothing), and
-                // `where T : Enum` guarantees immutable values or immutable boxes -- both are
-                // safe without any creation-site check. (A plain `struct` constraint is NOT
-                // enough: a struct can carry references to mutable objects.)
-                return !parameter.HasUnmanagedTypeConstraint
-                    && !parameter.ConstraintTypes.Any(constraint => constraint.SpecialType == SpecialType.System_Enum);
+                return !SendableSymbolClassifier.IsProvenSendableByConstraints(parameter);
             case IArrayTypeSymbol array:
                 return HasUnshieldedTypeParameter(array.ElementType, visited, path);
             case INamedTypeSymbol named
@@ -222,16 +218,7 @@ public sealed class StaticStateAnalyzer : DiagnosticAnalyzer
                     return true;
                 }
 
-                // Member re-instantiation can construct fresh symbols forever (Box<T> exposing
-                // Box<List<T>>), so the member walk needs a divergence bound -- counted on the
-                // recursion PATH, not globally: sibling instantiations (Outer<int>.Holder next
-                // to Outer<string>.Holder next to Outer<T>.Holder) are not recursion and must
-                // all be walked, while a divergent chain stacks same-definition ancestors.
-                var definition = (INamedTypeSymbol)named.OriginalDefinition;
-                var priorNonShrinking = path.Count(other =>
-                    SymbolEqualityComparer.Default.Equals(other.OriginalDefinition, definition)
-                    && SendableSymbolClassifier.TypeSize(other) <= SendableSymbolClassifier.TypeSize(named));
-                if (priorNonShrinking >= 2)
+                if (SendableSymbolClassifier.IsDivergentReinstantiation(named, path))
                 {
                     return false;
                 }
@@ -239,7 +226,8 @@ public sealed class StaticStateAnalyzer : DiagnosticAnalyzer
                 path.Add(named);
                 try
                 {
-                    return MemberTypesOf(named).Any(memberType => HasUnshieldedTypeParameter(memberType, visited, path));
+                    return SendableSymbolClassifier.StoredInstanceMemberTypesOf(named)
+                        .Any(memberType => HasUnshieldedTypeParameter(memberType, visited, path));
                 }
                 finally
                 {
@@ -249,40 +237,6 @@ public sealed class StaticStateAnalyzer : DiagnosticAnalyzer
             default:
                 return false;
         }
-    }
-
-    private static System.Collections.Generic.IEnumerable<ITypeSymbol> MemberTypesOf(INamedTypeSymbol named)
-    {
-        if (!named.Locations.Any(location => location.IsInSource))
-        {
-            yield break; // metadata members are import-limited; framework internals carry no user T
-        }
-
-        // The base chain is walked like the classifier walks it: an INHERITED member stores
-        // state (and possibly an outer type parameter) exactly like a declared one. Only
-        // STORED members contribute -- explicit fields and auto-properties; a computed member
-        // (`public T New => default!`) holds no slot, the member-level analog of the
-        // top-level computed-getter exemption.
-        for (var current = named; current is not null && !IsRootType(current); current = current.BaseType)
-        {
-            foreach (var member in current.GetMembers())
-            {
-                switch (member)
-                {
-                    case IFieldSymbol { IsStatic: false, IsImplicitlyDeclared: false } field:
-                        yield return field.Type;
-                        break;
-                    case IPropertySymbol { IsStatic: false } property when SendableSymbolClassifier.HasBackingSlot(property):
-                        yield return property.Type;
-                        break;
-                }
-            }
-        }
-    }
-
-    private static bool IsRootType(INamedTypeSymbol type)
-    {
-        return type.SpecialType is SpecialType.System_Object or SpecialType.System_ValueType;
     }
 
     // The mandate boundary: the static's FILE must use MemoizR. Using directives sit at the
@@ -299,12 +253,12 @@ public sealed class StaticStateAnalyzer : DiagnosticAnalyzer
         return treeUsesMemoizR.GetOrAdd(tree, static t => MemoizRUsingsIn(t).Any());
     }
 
-    private static System.Collections.Generic.IEnumerable<UsingDirectiveSyntax> MemoizRUsingsIn(SyntaxTree tree)
+    private static IEnumerable<UsingDirectiveSyntax> MemoizRUsingsIn(SyntaxTree tree)
     {
         return tree.GetRoot()
             .DescendantNodes(node => node is CompilationUnitSyntax or BaseNamespaceDeclarationSyntax)
             .OfType<UsingDirectiveSyntax>()
             .Where(directive => directive.Name?.ToString() is { } name
-                && (name == "MemoizR" || name.StartsWith("MemoizR.", System.StringComparison.Ordinal)));
+                && (name == "MemoizR" || name.StartsWith("MemoizR.", StringComparison.Ordinal)));
     }
 }

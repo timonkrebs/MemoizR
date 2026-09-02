@@ -15,7 +15,7 @@ public sealed class EagerRelativeSignal<T> : MemoHandlR<T>, IStampedGetR<T>
     internal EagerRelativeSignal(T value, Context context, bool validateWrittenValues = false) : base(context)
     {
         this.validateWrittenValues = validateWrittenValues;
-        ValidateWrittenValue(value);
+        SendableChecker.EnsureWrittenValueSendable(validateWrittenValues, value);
         if (context.StampsEnabled)
         {
             SetValueAndStamp(value, CausalityStamp.ForSignal(Id, 0, context.Epoch));
@@ -23,14 +23,6 @@ public sealed class EagerRelativeSignal<T> : MemoHandlR<T>, IStampedGetR<T>
         else
         {
             SetValueUnstamped(value);
-        }
-    }
-
-    private void ValidateWrittenValue(T value)
-    {
-        if (validateWrittenValues && value is not null)
-        {
-            SendableChecker.EnsureSendable(value.GetType());
         }
     }
 
@@ -60,7 +52,7 @@ public sealed class EagerRelativeSignal<T> : MemoHandlR<T>, IStampedGetR<T>
                     // exactly what observers are told (issue #39). A stamps-disabled context
                     // builds no stamp at all.
                     var next = fn(Value);
-                    ValidateWrittenValue(next);
+                    SendableChecker.EnsureWrittenValueSendable(validateWrittenValues, next);
                     if (Context.StampsEnabled)
                     {
                         SetValueAndStamp(next, CausalityStamp.ForSignal(Id, ++trigger, Context.Epoch));

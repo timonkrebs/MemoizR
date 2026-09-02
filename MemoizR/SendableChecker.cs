@@ -190,38 +190,38 @@ public static class SendableChecker
         return CheckFields(type, inProgress);
     }
 
+    // MemoFactoryOptions.ValidateWrittenValues: a node checks each written instance's RUNTIME
+    // type, closing the subclass-smuggling hole the declared-type check cannot see.
+    internal static void EnsureWrittenValueSendable<T>(bool enabled, T value)
+    {
+        if (enabled && value is not null)
+        {
+            EnsureSendable(value.GetType());
+        }
+    }
+
     private static string? CheckGreenListedBaseArguments(Type type, HashSet<Type> inProgress)
     {
-        for (var baseType = type.BaseType; baseType is not null; baseType = baseType.BaseType)
-        {
-            if (baseType.IsGenericType && KnownSendableGenericDefinitions.Contains(baseType.GetGenericTypeDefinition())
-                && CheckTypeArguments(baseType, inProgress) is { } reason)
-            {
-                return reason;
-            }
-        }
-
-        return null;
+        return GreenListedGenericBases(type)
+            .Select(baseType => CheckTypeArguments(baseType, inProgress))
+            .FirstOrDefault(reason => reason is not null);
     }
 
     private static bool IsFrameworkImplementationOfAGreenListedType(Type type)
     {
-        if (KnownSendable.Any(entry => !entry.IsValueType && entry.IsAssignableFrom(type) && type.Assembly == entry.Assembly))
-        {
-            return true;
-        }
+        return KnownSendable.Any(entry => !entry.IsValueType && entry.IsAssignableFrom(type) && type.Assembly == entry.Assembly)
+            || GreenListedGenericBases(type).Any(baseType => type.Assembly == baseType.GetGenericTypeDefinition().Assembly);
+    }
 
+    private static IEnumerable<Type> GreenListedGenericBases(Type type)
+    {
         for (var baseType = type.BaseType; baseType is not null; baseType = baseType.BaseType)
         {
-            if (baseType.IsGenericType
-                && KnownSendableGenericDefinitions.Contains(baseType.GetGenericTypeDefinition())
-                && type.Assembly == baseType.GetGenericTypeDefinition().Assembly)
+            if (baseType.IsGenericType && KnownSendableGenericDefinitions.Contains(baseType.GetGenericTypeDefinition()))
             {
-                return true;
+                yield return baseType;
             }
         }
-
-        return false;
     }
 
     // Categories that can never be verified structurally, whatever their fields say.

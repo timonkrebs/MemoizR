@@ -18,7 +18,7 @@ public sealed class Signal<T> : MemoHandlR<T>, IStampedGetR<T?>
     internal Signal(T value, Context context, bool validateWrittenValues = false) : base(context)
     {
         this.validateWrittenValues = validateWrittenValues;
-        ValidateWrittenValue(value);
+        SendableChecker.EnsureWrittenValueSendable(validateWrittenValues, value);
         if (context.StampsEnabled)
         {
             SetValueAndStamp(value, CausalityStamp.ForSignal(Id, 0, context.Epoch));
@@ -29,17 +29,9 @@ public sealed class Signal<T> : MemoHandlR<T>, IStampedGetR<T?>
         }
     }
 
-    private void ValidateWrittenValue(T value)
-    {
-        if (validateWrittenValues && value is not null)
-        {
-            SendableChecker.EnsureSendable(value.GetType());
-        }
-    }
-
     public async Task Set(T value)
     {
-        ValidateWrittenValue(value);
+        SendableChecker.EnsureWrittenValueSendable(validateWrittenValues, value);
 
         // Resolve the scope once and keep it strongly rooted for the whole write: repeated getter
         // access can resolve different instances (weak registry + resurrection), which would hand
