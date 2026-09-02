@@ -23,12 +23,7 @@ internal static class ReceiverChains
     // creation (`f.CreateSignal(0).Set(1)`) is its own provenance and resolves directly, and a
     // variable-to-variable ALIAS (`var state = s0;`) resolves through initializers until a
     // creation or a dead end -- the visited set breaks initializer cycles.
-    public static ISymbol? ResolveCreatingFactorySymbol(IOperation? nodeReference, SemanticModel? semanticModel, Dictionary<IParameterSymbol, IOperation>? argumentMap = null)
-    {
-        return ResolveCreatingFactorySymbol(nodeReference, semanticModel, argumentMap, visitedGetters: null);
-    }
-
-    private static ISymbol? ResolveCreatingFactorySymbol(IOperation? nodeReference, SemanticModel? semanticModel, Dictionary<IParameterSymbol, IOperation>? argumentMap, HashSet<IMethodSymbol>? visitedGetters)
+    public static ISymbol? ResolveCreatingFactorySymbol(IOperation? nodeReference, SemanticModel? semanticModel, Dictionary<IParameterSymbol, IOperation>? argumentMap = null, HashSet<IMethodSymbol>? visitedGetters = null)
     {
         var reference = nodeReference;
         var site = nodeReference?.Syntax;
@@ -62,8 +57,8 @@ internal static class ReceiverChains
                     continue;
                 case ILocalReferenceOperation or IFieldReferenceOperation or IParameterReferenceOperation or IPropertyReferenceOperation:
                     visited ??= new HashSet<ISymbol>(SymbolEqualityComparer.Default);
-                    var symbol = ComputationLambdas.ReferencedSymbol(reference);
-                    if (symbol is null || !visited.Add(symbol) || site is null || IsReassignedBefore(symbol, site, semanticModel))
+                    var symbol = ComputationLambdas.ReferencedSymbol(reference)!;
+                    if (!visited.Add(symbol) || site is null || IsReassignedBefore(symbol, site, semanticModel))
                     {
                         return null;
                     }
@@ -144,30 +139,17 @@ internal static class ReceiverChains
     // value is read (the previous link's initializer).
     private static bool IsReassignedBefore(ISymbol variable, SyntaxNode reference, SemanticModel? semanticModel)
     {
-        if (semanticModel is null)
-        {
-            return false;
-        }
-
         // The sole assignment standing in for a missing initializer is initialization, not a
         // rebind (`OptimisticState<int> state; state = f1.CreateOptimistic(...);` still proves
-        // provenance -- the same assignment is what InitializerOf resolves through). The
-        // synthesis is READ-relative: a write that cannot run before this read, or a member
-        // write that does not provably reach it, excuses nothing and falls to the scan below.
-        var effectiveInitializer = ComputationLambdas.EffectiveInitializerAssignment(variable, semanticModel, reference);
-
-        foreach (var node in semanticModel.SyntaxTree.GetRoot().DescendantNodes())
-        {
-            if (!ReferenceEquals(node, effectiveInitializer)
-                && ComputationLambdas.ReassignmentTargets(node) is { } targets
-                && targets.Any(target => ComputationLambdas.WritesVariable(target, variable, semanticModel))
-                && ComputationLambdas.CanExecuteBefore(node, reference, variable, semanticModel))
-            {
-                return true;
-            }
-        }
-
-        return false;
+        // provenance -- the same assignment is what SameTreeInitializerOperation resolves
+        // through). The synthesis is READ-relative: a write that cannot run before this read,
+        // or a member write that does not provably reach it, excuses nothing.
+        return semanticModel is not null
+            && ComputationLambdas.IsWrittenBefore(
+                variable,
+                reference,
+                semanticModel,
+                excluding: ComputationLambdas.EffectiveInitializerWrite(variable, semanticModel, reference) as AssignmentExpressionSyntax);
     }
 
     // Only a RECOGNIZED creation proves provenance: an arbitrary helper that merely RETURNS a
@@ -223,8 +205,8 @@ internal static class ReceiverChains
                 // factory by construction. A variable REASSIGNED before this use proves
                 // nothing (`var host = f1; host = f2; host.CreateOptimistic(...)` holds f2,
                 // not its initializer) -- unprovable keeps the diagnostic.
-                var symbol = ComputationLambdas.ReferencedSymbol(receiver);
-                if (symbol is null || IsReassignedBefore(symbol, receiver.Syntax, semanticModel))
+                var symbol = ComputationLambdas.ReferencedSymbol(receiver)!;
+                if (IsReassignedBefore(symbol, receiver.Syntax, semanticModel))
                 {
                     return null;
                 }

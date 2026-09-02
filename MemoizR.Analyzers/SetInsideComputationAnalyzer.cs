@@ -34,36 +34,21 @@ public sealed class SetInsideComputationAnalyzer : DiagnosticAnalyzer
             return;
         }
 
-        var actorHost = FactoryMethods.IsActorEngineHost(invocation.TargetMethod);
-
         foreach (var computation in ComputationLambdas.OfInvocation(invocation))
         {
             // Keyed per CALL SITE and ARGUMENT BINDING, not per method: the same helper (or
             // the same nested call inside it) reached with different signal arguments has
             // different target provenance each time, while a recursive helper -- whose
             // rebuilt map carries the same substituted values -- stops.
-            var visitedCalls = new HashSet<(SyntaxNode, IMethodSymbol, string)>();
-            InspectExecutedBody(context, invocation, computation.Body, actorHost, visitedCalls, argumentMap: null);
+            InspectExecutedBody(context, invocation, computation.Body, new HashSet<(SyntaxNode, IMethodSymbol, string)>(), argumentMap: null);
         }
 
         // Patch shapes resolved beyond plain arguments -- assembled by an out-helper, or
         // returned by a computed delegate property -- still run under the evaluation lock,
         // so their Sets throw exactly like an inline patch's.
-        if (FactoryMethods.IsOptimisticPatchHost(invocation.TargetMethod))
+        foreach (var (body, map) in ComputationLambdas.AssembledPatchBodies(invocation))
         {
-            foreach (var argument in invocation.Arguments)
-            {
-                if (argument.Parameter?.Type is not { TypeKind: TypeKind.Delegate })
-                {
-                    continue;
-                }
-
-                foreach (var (body, map) in ComputationLambdas.AssembledPatchBodies(argument.Value, invocation.SemanticModel))
-                {
-                    var visitedCalls = new HashSet<(SyntaxNode, IMethodSymbol, string)>();
-                    InspectExecutedBody(context, invocation, body.Body, actorHost, visitedCalls, map);
-                }
-            }
+            InspectExecutedBody(context, invocation, body.Body, new HashSet<(SyntaxNode, IMethodSymbol, string)>(), map);
         }
     }
 
@@ -76,10 +61,10 @@ public sealed class SetInsideComputationAnalyzer : DiagnosticAnalyzer
         OperationAnalysisContext context,
         IInvocationOperation host,
         IOperation body,
-        bool actorHost,
         HashSet<(SyntaxNode, IMethodSymbol, string)> visitedCalls,
         Dictionary<IParameterSymbol, IOperation>? argumentMap)
     {
+        var actorHost = FactoryMethods.IsActorEngineHost(host.TargetMethod);
         foreach (var operation in ComputationLambdas.DescendDirectExecution(body))
         {
             if (operation is IInvocationOperation inner && IsSameEngineSet(inner.TargetMethod, actorHost))
@@ -98,11 +83,11 @@ public sealed class SetInsideComputationAnalyzer : DiagnosticAnalyzer
 
             if (operation is IInvocationOperation { TargetMethod.MethodKind: MethodKind.DelegateInvoke } invoke)
             {
-                InspectInvokedDelegate(context, host, invoke, actorHost, visitedCalls, argumentMap);
+                InspectInvokedDelegate(context, host, invoke, visitedCalls, argumentMap);
                 continue;
             }
 
-            InspectExecutedCalls(context, host, operation, actorHost, visitedCalls, argumentMap);
+            InspectExecutedCalls(context, host, operation, visitedCalls, argumentMap);
         }
     }
 
@@ -115,7 +100,6 @@ public sealed class SetInsideComputationAnalyzer : DiagnosticAnalyzer
         OperationAnalysisContext context,
         IInvocationOperation host,
         IInvocationOperation invoke,
-        bool actorHost,
         HashSet<(SyntaxNode, IMethodSymbol, string)> visitedCalls,
         Dictionary<IParameterSymbol, IOperation>? argumentMap)
     {
@@ -123,7 +107,7 @@ public sealed class SetInsideComputationAnalyzer : DiagnosticAnalyzer
         {
             if (visitedCalls.Add((body.Scope, host.TargetMethod, ComputationLambdas.ArgumentMapKey(map))))
             {
-                InspectExecutedBody(context, host, body.Body, actorHost, visitedCalls, map);
+                InspectExecutedBody(context, host, body.Body, visitedCalls, map);
             }
         }
     }
@@ -132,7 +116,6 @@ public sealed class SetInsideComputationAnalyzer : DiagnosticAnalyzer
         OperationAnalysisContext context,
         IInvocationOperation host,
         IOperation operation,
-        bool actorHost,
         HashSet<(SyntaxNode, IMethodSymbol, string)> visitedCalls,
         Dictionary<IParameterSymbol, IOperation>? argumentMap)
     {
@@ -147,7 +130,7 @@ public sealed class SetInsideComputationAnalyzer : DiagnosticAnalyzer
             var nestedMap = ComputationLambdas.BuildArgumentMap(operation, argumentMap);
             if (visitedCalls.Add((operation.Syntax, method, ComputationLambdas.ArgumentMapKey(nestedMap))))
             {
-                InspectExecutedBody(context, host, helper.Body, actorHost, visitedCalls, nestedMap);
+                InspectExecutedBody(context, host, helper.Body, visitedCalls, nestedMap);
             }
         }
     }
@@ -226,7 +209,8 @@ public sealed class SetInsideComputationAnalyzer : DiagnosticAnalyzer
     private static bool IsSameEngineSet(IMethodSymbol method, bool actorHost)
     {
         var type = method.ContainingType?.OriginalDefinition;
-        if (type is not { Arity: 1 } || type.ContainingNamespace?.ToDisplayString() != "MemoizR"
+        if (method.Name is not ("Set" or "Invalidate")
+            || type is not { Arity: 1 } || type.ContainingNamespace?.ToDisplayString() != "MemoizR"
             || !FactoryMethods.IsLibraryType(type))
         {
             // A source-shadowed MemoizR.Signal<T> lookalike's Set takes no evaluation lock and

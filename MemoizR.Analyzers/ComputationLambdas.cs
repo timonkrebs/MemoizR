@@ -9,10 +9,11 @@ using Microsoft.CodeAnalysis.Operations;
 
 namespace MemoizR.Analyzers;
 
-// Shared plumbing for the rules that inspect computation bodies (MZR002, MZR003): finding the
-// computations among a factory invocation's arguments -- anonymous functions, and method groups /
-// local functions declared in the same file -- walking their bodies, and locating where to
-// report.
+// Shared plumbing for the rules that inspect computation bodies (MZR002, MZR003, MZR004):
+// finding the computations among a factory invocation's arguments -- anonymous functions, and
+// method groups / local functions declared in the same file -- resolving the delegates they
+// store and invoke, walking their bodies, and locating where to report. Everything here is
+// RESOLUTION: MZR004 layers its unverifiable-means-flagged accounting on top.
 internal static class ComputationLambdas
 {
     // A computation's executable body plus the syntax that DECLARES the computation: the scope
@@ -99,42 +100,12 @@ internal static class ComputationLambdas
             // A conditional (or null-coalescing) computation stores whichever arm the flow
             // picks: both are possible bodies, so both are walked.
             case IConditionalOperation or ICoalesceOperation:
-                foreach (var body in BranchBodies(value, semanticModel, visitedVariables))
+                foreach (var body in ConditionalArms(value)!.SelectMany(arm => BodiesIn(arm, semanticModel, visitedVariables)))
                 {
                     yield return body;
                 }
 
                 break;
-        }
-    }
-
-    private static IEnumerable<ComputationBody> BranchBodies(IOperation value, SemanticModel? semanticModel, HashSet<ISymbol>? visitedVariables)
-    {
-        var arms = value switch
-        {
-            IConditionalOperation conditional => (First: (IOperation?)conditional.WhenTrue, Second: conditional.WhenFalse),
-            ICoalesceOperation coalesce => (First: (IOperation?)coalesce.Value, Second: coalesce.WhenNull),
-            _ => (First: null, Second: null),
-        };
-
-        if (arms.First is null)
-        {
-            yield break;
-        }
-
-        foreach (var body in BodiesIn(arms.First, semanticModel, visitedVariables))
-        {
-            yield return body;
-        }
-
-        if (arms.Second is null)
-        {
-            yield break;
-        }
-
-        foreach (var body in BodiesIn(arms.Second, semanticModel, visitedVariables))
-        {
-            yield return body;
         }
     }
 
@@ -181,7 +152,7 @@ internal static class ComputationLambdas
         return value;
     }
 
-    // Shared with MZR004's method-group receiver resolution.
+    // The declared STORAGE a reference reads: a local, a field, or a property.
     public static ISymbol? ReferencedVariable(IOperation reference)
     {
         return reference switch
@@ -194,21 +165,16 @@ internal static class ComputationLambdas
     }
 
     // ReferencedVariable widened to PARAMETERS, for the chases that hop through a callee's
-    // binding as readily as through storage. Deliberately a separate function: the
-    // initializer resolutions below must NOT treat a parameter as declared storage.
-    public static ISymbol? ReferencedSymbol(IOperation? reference)
+    // binding as readily as through storage (a parameter has no declaration initializer:
+    // only its initializing write, if any, resolves).
+    public static ISymbol? ReferencedSymbol(IOperation reference)
     {
-        return reference switch
-        {
-            IParameterReferenceOperation parameter => parameter.Parameter,
-            null => null,
-            _ => ReferencedVariable(reference),
-        };
+        return reference is IParameterReferenceOperation parameter ? parameter.Parameter : ReferencedVariable(reference);
     }
 
-    // The leaf ARMS of a conditional or coalesced value: each is a candidate the flow can
-    // pick, and each resolves independently. Null when the value is neither -- callers
-    // distinguish "not a conditional" from "one arm".
+    // The direct ARMS of a conditional or coalesced value: each is a candidate the flow can
+    // pick, and each resolves independently (ValueArms flattens nesting). Null when the
+    // value is neither -- callers distinguish "not a conditional" from "one arm".
     public static IReadOnlyList<IOperation>? ConditionalArms(IOperation value)
     {
         return value switch
@@ -232,10 +198,10 @@ internal static class ComputationLambdas
 
     // `Func<Task<int>> compute = async () => ...; f.CreateMemoizR(compute);` is the same
     // computation as the inline form, reached through a variable. Best-effort resolution: the
-    // variable's same-tree INITIALIZER (a later reassignment is dataflow the analyzer does not
-    // chase -- the runtime checks cover what this cannot see, like the method-group rule
-    // above). The visited set breaks initializer reference cycles (two fields initialized from
-    // each other).
+    // variable's same-tree INITIALIZER, unless a reassignment definitely replaced it (then the
+    // surviving-write resolution owns the value; a reassignment that MAY run keeps the
+    // best-effort trust, and the runtime checks cover what this cannot see). The visited set
+    // breaks initializer reference cycles (two fields initialized from each other).
     private static IEnumerable<ComputationBody> BodiesFromVariableInitializer(ISymbol? variable, IOperation reference, SemanticModel? semanticModel, HashSet<ISymbol>? visitedVariables)
     {
         visitedVariables ??= new HashSet<ISymbol>(SymbolEqualityComparer.Default);
@@ -264,8 +230,7 @@ internal static class ComputationLambdas
     // The variable's same-tree INITIALIZER as an operation. Locals and fields declare through
     // VariableDeclaratorSyntax; auto-properties with an initializer (`Func<...> Compute { get; }
     // = async () => ...`) through PropertyDeclarationSyntax. Computed properties have no
-    // initializer and stay unresolvable, as they should. Shared with MZR004's method-group
-    // receiver resolution.
+    // initializer here: the callers that chase them resolve the getter's returns instead.
     public static IOperation? SameTreeInitializerOperation(ISymbol? variable, SemanticModel? semanticModel)
     {
         if (variable is null || semanticModel is null)
@@ -292,7 +257,9 @@ internal static class ComputationLambdas
         // `Func<int,int> patch; patch = static x => x;` initializes by assignment: when the
         // SOLE same-tree write is a simple assignment, its right-hand side is the initializer
         // -- for a deconstruction form, the positionally matching tuple element.
-        if (initializer is null && EffectiveInitializerAssignment(variable, semanticModel) is { } assignment)
+        // (An out-argument handoff has no right-hand side here: its bodies come from the
+        // callee's assignments, which the out-handoff resolution walks.)
+        if (initializer is null && EffectiveInitializerWrite(variable, semanticModel) is AssignmentExpressionSyntax assignment)
         {
             initializer = AssignedElementFor(assignment.Left, assignment.Right, variable, semanticModel);
         }
@@ -327,14 +294,6 @@ internal static class ComputationLambdas
         return null;
     }
 
-    // The effective initializer narrowed to the shapes whose right-hand side resolves to a
-    // single operation; an out-argument handoff has no RHS here (its bodies come from the
-    // callee's assignments, which MZR004 resolves itself).
-    public static AssignmentExpressionSyntax? EffectiveInitializerAssignment(ISymbol variable, SemanticModel? semanticModel, SyntaxNode? readSite = null)
-    {
-        return EffectiveInitializerWrite(variable, semanticModel, readSite) as AssignmentExpressionSyntax;
-    }
-
     // The single same-tree WRITE standing in for a missing declaration initializer -- a
     // plain `x = value` (or simple deconstruction), or an OUT-argument handoff
     // (`Provide(out patch)`, which the language requires to assign) -- or null when the
@@ -343,10 +302,8 @@ internal static class ComputationLambdas
     // the initialization, not a rebind.
     public static SyntaxNode? EffectiveInitializerWrite(ISymbol variable, SemanticModel? semanticModel, SyntaxNode? readSite = null)
     {
-        if (semanticModel is null || variable.DeclaringSyntaxReferences.FirstOrDefault()?.GetSyntax()
-                is VariableDeclaratorSyntax { Initializer: not null }
-                or PropertyDeclarationSyntax { Initializer: not null }
-                or SingleVariableDesignationSyntax)
+        if (semanticModel is null
+            || (variable.DeclaringSyntaxReferences.FirstOrDefault()?.GetSyntax() is { } declaration && DeclaredInitializerSite(declaration) is not null))
         {
             return null;
         }
@@ -360,14 +317,8 @@ internal static class ComputationLambdas
             // assignment would read as a rebind. With a READ SITE, writes that cannot run
             // before it are ignored outright: a future rebind neither initializes nor
             // disqualifies the write whose value this read observes.
-            if (ReassignmentTargets(node) is not { } targets
-                || (readSite is not null && !CanExecuteBefore(node, readSite, variable, semanticModel)))
-            {
-                continue;
-            }
-
-            var target = targets.FirstOrDefault(candidate => WritesVariable(candidate, variable, semanticModel));
-            if (target is null)
+            var target = ReassignmentTargets(node)?.FirstOrDefault(candidate => WritesVariable(candidate, variable, semanticModel));
+            if (target is null || (readSite is not null && !CanExecuteBefore(node, readSite, variable, semanticModel)))
             {
                 continue;
             }
@@ -462,9 +413,7 @@ internal static class ComputationLambdas
 
         for (SyntaxNode? current = write.Parent; current is not null; current = current.Parent)
         {
-            if (current is AnonymousFunctionExpressionSyntax or LocalFunctionStatementSyntax
-                or BaseMethodDeclarationSyntax or AccessorDeclarationSyntax or ArrowExpressionClauseSyntax
-                or CompilationUnitSyntax)
+            if (IsFunctionBoundary(current) || current is ArrowExpressionClauseSyntax or CompilationUnitSyntax)
             {
                 return true;
             }
@@ -484,24 +433,18 @@ internal static class ComputationLambdas
     // declaration itself binds the value (a parameter, an aliased local), so every write is
     // a rebind. Unverifiable (no model) counts as written: callers hop or trust only on
     // proof.
-    public static bool IsWrittenBefore(ISymbol variable, SyntaxNode reference, SemanticModel? semanticModel)
+    public static bool IsWrittenBefore(ISymbol variable, SyntaxNode reference, SemanticModel? semanticModel, SyntaxNode? excluding = null)
     {
         if (semanticModel is null)
         {
             return true;
         }
 
-        foreach (var node in semanticModel.SyntaxTree.GetRoot().DescendantNodes())
-        {
-            if (ReassignmentTargets(node) is { } targets
-                && targets.Any(target => WritesVariable(target, variable, semanticModel))
-                && CanExecuteBefore(node, reference, variable, semanticModel))
-            {
-                return true;
-            }
-        }
-
-        return false;
+        return semanticModel.SyntaxTree.GetRoot().DescendantNodes().Any(node =>
+            !ReferenceEquals(node, excluding)
+            && ReassignmentTargets(node) is { } targets
+            && targets.Any(target => WritesVariable(target, variable, semanticModel))
+            && CanExecuteBefore(node, reference, variable, semanticModel));
     }
 
     // Call-site arguments substitute for a chased helper's parameters: maps are built
@@ -512,8 +455,7 @@ internal static class ComputationLambdas
     // OUTER bindings carry through -- a called local function closes over its enclosing
     // helper's parameters (`void Inner() => s.Set(2); Inner();`), so dropping them would
     // orphan those references; keys are parameter symbols, so unrelated callees cannot
-    // collide, and a recursive call's fresh binding overwrites the stale one. Shared by
-    // MZR003's Set-target provenance and MZR004's delegate chase.
+    // collide, and a recursive call's fresh binding overwrites the stale one.
     public static Dictionary<IParameterSymbol, IOperation>? BuildArgumentMap(IOperation operation, Dictionary<IParameterSymbol, IOperation>? outer)
     {
         var arguments = operation switch
@@ -596,7 +538,7 @@ internal static class ComputationLambdas
             var declaration = entry.Key.DeclaringSyntaxReferences.FirstOrDefault()
                 ?? entry.Key.ContainingSymbol?.DeclaringSyntaxReferences.FirstOrDefault();
             var parameter = declaration is null
-                ? $"{entry.Key.Name}"
+                ? entry.Key.Name
                 : $"{declaration.SyntaxTree.FilePath}:{declaration.Span.Start}";
             parts.Add($"{parameter}#{entry.Key.Ordinal}={entry.Value.Syntax.SyntaxTree.FilePath}:{entry.Value.Syntax.SpanStart}");
         }
@@ -682,7 +624,7 @@ internal static class ComputationLambdas
     // The values a simple assignment gives THIS variable, deconstructions paired
     // positionally (`(other, later) = (a, b)` assigns only `b` to `later`). WritesVariable,
     // not plain symbol equality: an assignment through a ref alias rebinds the variable
-    // too. Shared by MZR004's delegate chases and the assembled-patch resolution below.
+    // too.
     public static IEnumerable<IOperation> AssignedValuesFor(ExpressionSyntax left, ExpressionSyntax right, ISymbol variable, SemanticModel semanticModel)
     {
         if (left is TupleExpressionSyntax leftTuple && right is TupleExpressionSyntax rightTuple
@@ -706,9 +648,30 @@ internal static class ComputationLambdas
         }
     }
 
+    // The delegate-typed arguments of an Apply call. Only the PATCH parameter stores a
+    // delegate: the state argument (possibly a computed property) must not run the
+    // delegate-shaped resolutions.
+    public static IEnumerable<IOperation> PatchArguments(IInvocationOperation invocation)
+    {
+        return invocation.Arguments
+            .Where(argument => argument.Parameter?.Type is { TypeKind: TypeKind.Delegate })
+            .Select(argument => argument.Value);
+    }
+
+    // Every supplemental patch body an Apply call stores (nothing for any other host):
+    // MZR002 and MZR003 walk these exactly like inline patches, because they replay on the
+    // state's flows all the same.
+    public static IEnumerable<(ComputationBody Body, Dictionary<IParameterSymbol, IOperation>? ArgumentMap)> AssembledPatchBodies(IInvocationOperation invocation)
+    {
+        return FactoryMethods.IsOptimisticPatchHost(invocation.TargetMethod)
+            ? PatchArguments(invocation).SelectMany(value => AssembledPatchBodies(value, invocation.SemanticModel))
+            : Enumerable.Empty<(ComputationBody, Dictionary<IParameterSymbol, IOperation>?)>();
+    }
+
     // Best-effort SUPPLEMENTAL bodies for an Apply patch argument beyond OfArgumentValue: a
     // patch assembled by a same-tree out-helper (the sole dominating out handoff, following
-    // forwarded handoffs), or returned by a same-tree computed get-only delegate property.
+    // forwarded handoffs), the surviving writes over a definitely overwritten initializer,
+    // or the returns of a same-tree computed get-only delegate property or delegate factory.
     // Resolution only -- MZR004 owns the unverifiable accounting for these shapes; MZR003
     // needs the BODIES, because a Set inside them still throws under the evaluation lock.
     public static IEnumerable<(ComputationBody Body, Dictionary<IParameterSymbol, IOperation>? ArgumentMap)> AssembledPatchBodies(IOperation value, SemanticModel? semanticModel)
@@ -720,7 +683,7 @@ internal static class ComputationLambdas
         // hide an assembled sibling.
         if (reference is IConditionalOperation or ICoalesceOperation)
         {
-            foreach (var body in ConditionalArmPatchBodies(reference, semanticModel))
+            foreach (var body in ValueArms(reference).SelectMany(arm => AssembledPatchBodies(arm, semanticModel)))
             {
                 yield return body;
             }
@@ -750,27 +713,15 @@ internal static class ComputationLambdas
         // An ALIAS resolves to its assembled source first: `Func<int,int> p = Patch;`
         // stores whatever the computed property's getter (or the stored factory call)
         // returned.
-        var source = Unwrap(ResolveDelegateValue(reference, semanticModel, null));
-
-        foreach (var body in AssembledSourceBodies(source, semanticModel))
+        foreach (var body in AssembledSourceBodies(ResolveDelegateValue(reference, semanticModel, null), semanticModel))
         {
             yield return body;
         }
     }
 
-    private static IEnumerable<(ComputationBody Body, Dictionary<IParameterSymbol, IOperation>? ArgumentMap)> ConditionalArmPatchBodies(IOperation reference, SemanticModel? semanticModel)
-    {
-        foreach (var arm in ValueArms(reference))
-        {
-            foreach (var body in AssembledPatchBodies(arm, semanticModel))
-            {
-                yield return body;
-            }
-        }
-    }
-
     private static IEnumerable<(ComputationBody Body, Dictionary<IParameterSymbol, IOperation>? ArgumentMap)> AssembledSourceBodies(IOperation source, SemanticModel? semanticModel, Dictionary<IParameterSymbol, IOperation>? outerMap = null)
     {
+        source = Unwrap(source);
         var resolvedVariable = ReferencedSymbol(source);
 
         // The INDEXER's argument map keeps the returned lambda's index-parameter references
@@ -787,24 +738,10 @@ internal static class ComputationLambdas
         // source of its own (`Func<int,int> patch = flag ? safe : Make(v);`).
         if (stored is not null && ConditionalArms(stored) is not null)
         {
-            return ConditionalInitializerBodies(stored, semanticModel, outerMap);
+            return ValueArms(stored).SelectMany(arm => AssembledSourceBodies(arm, semanticModel, outerMap));
         }
 
         return AssembledCallBodies(source, stored, semanticModel, outerMap);
-    }
-
-    private static IEnumerable<(ComputationBody Body, Dictionary<IParameterSymbol, IOperation>? ArgumentMap)> ConditionalInitializerBodies(
-        IOperation stored,
-        SemanticModel? semanticModel,
-        Dictionary<IParameterSymbol, IOperation>? outerMap)
-    {
-        foreach (var arm in ValueArms(stored))
-        {
-            foreach (var entry in AssembledSourceBodies(Unwrap(arm), semanticModel, outerMap))
-            {
-                yield return entry;
-            }
-        }
     }
 
     private static IEnumerable<(ComputationBody Body, Dictionary<IParameterSymbol, IOperation>? ArgumentMap)> AssembledCallBodies(
@@ -849,14 +786,13 @@ internal static class ComputationLambdas
             }
 
             if (SameTreeInitializerOperation(variable, semanticModel) is not { } next
-                || IsWrittenBefore(variable, link.Syntax, semanticModel)
-                || !IsReferenceShape(next))
+                || !IsReferenceShape(next)
+                || IsWrittenBefore(variable, link.Syntax, semanticModel))
             {
                 yield break;
             }
 
-            link = next;
-            link = Unwrap(link);
+            link = Unwrap(next);
         }
     }
 
@@ -864,34 +800,25 @@ internal static class ComputationLambdas
     // definitely overwritten on the straight-line path to this read, only the surviving
     // writes can be the stored closure -- each write that no other candidate definitely
     // kills resolves like an out-helper's assignment (values through aliases, forwarded
-    // handoffs recursively). MZR002/MZR003 walk these; MZR004's own carve-out accounts.
+    // handoffs recursively). MZR002/MZR003 walk these; MZR004's carve-out accounts.
     private static IEnumerable<(ComputationBody Body, Dictionary<IParameterSymbol, IOperation>? ArgumentMap)> SurvivingWriteBodies(
         ISymbol variable,
         IOperation reference,
         SemanticModel? semanticModel)
     {
-        if (semanticModel is null || !InitializerDefinitelyOverwritten(variable, reference, semanticModel))
+        if (semanticModel is null || StaleDeclarator(variable, reference, semanticModel) is not { } declarator)
         {
             yield break;
         }
 
-        var writes = new List<SyntaxNode>();
-        foreach (var node in semanticModel.SyntaxTree.GetRoot().DescendantNodes())
+        var writes = WritesBefore(variable, reference.Syntax, semanticModel);
+        if (!writes.Any(write => DefinitelyOverwrites(write, declarator, reference.Syntax, variable, semanticModel)))
         {
-            if (IsVariableWriteNode(node, variable, semanticModel)
-                && CanExecuteBefore(node, reference.Syntax, variable, semanticModel))
-            {
-                writes.Add(node);
-            }
+            yield break;
         }
 
-        foreach (var write in writes)
+        foreach (var write in Surviving(writes, reference.Syntax, variable, semanticModel))
         {
-            if (IsOverwrittenWithin(write, writes, reference.Syntax, variable, semanticModel))
-            {
-                continue;
-            }
-
             foreach (var body in OutHandoffNodeBodies(write, variable, semanticModel, new HashSet<SyntaxNode>(), callMap: null))
             {
                 yield return body;
@@ -901,20 +828,30 @@ internal static class ComputationLambdas
 
     private static bool InitializerDefinitelyOverwritten(ISymbol variable, IOperation reference, SemanticModel semanticModel)
     {
-        // A member read through some OTHER receiver observes that instance's storage: the
-        // own-receiver writes this scan counts say nothing definite about it.
-        if (!ReadsThroughOwnReceiver(reference.Syntax, variable)
-            || variable.DeclaringSyntaxReferences.FirstOrDefault() is not { } declaration
-            || declaration.SyntaxTree != semanticModel.SyntaxTree
-            || DeclaredInitializerSite(declaration.GetSyntax()) is not { } declarator)
-        {
-            return false;
-        }
+        return StaleDeclarator(variable, reference, semanticModel) is { } declarator
+            && WritesBefore(variable, reference.Syntax, semanticModel)
+                .Any(node => DefinitelyOverwrites(node, declarator, reference.Syntax, variable, semanticModel));
+    }
 
-        return semanticModel.SyntaxTree.GetRoot().DescendantNodes().Any(node =>
-            IsVariableWriteNode(node, variable, semanticModel)
-            && CanExecuteBefore(node, reference.Syntax, variable, semanticModel)
-            && DefinitelyOverwrites(node, declarator, reference.Syntax, variable, semanticModel));
+    // The same-tree declaration initializer a write CAN go stale at, for this read. A
+    // member read through some OTHER receiver observes that instance's storage: the
+    // own-receiver writes the scans count say nothing definite about it.
+    private static SyntaxNode? StaleDeclarator(ISymbol variable, IOperation reference, SemanticModel semanticModel)
+    {
+        return ReadsThroughOwnReceiver(reference.Syntax, variable)
+            && variable.DeclaringSyntaxReferences.FirstOrDefault() is { } declaration
+            && declaration.SyntaxTree == semanticModel.SyntaxTree
+            ? DeclaredInitializerSite(declaration.GetSyntax())
+            : null;
+    }
+
+    // Every reachable same-tree write to the variable that can run before the read.
+    public static List<SyntaxNode> WritesBefore(ISymbol variable, SyntaxNode reference, SemanticModel semanticModel)
+    {
+        return semanticModel.SyntaxTree.GetRoot().DescendantNodes()
+            .Where(node => IsVariableWriteNode(node, variable, semanticModel)
+                && CanExecuteBefore(node, reference, variable, semanticModel))
+            .ToList();
     }
 
     // Every declaration shape SameTreeInitializerOperation trusts can go stale the same way:
@@ -931,9 +868,12 @@ internal static class ComputationLambdas
     }
 
     // A delegate VALUE collapsed through variable-alias initializers and parameter-to-
-    // argument hops -- the resolution-only mirror of MZR004's invoked-delegate resolver,
-    // with a strict rebind guard: a written alias or parameter stays put, because the
-    // write (not the initializer or the call site) owns the value.
+    // argument hops. Hops stop at anything the body resolution can consume directly (a
+    // lambda, a method group, a variable holding one) so no shape is lost, and at any
+    // alias or parameter WRITTEN before its read: the write (not the initializer or the
+    // call site) owns the value, and hopping past it would resurrect a stale one. The
+    // aliasRebound policy decides what counts as written for an ALIAS link -- MZR004 excuses
+    // the write standing in for a missing initializer; resolution-only callers excuse none.
     public static IOperation ResolveDelegateValue(
         IOperation value,
         SemanticModel? semanticModel,
@@ -965,8 +905,9 @@ internal static class ComputationLambdas
             }
 
             visited ??= new HashSet<ISymbol>(SymbolEqualityComparer.Default);
-            var initializer = SameTreeInitializerOperation(variable, semanticModel);
-            if (!visited.Add(variable) || initializer is null || !IsReferenceShape(initializer)
+            if (!visited.Add(variable)
+                || SameTreeInitializerOperation(variable, semanticModel) is not { } initializer
+                || !IsReferenceShape(initializer)
                 || AliasRebound(variable, current, semanticModel, aliasRebound))
             {
                 return current;
@@ -976,12 +917,15 @@ internal static class ComputationLambdas
         }
     }
 
-    // The bodies a synchronously INVOKED delegate runs, with the argument map each resolved
-    // under. Direct resolutions (a same-tree lambda or method group, through aliases and
-    // parameter bindings, null-conditional invokes unwrapped) come first; only when none
-    // resolve does the callee's own SOURCE decide -- a factory call's returns, or a computed
-    // get-only property's. Resolution only: the callers own what they do per body, and
-    // MZR004 keeps its accounting-rich chase.
+    // The bodies a synchronously INVOKED delegate runs, each with the argument map it
+    // resolved under, the invoke's own arguments bound to the body's parameters. A
+    // conditional callee is resolved per ARM; within an arm, direct resolutions (a same-tree
+    // lambda or method group, through aliases and parameter bindings, null-conditional
+    // invokes unwrapped; a conditionally rebound parameter's handed-in value beside its
+    // rebind) come first, and only when none resolve does the callee's own SOURCE decide --
+    // a factory call's returns, a computed get-only property's, or the initializer's
+    // factory. Resolution only: the callers own what they do per body, and MZR004 keeps its
+    // accounting-rich chase.
     public static IEnumerable<(ComputationBody Body, Dictionary<IParameterSymbol, IOperation>? ArgumentMap)> InvokedDelegateBodies(
         IInvocationOperation invoke,
         SemanticModel? semanticModel,
@@ -1039,7 +983,7 @@ internal static class ComputationLambdas
         // `Get()(x)` runs whatever the factory returned, `Step()` whatever the getter did,
         // and `Func<int,int> d = Make(v); d(x)` whatever the INITIALIZER's factory did --
         // the same three sources an assembled patch argument resolves through.
-        foreach (var (body, map) in AssembledSourceBodies(Unwrap(resolved), semanticModel, argumentMap))
+        foreach (var (body, map) in AssembledSourceBodies(resolved, semanticModel, argumentMap))
         {
             yield return (body, BindInvokedParameters(body, invoke, map, semanticModel));
         }
@@ -1047,51 +991,56 @@ internal static class ComputationLambdas
 
     // The RECEIVER a method-group callee captured (`Action step = other.Touch;`), or null
     // when the callee is a lambda or a static target. MZR002 needs it: that body's `this`
-    // is the captured object, not the computation's.
+    // is the captured object, not the computation's. Follows the same hops that FIND the
+    // body: the alias collapse stops at a variable whose initializer is a method GROUP (not
+    // a reference shape), so the method-group resolution walks the initializer chain on.
     public static IOperation? InvokedDelegateReceiver(IInvocationOperation invoke, SemanticModel? semanticModel, Dictionary<IParameterSymbol, IOperation>? argumentMap)
     {
-        if (invoke.Instance is not { } callee)
-        {
-            return null;
-        }
+        return invoke.Instance is { } callee
+            ? ResolveMethodReference(ResolveDelegateValue(ResolveConditionalReceiver(callee), semanticModel, argumentMap), semanticModel)?.Instance
+            : null;
+    }
 
-        // Follows the same hops that FIND the body: the alias collapse stops at a variable
-        // whose initializer is a method GROUP (not a reference shape), so the initializer
-        // chain is walked here too, delegate-creation wrappers unwrapped.
-        var current = Unwrap(ResolveDelegateValue(ResolveConditionalReceiver(callee), semanticModel, argumentMap));
-        HashSet<ISymbol>? visited = null;
+    // The method group a delegate value holds: the group itself, a conversion or
+    // delegate-creation wrapper over it, or a variable whose (same-tree) initializer holds
+    // it -- so a `Func<int,int> patch = helper.Patch;` stored one statement earlier does not
+    // hide the receiver. GetOperation on an initializer yields the reference without the
+    // delegate-creation wrapper, hence the bare case. The visited set breaks initializer
+    // cycles.
+    public static IMethodReferenceOperation? ResolveMethodReference(IOperation? value, SemanticModel? semanticModel)
+    {
+        HashSet<ISymbol>? visitedVariables = null;
         while (true)
         {
-            if (current is IDelegateCreationOperation creation)
+            switch (value)
             {
-                current = Unwrap(creation.Target);
-                continue;
-            }
+                case IConversionOperation conversion:
+                    value = conversion.Operand;
+                    continue;
+                case IDelegateCreationOperation creation:
+                    value = creation.Target;
+                    continue;
+                case IMethodReferenceOperation methodReference:
+                    return methodReference;
+                case ILocalReferenceOperation or IFieldReferenceOperation or IPropertyReferenceOperation:
+                    visitedVariables ??= new HashSet<ISymbol>(SymbolEqualityComparer.Default);
+                    var variable = ReferencedVariable(value)!;
+                    if (!visitedVariables.Add(variable))
+                    {
+                        return null;
+                    }
 
-            if (current is IMethodReferenceOperation methodReference)
-            {
-                return methodReference.Instance;
+                    value = SameTreeInitializerOperation(variable, semanticModel);
+                    continue;
+                default:
+                    return null;
             }
-
-            if (ReferencedVariable(current) is not { } variable)
-            {
-                return null;
-            }
-
-            visited ??= new HashSet<ISymbol>(SymbolEqualityComparer.Default);
-            if (!visited.Add(variable) || SameTreeInitializerOperation(variable, semanticModel) is not { } initializer)
-            {
-                return null;
-            }
-
-            current = Unwrap(initializer);
         }
     }
 
     // The invoked delegate's OWN parameters bind to the call's arguments, exactly like a
     // called helper's: `Action<C> step = c => c.Counter++; step(this);` writes the
     // computation's instance, and `step(otherSignal)` carries that signal's provenance.
-    // Positional, because a delegate invoke has no named arguments to reorder.
     private static Dictionary<IParameterSymbol, IOperation>? BindInvokedParameters(
         ComputationBody body,
         IInvocationOperation invoke,
@@ -1149,28 +1098,19 @@ internal static class ComputationLambdas
         return ReferencedSymbol(Unwrap(operation)) is not null;
     }
 
-    private static IInvocationOperation? UnwrappedInitializerCall(ISymbol? variable, SemanticModel? semanticModel)
-    {
-        var initializer = SameTreeInitializerOperation(variable, semanticModel);
-
-        return initializer is null ? null : Unwrap(initializer) as IInvocationOperation;
-    }
-
     // Each body carries the ARGUMENT MAP that resolved it: a nested factory's returns bind
     // that factory's own parameters, which the caller's map knows nothing about.
     public static IEnumerable<(ComputationBody Body, Dictionary<IParameterSymbol, IOperation>? ArgumentMap)> ReturnedBodies(ComputationBody methodBody, SemanticModel? semanticModel, Dictionary<IParameterSymbol, IOperation>? argumentMap = null, HashSet<(IMethodSymbol, string)>? visitedFactories = null)
     {
-        foreach (var returned in ReturnedValues(methodBody.Body))
+        visitedFactories ??= new HashSet<(IMethodSymbol, string)>();
+
+        // A conditional return stores whichever arm the flow picked: each arm is its own
+        // candidate, so a direct lambda arm cannot silence a factory-call one.
+        foreach (var arm in ReturnedValues(methodBody.Body).SelectMany(ValueArms))
         {
-            // A conditional return stores whichever arm the flow picked: each arm is its
-            // own candidate, so a direct lambda arm cannot silence a factory-call one.
-            foreach (var arm in ValueArms(returned))
+            foreach (var entry in ReturnedArmBodies(arm, semanticModel, argumentMap, visitedFactories))
             {
-                visitedFactories ??= new HashSet<(IMethodSymbol, string)>();
-                foreach (var entry in ReturnedArmBodies(arm, semanticModel, argumentMap, visitedFactories))
-                {
-                    yield return entry;
-                }
+                yield return entry;
             }
         }
     }
@@ -1207,36 +1147,7 @@ internal static class ComputationLambdas
     {
         var unwrapped = Unwrap(value);
 
-        switch (unwrapped)
-        {
-            case IConditionalOperation { WhenFalse: { } whenFalse } conditional:
-                foreach (var arm in ValueArms(conditional.WhenTrue))
-                {
-                    yield return arm;
-                }
-
-                foreach (var arm in ValueArms(whenFalse))
-                {
-                    yield return arm;
-                }
-
-                break;
-            case ICoalesceOperation coalesce:
-                foreach (var arm in ValueArms(coalesce.Value))
-                {
-                    yield return arm;
-                }
-
-                foreach (var arm in ValueArms(coalesce.WhenNull))
-                {
-                    yield return arm;
-                }
-
-                break;
-            default:
-                yield return unwrapped;
-                break;
-        }
+        return ConditionalArms(unwrapped) is { } arms ? arms.SelectMany(ValueArms) : new[] { unwrapped };
     }
 
     // `return Make();` assembles one factory deeper: chased through the nested call's
@@ -1279,36 +1190,17 @@ internal static class ComputationLambdas
         Dictionary<IParameterSymbol, IOperation>? outerMap)
     {
         if (semanticModel is null || !visited.Add(argument)
-            || (semanticModel.GetOperation(argument) as IArgumentOperation) is not { Parameter: { } parameter } argumentOperation
-            || parameter.ContainingSymbol is not IMethodSymbol method
-            || ResolveMethodBody(method, semanticModel) is not { } helper)
+            || ResolveOutHelper(argument, semanticModel, outerMap) is not var (parameter, _, helper, callMap))
         {
             yield break;
         }
 
-        var callMap = argumentOperation.Parent is { } call
-            ? BuildArgumentMap(call, outerMap)
-            : outerMap;
-
         // The kill filter mirrors MZR004's accounting chase: a write -- assignment or
         // forwarded handoff -- definitely overwritten on the straight-line path to the
         // helper's return can never be the delegate the caller receives.
-        var writes = new List<SyntaxNode>();
-        foreach (var node in helper.Scope.DescendantNodes())
+        var writes = helper.Scope.DescendantNodes().Where(node => IsVariableWriteNode(node, parameter, semanticModel)).ToList();
+        foreach (var node in Surviving(writes, helper.Scope, parameter, semanticModel))
         {
-            if (IsVariableWriteNode(node, parameter, semanticModel))
-            {
-                writes.Add(node);
-            }
-        }
-
-        foreach (var node in writes)
-        {
-            if (IsOverwrittenWithin(node, writes, helper.Scope, parameter, semanticModel))
-            {
-                continue;
-            }
-
             foreach (var body in OutHandoffNodeBodies(node, parameter, semanticModel, visited, callMap))
             {
                 yield return body;
@@ -1316,11 +1208,38 @@ internal static class ComputationLambdas
         }
     }
 
-    // A node that can BIND the variable: a (possibly deconstructing) assignment whose target
-    // writes it, or an out-argument handoff naming it (ref aliases included on both). Shared
-    // by the out-helper kill filter and the surviving-write resolution. Member writes count
-    // only through the member's OWN receiver -- `other.patch = safe;` on some other instance
-    // neither kills nor stands in for what a `this.patch` read observes.
+    // The same-tree helper an out argument hands its variable to -- by the SEMANTIC
+    // parameter, since named arguments reorder freely (`Provide(second: out later, first:
+    // 0)`) -- with the call's own argument map: the helper's OTHER parameters resolve
+    // through this call's arguments (`Provide(out later, static () => 0)` with
+    // `Provide(out d, source) => d = source` hands the call-site lambda back through `d`).
+    public static (IParameterSymbol Parameter, IMethodSymbol Method, ComputationBody Helper, Dictionary<IParameterSymbol, IOperation>? CallMap)? ResolveOutHelper(
+        ArgumentSyntax argument,
+        SemanticModel semanticModel,
+        Dictionary<IParameterSymbol, IOperation>? outerMap)
+    {
+        if ((semanticModel.GetOperation(argument) as IArgumentOperation) is not { Parameter: { } parameter } argumentOperation
+            || parameter.ContainingSymbol is not IMethodSymbol method
+            || ResolveMethodBody(method, semanticModel) is not { } helper)
+        {
+            return null;
+        }
+
+        var callMap = argumentOperation.Parent is { } call
+            ? BuildArgumentMap(call, outerMap)
+            : outerMap;
+
+        return (parameter, method, helper, callMap);
+    }
+
+    // The candidate writes no OTHER candidate definitely kills before the value is
+    // observed -- the survivor filter every write-collecting scan applies.
+    public static IEnumerable<SyntaxNode> Surviving(IReadOnlyCollection<SyntaxNode> candidates, SyntaxNode observedAt, ISymbol variable, SemanticModel semanticModel)
+    {
+        return candidates.Where(write =>
+            !candidates.Any(other => other != write && DefinitelyOverwrites(other, write, observedAt, variable, semanticModel)));
+    }
+
     // A write the flow can never reach -- one after an unconditional `return`/`throw` --
     // binds nothing the caller can observe, so it is no candidate and kills nothing.
     // Roslyn answers this exactly; anything it cannot analyse counts as reachable.
@@ -1336,14 +1255,14 @@ internal static class ComputationLambdas
         return !flow.Succeeded || flow.StartPointIsReachable;
     }
 
-    private static bool IsVariableWriteNode(SyntaxNode node, ISymbol variable, SemanticModel semanticModel)
+    // A reachable node that can BIND the variable: a (possibly deconstructing) assignment
+    // whose target writes it, or an out-argument handoff naming it (ref aliases included on
+    // both). Member writes count only through the member's OWN receiver -- `other.patch =
+    // safe;` on some other instance neither kills nor stands in for what a `this.patch`
+    // read observes.
+    public static bool IsVariableWriteNode(SyntaxNode node, ISymbol variable, SemanticModel semanticModel)
     {
-        if (!IsReachable(node, semanticModel))
-        {
-            return false;
-        }
-
-        return node switch
+        var writes = node switch
         {
             AssignmentExpressionSyntax assignment => ReassignmentTargets(assignment) is { } targets
                 && targets.Any(target => WritesVariable(target, variable, semanticModel) && WritesThroughOwnReceiver(target, variable)),
@@ -1352,6 +1271,8 @@ internal static class ComputationLambdas
                 && WritesThroughOwnReceiver(argument.Expression, variable),
             _ => false,
         };
+
+        return writes && IsReachable(node, semanticModel);
     }
 
     private static IEnumerable<(ComputationBody Body, Dictionary<IParameterSymbol, IOperation>? ArgumentMap)> OutHandoffNodeBodies(
@@ -1361,11 +1282,10 @@ internal static class ComputationLambdas
         HashSet<SyntaxNode> visited,
         Dictionary<IParameterSymbol, IOperation>? callMap)
     {
+        // Callers hand in IsVariableWriteNode hits only, so the shape decides everything.
         switch (node)
         {
-            case AssignmentExpressionSyntax assignment
-                when ReassignmentTargets(assignment) is { } targets
-                    && targets.Any(target => WritesVariable(target, variable, semanticModel)):
+            case AssignmentExpressionSyntax assignment:
                 foreach (var value in AssignedValuesFor(assignment.Left, assignment.Right, variable, semanticModel))
                 {
                     foreach (var body in AssignedValueBodies(value, semanticModel, callMap))
@@ -1375,9 +1295,7 @@ internal static class ComputationLambdas
                 }
 
                 break;
-            case ArgumentSyntax forwarded
-                when forwarded.RefOrOutKeyword.IsKind(SyntaxKind.OutKeyword)
-                    && WritesVariable(forwarded.Expression, variable, semanticModel):
+            case ArgumentSyntax forwarded:
                 foreach (var body in OutHandoffBodies(forwarded, semanticModel, visited, callMap))
                 {
                     yield return body;
@@ -1409,19 +1327,10 @@ internal static class ComputationLambdas
             yield break;
         }
 
-        resolved = Unwrap(resolved);
-
         foreach (var entry in AssembledSourceBodies(resolved, semanticModel, callMap))
         {
             yield return entry;
         }
-    }
-
-    // Whether ANOTHER candidate write definitely kills this one before the value is
-    // observed -- the survivor test every write-collecting scan applies.
-    public static bool IsOverwrittenWithin(SyntaxNode write, IReadOnlyCollection<SyntaxNode> candidates, SyntaxNode observedAt, ISymbol variable, SemanticModel semanticModel)
-    {
-        return candidates.Any(other => other != write && DefinitelyOverwrites(other, write, observedAt, variable, semanticModel));
     }
 
     // "Straight-line" = the killer sits in plain statements between itself and wherever the
@@ -1431,12 +1340,10 @@ internal static class ComputationLambdas
     // argument-list hop covers out-handoff killers; a conditional-access call stays rejected.
     public static bool DefinitelyOverwrites(SyntaxNode killer, SyntaxNode victim, SyntaxNode reference, ISymbol variable, SemanticModel semanticModel)
     {
-        // Span order first: it rejects most candidate pairs outright, while the write test
-        // below issues semantic queries and the exit walk covers a whole function.
-        if (killer.SpanStart <= victim.SpanStart
-            || killer.SpanStart >= reference.Span.End
-            || !IsDeterminingWrite(killer, variable, semanticModel)
-            || ExitsBetween(victim, killer))
+        // Syntactic tests first: span order and the parent walk reject most candidate
+        // pairs outright, while the write test issues semantic queries and the exit walk
+        // covers a whole function.
+        if (killer.SpanStart <= victim.SpanStart || killer.SpanStart >= reference.Span.End)
         {
             return false;
         }
@@ -1449,7 +1356,7 @@ internal static class ComputationLambdas
             }
         }
 
-        return true;
+        return IsDeterminingWrite(killer, variable, semanticModel) && !ExitsBetween(victim, killer);
     }
 
     // A killer must fully DETERMINE the new value: a simple assignment -- deconstruction
@@ -1561,7 +1468,7 @@ internal static class ComputationLambdas
     // A method group (`f.CreateMemoizR(Compute)`) or local-function reference is as much a
     // computation as a lambda; its declaration is the body to analyze. Resolution is same-tree
     // by design: another tree's declarations have no operation model here, and the runtime
-    // checks still cover what the analyzer cannot see. Shared with MZR004's helper chasing.
+    // checks still cover what the analyzer cannot see.
     public static ComputationBody? ResolveMethodBody(IMethodSymbol method, SemanticModel? semanticModel)
     {
         if (semanticModel is null)
@@ -1588,25 +1495,7 @@ internal static class ComputationLambdas
     // walked.
     public static IEnumerable<IOperation> Descend(IOperation root)
     {
-        foreach (var child in root.ChildOperations)
-        {
-            yield return child;
-
-            if (child is IInvocationOperation invocation && FactoryMethods.IsComputationHost(invocation.TargetMethod))
-            {
-                foreach (var descendant in DescendNestedHostArguments(invocation, Descend))
-                {
-                    yield return descendant;
-                }
-
-                continue;
-            }
-
-            foreach (var descendant in Descend(child))
-            {
-                yield return descendant;
-            }
-        }
+        return Walk(root, FactoryMethods.IsComputationHost, pruneFunctions: false);
     }
 
     // The unpruned walk for STORED-closure facts (MZR004's capture verdicts): a nested
@@ -1616,78 +1505,42 @@ internal static class ComputationLambdas
     // analysis repeats exactly this capture walk on the same operations.
     public static IEnumerable<IOperation> DescendStoredClosure(IOperation root)
     {
-        foreach (var child in root.ChildOperations)
-        {
-            yield return child;
-
-            if (child is IInvocationOperation invocation && FactoryMethods.IsOptimisticPatchHost(invocation.TargetMethod))
-            {
-                foreach (var descendant in DescendNestedHostArguments(invocation, DescendStoredClosure))
-                {
-                    yield return descendant;
-                }
-
-                continue;
-            }
-
-            foreach (var descendant in DescendStoredClosure(child))
-            {
-                yield return descendant;
-            }
-        }
+        return Walk(root, FactoryMethods.IsOptimisticPatchHost, pruneFunctions: false);
     }
 
     // Like Descend, but restricted to the operations the computation executes as part of its OWN
     // evaluation: nested anonymous functions and local-function declarations are pruned. Their
     // bodies run only if and when the delegate is invoked -- and MZR003's own fix guidance is to
     // BUILD such a callback ("schedule the write outside the evaluation"), which executes later
-    // on a flow that holds no evaluation lock and so must not be flagged. The cost is a false
-    // negative for a nested function invoked synchronously inside the computation; the runtime
-    // exception still guards that path. MZR002 deliberately keeps the full walk: a captured-state
-    // write is a data race whenever the callback runs, deferred or not.
+    // on a flow that holds no evaluation lock and so must not be flagged. (A nested function
+    // the computation synchronously INVOKES is reached through the invoked-delegate
+    // resolution instead.) MZR002 deliberately keeps the full walk: a captured-state write
+    // is a data race whenever the callback runs, deferred or not.
     public static IEnumerable<IOperation> DescendDirectExecution(IOperation root)
+    {
+        return Walk(root, FactoryMethods.IsComputationHost, pruneFunctions: true);
+    }
+
+    // The depth-first walk behind the three: a nested host's ORDINARY arguments are still
+    // walked (they are evaluated as part of the outer computation), only its delegate
+    // arguments are skipped, and pruning drops nested functions altogether.
+    private static IEnumerable<IOperation> Walk(IOperation root, Func<IMethodSymbol, bool> isNestedHost, bool pruneFunctions)
     {
         foreach (var child in root.ChildOperations)
         {
-            if (child is IAnonymousFunctionOperation or ILocalFunctionOperation)
+            if (pruneFunctions && child is IAnonymousFunctionOperation or ILocalFunctionOperation)
             {
                 continue;
             }
 
             yield return child;
 
-            if (child is IInvocationOperation invocation && FactoryMethods.IsComputationHost(invocation.TargetMethod))
-            {
-                foreach (var descendant in DescendNestedHostArguments(invocation, DescendDirectExecution))
-                {
-                    yield return descendant;
-                }
+            var below = child is IInvocationOperation invocation && isNestedHost(invocation.TargetMethod)
+                ? invocation.Arguments.Select(argument => argument.Value).Where(value => !IsComputationDelegateArgument(value))
+                    .SelectMany(value => Walk(value, isNestedHost, pruneFunctions).Prepend(value))
+                : Walk(child, isNestedHost, pruneFunctions);
 
-                continue;
-            }
-
-            foreach (var descendant in DescendDirectExecution(child))
-            {
-                yield return descendant;
-            }
-        }
-    }
-
-    // Walks a nested computation host's ORDINARY arguments with the caller's walker (they are
-    // evaluated as part of the outer computation), skipping the delegate arguments, whose
-    // bodies the nested invocation's own analyzer pass covers.
-    private static IEnumerable<IOperation> DescendNestedHostArguments(IInvocationOperation nestedHost, Func<IOperation, IEnumerable<IOperation>> walker)
-    {
-        foreach (var argument in nestedHost.Arguments)
-        {
-            if (IsComputationDelegateArgument(argument.Value))
-            {
-                continue;
-            }
-
-            yield return argument.Value;
-
-            foreach (var descendant in walker(argument.Value))
+            foreach (var descendant in below)
             {
                 yield return descendant;
             }
@@ -1800,12 +1653,7 @@ internal static class ComputationLambdas
     // when a loop encloses both AND the variable outlives the iteration (a loop-body local is
     // freshly initialized each pass). Shared by MZR004's delegate-reassignment scan and the
     // provenance checks in ReceiverChains.
-    public static bool CanExecuteBefore(SyntaxNode assignment, SyntaxNode reference, ISymbol variable, SemanticModel? semanticModel)
-    {
-        return CanExecuteBefore(assignment, reference, variable, semanticModel, visitedFunctions: null);
-    }
-
-    private static bool CanExecuteBefore(SyntaxNode node, SyntaxNode reference, ISymbol variable, SemanticModel? semanticModel, HashSet<SyntaxNode>? visitedFunctions)
+    public static bool CanExecuteBefore(SyntaxNode node, SyntaxNode reference, ISymbol variable, SemanticModel? semanticModel, HashSet<SyntaxNode>? visitedFunctions = null)
     {
         var enclosing = EnclosingFunction(node);
         if (!ReferenceEquals(enclosing, EnclosingFunction(reference)))
@@ -1843,8 +1691,7 @@ internal static class ComputationLambdas
                 return owner;
             }
 
-            if (current is AnonymousFunctionExpressionSyntax or LocalFunctionStatementSyntax
-                or BaseMethodDeclarationSyntax or AccessorDeclarationSyntax)
+            if (IsFunctionBoundary(current))
             {
                 return current;
             }
@@ -1871,7 +1718,7 @@ internal static class ComputationLambdas
         if (function is AnonymousFunctionExpressionSyntax lambda)
         {
             visitedFunctions ??= new HashSet<SyntaxNode>();
-            return visitedFunctions.Add(lambda) && LambdaRunsBefore(lambda, reference, variable, semanticModel, visitedFunctions);
+            return visitedFunctions.Add(lambda) && ReferenceRunsBefore(lambda, reference, variable, semanticModel, visitedFunctions);
         }
 
         if (function is not LocalFunctionStatementSyntax local
@@ -1886,23 +1733,21 @@ internal static class ComputationLambdas
             return false;
         }
 
-        foreach (var identifier in semanticModel.SyntaxTree.GetRoot().DescendantNodes().OfType<IdentifierNameSyntax>())
-        {
-            if (identifier.Identifier.ValueText == symbol.Name
-                && !local.Span.Contains(identifier.Span)
-                && !IsInsideNameOfSyntax(identifier)
-                && SymbolEqualityComparer.Default.Equals(semanticModel.GetSymbolInfo(identifier).Symbol, symbol)
-                && ReferenceRunsBefore(identifier, reference, variable, semanticModel, visitedFunctions))
-            {
-                return true;
-            }
-        }
-
-        return false;
+        return ReferencesTo(symbol, semanticModel).Any(identifier =>
+            !local.Span.Contains(identifier.Span)
+            && ReferenceRunsBefore(identifier, reference, variable, semanticModel, visitedFunctions));
     }
 
-    // A name mentioned only inside nameof() is a compile-time string: it neither runs the
-    // function nor lets a delegate escape, so the ordering scans must not count it.
+    // Every same-tree mention of the symbol that is a real reference: a name inside nameof()
+    // is a compile-time string, which neither runs a function nor lets a delegate escape.
+    private static IEnumerable<IdentifierNameSyntax> ReferencesTo(ISymbol symbol, SemanticModel semanticModel)
+    {
+        return semanticModel.SyntaxTree.GetRoot().DescendantNodes().OfType<IdentifierNameSyntax>()
+            .Where(name => name.Identifier.ValueText == symbol.Name
+                && !IsInsideNameOfSyntax(name)
+                && SymbolEqualityComparer.Default.Equals(semanticModel.GetSymbolInfo(name).Symbol, symbol));
+    }
+
     private static bool IsInsideNameOfSyntax(SyntaxNode node)
     {
         for (var current = node.Parent; current is not null; current = current.Parent)
@@ -1916,33 +1761,13 @@ internal static class ComputationLambdas
         return false;
     }
 
-    // Where a lambda's body can run: at the invocation site for an immediately-invoked one
-    // (`(() => ...)()`), at the receiving variable's invocation sites for one lifted into a
-    // delegate variable -- resolved with the same machinery as method-group lifts. A lambda
-    // that goes anywhere else (an argument, a return value) escapes to unknowable callers.
-    private static bool LambdaRunsBefore(AnonymousFunctionExpressionSyntax lambda, SyntaxNode reference, ISymbol variable, SemanticModel semanticModel, HashSet<SyntaxNode> visitedFunctions)
-    {
-        SyntaxNode current = lambda;
-        while (current.Parent is ParenthesizedExpressionSyntax or CastExpressionSyntax)
-        {
-            current = current.Parent;
-        }
-
-        if (current.Parent is InvocationExpressionSyntax { Expression: { } invoked } invocation && invoked == current)
-        {
-            return CanExecuteBefore(invocation, reference, variable, semanticModel, visitedFunctions);
-        }
-
-        var lifted = LiftTargetVariable(current, semanticModel);
-        return lifted is null || LiftedDelegateRunsBefore(lifted, reference, variable, semanticModel, visitedFunctions);
-    }
-
-    // A direct CALL runs the function at the call's own position. A method-group LIFT runs it
-    // wherever the receiving delegate variable is invoked -- so those invocation sites become
-    // the ordering points; a lift that escapes anywhere else stays unknowable. Casts and
-    // parentheses change neither: `(Action)Rebind` lifted into a variable is still ordered by
-    // that variable's invocation sites.
-    private static bool ReferenceRunsBefore(IdentifierNameSyntax use, SyntaxNode reference, ISymbol variable, SemanticModel semanticModel, HashSet<SyntaxNode> visitedFunctions)
+    // A direct CALL (or an immediately-invoked lambda) runs the function at the call's own
+    // position. A method-group or lambda LIFT runs it wherever the receiving delegate
+    // variable is invoked -- so those invocation sites become the ordering points; a lift
+    // that escapes anywhere else (an argument, a return value) stays unknowable. Casts and
+    // parentheses change neither: `(Action)Rebind` lifted into a variable is still ordered
+    // by that variable's invocation sites.
+    private static bool ReferenceRunsBefore(SyntaxNode use, SyntaxNode reference, ISymbol variable, SemanticModel semanticModel, HashSet<SyntaxNode> visitedFunctions)
     {
         var current = UnwrapCastsAndParentheses(use);
         if (current.Parent is InvocationExpressionSyntax { Expression: { } invoked } && invoked == current)
@@ -1982,22 +1807,7 @@ internal static class ComputationLambdas
 
     private static bool LiftedDelegateRunsBefore(ISymbol lifted, SyntaxNode reference, ISymbol variable, SemanticModel semanticModel, HashSet<SyntaxNode> visitedFunctions)
     {
-        foreach (var name in semanticModel.SyntaxTree.GetRoot().DescendantNodes().OfType<IdentifierNameSyntax>())
-        {
-            if (name.Identifier.ValueText != lifted.Name
-                || IsInsideNameOfSyntax(name)
-                || !SymbolEqualityComparer.Default.Equals(semanticModel.GetSymbolInfo(name).Symbol, lifted))
-            {
-                continue;
-            }
-
-            if (LiftedUseRunsBefore(name, reference, variable, semanticModel, visitedFunctions))
-            {
-                return true;
-            }
-        }
-
-        return false;
+        return ReferencesTo(lifted, semanticModel).Any(name => LiftedUseRunsBefore(name, reference, variable, semanticModel, visitedFunctions));
     }
 
     private static bool LiftedUseRunsBefore(IdentifierNameSyntax name, SyntaxNode reference, ISymbol variable, SemanticModel semanticModel, HashSet<SyntaxNode> visitedFunctions)
@@ -2042,8 +1852,8 @@ internal static class ComputationLambdas
 
     // Same-tree code an operation EXECUTES, whatever the syntax: a call; a property access (a
     // read runs the getter, an assignment target runs the setter, compound forms run both); a
-    // constructor; or a user-defined operator/conversion. Shared by MZR003's and MZR004's
-    // executed chases. (A member mentioned only in nameof is not executed -- callers guard.)
+    // constructor; or a user-defined operator/conversion. (A member mentioned only in nameof
+    // is not executed -- callers guard.)
     public static IEnumerable<IMethodSymbol> ExecutedMethods(IOperation operation)
     {
         switch (operation)

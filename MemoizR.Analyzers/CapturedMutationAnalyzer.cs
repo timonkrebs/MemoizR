@@ -44,20 +44,9 @@ public sealed class CapturedMutationAnalyzer : DiagnosticAnalyzer
         // Patch shapes resolved beyond plain arguments -- assembled by an out-helper,
         // returned by a computed delegate property or a same-tree factory -- replay on the
         // state's flows exactly like an inline patch, so their writes race identically.
-        if (FactoryMethods.IsOptimisticPatchHost(invocation.TargetMethod))
+        foreach (var (body, map) in ComputationLambdas.AssembledPatchBodies(invocation))
         {
-            foreach (var argument in invocation.Arguments)
-            {
-                if (argument.Parameter?.Type is not { TypeKind: TypeKind.Delegate })
-                {
-                    continue;
-                }
-
-                foreach (var (body, map) in ComputationLambdas.AssembledPatchBodies(argument.Value, invocation.SemanticModel))
-                {
-                    InspectComputationBody(context, body, invocation.SemanticModel, map);
-                }
-            }
+            InspectComputationBody(context, body, invocation.SemanticModel, map);
         }
     }
 
@@ -175,8 +164,8 @@ public sealed class CapturedMutationAnalyzer : DiagnosticAnalyzer
         ImmutableArray<IParameterSymbol> thisParameters,
         bool foreignThis)
     {
-        var key = (delegateBody.Scope, ComputationLambdas.ArgumentMapKey(argumentMap), foreignThis);
-        if (!computationScope.Span.Contains(delegateBody.Scope.Span) && walk.VisitedDelegates.Add(key))
+        if (!computationScope.Span.Contains(delegateBody.Scope.Span)
+            && walk.VisitedDelegates.Add((delegateBody.Scope, ComputationLambdas.ArgumentMapKey(argumentMap), foreignThis)))
         {
             InspectComputationOperations(context, delegateBody, computationScope, semanticModel, walk, argumentMap, thisParameters, foreignThis);
         }
@@ -216,7 +205,7 @@ public sealed class CapturedMutationAnalyzer : DiagnosticAnalyzer
                 continue;
             }
 
-            var nestedThis = NestedThisParameter(operation, thisParameters, foreignThis);
+            var nestedThis = NestedThisParameters(operation, thisParameters, foreignThis);
             var nestedForeign = ForeignReceiver(operation, thisParameters, foreignThis);
 
             // The map lets a delegate handed INTO the helper resolve at its invocation
@@ -246,59 +235,31 @@ public sealed class CapturedMutationAnalyzer : DiagnosticAnalyzer
         return ComputationLambdas.ArgumentMapKey(delegates);
     }
 
-    private static IEnumerable<IMethodSymbol> ChaseableMethods(IOperation operation, ImmutableArray<IParameterSymbol> thisParameters, bool foreignThis)
-    {
-        switch (operation)
-        {
-            case IMethodReferenceOperation { Method.MethodKind: MethodKind.LocalFunction } reference:
-                yield return reference.Method;
-                break;
-            case IPropertyReferenceOperation property:
-                foreach (var accessor in ChaseableAccessors(property, thisParameters, foreignThis))
-                {
-                    yield return accessor;
-                }
-
-                break;
-
-            // Every other executed shape runs like a call: a same-tree CONSTRUCTOR
-            // (`new Writer()` incrementing a static counter), a user-defined
-            // operator/conversion, a custom event accessor, using-driven Dispose.
-            // ForeignReceiver marks a constructor's fresh object so its own instance
-            // writes stay suppressed while statics and captured state still report.
-            default:
-                foreach (var method in ComputationLambdas.ExecutedMethods(operation))
-                {
-                    yield return method;
-                }
-
-                break;
-        }
-    }
-
-    // A property READ runs its getter like an invoked helper, on any receiver. A WRITE on
-    // the computation's own instance (or a static) needs no chase -- the property itself is
-    // the mutation target the direct walk reports -- but on a FOREIGN receiver nothing else
+    // Every executed shape runs like a call -- a property getter, a same-tree CONSTRUCTOR
+    // (`new Writer()` incrementing a static counter), a user-defined operator/conversion, a
+    // custom event accessor, using-driven Dispose (ForeignReceiver marks a constructor's
+    // fresh object so its own instance writes stay suppressed while statics and captured
+    // state still report) -- and a LIFTED local function's closure is the computation's
+    // environment whether or not the reference runs it. A property WRITE on the
+    // computation's own instance (or a static) needs no chase -- the property itself is the
+    // mutation target the direct walk reports -- but on a FOREIGN receiver nothing else
     // looks at the setter body, whose side effects (`set { hits++; }`) still run on every
     // replay.
-    private static IEnumerable<IMethodSymbol> ChaseableAccessors(IPropertyReferenceOperation property, ImmutableArray<IParameterSymbol> thisParameters, bool foreignThis)
+    private static IEnumerable<IMethodSymbol> ChaseableMethods(IOperation operation, ImmutableArray<IParameterSymbol> thisParameters, bool foreignThis)
     {
-        var (reads, writes) = ComputationLambdas.PropertyUsage(property);
-        if (reads && property.Property.GetMethod is { } getter)
+        if (operation is IMethodReferenceOperation { Method.MethodKind: MethodKind.LocalFunction } reference)
         {
-            yield return getter;
+            return new[] { reference.Method };
         }
 
-        if (writes && property.Property.SetMethod is { } setter
-            && property.Instance is { } instance && !IsComputationInstance(instance, thisParameters, foreignThis))
-        {
-            yield return setter;
-        }
+        return ComputationLambdas.ExecutedMethods(operation).Where(method =>
+            method.MethodKind != MethodKind.PropertySet
+            || (operation is IPropertyReferenceOperation { Instance: { } instance } && !IsComputationInstance(instance, thisParameters, foreignThis)));
     }
 
     // Whether the chased body's own `this` is some OTHER object than the computation's:
-    // true when the receiver is neither the enclosing instance nor the current this-bound
-    // parameter. A receiverless callee (static, extension, local function) has no `this` of
+    // true when the receiver is neither the enclosing instance nor one of the current
+    // this-bound parameters. A receiverless callee (static, extension, local function) has no `this` of
     // its own to rebind, so the current answer carries through -- a local function nested
     // in a foreign body still belongs to that foreign object.
     private static bool ForeignReceiver(IOperation operation, ImmutableArray<IParameterSymbol> thisParameters, bool foreignThis)
@@ -329,7 +290,7 @@ public sealed class CapturedMutationAnalyzer : DiagnosticAnalyzer
     // instance nowhere rebinds nothing: a chased local function keeps the current binding
     // (its closure can still name an extension body's receiver parameter), while any other
     // callee cannot reference it at all.
-    private static ImmutableArray<IParameterSymbol> NestedThisParameter(IOperation operation, ImmutableArray<IParameterSymbol> thisParameters, bool foreignThis)
+    private static ImmutableArray<IParameterSymbol> NestedThisParameters(IOperation operation, ImmutableArray<IParameterSymbol> thisParameters, bool foreignThis)
     {
         if (operation is not IInvocationOperation call)
         {
@@ -353,8 +314,8 @@ public sealed class CapturedMutationAnalyzer : DiagnosticAnalyzer
     }
 
     // The operation refers to the COMPUTATION's enclosing instance: a direct `this` -- only
-    // while walking code whose `this` IS that instance -- the current body's this-bound
-    // parameter, or a local ALIAS resolving to either through its same-tree initializer
+    // while walking code whose `this` IS that instance -- one of the current body's
+    // this-bound parameters, or a local ALIAS resolving to either through its same-tree initializer
     // chain (`var alias = c; Mutate(alias);` hands the instance on). An alias written
     // before its use no longer proves the binding and stays untrusted.
     private static bool IsComputationInstance(IOperation? receiver, ImmutableArray<IParameterSymbol> thisParameters, bool foreignThis)
@@ -503,6 +464,11 @@ public sealed class CapturedMutationAnalyzer : DiagnosticAnalyzer
 
     private static void ReportIfShared(OperationAnalysisContext context, IOperation target, SyntaxNode scope, SyntaxNode computationScope, ImmutableArray<IParameterSymbol> thisParameters, bool foreignThis, HashSet<SyntaxNode> reportedTargets)
     {
+        if (reportedTargets.Contains(target.Syntax))
+        {
+            return;
+        }
+
         var (kind, symbol) = ResolveSharedRoot(target, scope, thisParameters, foreignThis);
         if (kind is null || !SharesComputationEnvironment(symbol!, computationScope) || !reportedTargets.Add(target.Syntax))
         {
