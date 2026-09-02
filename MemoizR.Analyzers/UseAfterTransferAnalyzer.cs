@@ -292,9 +292,10 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     }
 
     // The call's sequence is walked right away: it is a foreach's collection, or the
-    // receiver or an argument of a framework method (ToList(), First(), Count(), ...) --
-    // every framework consumer of a sequence enumerates it. Stored, returned or handed to
-    // user code, the sequence stays deferred.
+    // receiver or an argument of a framework method that CONSUMES it (ToList(), First(),
+    // Count(), ...). A framework call that returns another view -- GetEnumerator(),
+    // Where(...), AsEnumerable() -- only wraps the sequence; the body still runs only when
+    // something advances it. Stored, returned or handed to user code, it stays deferred.
     private static bool IsEnumeratedImmediately(IInvocationOperation call)
     {
         var consumer = call.Parent;
@@ -303,13 +304,17 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             consumer = consumer.Parent;
         }
 
-        return consumer switch
+        var framework = consumer switch
         {
-            IForEachLoopOperation => true,
-            IInvocationOperation framework => IsFrameworkDeclared(framework.TargetMethod.ContainingType),
-            IArgumentOperation { Parent: IInvocationOperation framework } => IsFrameworkDeclared(framework.TargetMethod.ContainingType),
-            _ => false,
+            IInvocationOperation invocation => invocation,
+            IArgumentOperation { Parent: IInvocationOperation invocation } => invocation,
+            _ => null,
         };
+
+        return consumer is IForEachLoopOperation
+            || (framework?.TargetMethod.ContainingType is { } consumerType
+                && IsFrameworkDeclared(consumerType)
+                && !IsAFrameworkView(framework.TargetMethod, consumerType));
     }
 
     // Whether the body never completes normally once the handoff ran: an uncaught throw on

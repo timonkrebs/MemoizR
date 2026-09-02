@@ -5005,4 +5005,48 @@ public class UseAfterTransferAnalyzerTests
 
         Assert.Empty(diagnostics);
     }
+
+    [Fact]
+    public async Task LazyFrameworkCalls_DoNotEnumerateAnIterator()
+    {
+        // GetEnumerator() and lazy operators build wrappers; the iterator body runs only
+        // when something advances the sequence.
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    IEnumerable<Sending<List<int>>> Move()
+                    {
+                        yield return Sending.Transfer(list);
+                    }
+
+                    var iterator = Move().GetEnumerator();
+                    var filtered = Move().Where(_ => true);
+                    list.Add(1);
+                }
+            """, "using System.Collections.Generic;\nusing System.Linq;\nusing MemoizR;");
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task ConsumingFrameworkCalls_EnumerateAnIterator()
+    {
+        // ToList() and Count() walk the sequence: the handoff happened before the Add.
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    IEnumerable<Sending<List<int>>> Move()
+                    {
+                        yield return Sending.Transfer(list);
+                    }
+
+                    var count = Move().Count();
+                    list.Add(1);
+                }
+            """, "using System.Collections.Generic;\nusing System.Linq;\nusing MemoizR;");
+
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+    }
 }
