@@ -4891,4 +4891,118 @@ public class UseAfterTransferAnalyzerTests
         var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
         Assert.Contains("'a'", diagnostic.GetMessage());
     }
+
+    [Fact]
+    public async Task IteratorBodies_TransferOnlyWhenEnumerated()
+    {
+        // Calling an iterator runs nothing: the sequence may never be enumerated, so the
+        // handoff inside it is deferred like a lambda's -- the outer Add precedes it.
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    IEnumerable<Sending<List<int>>> Move()
+                    {
+                        yield return Sending.Transfer(list);
+                    }
+
+                    var sequence = Move();
+                    list.Add(1);
+                }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task EnumeratedIterators_PropagateTheirTransfer()
+    {
+        // A foreach over the iterator runs its body: the handoff happened before the code
+        // after the loop.
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    IEnumerable<Sending<List<int>>> Move()
+                    {
+                        yield return Sending.Transfer(list);
+                    }
+
+                    foreach (var sending in Move())
+                    {
+                    }
+
+                    list.Add(1);
+                }
+            """);
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task ViewsBehindConditionalAccess_StillCarryTheirReceiver()
+    {
+        // list?.AsReadOnly(): on the non-null path the receiver owns a view backed by the
+        // same list.
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(list?.AsReadOnly());
+                    list.Add(1);
+                }
+            """);
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task IntegerDivision_IsThrowCapable()
+    {
+        // A zero divisor throws after the handoff: the resuming catch observes the
+        // transferred value.
+        var diagnostics = await InClassC("""
+                public void M(int zero)
+                {
+                    var list = new List<int> { 1 };
+                    try
+                    {
+                        var sending = Sending.Transfer(list);
+                        _ = 1 / zero;
+                    }
+                    catch
+                    {
+                        list.Add(1);
+                    }
+                }
+            """);
+
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+    }
+
+    [Fact]
+    public async Task FloatingPointDivision_CannotThrow()
+    {
+        // Floating-point division yields infinity or NaN, never an exception: nothing after
+        // the handoff can reach the catch.
+        var diagnostics = await InClassC("""
+                public void M(int zero)
+                {
+                    var list = new List<int> { 1 };
+                    try
+                    {
+                        var sending = Sending.Transfer(list);
+                        _ = 1.0 / zero;
+                    }
+                    catch
+                    {
+                        list.Add(1);
+                    }
+                }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
 }

@@ -253,9 +253,14 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         // THROWN transfer: only the caller's handlers and finallys observe it.
         var calleeExits = CalleeCannotReturnAfter(transferBody, anchor.Syntax.Span.End);
 
+        // An ITERATOR body runs only when enumerated: the call itself hands nothing off (the
+        // sequence may never be walked), so only an immediate enumeration propagates.
+        var deferred = IsIteratorBody(transferBody);
+
         foreach (var invocation in block.DescendantsAndSelf().OfType<IInvocationOperation>())
         {
-            if (!InvokesTheBody(invocation, transferBody, functionSymbol, anchor, block))
+            if (!InvokesTheBody(invocation, transferBody, functionSymbol, anchor, block)
+                || (deferred && !IsEnumeratedImmediately(invocation)))
             {
                 continue;
             }
@@ -278,6 +283,34 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                 yield return entry;
             }
         }
+    }
+
+    private static bool IsIteratorBody(IOperation body)
+    {
+        return body.DescendantsAndSelf().Any(operation =>
+            operation is IReturnOperation { Kind: OperationKind.YieldReturn or OperationKind.YieldBreak }
+            && !IsWithinANestedFunction(operation, body));
+    }
+
+    // The call's sequence is walked right away: it is a foreach's collection, or the
+    // receiver or an argument of a framework method (ToList(), First(), Count(), ...) --
+    // every framework consumer of a sequence enumerates it. Stored, returned or handed to
+    // user code, the sequence stays deferred.
+    private static bool IsEnumeratedImmediately(IInvocationOperation call)
+    {
+        var consumer = call.Parent;
+        while (consumer is IConversionOperation)
+        {
+            consumer = consumer.Parent;
+        }
+
+        return consumer switch
+        {
+            IForEachLoopOperation => true,
+            IInvocationOperation framework => IsFrameworkDeclared(framework.TargetMethod.ContainingType),
+            IArgumentOperation { Parent: IInvocationOperation framework } => IsFrameworkDeclared(framework.TargetMethod.ContainingType),
+            _ => false,
+        };
     }
 
     // Whether the body never completes normally once the handoff ran: an uncaught throw on
@@ -642,6 +675,10 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             // Transfer([list]): matched by SYNTAX -- ICollectionExpressionOperation is not
             // public in the Roslyn this analyzer compiles against, but the children are
             // walkable regardless.
+            // list?.AsReadOnly(): the null-conditional wrapper carries whatever its inner
+            // expression carries, the receiver placeholder standing for the receiver.
+            IConditionalAccessOperation conditionalAccess when CarriedParts(conditionalAccess.WhenNotNull) is { } innerParts =>
+                innerParts.Select(part => part is IConditionalAccessInstanceOperation ? conditionalAccess.Operation : part),
             { } collection when collection.Syntax is CollectionExpressionSyntax =>
                 collection.ChildOperations.SelectMany(child =>
                     child.Syntax is SpreadElementSyntax
@@ -2069,10 +2106,10 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                 { Type.IsValueType: true } => false,
                 _ => true,
             },
-            IConversionOperation conversion => conversion.OperatorMethod is not null
+            IConversionOperation conversion => conversion.OperatorMethod is not null || conversion.IsChecked
                 || (conversion.Conversion is { IsReference: true, IsImplicit: false } && !conversion.IsTryCast),
-            IUnaryOperation unary => unary.OperatorMethod is not null,
-            IBinaryOperation binary => binary.OperatorMethod is not null,
+            IUnaryOperation or IBinaryOperation or ICompoundAssignmentOperation or IIncrementOrDecrementOperation
+                => ArithmeticCanThrow(operation),
             _ => operation is IInvocationOperation or IObjectCreationOperation or IAwaitOperation
                 or IPropertyReferenceOperation or IArrayElementReferenceOperation or IThrowOperation
                 or IDynamicInvocationOperation or IDynamicMemberReferenceOperation
@@ -2084,6 +2121,35 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                 or IUsingOperation or IUsingDeclarationOperation or IForEachLoopOperation
                 or ILockOperation,
         };
+    }
+
+    // User-defined operators are calls, checked arithmetic overflows, and integral or decimal
+    // division by zero throws -- floating-point division yields infinity instead.
+    private static bool ArithmeticCanThrow(IOperation operation)
+    {
+        return operation switch
+        {
+            IUnaryOperation unary => unary.OperatorMethod is not null || unary.IsChecked,
+            IIncrementOrDecrementOperation increment => increment.OperatorMethod is not null || increment.IsChecked,
+            IBinaryOperation binary => binary.OperatorMethod is not null || binary.IsChecked
+                || (binary.OperatorKind is BinaryOperatorKind.Divide or BinaryOperatorKind.Remainder && ThrowsOnAZeroDivisor(binary.Type)),
+            ICompoundAssignmentOperation compound => compound.OperatorMethod is not null || compound.IsChecked
+                || (compound.OperatorKind is BinaryOperatorKind.Divide or BinaryOperatorKind.Remainder && ThrowsOnAZeroDivisor(compound.Type)),
+            _ => false,
+        };
+    }
+
+    private static bool ThrowsOnAZeroDivisor(ITypeSymbol? type)
+    {
+        if (type is INamedTypeSymbol { OriginalDefinition.SpecialType: SpecialType.System_Nullable_T } nullable)
+        {
+            type = nullable.TypeArguments[0];
+        }
+
+        return type?.SpecialType is SpecialType.System_SByte or SpecialType.System_Byte
+            or SpecialType.System_Int16 or SpecialType.System_UInt16 or SpecialType.System_Int32 or SpecialType.System_UInt32
+            or SpecialType.System_Int64 or SpecialType.System_UInt64 or SpecialType.System_IntPtr or SpecialType.System_UIntPtr
+            or SpecialType.System_Char or SpecialType.System_Decimal;
     }
 
     // The use is in an arm of an if/switch/?. whose SIBLING arm holds the transfer: the arms
