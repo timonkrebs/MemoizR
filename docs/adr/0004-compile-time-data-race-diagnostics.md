@@ -18,7 +18,10 @@ deliberately does and does not flag, and the constraints Roslyn imposes.
 ## Decision
 
 A new `MemoizR.Analyzers` project (netstandard2.0, Roslyn 4.8 floor so any SDK ≥ 8 can load it)
-ships **inside the MemoizR NuGet package** (`analyzers/dotnet/cs`), so every consumer gets the
+ships **inside every graph-facing MemoizR NuGet package** (`analyzers/dotnet/cs` in MemoizR,
+MemoizR.Reactive, MemoizR.StructuredConcurrency, MemoizR.Blazor and MemoizR.Wpf — NuGet does
+not flow analyzer assets through package dependencies, and the compiler deduplicates the
+identical assembly by MVID when several are referenced), so every consumer gets the
 rules on build with no extra reference. All rules default to **Warning** — the Swift 5.x
 "strict concurrency warnings" migration posture — and are configurable per project via
 `.editorconfig` (`dotnet_diagnostic.MZR001.severity = error|suggestion|none`).
@@ -88,7 +91,11 @@ deconstructions (flattened through nested tuples: `(a, (b, c)) = ...` writes eve
 `ref`/`out` arguments, and non-`readonly` instance-method calls on value-type receivers that
 resolve to shared storage (`counter.Increment()` mutates the captured local exactly like
 `counter.Value++`; `readonly` members — which includes most BCL structs — and the
-object-virtual overrides stay exempt).
+object-virtual overrides stay exempt). A **local function** the computation calls (declared
+outside it, same tree) is chased for the same writes: its closure is the computation's
+environment, so `int Next() { applied++; ... }` is the inline `applied++` behind a name — while
+the helper's own per-call locals stay exempt (only storage declared in a function *enclosing
+the computation* counts).
 
 Deliberately **not** flagged:
 
@@ -132,9 +139,80 @@ The walk is likewise scoped to the lock semantics: only the computation's **dire
 path** is inspected. Nested anonymous functions and local-function declarations are pruned,
 because a callback the computation merely *builds* — the diagnostic's own fix guidance,
 "schedule the write outside the evaluation" — runs later on a flow that holds no evaluation
-lock. (The cost is a false negative for a nested function invoked synchronously inside the
-computation; the runtime exception still guards that path. MZR002 keeps the full walk: a
-captured-state write is a data race whenever the callback runs, deferred or not.)
+lock. Same-tree helpers the computation **calls** on that path are chased, though: their `Set`
+executes under the same evaluation lock and throws identically, so hiding the write behind a
+local function does not evade the rule. (The remaining cost is a false negative for a
+*delegate* invoked synchronously inside the computation; the runtime exception still guards
+that path. MZR002 keeps the full walk: a captured-state write is a data race whenever the
+callback runs, deferred or not.)
+
+### MZR004 — optimistic patch captures non-Sendable state
+
+The closure-capture mirror of MZR001, closing the strict-mode gap recorded in ADR 0007: a patch
+passed to `OptimisticActionContext.Apply` is stored in the overlay and **re-executed by the
+view's computation on whichever flow pulls** the optimistic state, so everything the patch's
+closure captures crosses flows exactly like a node value — but the *runtime* cannot check it
+(closure display classes always carry writable fields, so a structural runtime check would
+reject every capturing lambda, immutable captures included).
+
+Flagged, once per captured symbol per patch:
+
+- a **captured local or parameter whose type is not Sendable** (the same classifier verdicts as
+  MZR001; type parameters keep the benefit of the doubt) — or whose type is a **mutable
+  struct**: the classifier accepts those for node *values* because values are copied, but a
+  closure hoists the *variable* itself, so the owner mutates the same storage the stored patch
+  re-reads;
+- a read of **writable state on the enclosing object** (a non-readonly field, a settable
+  property; `init` counts as immutable, and a ref-returning property counts as writable — no
+  setter, but it hands out assignable live storage) — the patch re-reads it on other flows
+  while the owner mutates it freely;
+- a read of a **readonly/get-only member whose type is not Sendable** — the object handed out
+  is what gets shared. Computed get-only property bodies are not chased. Both member verdicts
+  refine a *non-Sendable* enclosing object only: an enclosing type the classifier accepts
+  (`[Sendable]`, structurally immutable) is trusted wholesale, exactly as the runtime checker
+  and MZR001 trust it;
+- a **method-group patch's receiver** (`ctx.Apply(state, helper.Patch)`, directly or stored in
+  a delegate variable first) — the receiver is captured into the stored delegate even when the
+  method body lives in metadata and cannot be walked. A *mutable struct* receiver is flagged
+  when the referenced method is non-readonly: the Sendable verdict for a value type rests on
+  copy semantics, but the delegate stores one boxed copy that a non-readonly method mutates in
+  place (extension methods never reach this verdict — CS1113 forbids creating a delegate from
+  a value-type extension receiver);
+- a **bare `this`** handed to a helper (`x => ReadCounter()`, `Use(this)`) — the whole
+  enclosing object is captured with no member to inspect, so it is held to its type's
+  sendability: hiding the read behind a helper must not evade the rule;
+- a read of **static state** that is writable or of a non-Sendable type (`const` is a
+  compile-time value; a static *event* always counts as writable — subscribing mutates its
+  backing delegate) — statics are shared across every flow without any capture at all, so
+  same-tree code the patch *executes* is chased for them transitively: helper methods,
+  property getters, constructors, user-defined operators/conversions, and delegates the patch
+  builds *and* invokes (the classifier deliberately ignores statics, meaning a Sendable `this`
+  says nothing about them). Only *backing storage* gets the type verdict: a computed static
+  getter may hand out a fresh value per replay, so its body is chased instead of its return
+  type being judged. Static
+  verdicts follow MZR003's *direct-execution* pruning: a read inside a callback the patch
+  merely builds runs later, off the overlay's re-execution (closure captures keep the full
+  walk — a built callback still pins them in the stored display chain);
+- the **closure of a local function** the patch calls that is declared *outside* the patch —
+  no receiver/`this` verdict covers it, so its body is inspected for captures against its own
+  declaration scope. Only captures declared in a function *enclosing the patch* count: one
+  declared inside the patch is patch-internal, and a local of a *called helper* (captured by a
+  local function nested in that helper) is recreated on every execution, not stored in the
+  delegate;
+- an **already-built delegate that resolves to nothing walkable** (a `Func<T,T>`
+  field/parameter with no same-tree initializer, or a variable *reassigned* — including
+  through deconstruction — where the assignment can execute before the call: a different
+  function body, textually earlier, or loop-carried into a variable that outlives the
+  iteration) — the overlay stores it all the same, this rule is the only check a patch ever
+  gets, and a delegate can capture arbitrary mutable state: unverifiable means flagged, like
+  the classifier's unverifiable categories.
+
+Reads of Sendable-typed captures stay unflagged: capturing the action payload or other
+immutable snapshots is the idiomatic pattern. Captured-state **writes** inside a patch are
+MZR002's territory — `Apply` is classified as a computation host (the patch is genuinely
+engine-executed, unlike action *bodies*, which are user-driven process code and deliberately
+not hosts) — and a `Set` inside a patch is MZR003's, since the patch runs inside the view
+memo's recompute whose flow holds the evaluation lock.
 
 ### Testing strategy
 

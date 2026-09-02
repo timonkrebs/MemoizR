@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.Linq;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
@@ -12,30 +13,152 @@ namespace MemoizR.Analyzers;
 // computation host's: null means "unprovable", and callers must treat it as such.
 internal static class ReceiverChains
 {
-    public static ISymbol? ResolveFactorySymbol(IInvocationOperation invocation, SemanticModel? semanticModel)
+    public static ISymbol? ResolveFactorySymbol(IInvocationOperation invocation, SemanticModel? semanticModel, Dictionary<IParameterSymbol, IOperation>? argumentMap = null)
     {
-        return ResolveReceiverSymbol(ReceiverOf(invocation), semanticModel, depth: 0);
+        return ResolveReceiverSymbol(ReceiverOf(invocation), semanticModel, depth: 0, argumentMap);
     }
 
     // A node reference (the signal a Set is invoked on) resolves through its same-tree
     // initializer to the creating invocation, then to that creation's factory. An INLINE
-    // creation (`f.CreateSignal(0).Set(1)`) is its own provenance and resolves directly.
-    public static ISymbol? ResolveCreatingFactorySymbol(IOperation? nodeReference, SemanticModel? semanticModel)
+    // creation (`f.CreateSignal(0).Set(1)`) is its own provenance and resolves directly, and a
+    // variable-to-variable ALIAS (`var state = s0;`) resolves through initializers until a
+    // creation or a dead end -- the visited set breaks initializer cycles.
+    public static ISymbol? ResolveCreatingFactorySymbol(IOperation? nodeReference, SemanticModel? semanticModel, Dictionary<IParameterSymbol, IOperation>? argumentMap = null, HashSet<IMethodSymbol>? visitedGetters = null)
     {
         var reference = nodeReference;
-        while (reference is IConversionOperation conversion)
+        var site = nodeReference?.Syntax;
+        HashSet<ISymbol>? visited = null;
+        while (true)
         {
-            reference = conversion.Operand;
+            switch (reference)
+            {
+                case IConversionOperation conversion:
+                    reference = conversion.Operand;
+                    continue;
+                case IInvocationOperation creation:
+                    return ResolveKnownCreationFactory(creation, semanticModel, argumentMap);
+                // A conditional node (`flag ? f.CreateSignal(1) : other`, a switch expression)
+                // is provable only when every arm agrees on the factory -- the same
+                // all-must-agree rule the computed getters below apply to their returns.
+                case IConditionalOperation or ICoalesceOperation or ISwitchExpressionOperation:
+                    return AgreedFactory(ComputationLambdas.ConditionalArms(reference)!, semanticModel, argumentMap, visitedGetters);
+                // A chased helper's PARAMETER hops to the call-site argument: `var a = s;
+                // a.Set(...)` inside `Write(other)` is `other`'s provenance. Not when the
+                // helper WROTE the parameter first, though -- a parameter binds the caller's
+                // argument at entry, so any same-tree write that can run before this read is
+                // a rebind (there is no missing initializer to stand in for), and the case
+                // below resolves what was actually assigned instead.
+                case IParameterReferenceOperation parameterReference
+                    when argumentMap?.TryGetValue(parameterReference.Parameter, out var mapped) == true
+                        && site is not null
+                        && !ComputationLambdas.IsWrittenBefore(parameterReference.Parameter, site, semanticModel):
+                    reference = mapped;
+                    site = mapped.Syntax;
+                    continue;
+                case ILocalReferenceOperation or IFieldReferenceOperation or IParameterReferenceOperation or IPropertyReferenceOperation:
+                    visited ??= new HashSet<ISymbol>(SymbolEqualityComparer.Default);
+                    var symbol = ComputationLambdas.ReferencedSymbol(reference)!;
+                    if (!visited.Add(symbol) || site is null || IsReassignedBefore(symbol, site, semanticModel))
+                    {
+                        return null;
+                    }
+
+                    var initializer = ComputationLambdas.SameTreeInitializerOperation(symbol, semanticModel);
+                    if (initializer is null)
+                    {
+                        // A get-only COMPUTED node property has no initializer: its getter's
+                        // returns are the provenance instead.
+                        return ResolveComputedGetterFactory(reference, symbol, semanticModel, argumentMap, visitedGetters);
+                    }
+
+                    site = initializer.Syntax;
+                    reference = initializer;
+                    continue;
+                default:
+                    return null;
+            }
+        }
+    }
+
+    // A get-only computed node property (`Signal<int> Other => f2.CreateSignal(1);`, indexers
+    // included via the reference's argument map) resolves through its getter's returns --
+    // accepted only when EVERY return agrees on the creating factory: a getter that can hand
+    // back nodes from different factories stays unprovable, which keeps the diagnostic. The
+    // visited set bounds mutually recursive getters.
+    private static ISymbol? ResolveComputedGetterFactory(IOperation reference, ISymbol symbol, SemanticModel? semanticModel, Dictionary<IParameterSymbol, IOperation>? argumentMap, HashSet<IMethodSymbol>? visitedGetters)
+    {
+        if (symbol is not IPropertySymbol { GetMethod: { } getter, SetMethod: null }
+            || ComputationLambdas.ResolveMethodBody(getter, semanticModel) is not { } getterBody)
+        {
+            return null;
         }
 
-        if (reference is IInvocationOperation inlineCreation)
+        visitedGetters ??= new HashSet<IMethodSymbol>(SymbolEqualityComparer.Default);
+        if (!visitedGetters.Add(getter))
         {
-            return ResolveFactorySymbol(inlineCreation, semanticModel);
+            return null;
         }
 
-        var creation = InitializerOf(SymbolOf(reference), semanticModel);
-        return creation is IInvocationOperation invocation
-            ? ResolveFactorySymbol(invocation, semanticModel)
+        return AgreedFactory(
+            ComputationLambdas.ReturnedValues(getterBody.Body),
+            semanticModel,
+            ComputationLambdas.BuildArgumentMap(reference, argumentMap),
+            visitedGetters);
+    }
+
+    // The one factory every candidate resolves to, or null when any is unprovable or they
+    // disagree: a value that can come from two factories proves nothing about the context a
+    // Set would lock, and unprovable keeps the diagnostic.
+    private static ISymbol? AgreedFactory(
+        IEnumerable<IOperation> candidates,
+        SemanticModel? semanticModel,
+        Dictionary<IParameterSymbol, IOperation>? argumentMap,
+        HashSet<IMethodSymbol>? visitedGetters)
+    {
+        ISymbol? factory = null;
+        foreach (var candidate in candidates)
+        {
+            var resolved = ResolveCreatingFactorySymbol(candidate, semanticModel, argumentMap, visitedGetters);
+            if (resolved is null || (factory is not null && !SymbolEqualityComparer.Default.Equals(factory, resolved)))
+            {
+                return null;
+            }
+
+            factory = resolved;
+        }
+
+        return factory;
+    }
+
+    // A node variable REASSIGNED where the assignment can execute before this READ no longer
+    // proves provenance: the value may come from any factory, and a suppression resting on the
+    // stale initializer would drop a diagnostic the runtime contradicts -- unprovable keeps
+    // it. A later straight-line reassignment cannot change the value already read, so it stays
+    // trusted; deconstruction targets are flattened, like MZR004's delegate scan. Same-tree
+    // syntactic, like every resolution here; each alias link checks against the site where its
+    // value is read (the previous link's initializer).
+    private static bool IsReassignedBefore(ISymbol variable, SyntaxNode reference, SemanticModel? semanticModel)
+    {
+        // The sole assignment standing in for a missing initializer is initialization, not a
+        // rebind (`OptimisticState<int> state; state = f1.CreateOptimistic(...);` still proves
+        // provenance -- the same assignment is what SameTreeInitializerOperation resolves
+        // through). The synthesis is READ-relative: a write that cannot run before this read,
+        // or a member write that does not provably reach it, excuses nothing.
+        return semanticModel is not null
+            && ComputationLambdas.IsWrittenBefore(
+                variable,
+                reference,
+                semanticModel,
+                excluding: ComputationLambdas.EffectiveInitializerWrite(variable, semanticModel, reference) as AssignmentExpressionSyntax);
+    }
+
+    // Only a RECOGNIZED creation proves provenance: an arbitrary helper that merely RETURNS a
+    // node (`f1.MakeState()`) says nothing about which factory created what it returns, so
+    // resolving its receiver would claim f1 and enable a suppression the runtime contradicts.
+    private static ISymbol? ResolveKnownCreationFactory(IInvocationOperation creation, SemanticModel? semanticModel, Dictionary<IParameterSymbol, IOperation>? argumentMap)
+    {
+        return FactoryMethods.IsValueBearingCreation(creation.TargetMethod)
+            ? ResolveFactorySymbol(creation, semanticModel, argumentMap)
             : null;
     }
 
@@ -53,7 +176,7 @@ internal static class ReceiverChains
             : null;
     }
 
-    private static ISymbol? ResolveReceiverSymbol(IOperation? receiver, SemanticModel? semanticModel, int depth)
+    private static ISymbol? ResolveReceiverSymbol(IOperation? receiver, SemanticModel? semanticModel, int depth, Dictionary<IParameterSymbol, IOperation>? argumentMap = null)
     {
         if (depth > 8 || receiver is null)
         {
@@ -63,17 +186,33 @@ internal static class ReceiverChains
         switch (receiver)
         {
             case IInvocationOperation chained:
-                return ResolveReceiverSymbol(ReceiverOf(chained), semanticModel, depth + 1);
+                return ResolveReceiverSymbol(ReceiverOf(chained), semanticModel, depth + 1, argumentMap);
             case IConversionOperation conversion:
-                return ResolveReceiverSymbol(conversion.Operand, semanticModel, depth + 1);
+                return ResolveReceiverSymbol(conversion.Operand, semanticModel, depth + 1, argumentMap);
+
+            // A chased helper's FACTORY parameter hops to the call-site argument, like the
+            // node-reference hop above: `f.CreateSignal(0)` inside `Write(f2)` is created
+            // by f2. Same rebind guard: a parameter overwritten before this use resolves
+            // through the effective-initializer machinery below instead.
+            case IParameterReferenceOperation parameterReference
+                when argumentMap?.TryGetValue(parameterReference.Parameter, out var mapped) == true
+                    && !ComputationLambdas.IsWrittenBefore(parameterReference.Parameter, receiver.Syntax, semanticModel):
+                return ResolveReceiverSymbol(mapped, semanticModel, depth + 1, argumentMap);
             case ILocalReferenceOperation or IFieldReferenceOperation or IParameterReferenceOperation or IPropertyReferenceOperation:
                 // An intermediate (a stored ReactionBuilder, a factory alias) resolves through
                 // its initializer; when that gives out, the reference symbol itself is the
                 // identity -- two creations hanging off the same local/field/parameter share a
-                // factory by construction.
-                var symbol = SymbolOf(receiver);
-                var initialized = InitializerOf(symbol, semanticModel);
-                if (initialized is not null && ResolveReceiverSymbol(initialized, semanticModel, depth + 1) is { } through)
+                // factory by construction. A variable REASSIGNED before this use proves
+                // nothing (`var host = f1; host = f2; host.CreateOptimistic(...)` holds f2,
+                // not its initializer) -- unprovable keeps the diagnostic.
+                var symbol = ComputationLambdas.ReferencedSymbol(receiver)!;
+                if (IsReassignedBefore(symbol, receiver.Syntax, semanticModel))
+                {
+                    return null;
+                }
+
+                var initialized = ComputationLambdas.SameTreeInitializerOperation(symbol, semanticModel);
+                if (initialized is not null && ResolveReceiverSymbol(initialized, semanticModel, depth + 1, argumentMap) is { } through)
                 {
                     return through;
                 }
@@ -90,13 +229,9 @@ internal static class ReceiverChains
     // visible creation, or a non-constant key).
     public static (bool Resolved, object? ContextKey) ResolveFactoryContextKey(ISymbol factorySymbol, SemanticModel? semanticModel)
     {
-        var initializer = InitializerOf(factorySymbol, semanticModel);
-        while (initializer is IConversionOperation conversion)
-        {
-            initializer = conversion.Operand;
-        }
+        var declared = ComputationLambdas.SameTreeInitializerOperation(factorySymbol, semanticModel);
 
-        if (initializer is not IObjectCreationOperation creation
+        if (declared is null || ComputationLambdas.Unwrap(declared) is not IObjectCreationOperation creation
             || creation.Type is not INamedTypeSymbol { Name: "MemoFactory" } named
             || named.ContainingNamespace?.ToDisplayString() != "MemoizR")
         {
@@ -126,41 +261,4 @@ internal static class ReceiverChains
         return (true, null);
     }
 
-    private static ISymbol? SymbolOf(IOperation? reference)
-    {
-        return reference switch
-        {
-            ILocalReferenceOperation local => local.Local,
-            IFieldReferenceOperation field => field.Field,
-            IParameterReferenceOperation parameter => parameter.Parameter,
-            IPropertyReferenceOperation property => property.Property,
-            _ => null,
-        };
-    }
-
-    private static IOperation? InitializerOf(ISymbol? variable, SemanticModel? semanticModel)
-    {
-        if (variable is null || semanticModel is null)
-        {
-            return null;
-        }
-
-        var declaration = variable.DeclaringSyntaxReferences.FirstOrDefault();
-        if (declaration is null || declaration.SyntaxTree != semanticModel.SyntaxTree)
-        {
-            return null;
-        }
-
-        // Locals and fields declare through VariableDeclaratorSyntax; auto-properties with an
-        // initializer (`MemoFactory F { get; } = new MemoFactory();`) through
-        // PropertyDeclarationSyntax. Computed properties have no initializer and stay
-        // unresolvable, as they should.
-        var initializer = declaration.GetSyntax() switch
-        {
-            VariableDeclaratorSyntax { Initializer.Value: { } value } => value,
-            PropertyDeclarationSyntax { Initializer.Value: { } value } => value,
-            _ => null,
-        };
-        return initializer is null ? null : semanticModel.GetOperation(initializer);
-    }
 }

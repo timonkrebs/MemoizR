@@ -34,7 +34,12 @@ internal static class FactoryMethods
             // The factory-level CreateReaction sugar forwards to BuildReaction().CreateReaction,
             // so its action is just as much a reaction computation -- without this, the
             // README-style f.CreateReaction(..) overloads bypass MZR002 entirely.
-            || IsReactiveMemoFactoryMethod(method, "CreateReaction");
+            || IsReactiveMemoFactoryMethod(method, "CreateReaction")
+            // An optimistic PATCH is engine-executed: it is stored in the overlay and re-run by
+            // the view's computation on whichever flow pulls, so a captured-state write in one
+            // is exactly MZR002's data race. (Action BODIES are deliberately NOT hosts -- they
+            // are user-driven process code; see ADR 0007.)
+            || IsOptimisticContextMethod(method, "Apply");
     }
 
     // Hosts whose computations deterministically throw on a Set of their own graph (MZR003): in
@@ -49,7 +54,17 @@ internal static class FactoryMethods
         return IsMemoFactoryMethod(method, "CreateMemoizR", "CreateActorMemoizR")
             || IsStructuredFactoryMethod(method, "CreateConcurrentMapReduce", "CreateConcurrentRace")
             || IsReactionBuilderMethod(method, "CreateReaction", "CreateAdvancedReaction")
-            || IsReactiveMemoFactoryMethod(method, "CreateReaction");
+            || IsReactiveMemoFactoryMethod(method, "CreateReaction")
+            // A patch runs inside the view memo's recompute, whose flow holds the evaluation
+            // lock -- a Set in one throws exactly like a Set in the memo's own computation.
+            || IsOptimisticContextMethod(method, "Apply");
+    }
+
+    // Whether the delegate argument is an OPTIMISTIC PATCH (MZR004's subject, and a computation
+    // for MZR002/MZR003 via the classifications above).
+    public static bool IsOptimisticPatchHost(IMethodSymbol method)
+    {
+        return IsOptimisticContextMethod(method, "Apply");
     }
 
     // Whether the host runs an ACTOR-engine computation (CreateActorMemoizR). MZR003 uses this to
@@ -82,6 +97,12 @@ internal static class FactoryMethods
     private static bool IsReactiveMemoFactoryMethod(IMethodSymbol method, params string[] names)
     {
         return IsOn(method, "MemoizR", "ReactiveMemoFactory", names);
+    }
+
+    // The action-run context an optimistic patch is applied through (ADR 0007).
+    private static bool IsOptimisticContextMethod(IMethodSymbol method, params string[] names)
+    {
+        return IsOn(method, "MemoizR.Reactive", "OptimisticActionContext", names);
     }
 
     private static bool IsOn(IMethodSymbol method, string namespaceName, string typeName, string[] names)

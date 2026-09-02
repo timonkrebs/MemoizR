@@ -22,14 +22,20 @@ internal static class AnalyzerTestHarness
         return [.. paths.Distinct().Select(p => (MetadataReference)MetadataReference.CreateFromFile(p))];
     }
 
-    public static async Task<ImmutableArray<Diagnostic>> AnalyzeAsync(string source, DiagnosticAnalyzer analyzer)
+    // ConsoleApplication is for top-level-statement snippets, which cannot compile in a library.
+    public static Task<ImmutableArray<Diagnostic>> AnalyzeAsync(string source, DiagnosticAnalyzer analyzer, OutputKind outputKind = OutputKind.DynamicallyLinkedLibrary)
+        => AnalyzeAsync([source], analyzer, outputKind);
+
+    // Multiple sources compile as separate syntax trees: for pinning the same-tree-only
+    // resolution boundaries (a method group whose body lives in another file).
+    public static async Task<ImmutableArray<Diagnostic>> AnalyzeAsync(string[] sources, DiagnosticAnalyzer analyzer, OutputKind outputKind = OutputKind.DynamicallyLinkedLibrary)
     {
-        var tree = CSharpSyntaxTree.ParseText(source, new CSharpParseOptions(LanguageVersion.Latest));
+        var trees = sources.Select(source => CSharpSyntaxTree.ParseText(source, new CSharpParseOptions(LanguageVersion.Latest))).ToArray();
         var compilation = CSharpCompilation.Create(
             "AnalyzerTestSnippet",
-            [tree],
+            trees,
             References.Value,
-            new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary, nullableContextOptions: NullableContextOptions.Enable));
+            new CSharpCompilationOptions(outputKind, nullableContextOptions: NullableContextOptions.Enable));
 
         var compileErrors = compilation.GetDiagnostics().Where(d => d.Severity == DiagnosticSeverity.Error).ToList();
         Assert.True(compileErrors.Count == 0, $"snippet does not compile: {string.Join("; ", compileErrors)}");

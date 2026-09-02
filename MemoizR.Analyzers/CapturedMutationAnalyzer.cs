@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.Linq;
 using Microsoft.CodeAnalysis;
@@ -37,13 +38,337 @@ public sealed class CapturedMutationAnalyzer : DiagnosticAnalyzer
 
         foreach (var computation in ComputationLambdas.OfInvocation(invocation))
         {
-            foreach (var operation in ComputationLambdas.Descend(computation.Body))
+            InspectComputationBody(context, computation, invocation.SemanticModel);
+        }
+
+        // Patch shapes resolved beyond plain arguments -- assembled by an out-helper,
+        // returned by a computed delegate property or a same-tree factory -- replay on the
+        // state's flows exactly like an inline patch, so their writes race identically.
+        foreach (var (body, map) in ComputationLambdas.AssembledPatchBodies(invocation))
+        {
+            InspectComputationBody(context, body, invocation.SemanticModel, map);
+        }
+    }
+
+    // The assembled body carries the map that RESOLVED it: a factory parameter bound to the
+    // enclosing instance (`Make(this)`) is `this` for the walked patch, exactly as at a
+    // helper call.
+    private static void InspectComputationBody(
+        OperationAnalysisContext context,
+        ComputationLambdas.ComputationBody computation,
+        SemanticModel? semanticModel,
+        Dictionary<IParameterSymbol, IOperation>? argumentMap = null)
+    {
+        var walk = new ChaseState();
+        InspectComputationOperations(
+            context,
+            computation,
+            computation.Scope,
+            semanticModel,
+            walk,
+            argumentMap,
+            BoundThisParameters(argumentMap, default, foreignThis: false));
+    }
+
+    // Per-computation walk state: the visited sets bound helper/delegate cycles, and the
+    // reported set keeps a body re-walked under a DIFFERENT delegate binding from emitting
+    // the same mutation diagnostic twice.
+    private sealed class ChaseState
+    {
+        public readonly HashSet<(IMethodSymbol, ImmutableArray<IParameterSymbol>, bool, string)> VisitedHelpers = new(ChaseKeyComparer.Instance);
+        public readonly HashSet<(SyntaxNode, string, bool)> VisitedDelegates = new();
+        public readonly HashSet<SyntaxNode> ReportedTargets = new();
+    }
+
+    private static void InspectComputationOperations(
+        OperationAnalysisContext context,
+        ComputationLambdas.ComputationBody body,
+        SyntaxNode computationScope,
+        SemanticModel? semanticModel,
+        ChaseState walk,
+        Dictionary<IParameterSymbol, IOperation>? argumentMap,
+        ImmutableArray<IParameterSymbol> thisParameters = default,
+        bool foreignThis = false)
+    {
+        foreach (var operation in ComputationLambdas.Descend(body.Body))
+        {
+            foreach (var target in MutationTargets(operation))
             {
-                foreach (var target in MutationTargets(operation))
-                {
-                    ReportIfShared(context, target, computation.Scope);
-                }
+                ReportIfShared(context, target, body.Scope, computationScope, thisParameters, foreignThis, walk.ReportedTargets);
             }
+
+            InspectCalledHelper(context, operation, computationScope, semanticModel, walk, thisParameters, foreignThis, argumentMap);
+            InspectInvokedDelegate(context, operation, computationScope, semanticModel, walk, argumentMap, thisParameters, foreignThis);
+        }
+    }
+
+    // A delegate the computation synchronously INVOKES runs its body on the computation's
+    // flows: a captured lambda's write (`Func<int,int> d = x => { applied++; return x; }`
+    // invoked by the body) races exactly like inline code.
+    private static void InspectInvokedDelegate(
+        OperationAnalysisContext context,
+        IOperation operation,
+        SyntaxNode computationScope,
+        SemanticModel? semanticModel,
+        ChaseState walk,
+        Dictionary<IParameterSymbol, IOperation>? argumentMap,
+        ImmutableArray<IParameterSymbol> thisParameters,
+        bool foreignThis)
+    {
+        if (operation is not IInvocationOperation { TargetMethod.MethodKind: MethodKind.DelegateInvoke } invoke)
+        {
+            return;
+        }
+
+        // A method group's body runs on the RECEIVER the delegate captured
+        // (`Action step = other.Touch;`), never on the computation's instance unless that
+        // receiver provably is it -- its own field writes are then MZR001's territory.
+        var receiver = ComputationLambdas.InvokedDelegateReceiver(invoke, semanticModel, argumentMap);
+        var calleeForeign = receiver is null
+            ? foreignThis
+            : !IsComputationInstance(ComputationLambdas.Unwrap(receiver), thisParameters, foreignThis);
+
+        foreach (var (delegateBody, map) in ComputationLambdas.InvokedDelegateBodies(invoke, semanticModel, argumentMap))
+        {
+            // The invoke's arguments bind the delegate's parameters exactly like a helper
+            // call's: one handed the enclosing instance IS `this` for the walked body.
+            InspectDelegateBody(context, delegateBody, computationScope, semanticModel, walk, map, BoundThisParameters(map, thisParameters, calleeForeign), calleeForeign);
+        }
+    }
+
+    private static ImmutableArray<IParameterSymbol> BoundThisParameters(
+        Dictionary<IParameterSymbol, IOperation>? argumentMap,
+        ImmutableArray<IParameterSymbol> thisParameters,
+        bool foreignThis)
+    {
+        if (argumentMap is null)
+        {
+            return thisParameters;
+        }
+
+        var bound = argumentMap
+            .Where(entry => IsComputationInstance(ComputationLambdas.Unwrap(entry.Value), thisParameters, foreignThis))
+            .Select(entry => entry.Key)
+            .ToImmutableArray();
+
+        return bound.IsEmpty ? thisParameters : bound;
+    }
+
+    private static void InspectDelegateBody(
+        OperationAnalysisContext context,
+        ComputationLambdas.ComputationBody delegateBody,
+        SyntaxNode computationScope,
+        SemanticModel? semanticModel,
+        ChaseState walk,
+        Dictionary<IParameterSymbol, IOperation>? argumentMap,
+        ImmutableArray<IParameterSymbol> thisParameters,
+        bool foreignThis)
+    {
+        if (!computationScope.Span.Contains(delegateBody.Scope.Span)
+            && walk.VisitedDelegates.Add((delegateBody.Scope, ComputationLambdas.ArgumentMapKey(argumentMap), foreignThis)))
+        {
+            InspectComputationOperations(context, delegateBody, computationScope, semanticModel, walk, argumentMap, thisParameters, foreignThis);
+        }
+    }
+
+    // A helper the computation runs writes the same state the inline form would: a LOCAL
+    // FUNCTION's closure IS the computation's environment (`int Next() { applied++; ... }`),
+    // a method invoked on THIS or statically (`void Inc() => counter++;`) mutates the
+    // enclosing object/static state on every run, and a GETTER read executes the same way
+    // (`int P { get { counter++; ... } }`) -- shapes MZR004 cannot carry (a Sendable type or
+    // int hides them; the WRITE is the race). A helper handed the enclosing instance -- an
+    // extension's receiver argument, or an explicit `Mutate(this)` -- is the same in
+    // disguise: the receiving parameter IS `this` for the walked body, so it is carried as
+    // such. A helper on some OTHER receiver is chased too -- a STATIC it writes races
+    // regardless of who the receiver is -- but with `foreignThis` set, so writes to that
+    // body's own object stay suppressed: those are a captured-reference mutation,
+    // deliberately MZR001's territory. Bodies resolve same-tree; the visited set -- keyed
+    // per RECEIVER BINDING, so `other.Inc()` before `this.Inc()` cannot poison the chase --
+    // bounds call cycles, and the helper's own per-call locals stay exempt via the
+    // enclosing-function guard in ReportIfShared.
+    private static void InspectCalledHelper(
+        OperationAnalysisContext context,
+        IOperation operation,
+        SyntaxNode computationScope,
+        SemanticModel? semanticModel,
+        ChaseState walk,
+        ImmutableArray<IParameterSymbol> thisParameters,
+        bool foreignThis,
+        Dictionary<IParameterSymbol, IOperation>? argumentMap)
+    {
+        foreach (var method in ChaseableMethods(operation, thisParameters, foreignThis))
+        {
+            if (ComputationLambdas.IsInsideNameOf(operation)
+                || (method.MethodKind == MethodKind.LocalFunction && !ComputationLambdas.IsDeclaredOutside(method, computationScope))
+                || ComputationLambdas.ResolveMethodBody(method, semanticModel) is not { } helper)
+            {
+                continue;
+            }
+
+            var nestedThis = NestedThisParameters(operation, thisParameters, foreignThis);
+            var nestedForeign = ForeignReceiver(operation, thisParameters, foreignThis);
+
+            // The map lets a delegate handed INTO the helper resolve at its invocation
+            // (`Run(step)` with `Run(Func<int> f) => f()` executes step's body). Only the
+            // DELEGATE bindings key the visited set: they decide what an invoked parameter
+            // resolves to, while re-walking on ordinary arguments would only repeat the
+            // same reports (which the reported set deduplicates anyway).
+            var nestedMap = ComputationLambdas.BuildArgumentMap(operation, argumentMap);
+            if (!walk.VisitedHelpers.Add((method, nestedThis, nestedForeign, DelegateBindingsKey(nestedMap))))
+            {
+                continue;
+            }
+
+            InspectComputationOperations(context, helper, computationScope, semanticModel, walk, nestedMap, nestedThis, nestedForeign);
+        }
+    }
+
+    private static string DelegateBindingsKey(Dictionary<IParameterSymbol, IOperation>? map)
+    {
+        if (map is null)
+        {
+            return "";
+        }
+
+        var delegates = map.Where(entry => entry.Key.Type.TypeKind == TypeKind.Delegate)
+            .ToDictionary(entry => entry.Key, entry => entry.Value);
+        return ComputationLambdas.ArgumentMapKey(delegates);
+    }
+
+    // Every executed shape runs like a call -- a property getter, a same-tree CONSTRUCTOR
+    // (`new Writer()` incrementing a static counter), a user-defined operator/conversion, a
+    // custom event accessor, using-driven Dispose (ForeignReceiver marks a constructor's
+    // fresh object so its own instance writes stay suppressed while statics and captured
+    // state still report) -- and a LIFTED local function's closure is the computation's
+    // environment whether or not the reference runs it. A property WRITE on the
+    // computation's own instance (or a static) needs no chase -- the property itself is the
+    // mutation target the direct walk reports -- but on a FOREIGN receiver nothing else
+    // looks at the setter body, whose side effects (`set { hits++; }`) still run on every
+    // replay.
+    private static IEnumerable<IMethodSymbol> ChaseableMethods(IOperation operation, ImmutableArray<IParameterSymbol> thisParameters, bool foreignThis)
+    {
+        if (operation is IMethodReferenceOperation { Method.MethodKind: MethodKind.LocalFunction } reference)
+        {
+            return new[] { reference.Method };
+        }
+
+        return ComputationLambdas.ExecutedMethods(operation).Where(method =>
+            method.MethodKind != MethodKind.PropertySet
+            || (operation is IPropertyReferenceOperation { Instance: { } instance } && !IsComputationInstance(instance, thisParameters, foreignThis)));
+    }
+
+    // Whether the chased body's own `this` is some OTHER object than the computation's:
+    // true when the receiver is neither the enclosing instance nor one of the current
+    // this-bound parameters. A receiverless callee (static, extension, local function) has no `this` of
+    // its own to rebind, so the current answer carries through -- a local function nested
+    // in a foreign body still belongs to that foreign object.
+    private static bool ForeignReceiver(IOperation operation, ImmutableArray<IParameterSymbol> thisParameters, bool foreignThis)
+    {
+        // A constructor body's `this` is the FRESH object being built, and a using
+        // resource's Dispose runs on that resource -- never on the computation's instance,
+        // whichever flow reaches them. Their own instance writes are per-evaluation
+        // storage, so only the statics and captures inside them are shared.
+        if (operation is IObjectCreationOperation or IUsingOperation or IUsingDeclarationOperation)
+        {
+            return true;
+        }
+
+        var instance = operation switch
+        {
+            IInvocationOperation call => call.Instance,
+            IPropertyReferenceOperation property => property.Instance,
+            _ => null,
+        };
+
+        return instance is null ? foreignThis : !IsComputationInstance(instance, thisParameters, foreignThis);
+    }
+
+    // The `this` identity for a chased body: the parameter that RECEIVES the enclosing
+    // instance at this call -- an extension's receiver argument (`this.Inc()` with
+    // `Inc(this C c)`) or an explicit ordinary argument (`Mutate(this)`) -- resolved
+    // through the current body's own binding so chains keep it. A call handing the
+    // instance nowhere rebinds nothing: a chased local function keeps the current binding
+    // (its closure can still name an extension body's receiver parameter), while any other
+    // callee cannot reference it at all.
+    private static ImmutableArray<IParameterSymbol> NestedThisParameters(IOperation operation, ImmutableArray<IParameterSymbol> thisParameters, bool foreignThis)
+    {
+        if (operation is not IInvocationOperation call)
+        {
+            return thisParameters;
+        }
+
+        // EVERY parameter the instance was handed to: `Mutate(this, this)` binds both, and a
+        // write through either lands on the computation's object.
+        var bound = call.Arguments
+            .Where(argument => argument.Parameter is not null
+                && IsComputationInstance(ComputationLambdas.Unwrap(argument.Value), thisParameters, foreignThis))
+            .Select(argument => argument.Parameter!)
+            .ToImmutableArray();
+
+        if (!bound.IsEmpty)
+        {
+            return bound;
+        }
+
+        return call.TargetMethod.MethodKind == MethodKind.LocalFunction ? thisParameters : default;
+    }
+
+    // The operation refers to the COMPUTATION's enclosing instance: a direct `this` -- only
+    // while walking code whose `this` IS that instance -- one of the current body's
+    // this-bound parameters, or a local ALIAS resolving to either through its same-tree initializer
+    // chain (`var alias = c; Mutate(alias);` hands the instance on). An alias written
+    // before its use no longer proves the binding and stays untrusted.
+    private static bool IsComputationInstance(IOperation? receiver, ImmutableArray<IParameterSymbol> thisParameters, bool foreignThis)
+    {
+        var current = receiver;
+        HashSet<ISymbol>? visited = null;
+        while (true)
+        {
+            switch (current)
+            {
+                case IConversionOperation conversion:
+                    current = conversion.Operand;
+                    continue;
+                case IInstanceReferenceOperation { ReferenceKind: InstanceReferenceKind.ContainingTypeInstance }:
+                    return !foreignThis;
+                // ...unless the helper rebound it first (`c = new C(); c.Counter++`), in
+                // which case the write lands on whatever it was rebound to.
+                case IParameterReferenceOperation parameter when !thisParameters.IsDefaultOrEmpty
+                    && thisParameters.Contains<ISymbol>(parameter.Parameter, SymbolEqualityComparer.Default):
+                    return !ComputationLambdas.IsWrittenBefore(parameter.Parameter, current.Syntax, current.SemanticModel);
+                case ILocalReferenceOperation local:
+                    visited ??= new HashSet<ISymbol>(SymbolEqualityComparer.Default);
+                    if (!visited.Add(local.Local)
+                        || ComputationLambdas.IsWrittenBefore(local.Local, current.Syntax, current.SemanticModel)
+                        || ComputationLambdas.SameTreeInitializerOperation(local.Local, current.SemanticModel) is not { } initializer)
+                    {
+                        return false;
+                    }
+
+                    current = initializer;
+                    continue;
+                default:
+                    return false;
+            }
+        }
+    }
+
+    private sealed class ChaseKeyComparer : IEqualityComparer<(IMethodSymbol Method, ImmutableArray<IParameterSymbol> This, bool Foreign, string Bindings)>
+    {
+        public static readonly ChaseKeyComparer Instance = new();
+
+        public bool Equals((IMethodSymbol Method, ImmutableArray<IParameterSymbol> This, bool Foreign, string Bindings) x, (IMethodSymbol Method, ImmutableArray<IParameterSymbol> This, bool Foreign, string Bindings) y)
+        {
+            return SymbolEqualityComparer.Default.Equals(x.Method, y.Method)
+                && x.This.IsDefaultOrEmpty == y.This.IsDefaultOrEmpty
+                && (x.This.IsDefaultOrEmpty || Enumerable.SequenceEqual(x.This, y.This, SymbolEqualityComparer.Default))
+                && x.Foreign == y.Foreign
+                && x.Bindings == y.Bindings;
+        }
+
+        public int GetHashCode((IMethodSymbol Method, ImmutableArray<IParameterSymbol> This, bool Foreign, string Bindings) key)
+        {
+            return SymbolEqualityComparer.Default.GetHashCode(key.Method);
         }
     }
 
@@ -51,7 +376,8 @@ public sealed class CapturedMutationAnalyzer : DiagnosticAnalyzer
     {
         switch (operation)
         {
-            case ISimpleAssignmentOperation assignment:
+            // A ref REASSIGNMENT (`alias = ref other`) rebinds the alias and writes nothing.
+            case ISimpleAssignmentOperation { IsRef: false } assignment:
                 return ImmutableArray.Create(assignment.Target);
             case ICompoundAssignmentOperation compound:
                 return ImmutableArray.Create(compound.Target);
@@ -137,10 +463,15 @@ public sealed class CapturedMutationAnalyzer : DiagnosticAnalyzer
         return targets.ToImmutable();
     }
 
-    private static void ReportIfShared(OperationAnalysisContext context, IOperation target, SyntaxNode scope)
+    private static void ReportIfShared(OperationAnalysisContext context, IOperation target, SyntaxNode scope, SyntaxNode computationScope, ImmutableArray<IParameterSymbol> thisParameters, bool foreignThis, HashSet<SyntaxNode> reportedTargets)
     {
-        var (kind, symbol) = ResolveSharedRoot(target, scope);
-        if (kind is null)
+        if (reportedTargets.Contains(target.Syntax))
+        {
+            return;
+        }
+
+        var (kind, symbol) = ResolveSharedRoot(target, scope, thisParameters, foreignThis);
+        if (kind is null || !SharesComputationEnvironment(symbol!, computationScope) || !reportedTargets.Add(target.Syntax))
         {
             return;
         }
@@ -152,74 +483,76 @@ public sealed class CapturedMutationAnalyzer : DiagnosticAnalyzer
             symbol!.Name));
     }
 
+    // A captured local/parameter is the computation's business only when it lives in a
+    // function ENCLOSING the computation -- a chased helper's own locals are recreated per
+    // call. Members of `this` and statics are shared storage wherever they are written from.
+    // (For the computation's own body, scope == computationScope and C# scoping makes this
+    // trivially true.)
+    private static bool SharesComputationEnvironment(ISymbol symbol, SyntaxNode computationScope)
+    {
+        return symbol is not (ILocalSymbol or IParameterSymbol)
+            || ComputationLambdas.DeclaredInFunctionEnclosing(symbol, computationScope);
+    }
+
     // Resolves a mutation target to the shared storage it ultimately writes, walking up value-type
     // member receivers so that `this.s.Value++`, `StaticStruct.Value++`, and `capturedStruct.Value++`
     // all resolve to the shared field/local being mutated. Returns (null, null) when the target is a
     // member of some OTHER reference object (mutation through a captured reference -- MZR001's
     // territory, the value type there should be Sendable).
-    private static (string? kind, ISymbol? symbol) ResolveSharedRoot(IOperation target, SyntaxNode scope)
+    private static (string? kind, ISymbol? symbol) ResolveSharedRoot(IOperation target, SyntaxNode scope, ImmutableArray<IParameterSymbol> thisParameters, bool foreignThis)
     {
         switch (target)
         {
-            case ILocalReferenceOperation local when IsDeclaredOutside(local.Local, scope):
+            // A ref local declared in the computation is a window onto whatever it was bound
+            // to: `ref int alias = ref shared; alias++;` writes the captured variable.
+            case ILocalReferenceOperation alias when ComputationLambdas.RefAliasTarget(alias) is { } referent:
+                return ResolveSharedRoot(referent, scope, thisParameters, foreignThis);
+            case ILocalReferenceOperation local when ComputationLambdas.IsDeclaredOutside(local.Local, scope):
                 return ("captured local", local.Local);
-            case IParameterReferenceOperation parameter when IsDeclaredOutside(parameter.Parameter, scope):
+            case IParameterReferenceOperation parameter when ComputationLambdas.IsDeclaredOutside(parameter.Parameter, scope):
                 return ("captured parameter", parameter.Parameter);
             case IFieldReferenceOperation { Field.IsStatic: true } staticField:
                 return ("static field", staticField.Field);
             case IFieldReferenceOperation field:
-                return ResolveThroughReceiver(field.Instance, "field", field.Field, scope);
+                return ResolveThroughReceiver(field.Instance, "field", field.Field, scope, thisParameters, foreignThis);
             case IPropertyReferenceOperation { Property.IsStatic: true } staticProperty:
                 return ("static property", staticProperty.Property);
             case IPropertyReferenceOperation property:
-                return ResolveThroughReceiver(property.Instance, "property", property.Property, scope);
+                return ResolveThroughReceiver(property.Instance, "property", property.Property, scope, thisParameters, foreignThis);
             case IEventReferenceOperation { Event.IsStatic: true } staticEvent:
                 return ("static event", staticEvent.Event);
             case IEventReferenceOperation @event:
-                return ResolveThroughReceiver(@event.Instance, "event", @event.Event, scope);
+                return ResolveThroughReceiver(@event.Instance, "event", @event.Event, scope, thisParameters, foreignThis);
             default:
                 return (null, null);
         }
     }
 
-    // A member on `this` is reported as the member. A member on a value-type receiver that is
-    // itself shared storage (a captured struct local/parameter, or a nested value-type
-    // field/property/this) reports that RECEIVER -- mutating the member mutates the receiver's
-    // storage. A member on any other (reference) receiver is left to MZR001.
-    private static (string? kind, ISymbol? symbol) ResolveThroughReceiver(IOperation? receiver, string memberKind, ISymbol member, SyntaxNode scope)
+    // A member on the COMPUTATION's instance -- direct `this` in a non-foreign body, or a
+    // this-bound receiver parameter -- is reported as the member. A member on a value-type
+    // receiver that is itself shared storage (a captured struct local/parameter, or a
+    // nested value-type field/property/this) reports that RECEIVER -- mutating the member
+    // mutates the receiver's storage. A member on any other receiver -- including a foreign
+    // body's own `this` -- is left to MZR001.
+    private static (string? kind, ISymbol? symbol) ResolveThroughReceiver(IOperation? receiver, string memberKind, ISymbol member, SyntaxNode scope, ImmutableArray<IParameterSymbol> thisParameters, bool foreignThis)
     {
         switch (receiver)
         {
-            case IInstanceReferenceOperation { ReferenceKind: InstanceReferenceKind.ContainingTypeInstance }:
+            case var enclosing when IsComputationInstance(enclosing, thisParameters, foreignThis):
                 return (memberKind, member);
-            case ILocalReferenceOperation { Local.Type.IsValueType: true } local when IsDeclaredOutside(local.Local, scope):
+            case ILocalReferenceOperation alias when ComputationLambdas.RefAliasTarget(alias) is { } referent:
+                return ResolveThroughReceiver(referent, memberKind, member, scope, thisParameters, foreignThis);
+            case ILocalReferenceOperation { Local.Type.IsValueType: true } local when ComputationLambdas.IsDeclaredOutside(local.Local, scope):
                 return ("captured local", local.Local);
-            case IParameterReferenceOperation { Parameter.Type.IsValueType: true } parameter when IsDeclaredOutside(parameter.Parameter, scope):
+            case IParameterReferenceOperation { Parameter.Type.IsValueType: true } parameter when ComputationLambdas.IsDeclaredOutside(parameter.Parameter, scope):
                 return ("captured parameter", parameter.Parameter);
             case IFieldReferenceOperation { Type.IsValueType: true } outerField:
-                return ResolveSharedRoot(outerField, scope);
+                return ResolveSharedRoot(outerField, scope, thisParameters, foreignThis);
             case IPropertyReferenceOperation { Type.IsValueType: true } outerProperty:
-                return ResolveSharedRoot(outerProperty, scope);
+                return ResolveSharedRoot(outerProperty, scope, thisParameters, foreignThis);
             default:
                 return (null, null);
         }
     }
 
-    // "Captured" = declared outside the computation's declaring syntax (the lambda expression,
-    // or the method/local-function declaration for a method-group computation). The span test
-    // (rather than comparing containing symbols) is what keeps nested non-computation lambdas
-    // correct: a local declared in a nested LINQ lambda belongs to the computation and must not
-    // be flagged, while a local of the enclosing method is shared and must be.
-    private static bool IsDeclaredOutside(ISymbol symbol, SyntaxNode scope)
-    {
-        var declaration = symbol.DeclaringSyntaxReferences.FirstOrDefault();
-        if (declaration is null)
-        {
-            // Compiler-generated (e.g. a setter's value parameter): nothing actionable to point at.
-            return false;
-        }
-
-        return declaration.SyntaxTree != scope.SyntaxTree
-            || !scope.Span.Contains(declaration.Span);
-    }
 }

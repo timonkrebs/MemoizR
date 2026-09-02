@@ -8,3 +8,4 @@ Rule ID | Category | Severity | Notes
 MZR001  | Concurrency | Warning | Value type shared by the reactive graph is not Sendable
 MZR002  | Concurrency | Warning | Reactive computation mutates state shared with code outside it
 MZR003  | Concurrency | Warning | Signal.Set inside a reactive computation throws at runtime
+MZR004  | Concurrency | Warning | Optimistic patch captures non-Sendable state

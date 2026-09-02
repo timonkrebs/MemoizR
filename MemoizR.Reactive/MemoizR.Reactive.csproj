@@ -4,6 +4,17 @@
     <ProjectReference Include="..\MemoizR\MemoizR.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- NuGet does not flow analyzer assets through package dependencies (the dependency on
+         MemoizR is packed with the default exclude="Build,Analyzers"), so a consumer
+         installing only this package would build the very APIs the MZR rules cover (Apply
+         patches, CreateAction/CreateOptimistic) with no diagnostics. Same packing as
+         MemoizR.csproj; when both packages are referenced the compiler deduplicates the
+         identical analyzer assembly by MVID. -->
+    <ProjectReference Include="..\MemoizR.Analyzers\MemoizR.Analyzers.csproj" ReferenceOutputAssembly="false" PrivateAssets="all" />
+    <None Include="$(ArtifactsPath)\bin\MemoizR.Analyzers\$(Configuration.ToLowerInvariant())\MemoizR.Analyzers.dll" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
+  </ItemGroup>
+
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
     <PackageId>MemoizR.Reactive</PackageId>
