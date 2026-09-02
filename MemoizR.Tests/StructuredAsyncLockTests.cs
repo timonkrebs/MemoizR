@@ -30,6 +30,34 @@ public class AsyncAsymmetricLockTests
         }
     }
 
+    [Fact(Timeout = 5000)]
+    public async Task DetachedTaskInsideUpgradeableScope_InheritsTheFlow_UnlessSuppressed()
+    {
+        // The premise behind DistributedBarrier's re-pull scheduling: the lock scope is an
+        // AsyncLocal, so a Task.Run started inside an upgradeable scope inherits the holding
+        // flow and its exclusive acquisition is refused as recursive -- even though it runs on
+        // another thread. Suppressing ExecutionContext flow detaches the task into a fresh
+        // top-level flow that simply queues until the upgradeable is released.
+        var asyncLock = new AsyncAsymmetricLock();
+
+        using (await asyncLock.UpgradeableLockAsync())
+        {
+            await Assert.ThrowsAsync<InvalidOperationException>(
+                () => Task.Run(() => asyncLock.ExclusiveLockAsync()));
+        }
+
+        Task<IDisposable> queued;
+        using (await asyncLock.UpgradeableLockAsync())
+        {
+            using (ExecutionContext.SuppressFlow())
+            {
+                queued = Task.Run(() => asyncLock.ExclusiveLockAsync());
+            }
+            Assert.False(queued.IsFaulted);
+        }
+        (await queued).Dispose();
+    }
+
     [Fact(Timeout = 500)]
     public async Task UpgradeableLock_AcquiredAndReleased()
     {

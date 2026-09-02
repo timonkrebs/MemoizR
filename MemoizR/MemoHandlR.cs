@@ -397,7 +397,15 @@ public abstract class MemoHandlR<T> : SignalHandlR
     // The causality evidence rides in the same box (issue #39): the stamp AND the per-source map
     // describing which signal versions the value reflects are published in the same atomic swap,
     // so neither can ever be paired with a neighbouring publication's value.
-    private volatile ValueBox valueBox = new(default!, StampEvidence.None);
+    private volatile ValueBox valueBox = new(default!, StampEvidence.None, 0);
+
+    // Monotonic per-node publication counter, stamped into each box: sequence n+1's box swap
+    // happened after sequence n's, full stop. Distributed payloads carry it (via the friend
+    // package) because causality stamps deliberately cannot totally order one node's
+    // publications when its dependency set oscillates -- {s:3}, then {} (empty), then {s:3}
+    // again are three DIFFERENT publications with two indistinguishable stamps; the sequence
+    // is the per-node tiebreaker that lets a consumer drop late deliveries exactly.
+    private long publicationSequence;
 
     internal T Value => valueBox.Value;
 
@@ -419,6 +427,17 @@ public abstract class MemoHandlR<T> : SignalHandlR
         }
     }
 
+    // The full (value, evidence, sequence) triple of one publication, for the distributed
+    // export path: a pull must answer with fields that all describe the SAME box.
+    internal (T Value, StampEvidence Evidence, long Sequence) ValueEvidenceAndSequence
+    {
+        get
+        {
+            var box = valueBox;
+            return (box.Value, box.Evidence, box.Sequence);
+        }
+    }
+
     // The (value, stamp) projection of one publication.
     internal (T Value, CausalityStamp Stamp) ValueAndStamp
     {
@@ -429,11 +448,23 @@ public abstract class MemoHandlR<T> : SignalHandlR
         }
     }
 
+    // Every publication funnels through here: one box swap, carrying the next sequence. A
+    // PLAIN increment on purpose: a node's publications are already mutually exclusive under
+    // its own write serialization -- a signal only publishes inside its monitor, a recomputing
+    // node only under its mutex, and a node is never both -- and the volatile box store
+    // releases the incremented value to readers. (An Interlocked here would also be a Coyote
+    // interception point inside the signal monitor's critical section, which the systematic
+    // tests cannot control -- see TestChainLostUpdateWithCoyote on the uncontrolled Lock.)
+    private void Publish(T value, StampEvidence evidence)
+    {
+        valueBox = new ValueBox(value, evidence, ++publicationSequence);
+    }
+
     // The signal write path: publishes the value with its own single-entry stamp (a signal has
     // no sources), in one atomic box swap.
     internal void SetValueAndStamp(T value, CausalityStamp stamp)
     {
-        valueBox = new ValueBox(value, StampEvidence.ForOwnStamp(stamp));
+        Publish(value, StampEvidence.ForOwnStamp(stamp));
     }
 
     // The signal write path of a stamps-disabled context: no stamp is constructed at all, and
@@ -441,7 +472,7 @@ public abstract class MemoHandlR<T> : SignalHandlR
     // made" (None would falsely assert "depends on no tracked signals" to a consistency check).
     internal void SetValueUnstamped(T value)
     {
-        valueBox = new ValueBox(value, StampEvidence.UnverifiableEvidence);
+        Publish(value, StampEvidence.UnverifiableEvidence);
     }
 
     // Publish a computed value together with the evidence captured during the evaluation that
@@ -454,7 +485,7 @@ public abstract class MemoHandlR<T> : SignalHandlR
         // A stamps-disabled context publishes the shared Unverifiable evidence: the capture is
         // always empty there, and sealing it would produce None -- an honest-looking "depends
         // on nothing" claim no disabled context can actually make.
-        valueBox = new ValueBox(value, Context.StampsEnabled
+        Publish(value, Context.StampsEnabled
             ? StampEvidence.FromCapture(capture, winningBranch)
             : StampEvidence.UnverifiableEvidence);
     }
@@ -506,10 +537,11 @@ public abstract class MemoHandlR<T> : SignalHandlR
         return pair;
     }
 
-    private sealed class ValueBox(T value, StampEvidence evidence)
+    private sealed class ValueBox(T value, StampEvidence evidence, long sequence)
     {
         public readonly T Value = value;
         public readonly StampEvidence Evidence = evidence;
+        public readonly long Sequence = sequence;
 
         // Benign race: two concurrent creations produce interchangeable completed tasks over
         // the same immutable box, so no synchronization is needed.

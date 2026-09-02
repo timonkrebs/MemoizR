@@ -129,6 +129,13 @@ public sealed class ConcurrentRace<T, I> : MemoHandlR<T>, IMemoizR, IStampedGetR
             };
             var newValue = await job.Run(Context.CancellationTokenSource!.Token);
             PublishValueWithStamps(newValue, winnerCapture ?? Context.TakeStampCapture(this), winnerBranch);
+            // Record the sources this evaluation read -- every branch's, not only the winner's:
+            // for the graph walks that consume Sources (a bridge's chain refresh and its
+            // re-export guard) an over-approximation is the safe direction. The observer links
+            // are deliberately left alone: a race is uncached, so pruning an input only a losing
+            // branch read would silently stop that input's Sets from reaching the race's
+            // observers. Taken before the frame restores CurrentGets below.
+            Sources = [.. Sources.AsSpan(0, scope.CurrentGetsIndex), .. scope.CurrentGets];
             State = CacheState.CacheClean;
         }
         catch

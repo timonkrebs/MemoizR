@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 ## [Unreleased]
 
 ### Added
+- `MemoizR.Distributed` (new package, issue #148): the bridge layer over the causality
+  stamps. `Export` pushes stale advertisements on value changes and answers pulls with the
+  untorn (value, evidence, sequence) triple of one publication (plus an optional heartbeat
+  for evidence-only transitions); `RemoteSignal<T>` adopts deliveries under a protocol that
+  makes reordered, at-least-once transports harmless — per-publication sequences totally
+  order deliveries (including the dependency-oscillation shapes stamps cannot order),
+  incarnation epochs detect host restarts (held evidence is discarded, never merged, and an
+  `OnPeerReset` hook resubscribes), and abandoned epochs drop late traffic from dead
+  incarnations; `DistributedBarrier` renders only consistent, verified snapshots, re-pulls
+  the lagging mirror itself, and never blocks forever on the core's deliberately conservative
+  stamps (see the design doc's bridge-layer section). The sample migrated to the package.
+- Per-node publication sequence in the core value box: strictly increasing per publication,
+  carried by distributed payloads as the per-node total order that causality stamps
+  deliberately do not provide.
+- `MemoFactoryOptions.DisableCausalityStamps`: opt a context out of causality-stamp tracking
+  entirely (issue #39). Signals stop bumping triggers, evaluations never open a capture, and
+  every node publishes the honest no-claim (unverifiable) evidence; values and glitch freedom
+  are unchanged, and the recompute paths measure below the pre-stamps baseline. The flag binds
+  to the context: factories sharing a keyed context must agree on it (a mismatch throws), and
+  a disabled context cannot be exported to peers.
+- `benchmarks/MemoizR.Benchmarks`: the micro-harness behind the overhead numbers (hot-path
+  ns/op and B/op for sets, clean reads and recomputes), runnable against any checkout via
+  `-p:MemoizRPath=` for before/after comparisons.
 - First data-race safety layer for the user boundary (issue #36, see ADR 0003): a `[Sendable]`
   attribute, structural verification via `SendableChecker`, and an opt-in
   `MemoFactoryOptions.StrictSendableChecks` factory mode that rejects, at node creation,

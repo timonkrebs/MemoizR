@@ -7,5 +7,6 @@
   <ItemGroup>
     <ProjectReference Include="..\..\MemoizR\MemoizR.csproj" />
     <ProjectReference Include="..\..\MemoizR.Reactive\MemoizR.Reactive.csproj" />
+    <ProjectReference Include="..\..\MemoizR.Distributed\MemoizR.Distributed.csproj" />
   </ItemGroup>
 </Project>

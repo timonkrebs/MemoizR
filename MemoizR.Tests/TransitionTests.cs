@@ -1,4 +1,5 @@
 using MemoizR.Reactive;
+using xRetry.v3;
 
 namespace MemoizR.Tests;
 
@@ -383,6 +384,9 @@ public class TransitionTests
         gate2.SetResult(); // unpark the stray effect
     }
 
+    // va's and vb's cascades schedule two debounced updates; whichever order the runner
+    // serializes them in, a faulting scan must never record over a newer committed rerun (the
+    // fault record is token-guarded), so this holds deterministically.
     [Fact(Timeout = 5000)]
     public async Task Transition_ParentFaultWithSuccessfulRerun_SettlesClean_WithoutAFaultRecord()
     {

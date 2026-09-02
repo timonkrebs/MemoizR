@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\MemoizR\MemoizR.csproj" />
+    <ProjectReference Include="..\MemoizR.Reactive\MemoizR.Reactive.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <PackageId>MemoizR.Distributed</PackageId>
+    <Version>0.0.1</Version>
+    <Authors>Timon Krebs</Authors>
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <PackageReadmeFile>NUGET_DISTRIBUTED_README.md</PackageReadmeFile>
+    <PackageIcon>MemoizR-Small.png</PackageIcon>
+    <!-- Optional: Publish the repository URL in the built .nupkg (in the NuSpec <Repository> element) -->
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+
+    <!-- Optional: Embed source files that are not tracked by the source control manager in the PDB -->
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+
+    <!-- Optional: Build symbol package (.snupkg) to distribute the PDB containing Source Link -->
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <PackageTags>Signal, Signals, Reactive, Reactivity, Memoization, Graph, Dependency, Dependencies, Distributed, Distributed Systems, Replication, Synchronization, Causality, Causal Consistency, Interval Tree Clocks, Glitch Free, State, State Synchronization</PackageTags>
+  </PropertyGroup>
+  <ItemGroup>
+        <None Include="..\docs\NUGET_DISTRIBUTED_README.md" Pack="true" PackagePath="\" />
+        <None Include="..\docs\MemoizR-Small.png" Pack="true" PackagePath="\" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.SourceLink.GitHub" PrivateAssets="All" />
+  </ItemGroup>
+</Project>
