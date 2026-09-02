@@ -259,30 +259,29 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
 
         foreach (var invocation in block.DescendantsAndSelf().OfType<IInvocationOperation>())
         {
-            if (!InvokesTheBody(invocation, transferBody, functionSymbol, anchor, block)
-                || (deferred && !IsEnumeratedImmediately(invocation)))
-            {
-                continue;
-            }
-
-            // A call in a mutually exclusive sibling arm of the store/transfer never runs
-            // on the path that stored the transferring callable.
-            if (IsInASiblingArmOfTheTransfer(invocation, anchor.Syntax.Span.End))
+            if (!IsAPropagatingCallSite(invocation, transferBody, functionSymbol, anchor, block, deferred))
             {
                 continue;
             }
 
             var callBody = EnclosingFunctionBody(invocation, block);
-            if (ReferenceEquals(callBody, transferBody))
-            {
-                continue; // self-recursion: the body scan already covers it
-            }
-
             foreach (var entry in CallSiteEntries(invocation, callBody, variable, functionSymbol, block, classifier, visited, calleeExits))
             {
                 yield return entry;
             }
         }
+    }
+
+    // A call site the transfer propagates to: it runs the body (an enumeration, for an
+    // iterator), it is not in a mutually exclusive sibling arm of the store/transfer -- no
+    // path runs it after storing the transferring callable -- and it is not the body's own
+    // recursion, which the body scan already covers.
+    private static bool IsAPropagatingCallSite(IInvocationOperation invocation, IOperation transferBody, IMethodSymbol functionSymbol, IOperation anchor, IOperation block, bool deferred)
+    {
+        return InvokesTheBody(invocation, transferBody, functionSymbol, anchor, block)
+            && (!deferred || IsEnumeratedImmediately(invocation))
+            && !IsInASiblingArmOfTheTransfer(invocation, anchor.Syntax.Span.End)
+            && !ReferenceEquals(EnclosingFunctionBody(invocation, block), transferBody);
     }
 
     private static bool IsIteratorBody(IOperation body)
