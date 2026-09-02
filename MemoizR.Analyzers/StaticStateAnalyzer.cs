@@ -72,6 +72,13 @@ public sealed class StaticStateAnalyzer : DiagnosticAnalyzer
             return;
         }
 
+        // A [ThreadStatic] field is one slot PER THREAD: concurrently running flows never
+        // share it, so neither the slot rule nor the smuggle hint applies.
+        if (symbol is IFieldSymbol staticField && IsThreadStatic(staticField))
+        {
+            return;
+        }
+
         var (kind, finding) = symbol switch
         {
             IFieldSymbol field => ("field", ClassifyField(field, classifier)),
@@ -123,6 +130,13 @@ public sealed class StaticStateAnalyzer : DiagnosticAnalyzer
                     " (a static slot publishes unchecked: ValidateWrittenValues covers signal writes only)"));
             }
         }
+    }
+
+    private static bool IsThreadStatic(IFieldSymbol field)
+    {
+        return field.GetAttributes().Any(attribute => attribute.AttributeClass is { Name: "ThreadStaticAttribute" } attributeClass
+            && attributeClass.ContainingNamespace?.ToDisplayString() == "System"
+            && SendableSymbolClassifier.IsDeclaredInFrameworkAssembly(attributeClass));
     }
 
     private static string? ClassifyField(IFieldSymbol field, SendableSymbolClassifier classifier)

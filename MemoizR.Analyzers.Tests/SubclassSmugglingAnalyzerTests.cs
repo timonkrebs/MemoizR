@@ -326,4 +326,42 @@ public class SubclassSmugglingAnalyzerTests
 
         Assert.Empty(diagnostics);
     }
+
+
+    [Fact]
+    public async Task ConstrainedTypeParameters_ExposeTheirConstraintSurfaces()
+    {
+        // The creation sees T, but every instantiation is OpenBase or a subclass: the
+        // constraint IS the declared surface, and it can smuggle exactly like a direct one.
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public class OpenBase { }
+
+            public class C
+            {
+                public Signal<T> Publish<T>(MemoFactory f, T value) where T : OpenBase => f.CreateSignal(value);
+            }
+            """);
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR006");
+        Assert.Contains("OpenBase", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task UnconstrainedTypeParameters_StayQuiet()
+    {
+        // Nothing declared bounds T: the closed instantiation's own creation-time check is
+        // the only place a verdict exists (MZR001's deliberate type-parameter stance).
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public class C
+            {
+                public Signal<T> Publish<T>(MemoFactory f, T value) => f.CreateSignal(value);
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
 }

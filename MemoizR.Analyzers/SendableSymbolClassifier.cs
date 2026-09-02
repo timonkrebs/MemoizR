@@ -263,7 +263,7 @@ internal sealed class SendableSymbolClassifier
     // green-listed types (or their facades) live across TFMs -- .NET (split System.* runtime
     // assemblies, System.Private.CoreLib in runtime-assembly compilations), .NET Framework
     // (mscorlib/System/System.Numerics), and the netstandard/System.Runtime facades.
-    private static bool IsDeclaredInFrameworkAssembly(INamedTypeSymbol definition)
+    internal static bool IsDeclaredInFrameworkAssembly(INamedTypeSymbol definition)
     {
         if (definition.Locations.Any(location => location.IsInSource))
         {

@@ -606,4 +606,24 @@ public class StaticStateAnalyzerTests
 
         Assert.Empty(diagnostics);
     }
+
+
+    [Fact]
+    public async Task ThreadStaticFields_AreNotSharedSlots()
+    {
+        // Every thread gets its own storage: concurrent flows on different threads never
+        // touch the same slot, so there is no shared mutable state to flag.
+        var diagnostics = await InClassC("""
+                [ThreadStatic]
+                private static int depth;
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    depth++;
+                }
+            """, "using System;\nusing MemoizR;");
+
+        Assert.Empty(diagnostics);
+    }
 }

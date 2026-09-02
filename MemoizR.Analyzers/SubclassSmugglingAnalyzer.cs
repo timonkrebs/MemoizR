@@ -50,11 +50,11 @@ public sealed class SubclassSmugglingAnalyzer : DiagnosticAnalyzer
             return;
         }
 
-        foreach (var typeArgument in method.TypeArguments)
+        foreach (var surface in method.TypeArguments.SelectMany(DeclaredSurfacesOf))
         {
-            // A type argument the Sendable classifier REJECTS is MZR001's territory: the
-            // value never passes the creation check, so there is no smuggle hole to hint at.
-            if (classifier.GetNotSendableReason(typeArgument) is not null)
+            // A surface the Sendable classifier REJECTS is MZR001's territory: the value
+            // never passes the creation check, so there is no smuggle hole to hint at.
+            if (classifier.GetNotSendableReason(surface) is not null)
             {
                 continue;
             }
@@ -62,7 +62,7 @@ public sealed class SubclassSmugglingAnalyzer : DiagnosticAnalyzer
             // Smuggling hides inside Sendable CONTAINERS too (ImmutableArray<OpenBase>,
             // Task<OpenBase>): the container passes the green-lists, but the non-sealed element
             // type is the smuggle surface -- unfold nested type arguments.
-            foreach (var (named, depth) in NamedTypesIn(typeArgument, depth: 0))
+            foreach (var (named, depth) in NamedTypesIn(surface, depth: 0))
             {
                 if (IsSmuggleSurface(named))
                 {
@@ -74,6 +74,15 @@ public sealed class SubclassSmugglingAnalyzer : DiagnosticAnalyzer
                 }
             }
         }
+    }
+
+    // A creation inside a generic helper sees a TYPE PARAMETER, whose class/interface
+    // constraints are its declared surface: every instantiation is one of them or a subtype,
+    // so a smuggle surface among them hides the same hole a direct creation of that type
+    // would hint at. An unconstrained T stays MZR001's deliberate type-parameter stance.
+    private static IEnumerable<ITypeSymbol> DeclaredSurfacesOf(ITypeSymbol typeArgument)
+    {
+        return typeArgument is ITypeParameterSymbol parameter ? parameter.ConstraintTypes : new[] { typeArgument };
     }
 
     // The runtime-guard suggestion only holds where the guard can actually fire:

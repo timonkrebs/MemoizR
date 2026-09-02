@@ -4623,4 +4623,98 @@ public class UseAfterTransferAnalyzerTests
         var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
         Assert.Contains("'list'", diagnostic.GetMessage());
     }
+
+
+    [Fact]
+    public async Task CopyingFactories_CarryInlineSourceElements()
+    {
+        // CreateRange never retains the array, but it copies the array's ELEMENT -- the same
+        // list reference -- into the transferred collection: spread semantics, not a leaf.
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(ImmutableArray.CreateRange(new[] { list }));
+                    list.Add(1);
+                }
+            """, "using System.Collections.Generic;\nusing System.Collections.Immutable;\nusing MemoizR;");
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task CopyingConversions_CarryInlineSourceElements()
+    {
+        // new[] { list }.ToImmutableArray() likewise delivers the list reference itself.
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(new[] { list }.ToImmutableArray());
+                    list.Add(1);
+                }
+            """, "using System.Collections.Generic;\nusing System.Collections.Immutable;\nusing MemoizR;");
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task OpenSendableSurfaces_StayTracked_TheRuntimeObjectMayBeMutable()
+    {
+        // OpenBase passes the classifier by declaration, but the object behind it is a
+        // MutableChild the receiver can own and mutate: a transfer of such a surface is
+        // exactly the case where the declared-type verdict cannot be trusted.
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public class OpenBase
+            {
+                public void Touch() { }
+            }
+
+            public sealed class MutableChild : OpenBase
+            {
+                public int Count;
+            }
+
+            public class C
+            {
+                public void M()
+                {
+                    OpenBase value = new MutableChild();
+                    var sending = Sending.Transfer(value);
+                    value.Touch();
+                }
+            }
+            """);
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'value'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task SealedSendableSources_StayUntracked()
+    {
+        // A sealed immutable record cannot hide anything: the receiver gets a value nothing
+        // on the sender side can mutate, so later reads are not handoff violations.
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public sealed record SealedPerson(string Name);
+
+            public class C
+            {
+                public void M()
+                {
+                    var person = new SealedPerson("a");
+                    var sending = Sending.Transfer(person);
+                    _ = person.Name;
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
 }

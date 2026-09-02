@@ -183,9 +183,21 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             return SendableSymbolClassifier.IsProvenSendableByConstraints(typeParameter) ? null : variable;
         }
 
-        return source.Type is { } sourceType && classifier.GetNotSendableReason(sourceType) is null
+        // Sendable by DECLARATION alone is not enough: a non-sealed class -- or a container
+        // holding one -- can carry a mutable subclass the receiver then owns (the smuggle
+        // hole MZR006 hints at), and a transfer of such a value is exactly where the
+        // declared-type verdict cannot be trusted.
+        return source.Type is { } sourceType
+            && classifier.GetNotSendableReason(sourceType) is null
+            && !CanHideAMutableImplementation(sourceType)
             ? null
             : variable;
+    }
+
+    private static bool CanHideAMutableImplementation(ITypeSymbol type)
+    {
+        return SubclassSmugglingAnalyzer.NamedTypesIn(type, depth: 0)
+            .Any(entry => SubclassSmugglingAnalyzer.IsSmuggleSurface(entry.Named));
     }
 
     private static IEnumerable<TransferEntry> EntriesFor(
@@ -558,18 +570,23 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             // Tuple.Create(list) is the constructor spelling of a framework value carrier,
             // and the immutable/frozen collection factories' Create store their ARGUMENTS
             // as elements the same way (ImmutableArray.Create(list) retains the list).
-            // CreateRange and the ToImmutable*/ToFrozen* conversions stay leaves: they copy
-            // elements OUT of their source, which is itself never retained.
             IInvocationOperation { TargetMethod: { Name: "Create", ContainingType: { } factory } } factoryCall
                 when IsACarrierFactory(factory) =>
                 factoryCall.Arguments.Select(argument => (IOperation?)argument.Value),
+            // CreateRange, ToImmutable*/ToFrozen* and LINQ's ToArray/ToList/ToHashSet copy the
+            // ELEMENTS out of their source: the source object is never retained (a variable
+            // contributes nothing), but an inline container's elements reach the receiver --
+            // the same spread semantics as [.. new[] { list }].
+            IInvocationOperation { TargetMethod: { ContainingType: { } copier } method } copyCall
+                when IsACopyingFactory(method, copier) =>
+                copyCall.Arguments.SelectMany(argument => CopiedElementParts(argument.Value)),
             // Transfer([list]): matched by SYNTAX -- ICollectionExpressionOperation is not
             // public in the Roslyn this analyzer compiles against, but the children are
             // walkable regardless.
             { } collection when collection.Syntax is CollectionExpressionSyntax =>
                 collection.ChildOperations.SelectMany(child =>
                     child.Syntax is SpreadElementSyntax
-                        ? SpreadCarriedParts(child)
+                        ? CopiedElementParts(child.ChildOperations.FirstOrDefault())
                         : new[] { (IOperation?)child }),
             _ => null,
         };
@@ -584,6 +601,23 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                 || factory.Name.StartsWith("Immutable", StringComparison.Ordinal)
                 || factory.Name.StartsWith("Frozen", StringComparison.Ordinal))
             && IsFrameworkDeclared(factory);
+    }
+
+    // Framework copiers enumerate a source into a fresh collection: the immutable/frozen
+    // CreateRange and ToImmutable*/ToFrozen* conversions, and LINQ's materializers.
+    private static bool IsACopyingFactory(IMethodSymbol method, INamedTypeSymbol copier)
+    {
+        if (!IsFrameworkDeclared(copier))
+        {
+            return false;
+        }
+
+        var immutableFactory = copier.Name.StartsWith("Immutable", StringComparison.Ordinal)
+            || copier.Name.StartsWith("Frozen", StringComparison.Ordinal);
+        return (method.Name == "CreateRange" && immutableFactory)
+            || method.Name.StartsWith("ToImmutable", StringComparison.Ordinal)
+            || method.Name.StartsWith("ToFrozen", StringComparison.Ordinal)
+            || (copier.Name == "Enumerable" && method.Name is "ToArray" or "ToList" or "ToHashSet");
     }
 
     // Where the sender-side scan looks. Normally the whole scope; a transfer the flow
@@ -1387,13 +1421,14 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             || (member is IPropertyReferenceOperation property && SendableSymbolClassifier.HasBackingSlot(property.Property));
     }
 
-    // `[..operand]` enumerates the operand INTO the new collection: the operand OBJECT is
-    // never carried, but an inline container's elements are -- [.. new[] { list }] delivers
-    // the same list reference to the receiver. So only the operand's own carried parts
-    // unfold; a plain variable operand contributes nothing.
-    private static IEnumerable<IOperation?> SpreadCarriedParts(IOperation spread)
+    // Enumerating a source INTO a new collection ([..source], CreateRange(source),
+    // source.ToImmutableArray()) never carries the source OBJECT, but an inline container's
+    // elements are delivered -- [.. new[] { list }] hands the receiver the same list
+    // reference. So only the source's own carried parts unfold; a plain variable contributes
+    // nothing.
+    private static IEnumerable<IOperation?> CopiedElementParts(IOperation? source)
     {
-        var operand = PeelConversions(spread.ChildOperations.FirstOrDefault());
+        var operand = PeelConversions(source);
         return operand is not null && CarriedParts(operand) is { } parts
             ? parts
             : Enumerable.Empty<IOperation?>();
