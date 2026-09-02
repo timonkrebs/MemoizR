@@ -19,9 +19,11 @@ deliberately does and does not flag, and the constraints Roslyn imposes.
 
 A new `MemoizR.Analyzers` project (netstandard2.0, Roslyn 4.8 floor so any SDK ≥ 8 can load it)
 ships **inside the MemoizR NuGet package** (`analyzers/dotnet/cs`), so every consumer gets the
-rules on build with no extra reference. All rules default to **Warning** — the Swift 5.x
-"strict concurrency warnings" migration posture — and are configurable per project via
-`.editorconfig` (`dotnet_diagnostic.MZR001.severity = error|suggestion|none`).
+rules on build with no extra reference. Since the Swift-6-parity step (issue #145 part A4),
+MZR001–003 default to **Error** — the Swift 6 language-mode posture, matching the runtime
+checks being on by default — while the newer heuristic rules stay softer (MZR004/005 Warning,
+MZR006 Info). Everything is configurable per project via `.editorconfig`
+(`dotnet_diagnostic.MZR001.severity = warning|suggestion|none` is the migration posture).
 
 ### MZR001 — non-Sendable value type at a creation site
 
@@ -31,6 +33,30 @@ of a value-bearing factory creation (`CreateSignal`, `CreateEagerRelativeSignal`
 classified by a symbol-based port of `SendableChecker`. Checking the method's `TypeArguments`
 uniformly covers `ConcurrentRace`'s resolver result `R` — handed to every racing child in
 parallel — for free.
+
+**The escape hatch is honored at build time too.** The runtime accepts a per-factory opt-out
+(`MemoFactoryOptions.DisableSendableChecks`); with an Error default, a creation on such a
+factory must not fail the build on the very checks its runtime disabled, or migration would
+need a project-wide suppression on top of the documented option. Receiver resolution is
+best-effort and conservative in the safe direction (`FactoryOptOut`), demanding *definite*
+evidence on three axes: the factory's construction must be in sight — an inline
+`new MemoFactory(options: …DisableSendableChecks)` receiver (followed through the library's
+fluent configuration chain — the named whitelist `AddExecutor`/`AddSynchronizationContext`/
+`AddTimeProvider`/`AddWpfDispatcher` mutates and returns the same factory, applied to direct
+receivers and initializer values alike; generic passthroughs like `Untrack<T>` return their
+delegate's result and are not followed), or a local / readonly field / get-only property whose
+initializer in the *same file* is one (analyzers may not call `Compilation.GetSemanticModel`, which keeps cross-file
+initializers out of reach; settable slots could be repointed from anywhere, and a member of a
+partial type split across files is not trusted either, since another file's constructor can
+overwrite the visible initializer) — the options argument must *fold to a constant*
+carrying the flag (a conditional `useLax ? DisableSendableChecks : None` still runs strict on
+one path), and any write to the receiver symbol elsewhere in the file revokes the
+initializer's authority (the local may have been repointed at a strict factory before the
+creation). Anything short of that — a factory parameter, options computed at runtime — keeps
+the checks on: a missed opt-out costs one suppression, a wrong opt-out would silently drop
+the rule. MZR006 honors the same opt-out (smuggling is a hole in checks that factory
+disabled); MZR002/003 do not, because they diagnose races and deterministic runtime throws
+that exist regardless of Sendable checking.
 
 **The lockstep contract.** `SendableSymbolClassifier` (symbols) and `SendableChecker`
 (reflection) implement the same classification and must be edited together; a type one accepts
@@ -136,6 +162,86 @@ lock. (The cost is a false negative for a nested function invoked synchronously 
 computation; the runtime exception still guards that path. MZR002 keeps the full walk: a
 captured-state write is a data race whenever the callback runs, deferred or not.)
 
+### MZR004 — static state next to the graph (the SE-0412 analog proper)
+
+Swift 6 rejects every non-isolated mutable global, because a global is reachable from every
+isolation domain. The analog: in files that use MemoizR (a `using` directive for the MemoizR
+namespaces — the rule's mandate boundary), a static must be an **immutable slot of a Sendable
+type**. Flagged: non-readonly static fields, settable static properties, static events (mutable
+slots), and readonly/get-only statics whose TYPE is not Sendable (one shared mutable object
+graph). Not flagged: consts, computed static getters (an expression-bodied getter owns no slot
+— fresh values share nothing, and a getter handing out other static state is flagged at that
+state's own declaration), Sendable readonly statics — and MemoizR's own nodes, factories and
+executors, which are `[Sendable]` by design (and all sealed), so the rule's own fix suggestion
+("lift it into a Signal") passes the rule. A static slot that PASSES the rule but whose type
+contains a smuggle surface (`static readonly OpenBase Cache` can store a mutable subclass, with
+no creation site where MZR006 would hint and no runtime write validation ever seeing the slot)
+gets the MZR006 Info hint at the static, with the same noise calculus as creation sites. A static whose type contains an unbound type parameter — `T` itself,
+or nested as in `ImmutableArray<T>` — is flagged as unverifiable: MZR001's benefit of the doubt
+relies on the closed instantiation being checked at its own creation site, and a static has no
+such site — every closed `C<T>` mints a fresh process-wide slot no rule ever sees again.
+`[Sendable]`-trusted types shield their arguments (a `Signal<T>` static is internally
+synchronized for any `T`, and the closed `T` is checked at the `CreateSignal` call that built
+the instance). The whole analyzer stays silent in compilations that do not reference the real
+MemoizR assembly.
+
+### MZR005 — use after transfer (the SE-0430 analog)
+
+`Sending<T>` hands a non-Sendable value across flows by TRANSFER: the wrapper is `[Sendable]`
+(strict mode accepts `Sending<List<int>>`), `Receive()` enforces single consumption at runtime,
+and MZR005 flags method-local uses of the transferred variable after the transfer, in source
+order, stopping at a reassignment. The scan is path-aware within its heuristic: uses in a
+mutually exclusive sibling arm of the transfer's construct are unreachable and not flagged,
+uses dominated by a conditional reinitialization (inside its arm, after it) are clean, `out`
+arguments reinitialize like assignments (after their sibling arguments — which are evaluated
+first — were checked for reads), reinitializations inside deferred callbacks don't count for
+the outer flow (mirroring transfers being scoped to their own callback body), and a `finally`
+arm counts as definite. Still deliberately a heuristic — Swift proves this with region-based
+isolation in the type system; source order approximates execution order, and aliases or loop
+back-edges can evade the rule. The receiver-side runtime check is the backstop.
+
+Known blind spots of the heuristic (documented non-goals, each backstopped by
+`Sending<T>.Receive`'s single-consumption check):
+
+- aliases the sender keeps through another path — a `ref` local, a `dynamic` view, a copy taken
+  before the transfer, or state reached through a field or property (only locals and parameters
+  are transfer sources; delegate invocation lists resolve from same-scope stores only);
+- loop back-edges: an iteration's use that textually precedes the transfer is not flagged for the
+  next iteration;
+- framework calls are classified by shape — `Create` factories carry their arguments, copiers
+  (`CreateRange`, `ToImmutable*`, LINQ materializers) copy inline elements only, and interface-
+  or view-returning methods retain their receiver — so a retaining method that fits none of
+  these (`Task.FromResult(list)`) is a leaf;
+- a callee that cannot return after its handoff is judged one level deep, and a declared-Sendable
+  but non-sealed source stays tracked because its runtime object may be a mutable subclass.
+
+### MZR006 — subclass smuggling (Info)
+
+Sendable verdicts are computed from the DECLARED type, so a mutable subclass behind an upcast
+passes creation-time checks — ADR 0003's documented limitation, which Swift closes by requiring
+Sendable classes to be `final`. MZR006 hints (Info severity: non-sealed records are idiomatic,
+and the hole needs an actual mutable subclass to bite) at non-sealed, non-abstract class type
+arguments at creation sites; green-listed framework types (`Uri` is not sealed) are exempt.
+Abstract classes and interfaces are normally MZR001's (Error) territory — except when a
+`[Sendable]` assertion lets them pass: the attribute is deliberately not inherited, so the
+assertion binds the declaring author and not every subclass or implementer, and MZR006 hints
+exactly there. The runtime counterpart is `MemoFactoryOptions.ValidateWrittenValues`, which validates each written
+instance's runtime type on `Set` — SIGNAL writes only (memo outputs are the computation's own
+doing and publish unchecked), which is why the MZR006 hint only suggests the option at signal
+creation sites. The nested type arguments of Sendable containers (`ImmutableArray<OpenBase>`)
+are unfolded: the container passes the green-lists, the element type is the smuggle surface —
+and since `ValidateWrittenValues` sees only the written instance's OWN runtime type, the hint
+for a nested surface says the runtime guard cannot reach it instead of suggesting the option.
+Creations on a factory that visibly opts out (`DisableSendableChecks`, see MZR001) get no hint
+at all: smuggling is a hole in checks that factory disabled. `[Sendable]`-attributed types
+shield their type arguments and members from the walk — `Sending<T>` deliberately wraps a
+non-Sendable payload for transfer, so hinting about the payload would misread the escape hatch
+— and the walk has no depth cap (the type graph is finite and a visited set breaks
+self-referential cycles; a cap would silently drop the hint exactly for the deep compositions
+MZR001 accepts). Besides generic type arguments, the walk visits the MEMBER types of
+source-declared types: a sealed Sendable DTO (`sealed record Box(OpenBase Value)`) hides the
+same hole one member deep, where `ValidateWrittenValues` sees only the runtime type `Box`.
+
 ### Testing strategy
 
 The analyzer tests compile snippets in-memory **against the real MemoizR assemblies**
@@ -188,5 +294,7 @@ Costs / accepted limitations:
 - **Flagging reads of captured mutable state** (full SE-0412 strictness). Rejected for v1: the
   false-positive rate on idiomatic code would push users to disable MZR002 wholesale, which is
   worse than the narrower write-only rule that survives contact with real codebases.
-- **Error severity by default.** Rejected: this layer is the Swift-5.x-style migration step;
-  projects opt into `error` per rule via `.editorconfig` when ready (the Swift 6 posture).
+- **Error severity by default.** Rejected at v1 as the Swift-5.x-style migration step, then
+  adopted for MZR001–003 by issue #145 part A4 alongside the runtime default-on switch (the
+  Swift 6 posture); `.editorconfig` downgrades and the `DisableSendableChecks` factory opt-out
+  (honored by the analyzers where the construction is visible) are the migration path.

@@ -18,6 +18,7 @@ namespace MemoizR;
 /// wait like any other reader. Waiting holds no lock and no actor, so the lock-ordering
 /// analysis of concurrency.md §9 has nothing to analyze here.
 /// </summary>
+[Sendable] // internally synchronized by design: safe to share across flows (and to hold in statics, see MZR004)
 public sealed class ActorMemo<T> : ActorValueNode<T>
 {
     private readonly Func<Task<T>> fn;

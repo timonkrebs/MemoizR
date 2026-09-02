@@ -18,11 +18,13 @@ internal static class DiagnosticDescriptors
         messageFormat: "'{0}' is not Sendable ({1}) — values of this type are shared across concurrently " +
                        "running flows; use an immutable type, or mark it [Sendable] to assert thread safety",
         category: Category,
-        defaultSeverity: DiagnosticSeverity.Warning,
+        defaultSeverity: DiagnosticSeverity.Error,
         isEnabledByDefault: true,
         description: "MemoizR publishes a node's value reference tear-free across concurrent flows, but only " +
                      "an immutable or internally synchronized type makes the object behind the reference safe " +
-                     "to share. This is the build-time mirror of MemoFactoryOptions.StrictSendableChecks.",
+                     "to share. This is the build-time mirror of the default-on runtime Sendable checks; " +
+                     "creations on a factory that visibly opts out via MemoFactoryOptions.DisableSendableChecks " +
+                     "are exempt, mirroring the runtime escape hatch.",
         helpLinkUri: HelpUri);
 
     public static readonly DiagnosticDescriptor CapturedMutation = new(
@@ -32,12 +34,57 @@ internal static class DiagnosticDescriptors
                        "computations run concurrently on other flows, so this is a data race — lift the state " +
                        "into a Signal or EagerRelativeSignal instead",
         category: Category,
-        defaultSeverity: DiagnosticSeverity.Warning,
+        defaultSeverity: DiagnosticSeverity.Error,
         isEnabledByDefault: true,
         description: "A memo/reaction/concurrent computation executes on arbitrary flows, concurrently with " +
                      "the code that created it and with other computations. Writing a captured local, a field " +
                      "of the enclosing object, or a static field from inside one is unsynchronized shared " +
                      "mutation — the very thing the reactive graph exists to replace (the SE-0412 analog).",
+        helpLinkUri: HelpUri);
+
+    public static readonly DiagnosticDescriptor MutableStaticState = new(
+        id: "MZR004",
+        title: "Static state shared with the reactive graph is not data-race safe",
+        messageFormat: "Static {0} '{1}' is {2} — statics are reachable from every concurrently running " +
+                       "flow (the SE-0412 analog); make it readonly with a Sendable type, lift it into a " +
+                       "Signal/EagerRelativeSignal (nodes are safe to hold in statics), or mark the type [Sendable]",
+        category: Category,
+        defaultSeverity: DiagnosticSeverity.Warning,
+        isEnabledByDefault: true,
+        description: "Swift 6 rejects every non-isolated mutable global (SE-0412) because globals are " +
+                     "reachable from every isolation domain. The analog here: a mutable static slot, or a " +
+                     "readonly static whose TYPE is mutable, is unsynchronized shared state next to a graph " +
+                     "whose computations run concurrently. Scoped to files that use MemoizR (a using " +
+                     "directive for the MemoizR namespaces).",
+        helpLinkUri: HelpUri);
+
+    public static readonly DiagnosticDescriptor UseAfterTransfer = new(
+        id: "MZR005",
+        title: "Value used after being transferred",
+        messageFormat: "'{0}' is used after being wrapped in Sending<T> — the receiver may already own " +
+                       "and mutate it on another flow; stop using a transferred value (or reassign it first)",
+        category: Category,
+        defaultSeverity: DiagnosticSeverity.Warning,
+        isEnabledByDefault: true,
+        description: "Sending<T> hands a non-Sendable value across flows by TRANSFER (the SE-0430 analog): " +
+                     "the sender promises to stop touching it. This rule flags method-local uses of the " +
+                     "transferred variable after the transfer, in source order, stopping at a reassignment. " +
+                     "It is a best-effort heuristic, not a proof: aliases and loop back-edges can evade it.",
+        helpLinkUri: HelpUri);
+
+    public static readonly DiagnosticDescriptor NonSealedValueType = new(
+        id: "MZR006",
+        title: "Non-sealed class shared by the reactive graph can smuggle mutable subclass state",
+        messageFormat: "'{0}' is not sealed — a mutable subclass behind an upcast passes the creation-time " +
+                       "Sendable checks (Swift requires Sendable classes to be final); consider sealing it{1}",
+        category: Category,
+        defaultSeverity: DiagnosticSeverity.Info,
+        isEnabledByDefault: true,
+        description: "Sendable verdicts are computed from the DECLARED type's structure, so a mutable " +
+                     "subclass smuggled in through an upcast is not caught at creation time (ADR 0003's " +
+                     "documented limitation). Swift closes this by requiring Sendable classes to be final. " +
+                     "Info severity: non-sealed records are idiomatic and the hole needs an actual mutable " +
+                     "subclass to bite.",
         helpLinkUri: HelpUri);
 
     public static readonly DiagnosticDescriptor SetInsideComputation = new(
@@ -48,7 +95,7 @@ internal static class DiagnosticDescriptors
                        "InvalidOperationException at runtime — return the value instead, or schedule the write " +
                        "outside the evaluation",
         category: Category,
-        defaultSeverity: DiagnosticSeverity.Warning,
+        defaultSeverity: DiagnosticSeverity.Error,
         isEnabledByDefault: true,
         description: "The evaluation lock deliberately converts this impossible same-flow wait into an " +
                      "exception (a write inside a read of the same graph is a feedback loop). This rule turns " +

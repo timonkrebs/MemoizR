@@ -1,3 +1,4 @@
+using MemoizR.StructuredConcurrency;
 using Xunit;
 
 namespace MemoizR.Tests.StructuredConcurrency
@@ -19,6 +20,23 @@ namespace MemoizR.Tests.StructuredConcurrency
 
             Assert.Equal([1, 2], value);
             Assert.IsNotType<int[]>(value, exactMatch: false);
+        }
+
+        // The nodes are [Sendable]: the computation set must be the construction-time snapshot,
+        // not the caller's live array -- swapping an element after creation must change nothing
+        // (a swap DURING a recompute would otherwise change the set mid-enumeration).
+        [Fact(Timeout = 10000)]
+        public async Task ConcurrentMap_SnapshotsTheParamsArray_CallerSwapsChangeNothing()
+        {
+            var f = new MemoFactory();
+            var fns = new Func<IStructuredResourceGroup, Task<int>>[] { async _ => 1 };
+            var map = f.CreateConcurrentMap(fns);
+            var reduce = f.CreateConcurrentMapReduce(fns);
+
+            fns[0] = async _ => 42;
+
+            Assert.Equal([1], await map.Get());
+            Assert.Equal(1, await reduce.Get());
         }
 
         [Fact(Timeout = 1000)]
@@ -50,7 +68,10 @@ namespace MemoizR.Tests.StructuredConcurrency
         [Fact(Timeout = 1000)]
         public async Task TestConcurrentMapWithDiamondDependencies()
         {
-            var f = new MemoFactory();
+            // Memos composed over a ConcurrentMap are typed IEnumerable<T> -- an interface, which
+            // the (now default) strict Sendable checks reject by principle. Known migration
+            // friction: compose over an immutable type, or opt out per factory as here.
+            var f = new MemoFactory(options: MemoFactoryOptions.DisableSendableChecks);
 
             var v1 = f.CreateSignal(1);
             var v2 = f.CreateSignal(2);

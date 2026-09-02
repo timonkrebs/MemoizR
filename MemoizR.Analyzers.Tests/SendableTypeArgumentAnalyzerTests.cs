@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using Microsoft.CodeAnalysis;
 
 namespace MemoizR.Analyzers.Tests;
@@ -7,28 +8,26 @@ namespace MemoizR.Analyzers.Tests;
 // the benefit of the doubt, and the message names the offending member.
 public class SendableTypeArgumentAnalyzerTests
 {
-    private static Task<System.Collections.Immutable.ImmutableArray<Diagnostic>> AnalyzeAsync(string source)
+    private static Task<ImmutableArray<Diagnostic>> AnalyzeAsync(string source)
         => AnalyzerTestHarness.AnalyzeAsync(source, new SendableTypeArgumentAnalyzer());
+
+    private const string WithSystem = "using System;\nusing System.Collections.Generic;\nusing MemoizR;";
+
+    private static Task<ImmutableArray<Diagnostic>> InClassC(string members, string usings = "using System.Collections.Generic;\nusing MemoizR;")
+        => AnalyzeAsync(AnalyzerTestHarness.InClassC(members, usings));
 
     [Fact]
     public async Task MutableSignalType_IsFlagged_WithTheStructuralReason()
     {
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var f = new MemoFactory();
                     f.CreateSignal(new List<int>());
                 }
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR001", diagnostic.Id);
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR001");
         Assert.Contains("List<int>", diagnostic.GetMessage());
         Assert.Contains("not Sendable", diagnostic.GetMessage());
     }
@@ -114,21 +113,14 @@ public class SendableTypeArgumentAnalyzerTests
         // FrozenDictionary/FrozenSet are abstract by design (the runtime hands out internal
         // implementations): the known-definitions green-list must trust them BEFORE the
         // abstract-category rejection, in lockstep with the runtime checker.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Frozen;
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var f = new MemoFactory();
                     f.CreateSignal(new Dictionary<string, int> { ["a"] = 1 }.ToFrozenDictionary());
                     f.CreateSignal(new HashSet<int> { 1 }.ToFrozenSet());
                 }
-            }
-            """);
+            """, "using System.Collections.Frozen;\nusing System.Collections.Generic;\nusing MemoizR;");
 
         Assert.Empty(diagnostics);
     }
@@ -160,8 +152,7 @@ public class SendableTypeArgumentAnalyzerTests
             }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR001", diagnostic.Id);
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR001");
         Assert.Contains("Hits", diagnostic.GetMessage());
     }
 
@@ -196,8 +187,7 @@ public class SendableTypeArgumentAnalyzerTests
             }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR001", diagnostic.Id);
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR001");
         Assert.Contains("Items", diagnostic.GetMessage());
     }
 
@@ -265,8 +255,7 @@ public class SendableTypeArgumentAnalyzerTests
             }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR001", diagnostic.Id);
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR001");
         Assert.Contains("Changed", diagnostic.GetMessage());
     }
 
@@ -296,8 +285,7 @@ public class SendableTypeArgumentAnalyzerTests
             }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR001", diagnostic.Id);
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR001");
         Assert.Contains("indexer", diagnostic.GetMessage());
     }
 
@@ -333,8 +321,7 @@ public class SendableTypeArgumentAnalyzerTests
             }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR001", diagnostic.Id);
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR001");
         Assert.Contains("State", diagnostic.GetMessage());
     }
 
@@ -365,8 +352,7 @@ public class SendableTypeArgumentAnalyzerTests
             }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR001", diagnostic.Id);
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR001");
         Assert.Contains("State", diagnostic.GetMessage());
     }
 
@@ -398,30 +384,22 @@ public class SendableTypeArgumentAnalyzerTests
             }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR001", diagnostic.Id);
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR001");
         Assert.Contains("Head", diagnostic.GetMessage());
     }
 
     [Fact]
     public async Task ImmutableCollectionBuilder_IsFlagged_NotBlessedByNamespace()
     {
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Immutable;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var f = new MemoFactory();
                     f.CreateSignal(ImmutableList.CreateBuilder<int>()); // Builder is mutable
                 }
-            }
-            """);
+            """, "using System.Collections.Immutable;\nusing MemoizR;");
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR001", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR001");
     }
 
     [Fact]
@@ -443,8 +421,7 @@ public class SendableTypeArgumentAnalyzerTests
             }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR001", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR001");
     }
 
     [Fact]
@@ -469,8 +446,7 @@ public class SendableTypeArgumentAnalyzerTests
             }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR001", diagnostic.Id);
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR001");
         Assert.Contains("Items", diagnostic.GetMessage());
     }
 
@@ -502,14 +478,9 @@ public class SendableTypeArgumentAnalyzerTests
     [Fact]
     public async Task UnboundTypeParameter_GetsTheBenefitOfTheDoubt()
     {
-        var diagnostics = await AnalyzeAsync("""
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public Signal<T> Make<T>(MemoFactory f, T value) => f.CreateSignal(value);
-            }
-            """);
+            """, "using MemoizR;");
 
         Assert.Empty(diagnostics);
     }
@@ -517,13 +488,7 @@ public class SendableTypeArgumentAnalyzerTests
     [Fact]
     public async Task ConcurrentRace_ResolverResult_IsChecked()
     {
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using System.Threading.Tasks;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var f = new MemoFactory();
@@ -531,8 +496,7 @@ public class SendableTypeArgumentAnalyzerTests
                         async () => new List<int>(),
                         async (_, _) => 1);
                 }
-            }
-            """);
+            """, "using System.Collections.Generic;\nusing System.Threading.Tasks;\nusing MemoizR;");
 
         var diagnostic = Assert.Single(diagnostics);
         Assert.Contains("List<int>", diagnostic.GetMessage());
@@ -541,12 +505,7 @@ public class SendableTypeArgumentAnalyzerTests
     [Fact]
     public async Task ActorEngineCreations_AreChecked()
     {
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var f = new MemoFactory();
@@ -554,7 +513,303 @@ public class SendableTypeArgumentAnalyzerTests
                     f.CreateActorMemoizR(async () => new Dictionary<string, int>());
                     f.CreateActorSignal(1); // fine
                 }
+            """);
+
+        Assert.Equal(2, diagnostics.Length);
+        Assert.All(diagnostics, d => Assert.Equal("MZR001", d.Id));
+    }
+
+    [Fact]
+    public async Task DisableSendableChecks_Factory_IsExemptWhereverItsConstructionIsVisible()
+    {
+        // The runtime accepts this exact per-factory escape hatch; under the Error default the
+        // build must accept it too. Positive evidence counts through every documented shape:
+        // an inline receiver, a local initializer (including flag combinations), and a
+        // same-file static field initializer -- for instance methods and the structured
+        // extension methods alike.
+        var diagnostics = await InClassC("""
+                private static readonly MemoFactory Lax = new(options: MemoFactoryOptions.DisableSendableChecks);
+
+                public void M()
+                {
+                    new MemoFactory(options: MemoFactoryOptions.DisableSendableChecks).CreateSignal(new List<int>());
+
+                    var lax = new MemoFactory(options: MemoFactoryOptions.StrictSendableChecks | MemoFactoryOptions.DisableSendableChecks);
+                    lax.CreateSignal(new List<int>());
+                    lax.CreateConcurrentMap<List<int>>(async _ => new List<int>()); // extension-method receiver
+
+                    Lax.CreateSignal(new List<int>());
+                }
+            """, "using System.Collections.Generic;\nusing System.Threading.Tasks;\nusing MemoizR;");
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task ReassignedFactoryLocal_DoesNotInheritTheInitializerOptOut()
+    {
+        // The initializer opted out, but the local was since repointed at a strict factory:
+        // the runtime WILL throw on this creation, so the build must keep saying so.
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var f = new MemoFactory(options: MemoFactoryOptions.DisableSendableChecks);
+                    f = new MemoFactory();
+                    f.CreateSignal(new List<int>());
+                }
+            """);
+
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR001");
+    }
+
+    [Fact]
+    public async Task ParenthesizedOptOutReceivers_KeepTheOptOut()
+    {
+        // Parentheses are pure syntax: the receiver operation is the creation itself.
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    (new MemoFactory(options: MemoFactoryOptions.DisableSendableChecks)).CreateSignal(new List<int>());
+                }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task BlazorFluentOptOutFactory_IsStillExempt()
+    {
+        // AddBlazorDispatcher mirrors AddWpfDispatcher: it returns the SAME factory via
+        // AddExecutor, so the opt-out evidence one hop up the chain still holds.
+        var diagnostics = await InClassC("""
+                public void M(Dispatcher dispatcher)
+                {
+                    new MemoFactory(options: MemoFactoryOptions.DisableSendableChecks)
+                        .AddBlazorDispatcher(dispatcher)
+                        .CreateSignal(new List<int>());
+                }
+            """, "using System.Collections.Generic;\nusing MemoizR;\nusing Microsoft.AspNetCore.Components;");
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task FluentlyConfiguredOptOutFactory_IsStillExempt()
+    {
+        // AddExecutor/AddTimeProvider mutate and return the SAME factory, so the opt-out
+        // evidence sits one hop up the fluent chain -- the runtime uses the opted-out factory
+        // and accepts the value, and the build must agree.
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    new MemoFactory(options: MemoFactoryOptions.DisableSendableChecks)
+                        .AddExecutor(new SynchronizationContextExecutor(new SynchronizationContext()))
+                        .CreateSignal(new List<int>());
+
+                    var lax = new MemoFactory(options: MemoFactoryOptions.DisableSendableChecks);
+                    lax.AddTimeProvider(TimeProvider.System).CreateSignal(new List<int>());
+                }
+            """, "using System;\nusing System.Collections.Generic;\nusing System.Threading;\nusing MemoizR;");
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task FluentlyConfiguredFactory_StoredInALocal_KeepsTheOptOut()
+    {
+        // The initializer's value is the fluent call's result -- which IS the factory the
+        // initializer created (AddTimeProvider returns its receiver) -- so the peeling applies
+        // to initializers exactly like direct receivers.
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var lax = new MemoFactory(options: MemoFactoryOptions.DisableSendableChecks)
+                        .AddTimeProvider(TimeProvider.System);
+                    lax.CreateSignal(new List<int>());
+                }
+            """, WithSystem);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task GenericPassthroughsReturningAFactory_AreNotFollowed()
+    {
+        // Untrack<T> returns its DELEGATE's result -- here a strict factory -- so following it
+        // back to the lax receiver would hide an error the runtime throws. Only the named
+        // fluent methods (which return their own receiver) are followed.
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    new MemoFactory(options: MemoFactoryOptions.DisableSendableChecks)
+                        .Untrack(() => new MemoFactory())
+                        .CreateSignal(new List<int>());
+                }
+            """);
+
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR001");
+    }
+
+    [Fact]
+    public async Task InArguments_DoNotRevokeTheOptOut()
+    {
+        // `in` is a read-only pass: the callee cannot repoint the local, so the initializer
+        // still proves which factory runs the creation.
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var lax = new MemoFactory(options: MemoFactoryOptions.DisableSendableChecks);
+                    Inspect(in lax);
+                    lax.CreateSignal(new List<int>());
+                }
+
+                private static void Inspect(in MemoFactory factory)
+                {
+                }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task VirtualFactoryProperty_IsNotTrusted_DispatchMayLandElsewhere()
+    {
+        // A derived override can hand back a strict factory the base initializer never saw:
+        // only a getter that cannot dispatch elsewhere may vouch for its initializer.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class Base
+            {
+                public virtual MemoFactory Lax { get; } = new(options: MemoFactoryOptions.DisableSendableChecks);
+
+                public void M()
+                {
+                    Lax.CreateSignal(new List<int>());
+                }
             }
+            """);
+
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR001");
+    }
+
+    [Fact]
+    public async Task ConditionalAccessReceiver_KeepsTheOptOut()
+    {
+        // `lax?.CreateSignal(...)` either does not run or runs on the lax factory -- the
+        // conditional-access placeholder must resolve to the visible initializer either way.
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    MemoFactory? lax = new(options: MemoFactoryOptions.DisableSendableChecks);
+                    lax?.CreateSignal(new List<int>());
+                }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task NullForgivingFactoryReceiver_KeepsTheOptOut()
+    {
+        // `lax!.CreateSignal(...)` is the same lax factory; the null-forgiving operator must
+        // not hide the receiver from the opt-out resolution.
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    MemoFactory? lax = new(options: MemoFactoryOptions.DisableSendableChecks);
+                    lax!.CreateSignal(new List<int>());
+                }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task PartialTypeFactoryField_IsNotTrusted_TheOtherFileMayReassignIt()
+    {
+        // A readonly field's initializer can be overwritten by a static constructor, and a
+        // partial type can keep that constructor in ANOTHER file: members of types split
+        // across files are not trusted, whatever the visible initializer says.
+        var diagnostics = await AnalyzerTestHarness.AnalyzeAsync(
+            [
+                """
+                using System.Collections.Generic;
+                using MemoizR;
+
+                public partial class C
+                {
+                    private static readonly MemoFactory Lax = new(options: MemoFactoryOptions.DisableSendableChecks);
+
+                    public void M()
+                    {
+                        Lax.CreateSignal(new List<int>());
+                    }
+                }
+                """,
+                """
+                public partial class C
+                {
+                    static C()
+                    {
+                        Lax = new MemoizR.MemoFactory(); // strict: the initializer never survives
+                    }
+                }
+                """,
+            ],
+            new SendableTypeArgumentAnalyzer());
+
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR001");
+    }
+
+    [Fact]
+    public async Task RefAliasedFactoryLocal_DoesNotKeepTheInitializerOptOut()
+    {
+        // `ref var r = ref f` lets any later write repoint the local without naming it, so a
+        // ref escape revokes the initializer's authority like a direct reassignment.
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var f = new MemoFactory(options: MemoFactoryOptions.DisableSendableChecks);
+                    ref var r = ref f;
+                    r = new MemoFactory();
+                    f.CreateSignal(new List<int>());
+                }
+            """);
+
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR001");
+    }
+
+    [Fact]
+    public async Task ConditionallyLaxOptions_AreNotADefiniteOptOut()
+    {
+        // On the false path the factory is strict and the creation throws at runtime: a mere
+        // MENTION of the flag in a non-constant options expression is not definite evidence.
+        var diagnostics = await InClassC("""
+                public void M(bool useLax)
+                {
+                    new MemoFactory(options: useLax ? MemoFactoryOptions.DisableSendableChecks : MemoFactoryOptions.None)
+                        .CreateSignal(new List<int>());
+                }
+            """);
+
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR001");
+    }
+
+    [Fact]
+    public async Task OtherOptions_AndUnresolvableReceivers_StayChecked()
+    {
+        // Conservative direction: only POSITIVE evidence of DisableSendableChecks exempts a
+        // creation. Other flags do not, and a factory the analyzer cannot see behind (here a
+        // parameter) keeps the checks on even if its construction elsewhere opted out.
+        var diagnostics = await InClassC("""
+                public void M(MemoFactory fromElsewhere)
+                {
+                    var strict = new MemoFactory(options: MemoFactoryOptions.ValidateWrittenValues);
+                    strict.CreateSignal(new List<int>());
+                    fromElsewhere.CreateSignal(new List<int>());
+                }
             """);
 
         Assert.Equal(2, diagnostics.Length);
@@ -564,23 +819,15 @@ public class SendableTypeArgumentAnalyzerTests
     [Fact]
     public async Task ConcurrentMap_ElementType_IsChecked()
     {
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using System.Threading.Tasks;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var f = new MemoFactory();
                     f.CreateConcurrentMap<List<int>>(async _ => new List<int>());
                 }
-            }
-            """);
+            """, "using System.Collections.Generic;\nusing System.Threading.Tasks;\nusing MemoizR;");
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR001", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR001");
     }
 
     // ADR 0007's process layer: the action payload crosses to the detached run flow and the
@@ -617,21 +864,49 @@ public class SendableTypeArgumentAnalyzerTests
     [Fact]
     public async Task ProcessLayerFactories_ImmutableTypeArguments_AreNotFlagged()
     {
-        var diagnostics = await AnalyzeAsync("""
-            using System.Threading.Tasks;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var f = new MemoFactory();
                     f.CreateAction<string>((p, ctx) => Task.CompletedTask);
                     f.CreateOptimistic<int>(f.CreateSignal(1));
                 }
-            }
+            """, "using System.Threading.Tasks;\nusing MemoizR;");
+
+        Assert.Empty(diagnostics);
+    }
+
+
+    [Fact]
+    public async Task ConditionalReceivers_KeepTheOptOut_WhenEveryArmOptsOut()
+    {
+        // Whichever factory the runtime picks has its checks disabled: the escape hatch holds
+        // on every path.
+        var diagnostics = await InClassC("""
+                public void M(bool flag)
+                {
+                    var laxA = new MemoFactory(options: MemoFactoryOptions.DisableSendableChecks);
+                    var laxB = new MemoFactory(options: MemoFactoryOptions.DisableSendableChecks);
+                    (flag ? laxA : laxB).CreateSignal(new List<int>());
+                }
             """);
 
         Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task ConditionalReceivers_WithAStrictArm_StayChecked()
+    {
+        // One arm may run strict: the opt-out is not definite, so the rule stands.
+        var diagnostics = await InClassC("""
+                public void M(bool flag)
+                {
+                    var lax = new MemoFactory(options: MemoFactoryOptions.DisableSendableChecks);
+                    var strict = new MemoFactory();
+                    (flag ? lax : strict).CreateSignal(new List<int>());
+                }
+            """);
+
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR001");
     }
 }

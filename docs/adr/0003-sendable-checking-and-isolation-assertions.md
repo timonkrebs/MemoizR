@@ -21,6 +21,13 @@
   hole where user types declared inside `System.Collections.*` bypassed the structural walk;
   this also correctly trusts the deliberately-abstract `FrozenDictionary`/`FrozenSet`, which the
   category rejection had been refusing.
+- Updated: 2026-07-02 (issue #145, part A) — MemoizR's nodes, factories and executors are
+  `[Sendable]` (internally synchronized by design), so holding them in statics is sanctioned;
+  `Sending<T>` adds transfer semantics for non-Sendable values (the SE-0430 analog: [Sendable]
+  wrapper, single-consumption `Receive()`, MZR005 flags sender-side use-after-transfer); and
+  `MemoFactoryOptions.ValidateWrittenValues` opt-in validates each written instance's RUNTIME
+  type on `Set`, closing the subclass-smuggling hole at the write for those who enable it
+  (MZR006 hints at it from the compile-time side).
 - Deciders: MemoizR maintainers
 - Issue: [#36 — Strengthen data-race safety guarantees](https://github.com/timonkrebs/MemoizR/issues/36)
 
@@ -106,7 +113,11 @@ Design points:
 - **Per-factory, not per-context.** Strictness governs how *this* factory creates nodes; a
   strict and a lax factory may deliberately share one keyed context (e.g. migrating a codebase
   incrementally, exactly like Swift's per-module `-strict-concurrency` staging).
-- **Off by default.** Existing users see zero behavior change.
+- **On by default since the Swift-6-parity step** (issue #145 part A4 — the language-mode
+  analog): a guarantee is only a guarantee when it holds without opt-in.
+  `MemoFactoryOptions.DisableSendableChecks` is the migration escape hatch (the analog of
+  staying on Swift 5's language mode); `StrictSendableChecks` remains as an explicit statement
+  of intent.
 - Reactions are not enforcement points: they store no new value type — the values they read were
   validated where their source nodes were created.
 

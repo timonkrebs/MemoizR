@@ -184,14 +184,219 @@ public class SendableCheckerTests
     }
 }
 
-public class StrictSendableModeTests
+public class ValidateWrittenValuesTests
 {
     [Fact]
-    public void DefaultFactory_DoesNotCheck()
+    public async Task SmuggledMutableSubclass_IsRejectedAtTheWrite()
     {
-        var f = new MemoFactory();
-        var signal = f.CreateSignal(new List<int>()); // compatibility: lax by default
+        var f = new MemoFactory(options: MemoFactoryOptions.StrictSendableChecks | MemoFactoryOptions.ValidateWrittenValues);
+        var signal = f.CreateSignal<OpenBase>(new OpenBase()); // declared type passes the creation check
+
+        // The runtime type of the written instance is what the declared-type check cannot see.
+        await Assert.ThrowsAsync<InvalidOperationException>(() => signal.Set(new MutableChild()));
+
+        await signal.Set(new OpenBase()); // a well-behaved instance still writes fine
+    }
+
+    [Fact]
+    public async Task WithoutTheOption_RuntimeTypesAreNotChecked()
+    {
+        var f = new MemoFactory(options: MemoFactoryOptions.StrictSendableChecks);
+        var signal = f.CreateSignal<OpenBase>(new OpenBase());
+        await signal.Set(new MutableChild()); // documented hole when the option is off
         Assert.NotNull(signal);
+    }
+
+    [Fact]
+    public async Task ActorSignal_ValidatesWrites_Too()
+    {
+        var f = new MemoFactory(options: MemoFactoryOptions.ValidateWrittenValues);
+        var signal = f.CreateActorSignal<OpenBase>(new OpenBase());
+        await Assert.ThrowsAsync<InvalidOperationException>(() => signal.Set(new MutableChild()));
+    }
+
+    [Fact]
+    public async Task DisableSendableChecks_AlsoDisablesWriteValidation()
+    {
+        // The migration escape hatch is COMPLETE: opting out of the Sendable checks must not
+        // leave write-time validation armed, or migrating code would still throw on Set.
+        var f = new MemoFactory(options: MemoFactoryOptions.ValidateWrittenValues | MemoFactoryOptions.DisableSendableChecks);
+        var signal = f.CreateSignal<OpenBase>(new OpenBase());
+        await signal.Set(new MutableChild());
+        Assert.NotNull(signal);
+    }
+
+    [Fact]
+    public async Task EagerRelativeSignal_ValidatesTheComputedResult()
+    {
+        var f = new MemoFactory(options: MemoFactoryOptions.ValidateWrittenValues);
+        var relative = f.CreateEagerRelativeSignal<OpenBase>(new OpenBase());
+        await Assert.ThrowsAsync<InvalidOperationException>(() => relative.Set(_ => new MutableChild()));
+    }
+
+    [Fact]
+    public async Task FrameworkPolymorphicValues_KeepTheGreenListVerdict()
+    {
+        // typeof(int) is a System.RuntimeType: an internal runtime implementation of the
+        // green-listed Type. The write check sees the INSTANCE's type, so the entry's trust
+        // must extend to the runtime's own subclasses or every Signal<Type> write throws.
+        var f = new MemoFactory(options: MemoFactoryOptions.StrictSendableChecks | MemoFactoryOptions.ValidateWrittenValues);
+        var signal = f.CreateSignal<Type>(typeof(int));
+        await signal.Set(typeof(string));
+        Assert.Equal(typeof(string), await signal.Get());
+    }
+
+    [Fact]
+    public async Task AsyncReturnedTasks_KeepTheGreenListVerdict()
+    {
+        // A suspended async method returns an AsyncStateMachineBox: an internal Task subtype
+        // whose generic arguments carry the compiler-generated state machine -- captured
+        // mutable locals included. The instance is still the green-listed Task: its arguments
+        // are runtime plumbing, not the declared surface the creation check vetted.
+        var f = new MemoFactory(options: MemoFactoryOptions.StrictSendableChecks | MemoFactoryOptions.ValidateWrittenValues);
+        var signal = f.CreateSignal(ComputeAsync());
+        var task = await signal.Get();
+        Assert.Equal(1, await task!);
+
+        static async Task<int> ComputeAsync()
+        {
+            var buffer = new List<int> { 1 }; // lives on in the state machine across the await
+            await Task.Yield();
+            return buffer.Count;
+        }
+    }
+
+    [Fact]
+    public async Task FrozenSetInstances_KeepTheGreenListVerdict()
+    {
+        // ToFrozenSet hands out internal implementations (FrozenSet<T> is deliberately
+        // abstract): the instance is still the green-listed frozen collection, whatever
+        // specialized subtype the runtime picked.
+        var f = new MemoFactory(options: MemoFactoryOptions.StrictSendableChecks | MemoFactoryOptions.ValidateWrittenValues);
+        var signal = f.CreateSignal(System.Collections.Frozen.FrozenSet.ToFrozenSet(new[] { 1 }));
+        await signal.Set(System.Collections.Frozen.FrozenSet.ToFrozenSet(new[] { 2, 3 }));
+        Assert.Equal(2, (await signal.Get())!.Count);
+    }
+
+    [Fact]
+    public void AsyncTasks_BehindTheNonGenericSurface_StillCheckTheirResult()
+    {
+        // Declared as plain Task the creation check passes, but the INSTANCE is an internal
+        // subtype of Task<List<int>>: trusting the implementation must not skip the
+        // green-listed generic base's arguments, or a cast re-opens the upcast-smuggling
+        // hole this option exists to close.
+        var f = new MemoFactory(options: MemoFactoryOptions.StrictSendableChecks | MemoFactoryOptions.ValidateWrittenValues);
+        var ex = Assert.Throws<InvalidOperationException>(() => f.CreateSignal<Task>(ComputeListAsync()));
+        Assert.Contains("List", ex.Message);
+
+        static async Task<List<int>> ComputeListAsync()
+        {
+            await Task.Yield();
+            return new List<int> { 1 };
+        }
+    }
+
+    [Fact]
+    public void FrameworkImplementations_OfGreenListedTypes_AreSendable()
+    {
+        // The green-list trust covers same-assembly framework implementations only: a USER
+        // subclass of a green-listed type still walks structurally -- that is the smuggle
+        // surface ValidateWrittenValues exists to catch.
+        Assert.True(SendableChecker.IsSendable(typeof(int).GetType(), out var reason), reason);
+        Assert.False(SendableChecker.IsSendable(typeof(MutableChild)));
+    }
+}
+
+public class SendingTransferTests
+{
+    [Fact]
+    public void Sending_IsSendable_EvenWhenThePayloadIsNot()
+    {
+        // The whole point of the wrapper: transfer semantics stand in for immutability.
+        Assert.True(SendableChecker.IsSendable(typeof(Sending<List<int>>), out var reason), reason);
+    }
+
+    [Fact]
+    public void StrictFactory_AcceptsSendingOfNonSendablePayload()
+    {
+        var f = new MemoFactory(options: MemoFactoryOptions.StrictSendableChecks);
+        var signal = f.CreateSignal(Sending.Transfer(new List<int> { 1, 2 }));
+        Assert.NotNull(signal);
+    }
+
+    [Fact]
+    public async Task Receive_HandsOverTheValue_ExactlyOnce()
+    {
+        var list = new List<int> { 1, 2, 3 };
+        var sending = Sending.Transfer(list);
+
+        var received = await Task.Run(() => sending.Receive()); // one owner, on another flow
+        Assert.Same(list, received);
+
+        // A second receive would mean two owners -- exactly the aliasing the type prevents.
+        Assert.Throws<InvalidOperationException>(() => sending.Receive());
+    }
+}
+
+public class StrictSendableModeTests
+{
+    [Fact(Timeout = 10000)]
+    public async Task PolymorphicRecursion_TerminatesTheStructuralWalk()
+    {
+        // RecursiveBox<T> exposes RecursiveBox<List<T>>: every level is a FRESH closed type,
+        // so the per-instance cycle set never repeats -- the same-definition path cap must cut
+        // the walk. The closed type stores only readonly boxes, so strict mode accepts it.
+        var f = new MemoFactory();
+        var signal = f.CreateSignal(new RecursiveBox<int>());
+        Assert.NotNull(await signal.Get());
+    }
+
+    [Fact(Timeout = 10000)]
+    public async Task FiniteDeepGenericNesting_IsStillFullyChecked()
+    {
+        // Hand-written nesting repeats the definition but SHRINKS at every level: the
+        // divergence cut must not fire, so the walk reaches the List at the bottom and strict
+        // mode rejects the graph.
+        var f = new MemoFactory();
+        Assert.Throws<InvalidOperationException>(
+            () => f.CreateSignal(new WrapBox<WrapBox<WrapBox<WrapBox<WrapBox<List<int>>>>>>()));
+
+        // And the shrinking walk accepts a genuinely Sendable deep composition.
+        var deepButClean = f.CreateSignal(new WrapBox<WrapBox<WrapBox<WrapBox<WrapBox<int>>>>>());
+        Assert.NotNull(await deepButClean.Get());
+    }
+
+    [Fact(Timeout = 10000)]
+    public async Task PolymorphicRecursion_WithAStoredParameter_IsRejectedNotAssumed()
+    {
+        // The divergent chain's SECOND level substitutes Value to List<int>: the walk must
+        // inspect the first re-instantiation's members before cutting, or the shared mutable
+        // list hides behind the cycle assumption.
+        await Task.Yield(); // xunit requires async for Timeout, the termination backstop
+        var f = new MemoFactory();
+        Assert.Throws<InvalidOperationException>(() => f.CreateSignal(new RecursiveBoxWithValue<int>()));
+    }
+
+    [Fact]
+    public void NativeIntegers_ArePrimitives_AndPassStrictMode()
+    {
+        // typeof(IntPtr).IsPrimitive is true, so the runtime walk's primitive short-circuit
+        // accepts nint/nuint before any field reflection -- in lockstep with the analyzer's
+        // System_IntPtr/System_UIntPtr acceptance.
+        var f = new MemoFactory();
+        Assert.NotNull(f.CreateSignal(nint.Zero));
+        Assert.NotNull(f.CreateSignal(nuint.MinValue));
+    }
+
+    [Fact]
+    public void DefaultFactory_Checks_AndDisableIsTheEscapeHatch()
+    {
+        // The Swift 6 language-mode analog (issue #145 part A4): strict IS the default.
+        var f = new MemoFactory();
+        Assert.Throws<InvalidOperationException>(() => f.CreateSignal(new List<int>()));
+
+        var migrating = new MemoFactory(options: MemoFactoryOptions.DisableSendableChecks);
+        Assert.NotNull(migrating.CreateSignal(new List<int>()));
     }
 
     [Fact]
@@ -207,6 +412,21 @@ public class StrictSendableModeTests
         // The race's resolver result R is handed to every racing child in parallel, so a
         // non-Sendable R must be rejected even when T is fine.
         Assert.Throws<InvalidOperationException>(() => f.CreateConcurrentRace<int, List<int>>(async () => new List<int>(), async (_, _) => 1));
+    }
+
+    [Fact]
+    public void StrictFactory_RejectsMutableTypes_OnTheActorAndProcessLayerNodesToo()
+    {
+        var f = new MemoFactory(options: MemoFactoryOptions.StrictSendableChecks);
+        var lax = new MemoFactory(options: MemoFactoryOptions.DisableSendableChecks);
+        var source = lax.CreateSignal(new List<int>());
+
+        Assert.Throws<InvalidOperationException>(() => f.CreateActorSignal(new List<int>()));
+        Assert.Throws<InvalidOperationException>(() => f.CreateActorMemoizR(async () => new List<int>()));
+        // ADR 0007's process layer: the optimistic view's T and the action's payload cross
+        // flows exactly like a signal value -- the source need not come from a strict factory.
+        Assert.Throws<InvalidOperationException>(() => f.CreateOptimistic(source));
+        Assert.Throws<InvalidOperationException>(() => f.CreateAction<List<int>>((_, _) => Task.CompletedTask));
     }
 
     [Fact]
@@ -240,7 +460,7 @@ public class StrictSendableModeTests
         // Strictness is a per-factory creation policy, not a context property.
         var key = $"strict-{Guid.NewGuid():N}";
         var strict = new MemoFactory(key, MemoFactoryOptions.StrictSendableChecks);
-        var lax = new MemoFactory(key);
+        var lax = new MemoFactory(key, MemoFactoryOptions.DisableSendableChecks);
 
         Assert.Same(strict.Context, lax.Context);
         Assert.Throws<InvalidOperationException>(() => strict.CreateSignal(new List<int>()));
@@ -252,6 +472,43 @@ internal sealed record SendablePerson(string Name, int Age);
 
 // Deliberately NOT sealed: exercises the synthesized `protected virtual Type EqualityContract`.
 internal record SendableOpenRecord(string Name, int Age);
+
+// Immutable, deliberately NON-sealed: the declared type passes creation-time checks...
+// Polymorphic recursion: the member re-instantiates the declaration with a GROWING argument,
+// so a naive per-closed-type cycle set never terminates (see the same-definition divergence
+// cut in SendableChecker/SendableSymbolClassifier).
+internal sealed class RecursiveBox<T>
+{
+    public RecursiveBox<List<T>>? Next { get; init; }
+}
+
+// A plain wrapper for FINITE hand-written nesting (WrapBox<WrapBox<...<List<int>>>>): each
+// recursive step SHRINKS, so the divergence cut must let the walk reach the bottom.
+internal sealed class WrapBox<T>
+{
+    public T? Value { get; init; }
+}
+
+// Polymorphic recursion that ALSO stores its parameter: the divergent chain's second level
+// substitutes Value to List<int>, so the walk must inspect the first re-instantiation's own
+// members before cutting.
+internal sealed class RecursiveBoxWithValue<T>
+{
+    public RecursiveBoxWithValue<List<T>>? Next { get; init; }
+
+    public T? Value { get; init; }
+}
+
+internal class OpenBase
+{
+    public string Name { get; init; } = "";
+}
+
+// ...and this is what an upcast smuggles past them: mutable subclass state.
+internal sealed class MutableChild : OpenBase
+{
+    public int Mutable;
+}
 
 internal sealed class PlainInitDto
 {

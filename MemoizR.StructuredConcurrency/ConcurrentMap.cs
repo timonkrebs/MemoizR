@@ -1,12 +1,16 @@
 namespace MemoizR.StructuredConcurrency;
 
+[Sendable] // internally synchronized by design: safe to share across flows (and to hold in statics, see MZR004)
 public sealed class ConcurrentMap<T> : MemoBase<IEnumerable<T>>
 {
     private readonly IReadOnlyCollection<Func<IStructuredResourceGroup, Task<T>>> fns;
 
     internal ConcurrentMap(IReadOnlyCollection<Func<IStructuredResourceGroup, Task<T>>> fns, Context context) : base(context)
     {
-        this.fns = fns;
+        // Snapshot: the params array arrives caller-owned, and [Sendable] promises internal
+        // synchronization -- a caller swapping elements must not change the computation set a
+        // recompute is enumerating.
+        this.fns = fns.ToArray();
     }
 
     public void Cancel()

@@ -147,6 +147,28 @@ public static class SendableChecker
             return CheckTypeArguments(type, inProgress);
         }
 
+        // The runtime hands out internal implementations of green-listed types: typeof(int) is
+        // a System.RuntimeType, an async method's Task is an AsyncStateMachineBox whose
+        // generic arguments carry the compiler-generated state machine, and ToFrozenSet picks
+        // a specialized FrozenSet subtype. The write-time check (ValidateWrittenValues) sees
+        // those instance types, so the green-list verdict extends to subtypes declared in the
+        // SAME ASSEMBLY as their entry -- trusted wholesale like the entry itself, type
+        // arguments included: they are runtime plumbing, not the declared surface (the
+        // DECLARED type's arguments were already vetted by the creation-time check). A USER
+        // subclass lives in a user assembly and still walks structurally: exactly the smuggle
+        // surface the write check exists to catch. (No analyzer mirror: declared types can
+        // never name these internals, so the lockstep contract is untouched.)
+        if (IsFrameworkImplementationOfAGreenListedType(type))
+        {
+            // Trusted -- except that the green-listed GENERIC bases it implements are still
+            // its visible contract: CreateSignal<Task>(ComputeListAsync()) hands an internal
+            // subtype of Task<List<int>> through the non-generic Task surface, and skipping
+            // the base's arguments would re-open the upcast-smuggling hole ValidateWrittenValues
+            // exists to close. The implementation's OWN arguments (state machines, comparers)
+            // stay unchecked plumbing.
+            return CheckGreenListedBaseArguments(type, inProgress);
+        }
+
         // The trust escape hatch comes before the structural rejections so that an interface or
         // internally-synchronized class can be opted in.
         if (type.IsDefined(typeof(SendableAttribute), inherit: false))
@@ -166,6 +188,40 @@ public static class SendableChecker
         }
 
         return CheckFields(type, inProgress);
+    }
+
+    // MemoFactoryOptions.ValidateWrittenValues: a node checks each written instance's RUNTIME
+    // type, closing the subclass-smuggling hole the declared-type check cannot see.
+    internal static void EnsureWrittenValueSendable<T>(bool enabled, T value)
+    {
+        if (enabled && value is not null)
+        {
+            EnsureSendable(value.GetType());
+        }
+    }
+
+    private static string? CheckGreenListedBaseArguments(Type type, HashSet<Type> inProgress)
+    {
+        return GreenListedGenericBases(type)
+            .Select(baseType => CheckTypeArguments(baseType, inProgress))
+            .FirstOrDefault(reason => reason is not null);
+    }
+
+    private static bool IsFrameworkImplementationOfAGreenListedType(Type type)
+    {
+        return KnownSendable.Any(entry => !entry.IsValueType && entry.IsAssignableFrom(type) && type.Assembly == entry.Assembly)
+            || GreenListedGenericBases(type).Any(baseType => type.Assembly == baseType.GetGenericTypeDefinition().Assembly);
+    }
+
+    private static IEnumerable<Type> GreenListedGenericBases(Type type)
+    {
+        for (var baseType = type.BaseType; baseType is not null; baseType = baseType.BaseType)
+        {
+            if (baseType.IsGenericType && KnownSendableGenericDefinitions.Contains(baseType.GetGenericTypeDefinition()))
+            {
+                yield return baseType;
+            }
+        }
     }
 
     // Categories that can never be verified structurally, whatever their fields say.
@@ -211,6 +267,21 @@ public static class SendableChecker
             return null;
         }
 
+        // POLYMORPHIC recursion constructs a FRESH closed type per level (Box<T> exposing a
+        // Box<List<T>> member), which the re-entry check above can never catch. Its signature
+        // is a NON-SHRINKING re-occurrence of the same definition: finite hand-written nesting
+        // (Box<Box<Box<List<int>>>>) strictly shrinks at every recursive step and is walked to
+        // the bottom however deep it goes. A divergent expansion is walked through its FIRST
+        // re-instantiation -- substituted members can flip the verdict exactly one level down
+        // (Box<T> { Box<List<T>> Next; T Value; } hides the List in the second level's Value)
+        // -- and cut at the second, landing on the cycle assumption above.
+        if (DefinitionOf(type) is { } definition
+            && inProgress.Count(entry => entry != type && DefinitionOf(entry) == definition && TypeSize(entry) <= TypeSize(type)) >= 2)
+        {
+            inProgress.Remove(type);
+            return null;
+        }
+
         try
         {
             for (var t = type; t != null && t != typeof(object) && t != typeof(ValueType); t = t.BaseType)
@@ -228,6 +299,23 @@ public static class SendableChecker
         {
             inProgress.Remove(type);
         }
+    }
+
+    private static Type? DefinitionOf(Type type)
+    {
+        return type.IsGenericType ? type.GetGenericTypeDefinition() : null;
+    }
+
+    // The number of type nodes in the constructed reference: Box<List<int>> is 3. Finite
+    // nesting shrinks this at every recursive step; polymorphic recursion grows it.
+    private static int TypeSize(Type type)
+    {
+        if (type.IsArray)
+        {
+            return 1 + TypeSize(type.GetElementType()!);
+        }
+
+        return type.IsGenericType ? 1 + type.GetGenericArguments().Sum(TypeSize) : 1;
     }
 
     private static string? CheckDeclaredMembers(Type type, Type declaringLevel, HashSet<Type> inProgress)

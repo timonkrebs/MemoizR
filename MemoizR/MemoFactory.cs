@@ -1,5 +1,6 @@
 namespace MemoizR;
 
+[Sendable] // internally synchronized by design: safe to share across flows (and to hold in statics, see MZR004)
 public sealed class MemoFactory
 {
     private static readonly Lock contextsLock = new();
@@ -15,12 +16,18 @@ public sealed class MemoFactory
     // factory itself so the association is discoverable and dies with the factory -- it
     // previously sat in a static side-table in another assembly, which rooted every registered
     // factory forever.
-    internal IExecutor? Executor { get; set; }
+    // VOLATILE: the factory is [Sendable], so its mutable configuration must at least publish
+    // cleanly across flows -- a reaction built on one flow sees the executor registered on
+    // another (reference reads cannot tear; semantics are last-write-wins, i.e. configure the
+    // factory before sharing it, which the Add* docs already advise).
+    private volatile IExecutor? executor;
+    internal IExecutor? Executor { get => executor; set => executor = value; }
 
     // The TimeProvider reactions built from this factory schedule their debounce delays on
     // (set via MemoizR.Reactive's AddTimeProvider). Null means TimeProvider.System. Tests inject
     // a FakeTimeProvider so debounce windows elapse under test control instead of wall-clock time.
-    internal TimeProvider? TimeProvider { get; set; }
+    private volatile TimeProvider? timeProvider;
+    internal TimeProvider? TimeProvider { get => timeProvider; set => timeProvider = value; }
 
     /// <summary>
     /// Options are per-factory, not per-context: strictness governs how THIS factory creates
@@ -160,7 +167,7 @@ public sealed class MemoFactory
     public Signal<T> CreateSignal<T>(string label, T value)
     {
         EnsureSendableIfStrict<T>();
-        return new(value, Context)
+        return new(value, Context, ShouldValidateWrittenValues)
         {
             Label = label
         };
@@ -174,7 +181,7 @@ public sealed class MemoFactory
     public EagerRelativeSignal<T> CreateEagerRelativeSignal<T>(string label, T value)
     {
         EnsureSendableIfStrict<T>();
-        return new(value, Context)
+        return new(value, Context, ShouldValidateWrittenValues)
         {
             Label = label
         };
@@ -190,7 +197,7 @@ public sealed class MemoFactory
     public ActorSignal<T> CreateActorSignal<T>(T value)
     {
         EnsureSendableIfStrict<T>();
-        return new(value, Context);
+        return new(value, Context, ShouldValidateWrittenValues);
     }
 
     /// <summary>
@@ -208,9 +215,18 @@ public sealed class MemoFactory
     // Strict-mode boundary check (issue #36): every node type whose value crosses flows funnels
     // its creation through this. Internal so the structured-concurrency factory extensions (a
     // friend assembly) enforce the same contract for their nodes.
+    // ValidateWrittenValues rides ON TOP of the Sendable checks, so the migration escape hatch
+    // must switch both off: a factory that opted out via DisableSendableChecks would otherwise
+    // still throw on later writes -- an incomplete escape hatch (review finding on #147).
+    private bool ShouldValidateWrittenValues =>
+        Options.HasFlag(MemoFactoryOptions.ValidateWrittenValues)
+        && !Options.HasFlag(MemoFactoryOptions.DisableSendableChecks);
+
     internal void EnsureSendableIfStrict<T>()
     {
-        if (Options.HasFlag(MemoFactoryOptions.StrictSendableChecks))
+        // Strict is the DEFAULT (issue #145 part A4, the Swift 6 language-mode analog);
+        // DisableSendableChecks is the migration escape hatch.
+        if (!Options.HasFlag(MemoFactoryOptions.DisableSendableChecks))
         {
             SendableChecker.EnsureSendable(typeof(T));
         }

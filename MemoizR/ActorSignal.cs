@@ -8,15 +8,23 @@ namespace MemoizR;
 /// interfaces: the two engines must not be mixed in one graph, and keeping the types apart
 /// makes the mistake impossible to compile.
 /// </summary>
+[Sendable] // internally synchronized by design: safe to share across flows (and to hold in statics, see MZR004)
 public sealed class ActorSignal<T> : ActorValueNode<T>
 {
-    internal ActorSignal(T value, Context context)
+    // See Signal<T>: MemoFactoryOptions.ValidateWrittenValues (per-node, factory-governed).
+    private readonly bool validateWrittenValues;
+
+    internal ActorSignal(T value, Context context, bool validateWrittenValues = false)
         : base(value, context, CacheState.CacheClean)
     {
+        this.validateWrittenValues = validateWrittenValues;
+        SendableChecker.EnsureWrittenValueSendable(validateWrittenValues, value);
     }
 
     public Task Set(T value)
     {
+        SendableChecker.EnsureWrittenValueSendable(validateWrittenValues, value);
+
         // The actor engine's equivalent of the lock engine's exclusive-inside-upgradeable
         // rejection: a Set from inside a computation is a feedback loop -- it would invalidate
         // the very evaluation in progress, dooming its commit by design. Detected on the flow,
