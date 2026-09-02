@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using Microsoft.CodeAnalysis;
 
 namespace MemoizR.Analyzers.Tests;
@@ -8,18 +9,18 @@ namespace MemoizR.Analyzers.Tests;
 // check in Sending<T>.Receive is the receiver-side backstop.
 public class UseAfterTransferAnalyzerTests
 {
-    private static Task<System.Collections.Immutable.ImmutableArray<Diagnostic>> AnalyzeAsync(string source)
+    private static Task<ImmutableArray<Diagnostic>> AnalyzeAsync(string source)
         => AnalyzerTestHarness.AnalyzeAsync(source, new UseAfterTransferAnalyzer());
+
+    private const string WithSystem = "using System;\nusing System.Collections.Generic;\nusing MemoizR;";
+
+    private static Task<ImmutableArray<Diagnostic>> InClassC(string members, string usings = "using System.Collections.Generic;\nusing MemoizR;")
+        => AnalyzeAsync(AnalyzerTestHarness.InClassC(members, usings));
 
     [Fact]
     public async Task UseAfterTransfer_IsFlagged()
     {
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var f = new MemoFactory(options: MemoFactoryOptions.StrictSendableChecks);
@@ -27,11 +28,9 @@ public class UseAfterTransferAnalyzerTests
                     var signal = f.CreateSignal(Sending.Transfer(list));
                     list.Add(2); // the receiver may already own it on another flow
                 }
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
         Assert.Contains("'list'", diagnostic.GetMessage());
     }
 
@@ -40,12 +39,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // `list = Clone(list)` LOOKS like a fresh value, but the RHS reads the transferred one
         // to build the replacement -- exactly a use after transfer.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public Sending<List<int>> M()
                 {
                     var list = new List<int> { 1 };
@@ -53,11 +47,9 @@ public class UseAfterTransferAnalyzerTests
                     list = new List<int>(list); // reads the transferred list
                     return sending;
                 }
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -65,12 +57,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // On the `reset == false` path the later Add still touches the transferred list: only a
         // reassignment that definitely executes may end the tracking.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public Sending<List<int>> M(bool reset)
                 {
                     var list = new List<int> { 1 };
@@ -83,11 +70,9 @@ public class UseAfterTransferAnalyzerTests
                     list.Add(2);
                     return sending;
                 }
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -95,12 +80,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // `Sending.Transfer(list!)` hands off the same variable; the null-forgiving operator
         // must not hide the transfer from the rule.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public Sending<List<int>> M()
                 {
                     List<int>? list = new List<int> { 1 };
@@ -108,11 +88,9 @@ public class UseAfterTransferAnalyzerTests
                     list.Add(2);
                     return sending;
                 }
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
         Assert.Contains("'list'", diagnostic.GetMessage());
     }
 
@@ -122,12 +100,7 @@ public class UseAfterTransferAnalyzerTests
         // The try spans the transfer, but the catch is a SIBLING ARM of it: on the
         // no-exception path the reassignment never ran and the later Add still touches the
         // transferred list.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public Sending<List<int>>? M()
                 {
                     var list = new List<int> { 1 };
@@ -144,11 +117,9 @@ public class UseAfterTransferAnalyzerTests
                     list.Add(1);
                     return sending;
                 }
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
         Assert.Contains("'list'", diagnostic.GetMessage());
     }
 
@@ -157,12 +128,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // A finally arm ALWAYS executes: unlike a catch, its reassignment is as definite as
         // straight-line code, so the later use touches the fresh value.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public Sending<List<int>>? M()
                 {
                     var list = new List<int> { 1 };
@@ -179,7 +145,6 @@ public class UseAfterTransferAnalyzerTests
                     list.Add(1);
                     return sending;
                 }
-            }
             """);
 
         Assert.Empty(diagnostics);
@@ -190,12 +155,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // An out argument is definite assignment the callee cannot read: like `list = ...`, it
         // gives the variable a fresh value, so the later use is not a use-after-transfer.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public Sending<List<int>> M()
                 {
                     var list = new List<int> { 1 };
@@ -209,7 +169,6 @@ public class UseAfterTransferAnalyzerTests
                 {
                     value = new List<int>();
                 }
-            }
             """);
 
         Assert.Empty(diagnostics);
@@ -220,12 +179,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // Same sibling-arm rule as a conditional `list = ...`: on the false path the out-call
         // never ran and the later use still touches the transferred list.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public Sending<List<int>> M(bool reset)
                 {
                     var list = new List<int> { 1 };
@@ -243,11 +197,9 @@ public class UseAfterTransferAnalyzerTests
                 {
                     value = new List<int>();
                 }
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -255,13 +207,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // The callback may run later or never: outer statements are not sequenced after its
         // transfer, so the outer Add is not a use-after-transfer.
-        var diagnostics = await AnalyzeAsync("""
-            using System;
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public Action M()
                 {
                     var list = new List<int> { 1 };
@@ -269,8 +215,7 @@ public class UseAfterTransferAnalyzerTests
                     list.Add(1);
                     return later;
                 }
-            }
-            """);
+            """, WithSystem);
 
         Assert.Empty(diagnostics);
     }
@@ -280,13 +225,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // Within one callback body source order does imply execution order: the callback's own
         // later use of its own transfer is the ordinary MZR005 case.
-        var diagnostics = await AnalyzeAsync("""
-            using System;
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public Action M()
                 {
                     var list = new List<int> { 1 };
@@ -297,11 +236,9 @@ public class UseAfterTransferAnalyzerTests
                         _ = sending;
                     };
                 }
-            }
-            """);
+            """, WithSystem);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -309,12 +246,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // The arms are mutually exclusive: no execution path runs the else's Add after the
         // then's transfer, so there is nothing to flag.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public Sending<List<int>>? M(bool move)
                 {
                     var list = new List<int> { 1 };
@@ -330,7 +262,6 @@ public class UseAfterTransferAnalyzerTests
 
                     return sending;
                 }
-            }
             """);
 
         Assert.Empty(diagnostics);
@@ -341,12 +272,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // Unlike a sibling arm, a branch the transfer precedes entirely IS reachable after it:
         // the log==true path runs the Add on the transferred list.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public Sending<List<int>> M(bool log)
                 {
                     var list = new List<int> { 1 };
@@ -358,11 +284,9 @@ public class UseAfterTransferAnalyzerTests
 
                     return sending;
                 }
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -371,12 +295,7 @@ public class UseAfterTransferAnalyzerTests
         // Inside the arm, after the reassignment, every path that reaches the Add sees the
         // fresh list (reset == false never enters the arm): nothing touches the transferred
         // value.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public Sending<List<int>> M(bool reset)
                 {
                     var list = new List<int> { 1 };
@@ -389,7 +308,6 @@ public class UseAfterTransferAnalyzerTests
 
                     return sending;
                 }
-            }
             """);
 
         Assert.Empty(diagnostics);
@@ -400,12 +318,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // The domination ends with the arm: past the if, the reset == false path still hands
         // the transferred list to the Add.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public Sending<List<int>> M(bool reset)
                 {
                     var list = new List<int> { 1 };
@@ -419,11 +332,9 @@ public class UseAfterTransferAnalyzerTests
                     list.Add(2);
                     return sending;
                 }
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -431,12 +342,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // The out-assignment happens only when the callee runs, AFTER every argument was
         // evaluated: the second argument still reads the transferred list.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public Sending<List<int>> M()
                 {
                     var list = new List<int> { 1 };
@@ -449,11 +355,9 @@ public class UseAfterTransferAnalyzerTests
                 {
                     value = new List<int>(seed);
                 }
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -461,13 +365,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // The callback may never run before the outer Add, so its reassignment cannot end the
         // outer tracking -- while within the callback's own body it dominates as usual.
-        var diagnostics = await AnalyzeAsync("""
-            using System;
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public Sending<List<int>> M()
                 {
                     var list = new List<int> { 1 };
@@ -482,11 +380,9 @@ public class UseAfterTransferAnalyzerTests
                     _ = later;
                     return sending;
                 }
-            }
-            """);
+            """, WithSystem);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -494,12 +390,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // The condition runs BEFORE either arm: the then-arm's Add executes after the handoff
         // on every path that reaches it, so it is not a sibling-arm exclusion.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var list = new List<int> { 1 };
@@ -508,11 +399,9 @@ public class UseAfterTransferAnalyzerTests
                         list.Add(1);
                     }
                 }
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -520,12 +409,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // `return Sending.Transfer(list);` never falls through: the fallthrough path never
         // transferred, so the later Add is unreachable on the path that did.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public Sending<List<int>>? M(bool move)
                 {
                     var list = new List<int> { 1 };
@@ -537,7 +421,6 @@ public class UseAfterTransferAnalyzerTests
                     list.Add(1);
                     return null;
                 }
-            }
             """);
 
         Assert.Empty(diagnostics);
@@ -548,12 +431,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // A failing `when` guard falls through to later cases with the transfer already done:
         // the default arm's Add is a real use after transfer, not a sibling-arm exclusion.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M(int n)
                 {
                     var list = new List<int> { 1 };
@@ -566,11 +444,9 @@ public class UseAfterTransferAnalyzerTests
                             break;
                     }
                 }
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -578,12 +454,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // The switch VALUE evaluates before the selected case -- and here the value IS the
         // transfer, whose exclusive span end must still count as covering the position.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var list = new List<int> { 1 };
@@ -594,11 +465,9 @@ public class UseAfterTransferAnalyzerTests
                             break;
                     }
                 }
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -606,12 +475,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // The lazy-init handoff aliases the variable to the transferred value on BOTH paths
         // (already non-null, or just assigned): the later Add is a use-after-transfer.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public Sending<List<int>> M()
                 {
                     List<int>? list = null;
@@ -619,11 +483,9 @@ public class UseAfterTransferAnalyzerTests
                     list.Add(1);
                     return sending;
                 }
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -631,22 +493,15 @@ public class UseAfterTransferAnalyzerTests
     {
         // The return expression evaluates its remaining arguments AFTER the transfer, before
         // the method exits: the second argument is a use on the transfer path.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public (Sending<List<int>>, List<int>) M()
                 {
                     var list = new List<int> { 1 };
                     return (Sending.Transfer(list), list);
                 }
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -654,12 +509,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // The break exits the loop past the reassignment: on the skip path the code after the
         // loop still holds the transferred list.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M(bool cond, bool skip)
                 {
                     var list = new List<int> { 1 };
@@ -676,11 +526,9 @@ public class UseAfterTransferAnalyzerTests
 
                     list.Add(1);
                 }
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -688,12 +536,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // The switch closes before the reassignment: its break cannot jump past it, so the
         // reassignment stays definite and the later use is clean.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M(int n)
                 {
                     var list = new List<int> { 1 };
@@ -709,7 +552,6 @@ public class UseAfterTransferAnalyzerTests
                     list.Add(1);
                     _ = sending;
                 }
-            }
             """);
 
         Assert.Empty(diagnostics);
@@ -720,12 +562,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // The else-break never runs on the path that transferred: the reassignment at the end
         // of the loop body is definite there, so the code after the loop sees a fresh list.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M(bool c, bool move)
                 {
                     var list = new List<int> { 1 };
@@ -745,7 +582,6 @@ public class UseAfterTransferAnalyzerTests
 
                     list.Add(1);
                 }
-            }
             """);
 
         Assert.Empty(diagnostics);
@@ -756,24 +592,16 @@ public class UseAfterTransferAnalyzerTests
     {
         // On the normal path the coalesce hands off `list` itself: the later Add is a
         // use-after-transfer even though the argument is not a bare variable reference.
-        var diagnostics = await AnalyzeAsync("""
-            using System;
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public Sending<List<int>> M(List<int>? list)
                 {
                     var sending = Sending.Transfer(list ?? throw new InvalidOperationException());
                     list.Add(1);
                     return sending;
                 }
-            }
-            """);
+            """, WithSystem);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -781,12 +609,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // Nothing follows the transfer inside the try: a completed handoff skips the handlers,
         // and a throw from the transfer expression itself means no wrapper escaped.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var list = new List<int> { 1 };
@@ -799,7 +622,6 @@ public class UseAfterTransferAnalyzerTests
                         list.Add(1);
                     }
                 }
-            }
             """);
 
         Assert.Empty(diagnostics);
@@ -810,12 +632,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // The call after the transfer can throw INTO the handler with the wrapper already
         // escaped: the handler's use stays reportable.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var list = new List<int> { 1 };
@@ -833,11 +650,9 @@ public class UseAfterTransferAnalyzerTests
                 private static void MayThrow()
                 {
                 }
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -874,20 +689,14 @@ public class UseAfterTransferAnalyzerTests
             }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
     public async Task TupleElements_HandedToTransfer_AreTracked()
     {
         // Transfer((list, 0)): the tuple carries the same list reference to the receiver.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public Sending<(List<int>, int)> M()
                 {
                     var list = new List<int> { 1 };
@@ -895,23 +704,16 @@ public class UseAfterTransferAnalyzerTests
                     list.Add(1);
                     return sending;
                 }
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
     public async Task SwitchExpressionArms_HandedToTransfer_AreTracked()
     {
         // One arm hands off `list`: a may-transfer, tracked like a ternary operand.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public Sending<List<int>> M(bool flag)
                 {
                     var list = new List<int> { 1 };
@@ -919,11 +721,9 @@ public class UseAfterTransferAnalyzerTests
                     list.Add(1);
                     return sending;
                 }
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -931,12 +731,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // nameof(list) is a compile-time constant: no runtime read of the transferred object
         // occurs, so it must not block the handoff.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public Sending<List<int>> M()
                 {
                     var list = new List<int> { 1 };
@@ -944,7 +739,6 @@ public class UseAfterTransferAnalyzerTests
                     _ = nameof(list);
                     return sending;
                 }
-            }
             """);
 
         Assert.Empty(diagnostics);
@@ -955,12 +749,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // `using (stream)` over an existing local emits the same scope-end Dispose as a
         // using declaration: the sender destroys the object the receiver now owns.
-        var diagnostics = await AnalyzeAsync("""
-            using System.IO;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public Sending<MemoryStream> M(MemoryStream stream)
                 {
                     using (stream)
@@ -968,11 +757,9 @@ public class UseAfterTransferAnalyzerTests
                         return Sending.Transfer(stream);
                     }
                 }
-            }
-            """);
+            """, "using System.IO;\nusing MemoizR;");
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
         Assert.Contains("'stream'", diagnostic.GetMessage());
     }
 
@@ -981,12 +768,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // The declaration after the transfer neither executes nor throws on the try path: the
         // catch still cannot observe a completed handoff.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var list = new List<int> { 1 };
@@ -1002,7 +784,6 @@ public class UseAfterTransferAnalyzerTests
                         list.Add(1);
                     }
                 }
-            }
             """);
 
         Assert.Empty(diagnostics);
@@ -1013,12 +794,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // The reference inside the transfer argument IS the handoff, not a post-transfer
         // sibling read: the out assignment then hands the later Add a fresh list.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var list = new List<int> { 1 };
@@ -1030,7 +806,6 @@ public class UseAfterTransferAnalyzerTests
                 {
                     value = new List<int>();
                 }
-            }
             """);
 
         Assert.Empty(diagnostics);
@@ -1078,12 +853,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // Throwing() can throw AFTER the handoff and BEFORE the assignment completes: the
         // catch still sees the transferred list on that path.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var list = new List<int> { 1 };
@@ -1102,11 +872,9 @@ public class UseAfterTransferAnalyzerTests
                 {
                     return new List<int>();
                 }
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -1114,12 +882,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // The next MoveNext reads the transferred list -- a sender-side use with no source
         // reference to scan for.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var list = new List<int> { 1 };
@@ -1128,11 +891,9 @@ public class UseAfterTransferAnalyzerTests
                         _ = Sending.Transfer(list);
                     }
                 }
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -1140,12 +901,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // The break on the transfer's own conditional level leaves the loop before any
         // further MoveNext: the handoff is the find-and-transfer pattern.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var list = new List<int> { 1 };
@@ -1155,7 +911,6 @@ public class UseAfterTransferAnalyzerTests
                         break;
                     }
                 }
-            }
             """);
 
         Assert.Empty(diagnostics);
@@ -1166,12 +921,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // MayThrow runs AFTER building the wrapper and may throw with the handoff complete:
         // the catch use is reachable.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var list = new List<int> { 1 };
@@ -1188,11 +938,9 @@ public class UseAfterTransferAnalyzerTests
                 private static void MayThrow(Sending<List<int>> sending)
                 {
                 }
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -1200,12 +948,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // Transfer(list = other): BOTH names alias the handed-off object, so the later use of
         // the original RHS alias is a use-after-transfer.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public Sending<List<int>> M(List<int> other)
                 {
                     List<int> list;
@@ -1213,11 +956,9 @@ public class UseAfterTransferAnalyzerTests
                     other.Add(1);
                     return sending;
                 }
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
         Assert.Contains("'other'", diagnostic.GetMessage());
     }
 
@@ -1226,12 +967,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // The finally runs whether or not Throwing() threw before the assignment completed:
         // on the throwing path it observes the transferred value.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var list = new List<int> { 1 };
@@ -1250,11 +986,9 @@ public class UseAfterTransferAnalyzerTests
                 {
                     return new List<int>();
                 }
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -1262,12 +996,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // A property getter is a method: it can throw after the handoff, before the target is
         // assigned, so the catch still sees the transferred value.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public static List<int> Next => new();
 
                 public void M()
@@ -1283,11 +1012,9 @@ public class UseAfterTransferAnalyzerTests
                         list.Add(1);
                     }
                 }
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -1295,12 +1022,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // The returning call can throw after the wrapper exists, before the method exits: the
         // local catch runs with the handoff complete.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public Sending<List<int>>? M()
                 {
                     var list = new List<int> { 1 };
@@ -1319,11 +1041,9 @@ public class UseAfterTransferAnalyzerTests
                 {
                     return sending;
                 }
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -1331,12 +1051,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // The nested return never runs on the loop path: the next MoveNext still reads the
         // transferred collection.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var list = new List<int> { 1 };
@@ -1349,11 +1064,9 @@ public class UseAfterTransferAnalyzerTests
                         }
                     }
                 }
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -1361,12 +1074,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // The break leaves the switch, not the foreach: the next MoveNext still reads the
         // transferred collection.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M(int n)
                 {
                     var list = new List<int> { 1 };
@@ -1380,11 +1088,9 @@ public class UseAfterTransferAnalyzerTests
                         }
                     }
                 }
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -1392,12 +1098,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // The read inside Use sits source-BEFORE the transfer, but the CALL runs after it:
         // the sender still touches the handed-off list.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public Sending<List<int>> M()
                 {
                     var list = new List<int> { 1 };
@@ -1406,11 +1107,9 @@ public class UseAfterTransferAnalyzerTests
                     Use();
                     return sending;
                 }
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -1418,12 +1117,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // The compiler-generated Monitor.Exit touches the handed-off object at scope end:
         // same shape as using disposal.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public Sending<List<int>> M()
                 {
                     var gate = new List<int> { 1 };
@@ -1432,11 +1126,9 @@ public class UseAfterTransferAnalyzerTests
                         return Sending.Transfer(gate);
                     }
                 }
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
         Assert.Contains("'gate'", diagnostic.GetMessage());
     }
 
@@ -1445,23 +1137,16 @@ public class UseAfterTransferAnalyzerTests
     {
         // The scope's compiler-generated Dispose runs after the handoff with no source
         // reference to scan for: the sender destroys the object the receiver now owns.
-        var diagnostics = await AnalyzeAsync("""
-            using System.IO;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public Sending<MemoryStream> M()
                 {
                     using var stream = new MemoryStream();
                     var sent = Sending.Transfer(stream);
                     return sent;
                 }
-            }
-            """);
+            """, "using System.IO;\nusing MemoizR;");
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
         Assert.Contains("'stream'", diagnostic.GetMessage());
     }
 
@@ -1470,12 +1155,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // `return Sending.Transfer(list)` exits the method -- but the enclosing finally runs
         // AFTER the return expression evaluated, so its Add touches the transferred value.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public Sending<List<int>> M()
                 {
                     var list = new List<int> { 1 };
@@ -1488,11 +1168,9 @@ public class UseAfterTransferAnalyzerTests
                         list.Add(1);
                     }
                 }
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
         Assert.Contains("'list'", diagnostic.GetMessage());
     }
 
@@ -1501,12 +1179,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // Transfer(list = new(...)): after the statement the variable aliases the transferred
         // value, so the later Add is a use-after-transfer like any other.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public Sending<List<int>> M()
                 {
                     List<int> list;
@@ -1514,11 +1187,9 @@ public class UseAfterTransferAnalyzerTests
                     list.Add(1);
                     return sending;
                 }
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
         Assert.Contains("'list'", diagnostic.GetMessage());
     }
 
@@ -1527,12 +1198,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // A deconstruction target is definitely assigned like a simple-assignment target: the
         // later use touches the fresh value.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public Sending<List<int>> M()
                 {
                     var list = new List<int> { 1 };
@@ -1541,7 +1207,6 @@ public class UseAfterTransferAnalyzerTests
                     list.Add(1);
                     return sending;
                 }
-            }
             """);
 
         Assert.Empty(diagnostics);
@@ -1552,12 +1217,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // Same caveat as `list = Clone(list)`: the deconstruction's RHS reads the transferred
         // value to build the replacement -- exactly a use after transfer.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public Sending<List<int>> M()
                 {
                     var list = new List<int> { 1 };
@@ -1565,22 +1225,15 @@ public class UseAfterTransferAnalyzerTests
                     (list, _) = (new List<int>(list), 0);
                     return sending;
                 }
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
     public async Task UsesBeforeTransfer_AndReassignedVariables_AreNotFlagged()
     {
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public Sending<List<int>> M()
                 {
                     var list = new List<int> { 1 };
@@ -1590,7 +1243,6 @@ public class UseAfterTransferAnalyzerTests
                     list.Add(3);
                     return sending;
                 }
-            }
             """);
 
         Assert.Empty(diagnostics);
@@ -1601,12 +1253,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // Declaring a local function executes nothing: with no call, the body's reference
         // never runs.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public Sending<List<int>> M()
                 {
                     var list = new List<int> { 1 };
@@ -1617,7 +1264,6 @@ public class UseAfterTransferAnalyzerTests
                     }
                     return sending;
                 }
-            }
             """);
 
         Assert.Empty(diagnostics);
@@ -1628,12 +1274,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // Calling Reset only ever touches the fresh value: the body reassigns the variable
         // before any read, so the call is a reinitialization, not a use.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public Sending<List<int>> M()
                 {
                     var list = new List<int> { 1 };
@@ -1646,7 +1287,6 @@ public class UseAfterTransferAnalyzerTests
                     Reset();
                     return sending;
                 }
-            }
             """);
 
         Assert.Empty(diagnostics);
@@ -1657,12 +1297,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // The assignment wrapping the transfer completes right after its RHS: by the next
         // statement the variable already holds the fresh value.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var list = new List<int> { 1 };
@@ -1671,7 +1306,6 @@ public class UseAfterTransferAnalyzerTests
                 }
 
                 private static List<int> MakeFresh(Sending<List<int>> sending) => new();
-            }
             """);
 
         Assert.Empty(diagnostics);
@@ -1682,12 +1316,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // The reinitialization only lands AFTER the whole RHS runs: a sibling argument
         // evaluated after the transfer still reads the handed-off value.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var list = new List<int> { 1 };
@@ -1695,11 +1324,9 @@ public class UseAfterTransferAnalyzerTests
                 }
 
                 private static List<int> Combine(Sending<List<int>> sending, int count) => new();
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
         Assert.Contains("'list'", diagnostic.GetMessage());
     }
 
@@ -1708,12 +1335,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // Use(false) skips the reset and reads the transferred list: only a reassignment
         // that DEFINITELY runs before any read makes the call safe.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public Sending<List<int>> M()
                 {
                     var list = new List<int> { 1 };
@@ -1726,11 +1348,9 @@ public class UseAfterTransferAnalyzerTests
                     Use(false);
                     return sending;
                 }
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -1738,12 +1358,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // Every path through the call either resets before the read or skips both: the
         // transferred value is never touched.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public Sending<List<int>> M()
                 {
                     var list = new List<int> { 1 };
@@ -1759,7 +1374,6 @@ public class UseAfterTransferAnalyzerTests
                     Use(false);
                     return sending;
                 }
-            }
             """);
 
         Assert.Empty(diagnostics);
@@ -1770,23 +1384,16 @@ public class UseAfterTransferAnalyzerTests
     {
         // yield return hands the wrapper to the caller and RESUMES the same body on the next
         // MoveNext: the later Add is ordinary sender-side use, not code past a method exit.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public IEnumerable<Sending<List<int>>> M()
                 {
                     var list = new List<int> { 1 };
                     yield return Sending.Transfer(list);
                     list.Add(1);
                 }
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
         Assert.Contains("'list'", diagnostic.GetMessage());
     }
 
@@ -1795,12 +1402,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // The iterator resumes INSIDE the loop on the next MoveNext: the foreach still reads
         // the transferred collection.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public IEnumerable<int> M()
                 {
                     var list = new List<int> { 1 };
@@ -1810,11 +1412,9 @@ public class UseAfterTransferAnalyzerTests
                         yield return item;
                     }
                 }
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -1822,12 +1422,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // Reset() rewrites the variable on every path through it: after the call the later
         // Add only ever touches the fresh value.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public Sending<List<int>> M()
                 {
                     var list = new List<int> { 1 };
@@ -1840,7 +1435,6 @@ public class UseAfterTransferAnalyzerTests
                     list.Add(1);
                     return sending;
                 }
-            }
             """);
 
         Assert.Empty(diagnostics);
@@ -1851,12 +1445,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // The resetting call may be skipped: the path around it still reads the transferred
         // value at the Add.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public Sending<List<int>> M(bool keep)
                 {
                     var list = new List<int> { 1 };
@@ -1869,11 +1458,9 @@ public class UseAfterTransferAnalyzerTests
                     list.Add(1);
                     return sending;
                 }
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -1881,12 +1468,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // The recovery path overwrites the variable before touching it: the catch never
         // reads the transferred object, however the reinitializing RHS throws.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var list = new List<int> { 1 };
@@ -1903,7 +1485,6 @@ public class UseAfterTransferAnalyzerTests
                 }
 
                 private static List<int> MayThrow() => new();
-            }
             """);
 
         Assert.Empty(diagnostics);
@@ -1914,12 +1495,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // The handler's replacement is BUILT FROM the transferred value: that read runs
         // exactly in the window where the receiver may already own it.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var list = new List<int> { 1 };
@@ -1935,11 +1511,9 @@ public class UseAfterTransferAnalyzerTests
                 }
 
                 private static List<int> MayThrow() => new();
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -1948,12 +1522,7 @@ public class UseAfterTransferAnalyzerTests
         // The body's reset can throw before storing: its catch reads the transferred value,
         // so calling the function is a use -- the try-nested reset is CONDITIONAL, not a
         // definite rewrite.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public Sending<List<int>> M()
                 {
                     var list = new List<int> { 1 };
@@ -1974,11 +1543,9 @@ public class UseAfterTransferAnalyzerTests
                 }
 
                 private static List<int> MayThrow() => new();
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -1986,12 +1553,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // F() runs nothing: the only reference lives in a nested declaration F never
         // invokes, and declarations do not execute.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public Sending<List<int>> M()
                 {
                     var list = new List<int> { 1 };
@@ -2006,7 +1568,6 @@ public class UseAfterTransferAnalyzerTests
                     F();
                     return sending;
                 }
-            }
             """);
 
         Assert.Empty(diagnostics);
@@ -2016,12 +1577,7 @@ public class UseAfterTransferAnalyzerTests
     public async Task WrapperCalls_ThatReachAReadingFunction_StillReport()
     {
         // Outer() -> Use() -> the read runs after the handoff: the chained call is a use.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public Sending<List<int>> M()
                 {
                     var list = new List<int> { 1 };
@@ -2037,11 +1593,9 @@ public class UseAfterTransferAnalyzerTests
                     Outer();
                     return sending;
                 }
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -2049,12 +1603,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // Use() is only invoked from Outer's body, and Outer never runs: neither the
         // declaration nor the call inside it executes.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public Sending<List<int>> M()
                 {
                     var list = new List<int> { 1 };
@@ -2069,7 +1618,6 @@ public class UseAfterTransferAnalyzerTests
                     }
                     return sending;
                 }
-            }
             """);
 
         Assert.Empty(diagnostics);
@@ -2080,12 +1628,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // The using captured the ORIGINAL stream at entry: after the definite reassignment,
         // scope-end Dispose touches the old object, not the one handed off.
-        var diagnostics = await AnalyzeAsync("""
-            using System.IO;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public Sending<MemoryStream> M()
                 {
                     var stream = new MemoryStream();
@@ -2095,8 +1638,7 @@ public class UseAfterTransferAnalyzerTests
                         return Sending.Transfer(stream);
                     }
                 }
-            }
-            """);
+            """, "using System.IO;\nusing MemoizR;");
 
         Assert.Empty(diagnostics);
     }
@@ -2106,12 +1648,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // The enumerator iterates the collection captured at loop entry: every iteration
         // reassigns before transferring, so MoveNext never touches the handed-off object.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var list = new List<int> { 1 };
@@ -2121,7 +1658,6 @@ public class UseAfterTransferAnalyzerTests
                         _ = Sending.Transfer(list);
                     }
                 }
-            }
             """);
 
         Assert.Empty(diagnostics);
@@ -2132,12 +1668,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // Reset(list.Count): the argument reads the transferred value BEFORE the body's
         // reset runs -- the reset cannot retroactively excuse it.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public Sending<List<int>> M()
                 {
                     var list = new List<int> { 1 };
@@ -2149,11 +1680,9 @@ public class UseAfterTransferAnalyzerTests
                     Reset(list.Count);
                     return sending;
                 }
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -2161,12 +1690,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // Nothing after the completed handoff can throw: the handler can never observe the
         // wrapper, so its read is unreachable on every transferred path.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var list = new List<int> { 1 };
@@ -2181,7 +1705,6 @@ public class UseAfterTransferAnalyzerTests
                         list.Add(1);
                     }
                 }
-            }
             """);
 
         Assert.Empty(diagnostics);
@@ -2192,12 +1715,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // An out parameter must be assigned before Init returns: calling Reset only ever
         // rewrites the variable, exactly like a simple assignment.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public Sending<List<int>> M()
                 {
                     var list = new List<int> { 1 };
@@ -2212,7 +1730,6 @@ public class UseAfterTransferAnalyzerTests
                 }
 
                 private static void Init(out List<int> target) => target = new List<int>();
-            }
             """);
 
         Assert.Empty(diagnostics);
@@ -2223,12 +1740,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // A deconstruction target is definitely assigned like a simple-assignment target --
         // inside a called body too.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public Sending<List<int>> M()
                 {
                     var list = new List<int> { 1 };
@@ -2240,7 +1752,6 @@ public class UseAfterTransferAnalyzerTests
                     Reset();
                     return sending;
                 }
-            }
             """);
 
         Assert.Empty(diagnostics);
@@ -2251,13 +1762,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // The lambda body sits source-BEFORE the transfer, but invoking the delegate runs it
         // after: the sender still touches the handed-off list.
-        var diagnostics = await AnalyzeAsync("""
-            using System;
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public Sending<List<int>> M()
                 {
                     var list = new List<int> { 1 };
@@ -2266,11 +1771,9 @@ public class UseAfterTransferAnalyzerTests
                     use();
                     return sending;
                 }
-            }
-            """);
+            """, WithSystem);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -2278,12 +1781,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // Outer() -> Use() -> the read: both declarations sit before the handoff, but the
         // post-transfer call still reaches the transferred value through the chain.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public Sending<List<int>> M()
                 {
                     var list = new List<int> { 1 };
@@ -2299,11 +1797,9 @@ public class UseAfterTransferAnalyzerTests
                     Outer();
                     return sending;
                 }
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -2311,12 +1807,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // Outer() ran before the handoff: nothing in its declaration executes afterwards,
         // wherever the declaration happens to sit in source.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public Sending<List<int>> M()
                 {
                     var list = new List<int> { 1 };
@@ -2332,7 +1823,6 @@ public class UseAfterTransferAnalyzerTests
                     }
                     return sending;
                 }
-            }
             """);
 
         Assert.Empty(diagnostics);
@@ -2343,23 +1833,16 @@ public class UseAfterTransferAnalyzerTests
     {
         // Transfer([list]) hands off a collection carrying the same element reference,
         // exactly like an explicit array creation.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var list = new List<int> { 1 };
                     var sending = Sending.Transfer<List<int>[]>([list]);
                     list.Add(1);
                 }
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
         Assert.Contains("'list'", diagnostic.GetMessage());
     }
 
@@ -2368,13 +1851,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // use?.Invoke() reaches the same lambda through a conditional-access receiver: the
         // wrapper around the local must not hide the call.
-        var diagnostics = await AnalyzeAsync("""
-            using System;
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public Sending<List<int>> M()
                 {
                     var list = new List<int> { 1 };
@@ -2383,11 +1860,9 @@ public class UseAfterTransferAnalyzerTests
                     use?.Invoke();
                     return sending;
                 }
-            }
-            """);
+            """, WithSystem);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -2395,13 +1870,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // The reading lambda is stored only in the arm the transfer path never runs: the
         // call in the transfer arm can only see the earlier no-op.
-        var diagnostics = await AnalyzeAsync("""
-            using System;
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M(bool move)
                 {
                     var list = new List<int> { 1 };
@@ -2416,8 +1885,7 @@ public class UseAfterTransferAnalyzerTests
                         use = () => list.Add(1);
                     }
                 }
-            }
-            """);
+            """, WithSystem);
 
         Assert.Empty(diagnostics);
     }
@@ -2429,13 +1897,7 @@ public class UseAfterTransferAnalyzerTests
         // no-op: the CALL is not a use. What remains is the standing escape stance on the
         // post-transfer lambda itself -- so the report anchors at the lambda's read, not at
         // use().
-        var diagnostics = await AnalyzeAsync("""
-            using System;
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public Sending<List<int>> M()
                 {
                     var list = new List<int> { 1 };
@@ -2445,11 +1907,9 @@ public class UseAfterTransferAnalyzerTests
                     use = () => list.Add(1);
                     return sending;
                 }
-            }
-            """);
+            """, WithSystem);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
         Assert.Equal("list", diagnostic.Location.SourceTree!.GetText().ToString(diagnostic.Location.SourceSpan));
     }
 
@@ -2458,23 +1918,16 @@ public class UseAfterTransferAnalyzerTests
     {
         // [.. new[] { list }] enumerates the inline array INTO the new collection: the same
         // list reference arrives at the receiver.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var list = new List<int> { 1 };
                     var sending = Sending.Transfer<List<int>[]>([.. new[] { list }]);
                     list.Add(1);
                 }
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
         Assert.Contains("'list'", diagnostic.GetMessage());
     }
 
@@ -2483,19 +1936,13 @@ public class UseAfterTransferAnalyzerTests
     {
         // [..source] copies source's ELEMENTS into the new collection: the source object
         // itself stays with the sender.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var source = new List<int> { 1 };
                     var sending = Sending.Transfer<int[]>([.. source]);
                     source.Add(1);
                 }
-            }
             """);
 
         Assert.Empty(diagnostics);
@@ -2506,12 +1953,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // The throw is absorbed inside the loop body: control stays in the foreach and the
         // next MoveNext still reads the transferred collection.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var list = new List<int> { 1 };
@@ -2527,11 +1969,9 @@ public class UseAfterTransferAnalyzerTests
                         }
                     }
                 }
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -2568,8 +2008,7 @@ public class UseAfterTransferAnalyzerTests
             }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -2577,12 +2016,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // The argument reassigns BEFORE the body runs: the captured read inside Use only
         // ever sees the fresh list, and so does everything after the call.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public Sending<List<int>> M()
                 {
                     var list = new List<int> { 1 };
@@ -2592,7 +2026,6 @@ public class UseAfterTransferAnalyzerTests
                     list.Add(2);
                     return sending;
                 }
-            }
             """);
 
         Assert.Empty(diagnostics);
@@ -2602,12 +2035,7 @@ public class UseAfterTransferAnalyzerTests
     public async Task ArgumentResetsBuiltFromTheValue_AreStillUses()
     {
         // The replacement is built FROM the transferred value on the way into the call.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public Sending<List<int>> M()
                 {
                     var list = new List<int> { 1 };
@@ -2616,11 +2044,9 @@ public class UseAfterTransferAnalyzerTests
                     Use(list = new List<int>(list));
                     return sending;
                 }
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -2628,12 +2054,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // The try body is entered unconditionally and nothing can resume past a failed
         // reset: reaching the Add means the assignment completed.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public Sending<List<int>> M()
                 {
                     var list = new List<int> { 1 };
@@ -2649,7 +2070,6 @@ public class UseAfterTransferAnalyzerTests
                     list.Add(1);
                     return sending;
                 }
-            }
             """);
 
         Assert.Empty(diagnostics);
@@ -2660,12 +2080,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // A catch can resume past the failed reset: the Add may still see the transferred
         // value on that path.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public Sending<List<int>> M()
                 {
                     var list = new List<int> { 1 };
@@ -2683,11 +2098,9 @@ public class UseAfterTransferAnalyzerTests
                 }
 
                 private static List<int> MayThrow() => new();
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -2696,12 +2109,7 @@ public class UseAfterTransferAnalyzerTests
         // The escaping expression evaluates Use() after the handoff, before the method
         // exits -- and Use's declaration sits OUTSIDE the return expression, so the lookup
         // must reach the whole body.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public Sending<List<int>> M()
                 {
                     var list = new List<int> { 1 };
@@ -2714,11 +2122,9 @@ public class UseAfterTransferAnalyzerTests
                 }
 
                 private static Sending<List<int>> Pair(Sending<List<int>> sending, int x) => sending;
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -2746,8 +2152,7 @@ public class UseAfterTransferAnalyzerTests
             }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
         Assert.Contains("'list'", diagnostic.GetMessage());
     }
 
@@ -2776,8 +2181,7 @@ public class UseAfterTransferAnalyzerTests
             }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -2844,8 +2248,7 @@ public class UseAfterTransferAnalyzerTests
             }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -2853,23 +2256,16 @@ public class UseAfterTransferAnalyzerTests
     {
         // new List<List<int>> { list } stores the element exactly like a collection
         // expression: the receiver owns a collection containing the same reference.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var list = new List<int> { 1 };
                     var sending = Sending.Transfer(new List<List<int>> { list });
                     list.Add(1);
                 }
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
         Assert.Contains("'list'", diagnostic.GetMessage());
     }
 
@@ -2878,12 +2274,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // MayThrow can fail AFTER the wrapper exists, landing in the catch-all: control then
         // resumes after the try and the sender still touches the handed-off list.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public Sending<List<int>>? M()
                 {
                     var list = new List<int> { 1 };
@@ -2900,11 +2291,9 @@ public class UseAfterTransferAnalyzerTests
                 }
 
                 private static Sending<List<int>> MayThrow(Sending<List<int>> sending) => sending;
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -2912,12 +2301,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // On the throwing path the reset never runs, the catch-all resumes, and the final
         // Add still touches the transferred list: the reset is not definite.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M(bool fail)
                 {
                     var list = new List<int> { 1 };
@@ -2933,11 +2317,9 @@ public class UseAfterTransferAnalyzerTests
 
                     list.Add(1);
                 }
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -2945,13 +2327,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // F() runs the delegate, and the delegate runs the reading lambda: the chain
         // reaches the transferred value transitively.
-        var diagnostics = await AnalyzeAsync("""
-            using System;
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public Sending<List<int>> M()
                 {
                     var list = new List<int> { 1 };
@@ -2964,34 +2340,25 @@ public class UseAfterTransferAnalyzerTests
                     F();
                     return sending;
                 }
-            }
-            """);
+            """, WithSystem);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
     public async Task IndexerInitializerValues_AreTransferSources()
     {
         // ["x"] = list stores the same reference into the dictionary the receiver now owns.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var list = new List<int> { 1 };
                     var sending = Sending.Transfer(new Dictionary<string, List<int>> { ["x"] = list });
                     list.Add(1);
                 }
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
         Assert.Contains("'list'", diagnostic.GetMessage());
     }
 
@@ -3000,12 +2367,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // Use<int>() carries a constructed symbol; the declaration carries the definition --
         // the lookup must still connect them.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public Sending<List<int>> M()
                 {
                     var list = new List<int> { 1 };
@@ -3017,11 +2379,9 @@ public class UseAfterTransferAnalyzerTests
                     Use<int>();
                     return sending;
                 }
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -3029,13 +2389,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // += multicasts the reading lambda onto the delegate: invoking it after the handoff
         // runs that lambda.
-        var diagnostics = await AnalyzeAsync("""
-            using System;
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public Sending<List<int>> M()
                 {
                     var list = new List<int> { 1 };
@@ -3045,11 +2399,9 @@ public class UseAfterTransferAnalyzerTests
                     use();
                     return sending;
                 }
-            }
-            """);
+            """, WithSystem);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -3057,12 +2409,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // Reset(true) returns before the assignment: the call completes without rewriting,
         // and the later Add still touches the transferred list.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var list = new List<int> { 1 };
@@ -3075,11 +2422,9 @@ public class UseAfterTransferAnalyzerTests
                     Reset(true);
                     list.Add(1);
                 }
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -3087,13 +2432,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // The definite overwrite kills the reading initializer before the handoff: only the
         // no-op can run at the call.
-        var diagnostics = await AnalyzeAsync("""
-            using System;
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public Sending<List<int>> M()
                 {
                     var list = new List<int> { 1 };
@@ -3103,8 +2442,7 @@ public class UseAfterTransferAnalyzerTests
                     use();
                     return sending;
                 }
-            }
-            """);
+            """, WithSystem);
 
         Assert.Empty(diagnostics);
     }
@@ -3114,13 +2452,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // -= removes from the invocation list; the lambda on its right side never becomes a
         // target of the delegate.
-        var diagnostics = await AnalyzeAsync("""
-            using System;
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public Sending<List<int>> M()
                 {
                     var list = new List<int> { 1 };
@@ -3130,8 +2462,7 @@ public class UseAfterTransferAnalyzerTests
                     use();
                     return sending;
                 }
-            }
-            """);
+            """, WithSystem);
 
         Assert.Empty(diagnostics);
     }
@@ -3140,13 +2471,7 @@ public class UseAfterTransferAnalyzerTests
     public async Task DelegateAliases_ResolveToTheirStoredCallables()
     {
         // use holds what use2 held: the reading lambda runs at the call through the alias.
-        var diagnostics = await AnalyzeAsync("""
-            using System;
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public Sending<List<int>> M()
                 {
                     var list = new List<int> { 1 };
@@ -3156,11 +2481,9 @@ public class UseAfterTransferAnalyzerTests
                     use();
                     return sending;
                 }
-            }
-            """);
+            """, WithSystem);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -3199,8 +2522,7 @@ public class UseAfterTransferAnalyzerTests
             }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -3208,12 +2530,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // Reading a field through `this` has no exception path: nothing after the completed
         // handoff can carry the wrapper into the handler.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 private int count;
 
                 public void M()
@@ -3229,7 +2546,6 @@ public class UseAfterTransferAnalyzerTests
                         list.Add(1);
                     }
                 }
-            }
             """);
 
         Assert.Empty(diagnostics);
@@ -3240,19 +2556,13 @@ public class UseAfterTransferAnalyzerTests
     {
         // The deconstruction assigns the fresh list right after its RHS evaluated: by the
         // Add the transferred value is gone from the variable.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var list = new List<int> { 1 };
                     (list, _) = (new List<int>(), Sending.Transfer(list));
                     list.Add(1);
                 }
-            }
             """);
 
         Assert.Empty(diagnostics);
@@ -3263,12 +2573,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // Move() performs the handoff before returning: the caller's Add is sequenced after
         // it exactly like an inline transfer.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var list = new List<int> { 1 };
@@ -3279,11 +2584,9 @@ public class UseAfterTransferAnalyzerTests
                     Move();
                     list.Add(1);
                 }
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -3291,12 +2594,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // Move(list) hands the caller's list to the parameter the body transfers: at the
         // call site the tracked variable is the argument, not the callee's alias.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var list = new List<int> { 1 };
@@ -3307,11 +2605,9 @@ public class UseAfterTransferAnalyzerTests
                     Move(list);
                     list.Add(1);
                 }
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
         Assert.Contains("'list'", diagnostic.GetMessage());
     }
 
@@ -3320,23 +2616,16 @@ public class UseAfterTransferAnalyzerTests
     {
         // The matched RHS element IS the old list: the deconstruction writes the transferred
         // reference back, so the later Add still touches it.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var list = new List<int> { 1 };
                     (list, _) = (list, Sending.Transfer(list));
                     list.Add(1);
                 }
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -3364,8 +2653,7 @@ public class UseAfterTransferAnalyzerTests
             }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
         Assert.Contains("'list'", diagnostic.GetMessage());
     }
 
@@ -3374,13 +2662,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // move() invokes Move through the delegate: the handoff inside it is sequenced
         // before the caller's Add exactly like a direct call.
-        var diagnostics = await AnalyzeAsync("""
-            using System;
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var list = new List<int> { 1 };
@@ -3392,11 +2674,9 @@ public class UseAfterTransferAnalyzerTests
                     move();
                     list.Add(1);
                 }
-            }
-            """);
+            """, WithSystem);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -3404,12 +2684,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // Rethrowing an existing exception allocates nothing, but still runs after the
         // completed handoff and lands in the handler, which then reads the transferred list.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M(System.Exception ex)
                 {
                     var list = new List<int> { 1 };
@@ -3423,23 +2698,16 @@ public class UseAfterTransferAnalyzerTests
                         list.Add(1);
                     }
                 }
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
     public async Task CallsWhoseArgumentsContainTheTransfer_RunTheirBodyAfterIt()
     {
         // The callee body runs only after all arguments evaluated -- the handoff included.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var list = new List<int> { 1 };
@@ -3449,24 +2717,16 @@ public class UseAfterTransferAnalyzerTests
                     }
                     Use(Sending.Transfer(list));
                 }
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
     public async Task DelegateStoresInsideUncalledFunctions_NeverRan()
     {
         // Configure is never invoked: its store cannot be the delegate's value at the call.
-        var diagnostics = await AnalyzeAsync("""
-            using System;
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var list = new List<int> { 1 };
@@ -3478,8 +2738,7 @@ public class UseAfterTransferAnalyzerTests
                     var sending = Sending.Transfer(list);
                     use();
                 }
-            }
-            """);
+            """, WithSystem);
 
         Assert.Empty(diagnostics);
     }
@@ -3489,13 +2748,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // use copied src BEFORE the reading lambda landed in src: the copy keeps the old
         // invocation list, so the call runs only the no-op.
-        var diagnostics = await AnalyzeAsync("""
-            using System;
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var list = new List<int> { 1 };
@@ -3505,8 +2758,7 @@ public class UseAfterTransferAnalyzerTests
                     var sending = Sending.Transfer(list);
                     use();
                 }
-            }
-            """);
+            """, WithSystem);
 
         Assert.Empty(diagnostics);
     }
@@ -3516,12 +2768,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // The caught MayThrow() path skips the reset and resumes after the try: the final
         // Add still touches the transferred list on that path.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var list = new List<int> { 1 };
@@ -3541,11 +2788,9 @@ public class UseAfterTransferAnalyzerTests
                 private static void MayThrow()
                 {
                 }
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -3570,8 +2815,7 @@ public class UseAfterTransferAnalyzerTests
             }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
         Assert.Contains("'list'", diagnostic.GetMessage());
     }
 
@@ -3644,13 +2888,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // Returning Use hands the caller a delegate over the retained alias: it can run
         // after the method exits, exactly like the equivalent lambda.
-        var diagnostics = await AnalyzeAsync("""
-            using System;
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public Action M()
                 {
                     var list = new List<int> { 1 };
@@ -3662,11 +2900,9 @@ public class UseAfterTransferAnalyzerTests
                         list.Add(1);
                     }
                 }
-            }
-            """);
+            """, WithSystem);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -3674,12 +2910,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // Move() IS the propagated handoff: with nothing after it, the sender never touches
         // the list again.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var list = new List<int> { 1 };
@@ -3689,7 +2920,6 @@ public class UseAfterTransferAnalyzerTests
                     }
                     Move();
                 }
-            }
             """);
 
         Assert.Empty(diagnostics);
@@ -3699,12 +2929,7 @@ public class UseAfterTransferAnalyzerTests
     public async Task ParametersReassignedBeforeTheTransfer_NoLongerAliasTheArgument()
     {
         // Move transfers its own fresh list: the caller's original was never handed off.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var list = new List<int> { 1 };
@@ -3716,7 +2941,6 @@ public class UseAfterTransferAnalyzerTests
                     Move(list);
                     list.Add(1);
                 }
-            }
             """);
 
         Assert.Empty(diagnostics);
@@ -3754,8 +2978,7 @@ public class UseAfterTransferAnalyzerTests
             }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -3763,12 +2986,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // The handler rethrows: either the reset ran, or the method exited -- no path
         // reaches the Add with the old list.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var list = new List<int> { 1 };
@@ -3789,7 +3007,6 @@ public class UseAfterTransferAnalyzerTests
                 private static void MayThrow()
                 {
                 }
-            }
             """);
 
         Assert.Empty(diagnostics);
@@ -3800,12 +3017,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // A dynamic dispatch can fail at runtime after the completed handoff: the catch
         // then observes the transferred list.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M(dynamic dyn)
                 {
                     var list = new List<int> { 1 };
@@ -3819,11 +3031,9 @@ public class UseAfterTransferAnalyzerTests
                         list.Add(1);
                     }
                 }
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -3888,8 +3098,7 @@ public class UseAfterTransferAnalyzerTests
             }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
         Assert.Contains("'list'", diagnostic.GetMessage());
     }
 
@@ -3918,8 +3127,7 @@ public class UseAfterTransferAnalyzerTests
             }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -3927,13 +3135,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // move() runs the lambda that performs the handoff: the caller's Add is sequenced
         // after it exactly like a local-function call.
-        var diagnostics = await AnalyzeAsync("""
-            using System;
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var list = new List<int> { 1 };
@@ -3941,11 +3143,9 @@ public class UseAfterTransferAnalyzerTests
                     var sent = move();
                     list.Add(1);
                 }
-            }
-            """);
+            """, WithSystem);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -3986,12 +3186,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // x = x rewrites nothing: the parameter still aliases the caller's list when the
         // body transfers it.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var list = new List<int> { 1 };
@@ -4003,11 +3198,9 @@ public class UseAfterTransferAnalyzerTests
                     Move(list);
                     list.Add(1);
                 }
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -4015,13 +3208,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // The returned delegate captures the transferred list: the caller can run it
         // against the receiver-owned object at any time.
-        var diagnostics = await AnalyzeAsync("""
-            using System;
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public Action M()
                 {
                     var list = new List<int> { 1 };
@@ -4029,11 +3216,9 @@ public class UseAfterTransferAnalyzerTests
                     var sending = Sending.Transfer(list);
                     return use;
                 }
-            }
-            """);
+            """, WithSystem);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -4041,24 +3226,16 @@ public class UseAfterTransferAnalyzerTests
     {
         // BlockingCollection lives in System.Collections.Concurrent, not the core library:
         // its Add still deterministically stores the element.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Concurrent;
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var list = new List<int> { 1 };
                     var sending = Sending.Transfer(new BlockingCollection<List<int>> { list });
                     list.Add(1);
                 }
-            }
-            """);
+            """, "using System.Collections.Concurrent;\nusing System.Collections.Generic;\nusing MemoizR;");
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -4066,12 +3243,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // A failing MayThrow() runs the finally while the variable still holds the
         // transferred object.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var list = new List<int> { 1 };
@@ -4090,11 +3262,9 @@ public class UseAfterTransferAnalyzerTests
                 private static void MayThrow()
                 {
                 }
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -4129,13 +3299,7 @@ public class UseAfterTransferAnalyzerTests
     public async Task InspectedDelegates_DoNotEscape()
     {
         // A null check neither runs the delegate nor lets it leave the scope.
-        var diagnostics = await AnalyzeAsync("""
-            using System;
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var list = new List<int> { 1 };
@@ -4145,8 +3309,7 @@ public class UseAfterTransferAnalyzerTests
                     {
                     }
                 }
-            }
-            """);
+            """, WithSystem);
 
         Assert.Empty(diagnostics);
     }
@@ -4156,12 +3319,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // Fresh(out x) rewrites the parameter before the handoff: the callee transferred
         // its own fresh value, not the caller's list.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var list = new List<int> { 1 };
@@ -4175,7 +3333,6 @@ public class UseAfterTransferAnalyzerTests
                 }
 
                 private static void Fresh(out List<int> target) => target = new List<int>();
-            }
             """);
 
         Assert.Empty(diagnostics);
@@ -4186,12 +3343,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // The catch cannot catch InvalidOperationException: the throwing path exits the
         // method, so every path reaching the Add ran the reset.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M(bool bad)
                 {
                     var list = new List<int> { 1 };
@@ -4207,7 +3359,6 @@ public class UseAfterTransferAnalyzerTests
 
                     list.Add(1);
                 }
-            }
             """);
 
         Assert.Empty(diagnostics);
@@ -4218,12 +3369,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // The out write lands only when Reset returns -- AFTER its body read the
         // transferred list.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var list = new List<int> { 1 };
@@ -4235,11 +3381,9 @@ public class UseAfterTransferAnalyzerTests
                     _ = Sending.Transfer(list);
                     Reset(out list);
                 }
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -4247,12 +3391,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // MayThrow lives in the arm the transfer path never runs: no exception can carry
         // the wrapper into the handler.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M(bool move)
                 {
                     var list = new List<int> { 1 };
@@ -4276,7 +3415,6 @@ public class UseAfterTransferAnalyzerTests
                 private static void MayThrow()
                 {
                 }
-            }
             """);
 
         Assert.Empty(diagnostics);
@@ -4287,12 +3425,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // MayThrow can fail after the wrapper exists and before the reset: the caught path
         // resumes with the transferred list still in the variable.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var list = new List<int> { 1 };
@@ -4311,11 +3444,9 @@ public class UseAfterTransferAnalyzerTests
                 private static void MayThrow(Sending<List<int>> sending)
                 {
                 }
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -4323,12 +3454,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // x writes through to the caller's slot: the fresh value was transferred AND lives
         // in list, so the caller's Add touches the handed-off object.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var list = new List<int> { 1 };
@@ -4340,11 +3466,9 @@ public class UseAfterTransferAnalyzerTests
                     Move(ref list);
                     list.Add(1);
                 }
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -4352,12 +3476,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // The tuple copies id by value and int is deeply immutable: only the list can alias
         // mutable state with the receiver, so only its use reports.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var id = 1;
@@ -4366,11 +3485,9 @@ public class UseAfterTransferAnalyzerTests
                     _ = id;
                     list.Add(1);
                 }
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
         Assert.Contains("'list'", diagnostic.GetMessage());
     }
 
@@ -4379,13 +3496,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // A custom add accessor is user code: it can throw after the completed handoff and
         // land in the catch, which reads the transferred list.
-        var diagnostics = await AnalyzeAsync("""
-            using System;
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public event Action? Changed;
 
                 public void M()
@@ -4405,11 +3516,9 @@ public class UseAfterTransferAnalyzerTests
                 private static void Handler()
                 {
                 }
-            }
-            """);
+            """, WithSystem);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -4417,13 +3526,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // use -= Touch empties the invocation list before the handoff: the null-conditional
         // call runs nothing.
-        var diagnostics = await AnalyzeAsync("""
-            using System;
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var list = new List<int> { 1 };
@@ -4433,8 +3536,7 @@ public class UseAfterTransferAnalyzerTests
                     var sending = Sending.Transfer(list);
                     use?.Invoke();
                 }
-            }
-            """);
+            """, WithSystem);
 
         Assert.Empty(diagnostics);
     }
@@ -4444,13 +3546,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // The scope's Dispose runs after the handoff and can throw into the catch, which
         // then reads the transferred list.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using System.IO;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var list = new List<int> { 1 };
@@ -4466,11 +3562,9 @@ public class UseAfterTransferAnalyzerTests
                         list.Add(1);
                     }
                 }
-            }
-            """);
+            """, "using System.Collections.Generic;\nusing System.IO;\nusing MemoizR;");
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -4478,21 +3572,15 @@ public class UseAfterTransferAnalyzerTests
     {
         // T can be any mutable type at the call site: the generic helper's post-transfer
         // read is exactly the hazard MZR005 exists for.
-        var diagnostics = await AnalyzeAsync("""
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M<T>(T value)
                 {
                     _ = Sending.Transfer(value);
                     _ = value;
                 }
-            }
-            """);
+            """, "using MemoizR;");
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -4536,13 +3624,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // The reading lambda lands in use only on the arm that did NOT transfer: no path
         // both hands off the list and returns that callable.
-        var diagnostics = await AnalyzeAsync("""
-            using System;
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public Action? M(bool move)
                 {
                     var list = new List<int> { 1 };
@@ -4558,8 +3640,7 @@ public class UseAfterTransferAnalyzerTests
 
                     return use;
                 }
-            }
-            """);
+            """, WithSystem);
 
         Assert.Empty(diagnostics);
     }
@@ -4569,13 +3650,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // Touch was added twice and removed once: one target remains and reads the
         // transferred list at the call.
-        var diagnostics = await AnalyzeAsync("""
-            using System;
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var list = new List<int> { 1 };
@@ -4586,11 +3661,9 @@ public class UseAfterTransferAnalyzerTests
                     var sending = Sending.Transfer(list);
                     use?.Invoke();
                 }
-            }
-            """);
+            """, WithSystem);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -4598,13 +3671,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // The parameter holds the reading lambda and is returned after the handoff: the
         // caller can run it against the receiver-owned object.
-        var diagnostics = await AnalyzeAsync("""
-            using System;
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public Action M(Action use)
                 {
                     var list = new List<int> { 1 };
@@ -4612,11 +3679,9 @@ public class UseAfterTransferAnalyzerTests
                     var sending = Sending.Transfer(list);
                     return use;
                 }
-            }
-            """);
+            """, WithSystem);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -4624,23 +3689,16 @@ public class UseAfterTransferAnalyzerTests
     {
         // KeyValuePair's constructor deterministically stores both arguments: the receiver
         // owns a pair containing the same list.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var list = new List<int> { 1 };
                     var sending = Sending.Transfer(new KeyValuePair<string, List<int>>("k", list));
                     list.Add(1);
                 }
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
         Assert.Contains("'list'", diagnostic.GetMessage());
     }
 
@@ -4649,11 +3707,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // Move receives a boxed immutable int: nothing mutable reached the receiver, so
         // the caller's later read is harmless.
-        var diagnostics = await AnalyzeAsync("""
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     void Move(object x)
@@ -4664,8 +3718,7 @@ public class UseAfterTransferAnalyzerTests
                     Move(id);
                     _ = id;
                 }
-            }
-            """);
+            """, "using MemoizR;");
 
         Assert.Empty(diagnostics);
     }
@@ -4696,8 +3749,7 @@ public class UseAfterTransferAnalyzerTests
             }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
         Assert.Contains("'box'", diagnostic.GetMessage());
     }
 
@@ -4706,18 +3758,13 @@ public class UseAfterTransferAnalyzerTests
     {
         // Enum values are copied immutable values: the same exemption the statics rule
         // grants where T : Enum.
-        var diagnostics = await AnalyzeAsync("""
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M<T>(T value) where T : System.Enum
                 {
                     _ = Sending.Transfer(value);
                     _ = value;
                 }
-            }
-            """);
+            """, "using MemoizR;");
 
         Assert.Empty(diagnostics);
     }
@@ -4727,12 +3774,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // A custom enumerator's MoveNext/Dispose can throw after the body's handoff: the
         // catch then observes the transferred list.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M(IEnumerable<int> xs)
                 {
                     var list = new List<int> { 1 };
@@ -4748,11 +3790,9 @@ public class UseAfterTransferAnalyzerTests
                         list.Add(1);
                     }
                 }
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -4760,13 +3800,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // One runtime path stores the reading Touch: the guarded call can run it after the
         // handoff.
-        var diagnostics = await AnalyzeAsync("""
-            using System;
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M(bool flag)
                 {
                     var list = new List<int> { 1 };
@@ -4775,35 +3809,25 @@ public class UseAfterTransferAnalyzerTests
                     var sending = Sending.Transfer(list);
                     use?.Invoke();
                 }
-            }
-            """);
+            """, WithSystem);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
     public async Task CarrierFactoryCalls_CarryTheirArguments()
     {
         // Tuple.Create stores its arguments exactly like the constructor spelling.
-        var diagnostics = await AnalyzeAsync("""
-            using System;
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var list = new List<int> { 1 };
                     var sending = Sending.Transfer(Tuple.Create(list));
                     list.Add(1);
                 }
-            }
-            """);
+            """, WithSystem);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
         Assert.Contains("'list'", diagnostic.GetMessage());
     }
 
@@ -4812,12 +3836,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // Reset can fail before its reset; the caller's catch resumes with the ORIGINAL
         // transferred value still in the variable.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var list = new List<int> { 1 };
@@ -4841,11 +3860,9 @@ public class UseAfterTransferAnalyzerTests
                 private static void MayThrow()
                 {
                 }
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -4853,12 +3870,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // The only failure after the handoff is an InvalidOperationException: the
         // ArgumentException handler can never observe the transferred list.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M(bool flag)
                 {
                     var list = new List<int> { 1 };
@@ -4873,7 +3885,6 @@ public class UseAfterTransferAnalyzerTests
                         list.Add(1);
                     }
                 }
-            }
             """);
 
         Assert.Empty(diagnostics);
@@ -4884,13 +3895,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // read + noop puts BOTH callables in the invocation list: the call runs the reader
         // after the handoff.
-        var diagnostics = await AnalyzeAsync("""
-            using System;
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var list = new List<int> { 1 };
@@ -4899,11 +3904,9 @@ public class UseAfterTransferAnalyzerTests
                     var sending = Sending.Transfer(list);
                     use();
                 }
-            }
-            """);
+            """, WithSystem);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -4936,13 +3939,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // The transferring lambda lands in use only on the arm that did NOT call it: no
         // path stores and then invokes before the later Add.
-        var diagnostics = await AnalyzeAsync("""
-            using System;
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M(bool move)
                 {
                     var list = new List<int> { 1 };
@@ -4958,8 +3955,7 @@ public class UseAfterTransferAnalyzerTests
 
                     list.Add(1);
                 }
-            }
-            """);
+            """, WithSystem);
 
         Assert.Empty(diagnostics);
     }
@@ -4969,12 +3965,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // goto default re-enters the sibling arm AFTER the handoff: the arms are not
         // mutually exclusive on that path.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M(int n)
                 {
                     var list = new List<int> { 1 };
@@ -4988,34 +3979,25 @@ public class UseAfterTransferAnalyzerTests
                             break;
                     }
                 }
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
     public async Task KeyValuePairCreate_IsACarrierFactory()
     {
         // KeyValuePair.Create stores both arguments exactly like its constructor.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var list = new List<int> { 1 };
                     var sending = Sending.Transfer(KeyValuePair.Create("k", list));
                     list.Add(1);
                 }
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
         Assert.Contains("'list'", diagnostic.GetMessage());
     }
 
@@ -5048,23 +4030,16 @@ public class UseAfterTransferAnalyzerTests
     public async Task ParenthesizedTransferOperands_AreStillTransfers()
     {
         // Parentheses are pure syntax: the argument operation is the local reference.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var list = new List<int> { 1 };
                     var sending = Sending.Transfer((list));
                     list.Add(1);
                 }
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -5072,12 +4047,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // The RHS can throw into the resuming catch BEFORE the assignment completes: after
         // the try the variable may still hold the transferred value.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var list = new List<int> { 1 };
@@ -5093,11 +4063,9 @@ public class UseAfterTransferAnalyzerTests
                 }
 
                 private static List<int> MayThrow(Sending<List<int>> sending) => new List<int>();
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -5105,12 +4073,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // goto after exits the switch entirely: the default arm never runs on the
         // transferred path.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M(int n)
                 {
                     var list = new List<int> { 1 };
@@ -5127,7 +4090,6 @@ public class UseAfterTransferAnalyzerTests
                     after:
                     _ = n;
                 }
-            }
             """);
 
         Assert.Empty(diagnostics);
@@ -5138,23 +4100,16 @@ public class UseAfterTransferAnalyzerTests
     {
         // Transfer(new { Value = list }) hands off an object graph containing the same list:
         // anonymous members deterministically store what they were built from.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var list = new List<int> { 1 };
                     var sending = Sending.Transfer(new { Value = list });
                     list.Add(1);
                 }
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
         Assert.Contains("'list'", diagnostic.GetMessage());
     }
 
@@ -5163,23 +4118,16 @@ public class UseAfterTransferAnalyzerTests
     {
         // Transfer(new[] { list }) hands off the array WITH its element: the array carries
         // the reference exactly like a tuple does.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var list = new List<int> { 1 };
                     var sending = Sending.Transfer(new[] { list });
                     list.Add(1);
                 }
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
         Assert.Contains("'list'", diagnostic.GetMessage());
     }
 
@@ -5188,13 +4136,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // The reading lambda lives in a FIELD slot: invoking through the field after the
         // handoff runs it exactly like a local-held delegate would.
-        var diagnostics = await AnalyzeAsync("""
-            using System;
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 private Action? use;
 
                 public void M()
@@ -5204,11 +4146,9 @@ public class UseAfterTransferAnalyzerTests
                     var sending = Sending.Transfer(list);
                     this.use!();
                 }
-            }
-            """);
+            """, WithSystem);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
         Assert.Contains("'list'", diagnostic.GetMessage());
     }
 
@@ -5217,13 +4157,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // The definite overwrite replaces the field's invocation list before the call:
         // the reading lambda is no longer what `this.use!()` runs.
-        var diagnostics = await AnalyzeAsync("""
-            using System;
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 private Action? use;
 
                 public void M()
@@ -5234,8 +4168,7 @@ public class UseAfterTransferAnalyzerTests
                     this.use = () => { };
                     this.use!();
                 }
-            }
-            """);
+            """, WithSystem);
 
         Assert.Empty(diagnostics);
     }
@@ -5246,13 +4179,7 @@ public class UseAfterTransferAnalyzerTests
         // C# tests the clause TYPE before running any filter: a filtered catch of an
         // unrelated type can never receive the InvalidOperationException, so the handler
         // never observes the transferred value.
-        var diagnostics = await AnalyzeAsync("""
-            using System;
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var list = new List<int> { 1 };
@@ -5268,8 +4195,7 @@ public class UseAfterTransferAnalyzerTests
                 }
 
                 private static bool MayPass() => true;
-            }
-            """);
+            """, WithSystem);
 
         Assert.Empty(diagnostics);
     }
@@ -5279,13 +4205,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // The type gate passes, so whether the handler runs is down to the filter -- which
         // may pass: the catch stays reachable and its read reports.
-        var diagnostics = await AnalyzeAsync("""
-            using System;
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var list = new List<int> { 1 };
@@ -5301,11 +4221,9 @@ public class UseAfterTransferAnalyzerTests
                 }
 
                 private static bool MayPass() => true;
-            }
-            """);
+            """, WithSystem);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -5314,12 +4232,7 @@ public class UseAfterTransferAnalyzerTests
         // The only throw-capable operation in the reinitializing RHS is the Transfer call
         // itself: if it throws, no wrapper escaped; if it succeeds, the local is reset
         // before the catch could ever run. The handler never sees a transferred value.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var list = new List<int> { 1 };
@@ -5332,7 +4245,6 @@ public class UseAfterTransferAnalyzerTests
                         list.Add(1);
                     }
                 }
-            }
             """);
 
         Assert.Empty(diagnostics);
@@ -5343,13 +4255,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // Configure() runs only AFTER use(): the store it carries cannot be in the
         // delegate's invocation list at the call, which still runs the no-op.
-        var diagnostics = await AnalyzeAsync("""
-            using System;
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var list = new List<int> { 1 };
@@ -5360,8 +4266,7 @@ public class UseAfterTransferAnalyzerTests
                     use();
                     Configure();
                 }
-            }
-            """);
+            """, WithSystem);
 
         Assert.Empty(diagnostics);
     }
@@ -5371,13 +4276,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // Configure() ran before the handoff: at use() the reading target IS the delegate's
         // current value.
-        var diagnostics = await AnalyzeAsync("""
-            using System;
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var list = new List<int> { 1 };
@@ -5388,11 +4287,9 @@ public class UseAfterTransferAnalyzerTests
                     var sending = Sending.Transfer(list);
                     use();
                 }
-            }
-            """);
+            """, WithSystem);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -5400,13 +4297,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // The stored reading delegate leaves through a conditional expression: callers can
         // receive and invoke it after the handoff.
-        var diagnostics = await AnalyzeAsync("""
-            using System;
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public Action? M(bool flag)
                 {
                     var list = new List<int> { 1 };
@@ -5414,11 +4305,9 @@ public class UseAfterTransferAnalyzerTests
                     var sending = Sending.Transfer(list);
                     return flag ? use : null;
                 }
-            }
-            """);
+            """, WithSystem);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -5426,13 +4315,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // `use ?? fallback` publishes the stored reading delegate exactly like a bare
         // return of it would.
-        var diagnostics = await AnalyzeAsync("""
-            using System;
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public Action M(Action fallback)
                 {
                     var list = new List<int> { 1 };
@@ -5440,11 +4323,9 @@ public class UseAfterTransferAnalyzerTests
                     var sending = Sending.Transfer(list);
                     return use ?? fallback;
                 }
-            }
-            """);
+            """, WithSystem);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -5453,13 +4334,7 @@ public class UseAfterTransferAnalyzerTests
         // The Where wrapper's enumerator pulls from the SAME list: the next MoveNext after
         // the handoff is a sender-side read even though the collection expression is not
         // the bare variable.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using System.Linq;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var list = new List<int> { 1 };
@@ -5468,11 +4343,9 @@ public class UseAfterTransferAnalyzerTests
                         var sending = Sending.Transfer(list);
                     }
                 }
-            }
-            """);
+            """, "using System.Collections.Generic;\nusing System.Linq;\nusing MemoizR;");
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -5480,13 +4353,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // Every path that reaches use() ran the branch's own overwrite first: the stale
         // pre-branch Touch cannot be what the call invokes.
-        var diagnostics = await AnalyzeAsync("""
-            using System;
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M(bool flag)
                 {
                     var list = new List<int> { 1 };
@@ -5499,8 +4366,7 @@ public class UseAfterTransferAnalyzerTests
                         use();
                     }
                 }
-            }
-            """);
+            """, WithSystem);
 
         Assert.Empty(diagnostics);
     }
@@ -5510,13 +4376,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // The setter discards and the getter manufactures: nothing stored is ever
         // returned, so the assignment cannot be what the invocation runs.
-        var diagnostics = await AnalyzeAsync("""
-            using System;
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 private Action Use { get => () => { }; set { } }
 
                 public void M()
@@ -5527,8 +4387,7 @@ public class UseAfterTransferAnalyzerTests
                     var sending = Sending.Transfer(list);
                     Use();
                 }
-            }
-            """);
+            """, WithSystem);
 
         Assert.Empty(diagnostics);
     }
@@ -5538,13 +4397,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // An auto-property IS a backing slot: what the setter stored is what the
         // invocation runs.
-        var diagnostics = await AnalyzeAsync("""
-            using System;
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 private Action? Use { get; set; }
 
                 public void M()
@@ -5554,11 +4407,9 @@ public class UseAfterTransferAnalyzerTests
                     var sending = Sending.Transfer(list);
                     this.Use!();
                 }
-            }
-            """);
+            """, WithSystem);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
         Assert.Contains("'list'", diagnostic.GetMessage());
     }
 
@@ -5567,13 +4418,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // use -= Touch strips the reading target out of the combined invocation list:
         // what remains at the call is the no-op.
-        var diagnostics = await AnalyzeAsync("""
-            using System;
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var list = new List<int> { 1 };
@@ -5584,8 +4429,7 @@ public class UseAfterTransferAnalyzerTests
                     var sending = Sending.Transfer(list);
                     use();
                 }
-            }
-            """);
+            """, WithSystem);
 
         Assert.Empty(diagnostics);
     }
@@ -5595,13 +4439,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // Ignore never references its parameter: the delegate is dropped, not published
         // -- nothing can run it after the handoff.
-        var diagnostics = await AnalyzeAsync("""
-            using System;
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var list = new List<int> { 1 };
@@ -5610,8 +4448,7 @@ public class UseAfterTransferAnalyzerTests
                     var sending = Sending.Transfer(list);
                     Ignore(use);
                 }
-            }
-            """);
+            """, WithSystem);
 
         Assert.Empty(diagnostics);
     }
@@ -5620,13 +4457,7 @@ public class UseAfterTransferAnalyzerTests
     public async Task LocalFunctionArgumentsThatTouchTheParameter_StayEscapes()
     {
         // Run invokes what it was handed: the reading lambda executes after the handoff.
-        var diagnostics = await AnalyzeAsync("""
-            using System;
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var list = new List<int> { 1 };
@@ -5635,11 +4466,9 @@ public class UseAfterTransferAnalyzerTests
                     var sending = Sending.Transfer(list);
                     Run(use);
                 }
-            }
-            """);
+            """, WithSystem);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 
     [Fact]
@@ -5647,24 +4476,16 @@ public class UseAfterTransferAnalyzerTests
     {
         // ImmutableArray.Create(list) stores its ARGUMENTS as elements: the receiver owns
         // an immutable container that still holds the same mutable list.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using System.Collections.Immutable;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var list = new List<int> { 1 };
                     var sending = Sending.Transfer(ImmutableArray.Create(list));
                     list.Add(1);
                 }
-            }
-            """);
+            """, "using System.Collections.Generic;\nusing System.Collections.Immutable;\nusing MemoizR;");
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
         Assert.Contains("'list'", diagnostic.GetMessage());
     }
 
@@ -5674,21 +4495,14 @@ public class UseAfterTransferAnalyzerTests
         // list.ToImmutableArray() copies the elements OUT of the source: the source
         // collection itself is not retained, so later sender-side mutation of it does not
         // reach the receiver's container.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using System.Collections.Immutable;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var list = new List<int> { 1 };
                     var sending = Sending.Transfer(list.ToImmutableArray());
                     list.Add(1);
                 }
-            }
-            """);
+            """, "using System.Collections.Generic;\nusing System.Collections.Immutable;\nusing MemoizR;");
 
         Assert.Empty(diagnostics);
     }
@@ -5698,12 +4512,7 @@ public class UseAfterTransferAnalyzerTests
     {
         // The hidden Monitor.Enter can throw (a null gate) after the handoff: the catch
         // runs while the transferred list is still sender-reachable.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M(object? maybeGate)
                 {
                     var list = new List<int> { 1 };
@@ -5717,10 +4526,8 @@ public class UseAfterTransferAnalyzerTests
                         list.Add(1);
                     }
                 }
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR005", diagnostic.Id);
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 }

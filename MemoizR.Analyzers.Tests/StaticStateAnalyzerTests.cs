@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using Microsoft.CodeAnalysis;
 
 namespace MemoizR.Analyzers.Tests;
@@ -9,8 +10,11 @@ namespace MemoizR.Analyzers.Tests;
 // using directive are out of the rule's mandate.
 public class StaticStateAnalyzerTests
 {
-    private static Task<System.Collections.Immutable.ImmutableArray<Diagnostic>> AnalyzeAsync(string source)
+    private static Task<ImmutableArray<Diagnostic>> AnalyzeAsync(string source)
         => AnalyzerTestHarness.AnalyzeAsync(source, new StaticStateAnalyzer());
+
+    private static Task<ImmutableArray<Diagnostic>> InClassC(string members, string usings = "using System.Collections.Generic;\nusing MemoizR;")
+        => AnalyzeAsync(AnalyzerTestHarness.InClassC(members, usings));
 
     [Fact]
     public async Task StaticAbstractInterfaceContracts_OwnNoSlot()
@@ -34,12 +38,7 @@ public class StaticStateAnalyzerTests
     [Fact]
     public async Task MutableStaticSlots_AreFlagged()
     {
-        var diagnostics = await AnalyzeAsync("""
-            using System;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 private static int counter; // mutable slot, even though int is Sendable
                 public static string Label { get; set; } = ""; // settable slot
                 public static event Action? Changed; // subscription surface
@@ -51,8 +50,7 @@ public class StaticStateAnalyzerTests
                     Label = "x";
                     Changed?.Invoke();
                 }
-            }
-            """);
+            """, "using System;\nusing MemoizR;");
 
         Assert.Equal(3, diagnostics.Length);
         Assert.All(diagnostics, d => Assert.Equal("MZR004", d.Id));
@@ -64,12 +62,7 @@ public class StaticStateAnalyzerTests
     [Fact]
     public async Task ReadonlyStaticOfMutableType_IsFlagged()
     {
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 private static readonly List<int> Cache = new(); // readonly slot, mutable object
 
                 public void M()
@@ -77,11 +70,9 @@ public class StaticStateAnalyzerTests
                     var f = new MemoFactory();
                     Cache.Add(1);
                 }
-            }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR004", diagnostic.Id);
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR004");
         Assert.Contains("'Cache'", diagnostic.GetMessage());
         Assert.Contains("List", diagnostic.GetMessage());
     }
@@ -89,12 +80,7 @@ public class StaticStateAnalyzerTests
     [Fact]
     public async Task SendableStatics_AndConsts_AndNodes_AreNotFlagged()
     {
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Immutable;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 private const int Limit = 3;
                 private static readonly string Name = "x";
                 private static readonly ImmutableArray<int> Seeds = ImmutableArray.Create(1, 2);
@@ -109,8 +95,7 @@ public class StaticStateAnalyzerTests
                     _ = Limit + Name.Length + Seeds.Length;
                     _ = Counter.Get();
                 }
-            }
-            """);
+            """, "using System.Collections.Immutable;\nusing MemoizR;");
 
         Assert.Empty(diagnostics);
     }
@@ -137,8 +122,7 @@ public class StaticStateAnalyzerTests
             }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR004", diagnostic.Id);
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR004");
         Assert.Contains("'Cache'", diagnostic.GetMessage());
         Assert.Contains("type parameter", diagnostic.GetMessage());
     }
@@ -168,8 +152,7 @@ public class StaticStateAnalyzerTests
             }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR004", diagnostic.Id);
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR004");
         Assert.Contains("'Cache'", diagnostic.GetMessage());
         Assert.Contains("type parameter", diagnostic.GetMessage());
     }
@@ -200,8 +183,7 @@ public class StaticStateAnalyzerTests
             }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR004", diagnostic.Id);
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR004");
         Assert.Contains("'Cache'", diagnostic.GetMessage());
         Assert.Contains("type parameter", diagnostic.GetMessage());
     }
@@ -235,8 +217,7 @@ public class StaticStateAnalyzerTests
             }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR004", diagnostic.Id);
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR004");
         Assert.Contains("'Cache'", diagnostic.GetMessage());
         Assert.Contains("type parameter", diagnostic.GetMessage());
     }
@@ -295,8 +276,7 @@ public class StaticStateAnalyzerTests
             }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR004", diagnostic.Id);
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR004");
         Assert.Contains("List", diagnostic.GetMessage());
     }
 
@@ -345,8 +325,7 @@ public class StaticStateAnalyzerTests
             }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR004", diagnostic.Id);
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR004");
         Assert.Contains("type parameter", diagnostic.GetMessage());
     }
 
@@ -386,8 +365,7 @@ public class StaticStateAnalyzerTests
             }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR004", diagnostic.Id);
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR004");
         Assert.Contains("type parameter", diagnostic.GetMessage());
     }
 
@@ -428,8 +406,7 @@ public class StaticStateAnalyzerTests
             }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR004", diagnostic.Id);
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR004");
         Assert.Contains("type parameter", diagnostic.GetMessage());
     }
 
@@ -461,8 +438,7 @@ public class StaticStateAnalyzerTests
             }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR004", diagnostic.Id);
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR004");
         Assert.Contains("List", diagnostic.GetMessage());
     }
 
@@ -519,8 +495,7 @@ public class StaticStateAnalyzerTests
             }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR004", diagnostic.Id);
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR004");
         Assert.Contains("type parameter", diagnostic.GetMessage());
     }
 
@@ -552,8 +527,7 @@ public class StaticStateAnalyzerTests
             ],
             new StaticStateAnalyzer());
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR004", diagnostic.Id);
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR004");
         Assert.Contains("'Cache'", diagnostic.GetMessage());
     }
 
@@ -562,12 +536,7 @@ public class StaticStateAnalyzerTests
     {
         // An expression-bodied getter owns no static slot: each call returns a fresh value,
         // and a getter handing out OTHER static state is flagged at that state's declaration.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public static List<int> NewList => new();
 
                 public void M()
@@ -575,7 +544,6 @@ public class StaticStateAnalyzerTests
                     var f = new MemoFactory();
                     _ = NewList;
                 }
-            }
             """);
 
         Assert.Empty(diagnostics);
@@ -604,8 +572,7 @@ public class StaticStateAnalyzerTests
             }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR006", diagnostic.Id);
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR006");
         Assert.Contains("OpenPerson", diagnostic.GetMessage());
         Assert.Contains("static slot publishes unchecked", diagnostic.GetMessage());
     }
@@ -616,17 +583,11 @@ public class StaticStateAnalyzerTests
         // A settable static property is a process-wide write surface no matter where the
         // value lands -- the get+set arm never required a backing slot, and dropping the
         // getter does not make the surface less writable.
-        var diagnostics = await AnalyzeAsync("""
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public static int Sink { set { _ = value; } }
-            }
-            """);
+            """, "using MemoizR;");
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR004", diagnostic.Id);
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR004");
         Assert.Contains("settable", diagnostic.GetMessage());
     }
 

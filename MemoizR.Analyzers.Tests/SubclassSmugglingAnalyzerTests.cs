@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using Microsoft.CodeAnalysis;
 
 namespace MemoizR.Analyzers.Tests;
@@ -12,25 +13,22 @@ public class SubclassSmugglingAnalyzerTests
     {
         // List<int> never passes the creation check: there is no smuggle hole to hint
         // about on a value MZR001 already rejects.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var f = new MemoFactory();
                     f.CreateSignal(new List<int>());
                 }
-            }
             """);
 
         Assert.Empty(diagnostics);
     }
 
-    private static Task<System.Collections.Immutable.ImmutableArray<Diagnostic>> AnalyzeAsync(string source)
+    private static Task<ImmutableArray<Diagnostic>> AnalyzeAsync(string source)
         => AnalyzerTestHarness.AnalyzeAsync(source, new SubclassSmugglingAnalyzer());
+
+    private static Task<ImmutableArray<Diagnostic>> InClassC(string members, string usings = "using System.Collections.Generic;\nusing MemoizR;")
+        => AnalyzeAsync(AnalyzerTestHarness.InClassC(members, usings));
 
     [Fact]
     public async Task NonSealedClassAtCreationSite_GetsTheInfoHint()
@@ -50,8 +48,7 @@ public class SubclassSmugglingAnalyzerTests
             }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR006", diagnostic.Id);
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR006");
         Assert.Equal(DiagnosticSeverity.Info, diagnostic.Severity);
         Assert.Contains("OpenPerson", diagnostic.GetMessage());
         // The value's own runtime type IS what ValidateWrittenValues checks, so here (and only
@@ -80,8 +77,7 @@ public class SubclassSmugglingAnalyzerTests
             }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR006", diagnostic.Id);
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR006");
         Assert.Contains("OpenPerson", diagnostic.GetMessage());
         // The signal-write guard checks the written ARRAY's runtime type only; suggesting it
         // for the nested element would promise a check that can never see it.
@@ -95,18 +91,12 @@ public class SubclassSmugglingAnalyzerTests
         // Sending<T> DELIBERATELY wraps a non-Sendable payload for transfer (the SE-0430
         // analog); hinting about the payload's sealedness would misread the escape hatch as
         // shared Sendable state.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var f = new MemoFactory();
                     f.CreateSignal(Sending.Transfer(new List<int>()));
                 }
-            }
             """);
 
         Assert.Empty(diagnostics);
@@ -133,8 +123,7 @@ public class SubclassSmugglingAnalyzerTests
             }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR006", diagnostic.Id);
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR006");
         Assert.Contains("OpenPerson", diagnostic.GetMessage());
     }
 
@@ -209,8 +198,7 @@ public class SubclassSmugglingAnalyzerTests
             }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR006", diagnostic.Id);
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR006");
         Assert.Contains("OpenPerson", diagnostic.GetMessage());
         Assert.DoesNotContain("enable MemoFactoryOptions.ValidateWrittenValues", diagnostic.GetMessage());
     }
@@ -244,8 +232,7 @@ public class SubclassSmugglingAnalyzerTests
             }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR006", diagnostic.Id);
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR006");
         Assert.Contains("OpenPerson", diagnostic.GetMessage());
     }
 
@@ -277,8 +264,7 @@ public class SubclassSmugglingAnalyzerTests
             }
             """);
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR006", diagnostic.Id);
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR006");
         Assert.Contains("Base", diagnostic.GetMessage());
     }
 
@@ -312,23 +298,15 @@ public class SubclassSmugglingAnalyzerTests
         // Task needs no accidental user subclass: every Task<TResult> IS one, so a declared
         // Task surface can smuggle an arbitrary payload past the creation check (which sees
         // only typeof(Task)). ValidateWrittenValues is the runtime net -- hint it.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Collections.Generic;
-            using System.Threading.Tasks;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var f = new MemoFactory();
                     f.CreateSignal<Task>(Task.FromResult<List<int>>(new List<int>()));
                 }
-            }
-            """);
+            """, "using System.Collections.Generic;\nusing System.Threading.Tasks;\nusing MemoizR;");
 
-        var diagnostic = Assert.Single(diagnostics);
-        Assert.Equal("MZR006", diagnostic.Id);
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR006");
         Assert.Contains("Task", diagnostic.GetMessage());
     }
 
@@ -338,19 +316,13 @@ public class SubclassSmugglingAnalyzerTests
         // A declared Task<T> exposes its payload as a TYPE ARGUMENT the walk already
         // unfolds; the surface itself stays exempt -- user code subclassing Task<T> is not
         // a plausible failure mode.
-        var diagnostics = await AnalyzeAsync("""
-            using System.Threading.Tasks;
-            using MemoizR;
-
-            public class C
-            {
+        var diagnostics = await InClassC("""
                 public void M()
                 {
                     var f = new MemoFactory();
                     f.CreateSignal(Task.FromResult(1));
                 }
-            }
-            """);
+            """, "using System.Threading.Tasks;\nusing MemoizR;");
 
         Assert.Empty(diagnostics);
     }

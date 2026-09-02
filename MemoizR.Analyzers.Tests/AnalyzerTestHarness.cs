@@ -27,6 +27,19 @@ internal static class AnalyzerTestHarness
         return AnalyzeAsync([source], analyzer);
     }
 
+    // Most contracts are one class: the usual usings plus `public class C` around the members.
+    public static string InClassC(string members, string usings)
+    {
+        return $"{usings}\n\npublic class C\n{{\n{members}\n}}";
+    }
+
+    public static Diagnostic AssertSingle(ImmutableArray<Diagnostic> diagnostics, string id)
+    {
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal(id, diagnostic.Id);
+        return diagnostic;
+    }
+
     // Multi-file overload: some rules are scoped per FILE (MZR004's using-directive mandate),
     // so proving cross-file behavior (a centralized GlobalUsings.cs) needs separate trees.
     public static async Task<ImmutableArray<Diagnostic>> AnalyzeAsync(string[] sources, DiagnosticAnalyzer analyzer)
