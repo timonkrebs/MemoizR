@@ -384,12 +384,10 @@ public class TransitionTests
         gate2.SetResult(); // unpark the stray effect
     }
 
-    // Timing-sensitive on loaded runners (observed twice on windows-latest): va's and vb's
-    // cascades schedule two debounced updates, and when the va-triggered faulting scan is
-    // serialized AFTER the vb-triggered committing rerun, the fault is recorded over the
-    // commit and LastStabilizationFault survives. Retried like the other flaky reactive
-    // tests until the fault-record/commit ordering is token-guarded.
-    [RetryFact(3, 200, Timeout = 5000)]
+    // va's and vb's cascades schedule two debounced updates; whichever order the runner
+    // serializes them in, a faulting scan must never record over a newer committed rerun (the
+    // fault record is token-guarded), so this holds deterministically.
+    [Fact(Timeout = 5000)]
     public async Task Transition_ParentFaultWithSuccessfulRerun_SettlesClean_WithoutAFaultRecord()
     {
         var f = new MemoFactory();

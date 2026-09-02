@@ -186,13 +186,16 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
         // trigger re-attempts the parent -- but tell the stabilization listeners: no commit will
         // follow and nothing reschedules until the next invalidation, so a transition waiting on
         // this reaction would otherwise hang on a wavefront that already failed (ADR 0007).
-        // UNLESS the Update above committed anyway (another parent dirtied us and the body
-        // caught the faulting read or rewired away from it): the reaction stabilized, waiters
-        // were completed by the commit, and recording the scan fault over it would poison the
-        // fault record against later registrations.
+        // UNLESS a commit at or beyond this update's token already landed -- the Update above
+        // committed anyway (another parent dirtied us and the body caught the faulting read or
+        // rewired away from it), or a newer rerun serialized between the scan and this point
+        // committed: the reaction stabilized, waiters were completed by that commit, and
+        // recording the scan fault over it would poison the fault record against later
+        // registrations. The last commit token decides, not the current state: a later
+        // invalidation can already have re-dirtied the cell.
         if (parentFault != null)
         {
-            if (stateCell.State != CacheState.CacheClean)
+            if (stateCell.LastCleanCommitToken < token)
             {
                 RecordStabilizationFault(token, parentFault);
             }
@@ -260,8 +263,12 @@ public abstract class ReactionBase : SignalHandlR, IMemoizR, IDisposable
                     UpdateSourceAndObserverLinks();
                 }
                 // No commit will follow and nothing reschedules until the next invalidation:
-                // waiters (transitions) must hear the fault instead of a commit (ADR 0007).
-                RecordStabilizationFault(token, exception);
+                // waiters (transitions) must hear the fault instead of a commit (ADR 0007) --
+                // unless a newer rerun already committed past this token, which completed them.
+                if (stateCell.LastCleanCommitToken < token)
+                {
+                    RecordStabilizationFault(token, exception);
+                }
                 throw;
             }
 

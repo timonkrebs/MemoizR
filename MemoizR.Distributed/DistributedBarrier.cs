@@ -112,11 +112,13 @@ public static class DistributedBarrier
         private readonly Action<Exception>? onRepullError;
         private long rounds;
 
-        // The affirmed pair, compared by CONTENT (the record's value equality): a non-memoized
-        // export (a ConcurrentRace re-races on every pull) answers a re-pull with an
-        // equal-content publication under a fresh sequence, and reference identity would
-        // refuse the affirmation every round and spin the heal loop forever; every real change
-        // still counts as a change. Volatile: written on the heal flow, read by the reaction.
+        // The affirmed pair, compared by EVIDENCE identity (epoch, stamp, verifiability): a heal
+        // round proves that both hosts, asked again, still publish under this evidence, and the
+        // rendered values are whatever real publications currently carry it. Comparing values
+        // would make the affirmation undecidable for payloads without value semantics -- a
+        // re-racing export produces a fresh object under a fresh sequence every round, and the
+        // barrier would re-pull forever -- while every real change still shows in the stamp.
+        // Volatile: written on the heal flow, read by the reaction.
         private volatile Tuple<AdoptedPublication<T1>, AdoptedPublication<T2>>? affirmed;
 
         // An affirmation is knowledge the graph does not carry, so the barrier owns a private
@@ -135,7 +137,7 @@ public static class DistributedBarrier
         internal bool MatchOrExpire(AdoptedPublication<T1> firstPublication, AdoptedPublication<T2> secondPublication)
         {
             var pair = affirmed;
-            if (pair != null && Equals(pair.Item1, firstPublication) && Equals(pair.Item2, secondPublication))
+            if (pair != null && SameEvidence(pair.Item1, firstPublication) && SameEvidence(pair.Item2, secondPublication))
             {
                 return true;
             }
@@ -187,9 +189,15 @@ public static class DistributedBarrier
             await AffirmationTick.Set(Interlocked.Increment(ref rounds));
 
             bool Unchanged() =>
-                Equals(first.Publication, firstPublication)
-                && Equals(second.Publication, secondPublication);
+                SameEvidence(first.Publication, firstPublication)
+                && SameEvidence(second.Publication, secondPublication);
         }
+
+        private static bool SameEvidence<T>(AdoptedPublication<T>? current, AdoptedPublication<T> observed) =>
+            current != null
+            && current.Epoch == observed.Epoch
+            && current.Unverifiable == observed.Unverifiable
+            && current.Stamp.Equals(observed.Stamp);
 
         // The two mirrors have separate gates and each adoption mints its own flow scope, so
         // pulling both is the same as two concurrent transport deliveries.

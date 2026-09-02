@@ -42,6 +42,7 @@ public class DistributedPackageTests
 
         await temperature.Set(25.0);
         await TestHelpers.WaitForConvergenceAsync(() => !advertisements.IsEmpty);
+        Assert.NotEmpty(advertisements);
 
         var payload = await export.PullAsync();
         Assert.Equal(comfort.Id, payload.NodeId);
@@ -162,6 +163,7 @@ public class DistributedPackageTests
         using var export = host.Export(s, _ => { Interlocked.Increment(ref count); return Task.CompletedTask; });
 
         await TestHelpers.WaitForConvergenceAsync(() => Volatile.Read(ref count) > 0); // initial eager advertisement
+        Assert.True(Volatile.Read(ref count) > 0);
         var baseline = Volatile.Read(ref count);
 
         // The publish is detached from the timer callback's flow, so each tick's advertisement
@@ -170,8 +172,10 @@ public class DistributedPackageTests
         export.StartHeartbeat(TimeSpan.FromSeconds(30), clock);
         clock.Advance(TimeSpan.FromSeconds(30));
         await TestHelpers.WaitForConvergenceAsync(() => Volatile.Read(ref count) == baseline + 1);
+        Assert.Equal(baseline + 1, Volatile.Read(ref count));
         clock.Advance(TimeSpan.FromSeconds(60));
         await TestHelpers.WaitForConvergenceAsync(() => Volatile.Read(ref count) == baseline + 3);
+        Assert.Equal(baseline + 3, Volatile.Read(ref count));
     }
 
     [Fact]
@@ -362,6 +366,7 @@ public class DistributedPackageTests
 
         await s.Set(2);
         await TestHelpers.WaitForConvergenceAsync(() => Volatile.Read(ref published) > 0);
+        Assert.True(Volatile.Read(ref published) > 0);
         Assert.Null(export.LastPublishError);
         Assert.True(await outbox.Get() >= 1);
     }
@@ -387,6 +392,115 @@ public class DistributedPackageTests
         var lazyRace = consumer.CreateConcurrentRace(() => mirror.Local.Get(), async (_, r) => r);
         using var lazyExport = consumer.Export(lazyRace, _ => Task.CompletedTask);
         await Assert.ThrowsAsync<InvalidOperationException>(() => lazyExport.PullAsync());
+    }
+
+    [Fact]
+    public async Task Export_Pull_RefreshesAStickyChainBehindARace()
+    {
+        // The sticky shape of Export_Pull_RefreshesAStickyUnverifiablePublication, one race
+        // deeper: the exported node is a ConcurrentRace over the memo that caught the fault. A
+        // race re-evaluates on every read, so it is never sticky ITSELF -- but its input is, and
+        // the refresh can only reach that input through the sources the race recorded.
+        var host = new MemoFactory();
+        var s = host.CreateSignal(1);
+        var trigger = host.CreateSignal(0);
+        var failing = false;
+        var m1 = host.CreateMemoizR("m1", async () =>
+        {
+            var v = await s.Get();
+            if (Volatile.Read(ref failing))
+            {
+                throw new InvalidOperationException("m1 source down");
+            }
+            return v - v + 11;
+        });
+        var m2 = host.CreateMemoizR("m2", async () =>
+        {
+            var t = await trigger.Get();
+            try
+            {
+                return t + await m1.Get() + 100;
+            }
+            catch (InvalidOperationException)
+            {
+                return 999;
+            }
+        });
+        var race = host.CreateConcurrentRace(() => m2.Get(), async (_, r) => r);
+        using var export = host.Export(race, _ => Task.CompletedTask);
+
+        Assert.Equal(111, await race.Get());
+        Assert.False((await export.PullAsync()).Unverifiable);
+
+        Volatile.Write(ref failing, true);
+        await s.Set(2);
+        await trigger.Set(1);
+        Assert.Equal(999, await race.Get());
+        Volatile.Write(ref failing, false);
+        await TestHelpers.WaitForConvergenceAsync(() => m2.Evidence.Unverifiable);
+        Assert.True(m2.Evidence.Unverifiable);
+
+        var payload = await export.PullAsync();
+        Assert.False(payload.Unverifiable);
+        Assert.Equal(112, payload.Value);
+
+        // And the race's own cell was never forced dirty: a later pull is one plain evaluation
+        // that answers the same verified truth, not a refresh round.
+        var again = await export.PullAsync();
+        Assert.False(again.Unverifiable);
+        Assert.Equal(112, again.Value);
+    }
+
+    private sealed class Box(int value)
+    {
+        public int Value { get; } = value; // deliberately no value equality
+    }
+
+    [Fact]
+    public async Task Barrier_WithAReRacingExport_OfReferencePayloads_StillAffirms()
+    {
+        // Barrier_WithAReRacingExport_StillAffirmsAndRenders with a payload type that has no
+        // value semantics: every re-race publishes a fresh object under a fresh sequence, so an
+        // affirmation keyed on value content could never be reached and the barrier would
+        // re-pull forever. Affirmation is keyed on the EVIDENCE the hosts re-affirm instead.
+        var host = new MemoFactory();
+        var s = host.CreateSignal(4);
+        var race = host.CreateConcurrentRace(s.Get, async (_, r) => new Box(r));
+        var half = host.CreateMemoizR("half", async () => await s.Get() / 2);
+        var c = host.CreateMemoizR("c", async () => await half.Get() * 10);
+        using var raceExport = host.Export(race, _ => Task.CompletedTask);
+        using var cExport = host.Export(c, _ => Task.CompletedTask);
+
+        var consumer = new MemoFactory();
+        var raceMirror = consumer.CreateRemoteSignal("race", new Box(0), raceExport.PullAsync);
+        var cMirror = consumer.CreateRemoteSignal("c", 0, cExport.PullAsync);
+
+        var renders = new ConcurrentQueue<(int Race, int C)>();
+        var reaction = DistributedBarrier.CreateConsistentReaction(
+            consumer, raceMirror, cMirror, (box, v) => renders.Enqueue((box.Value, v)));
+
+        await raceMirror.PullAsync();
+        await cMirror.PullAsync();
+        await TestHelpers.WaitForConvergenceAsync(() => renders.Contains((4, 20)));
+        Assert.Contains((4, 20), renders);
+
+        await s.Set(5);
+        await raceMirror.PullAsync();
+        await TestHelpers.WaitForConvergenceAsync(() => renders.Contains((5, 20)));
+        Assert.Contains((5, 20), renders);
+        GC.KeepAlive(reaction);
+    }
+
+    [Fact]
+    public void Export_StartHeartbeat_AfterDispose_IsRefused()
+    {
+        // A heartbeat started after Dispose would leak a live timer advertising a node its
+        // owner believes is gone.
+        var host = new MemoFactory();
+        var s = host.CreateSignal(1);
+        var export = host.Export(s, _ => Task.CompletedTask);
+        export.Dispose();
+        Assert.Throws<ObjectDisposedException>(() => export.StartHeartbeat(TimeSpan.FromSeconds(1)));
     }
 
     // ── consumer side: adoption ordering ─────────────────────────────────────────────────
@@ -591,6 +705,7 @@ public class DistributedPackageTests
         await dewMirror.PullAsync();
         await heatMirror.PullAsync();
         await TestHelpers.WaitForConvergenceAsync(() => renders.Contains((15.0, 25.0)));
+        Assert.Contains((15.0, 25.0), renders);
 
         // The write; only dew's fresh publication is delivered -- heat is now lagging.
         await temperature.Set(30.0);
@@ -598,6 +713,7 @@ public class DistributedPackageTests
 
         // The barrier re-pulls heat itself and renders the healed snapshot.
         await TestHelpers.WaitForConvergenceAsync(() => renders.Contains((25.0, 35.0)));
+        Assert.Contains((25.0, 35.0), renders);
 
         // The torn pairs (fresh dew with stale heat, or the reverse) must never have rendered.
         Assert.DoesNotContain((25.0, 25.0), renders);
@@ -777,6 +893,7 @@ public class DistributedPackageTests
         // commits, and hook 1 blocks -- the resubscription window is open.
         var delivery = mirror.OnValueAsync(Payload(Epoch2, 1, 222));
         await TestHelpers.WaitForConvergenceAsync(() => Volatile.Read(ref hookRuns) == 1);
+        Assert.Equal(1, Volatile.Read(ref hookRuns));
 
         // Second restart mid-resubscription: its single-shot delivery is refused (and no
         // second hook starts -- windows are single-flight), but remembered.
@@ -790,6 +907,7 @@ public class DistributedPackageTests
         // Closing the window verifies the refused epoch change by pull and adopts the live
         // incarnation, running its hook in sequence.
         await TestHelpers.WaitForConvergenceAsync(() => Volatile.Read(ref hookRuns) == 2);
+        Assert.Equal(2, Volatile.Read(ref hookRuns));
         Assert.Equal(Epoch3, mirror.Publication!.Epoch);
         Assert.Equal(333, await mirror.Local.Get());
     }
@@ -905,6 +1023,7 @@ public class DistributedPackageTests
 
         var delivery = mirror.OnValueAsync(Payload(Epoch2, 1, 222));
         await TestHelpers.WaitForConvergenceAsync(() => Volatile.Read(ref hookRuns) == 1);
+        Assert.Equal(1, Volatile.Read(ref hookRuns));
 
         // A pull issued inside the window, still awaiting its answer when the hook fails.
         var windowPull = mirror.PullAsync();
@@ -962,6 +1081,7 @@ public class DistributedPackageTests
         // First restart: the verification pull commits Epoch2, hook 1 blocks (window open).
         var delivery = mirror.OnValueAsync(Payload(Epoch2, 1, 222));
         await TestHelpers.WaitForConvergenceAsync(() => Volatile.Read(ref hookRuns) == 1);
+        Assert.Equal(1, Volatile.Read(ref hookRuns));
         var pullsBeforeAdvert = Volatile.Read(ref pulls);
 
         // The second restart's single-shot advertisement mid-window: remembered, NOT chased.
@@ -973,6 +1093,7 @@ public class DistributedPackageTests
 
         // The close's verification pull runs on the repaired channel and adopts the live epoch.
         await TestHelpers.WaitForConvergenceAsync(() => mirror.Publication?.Epoch == Epoch3);
+        Assert.Equal(Epoch3, mirror.Publication?.Epoch);
         Assert.Equal(333, await mirror.Local.Get());
     }
 
@@ -1009,6 +1130,7 @@ public class DistributedPackageTests
 
         var delivery = mirror.OnValueAsync(Payload(Epoch2, 1, 222));
         await TestHelpers.WaitForConvergenceAsync(() => Volatile.Read(ref hookRuns) == 1);
+        Assert.Equal(1, Volatile.Read(ref hookRuns));
 
         // A third incarnation's one-shot delivery is refused mid-window and remembered.
         await mirror.OnValueAsync(Payload(Epoch3, 1, 333));
@@ -1018,6 +1140,7 @@ public class DistributedPackageTests
 
         // The queued verification adopts Epoch3; its hook throws; the failure is recorded.
         await TestHelpers.WaitForConvergenceAsync(() => mirror.LastBackgroundError is InvalidOperationException);
+        Assert.True(mirror.LastBackgroundError is InvalidOperationException);
         Assert.Equal(Epoch3, mirror.Publication!.Epoch);
         Assert.Equal(333, await mirror.Local.Get());
     }
@@ -1054,6 +1177,7 @@ public class DistributedPackageTests
 
         var delivery = mirror.OnValueAsync(Payload(Epoch2, 1, 222));
         await TestHelpers.WaitForConvergenceAsync(() => Volatile.Read(ref hookRuns) == 1);
+        Assert.Equal(1, Volatile.Read(ref hookRuns));
 
         // A second restart's one-shot delivery is refused during the window...
         await mirror.OnValueAsync(Payload(Epoch3, 1, 333));
@@ -1199,12 +1323,14 @@ public class DistributedPackageTests
         await a.OnValueAsync(Payload(Epoch1, 1, 1));
         await b.OnValueAsync(new ValuePayload<int>(1001, Epoch1, 1, 2, CausalityStamp.ForSignal(1001, 1, Epoch1).Serialize(), false));
         await TestHelpers.WaitForConvergenceAsync(() => renders.Contains((1, 2)));
+        Assert.Contains((1, 2), renders);
 
         // The restart: only mirror a receives the new incarnation's (empty-stamped) truth.
         await a.OnValueAsync(new ValuePayload<int>(1000, Epoch2, 1, 10, CausalityStamp.Empty.Serialize(), false));
 
         // The barrier re-pulls both sides itself and renders the post-restart snapshot.
         await TestHelpers.WaitForConvergenceAsync(() => renders.Contains((10, 20)));
+        Assert.Contains((10, 20), renders);
 
         // Cross-incarnation mixes must never have rendered.
         Assert.DoesNotContain((10, 2), renders);
@@ -1241,6 +1367,7 @@ public class DistributedPackageTests
         await qMirror.PullAsync();
         await cMirror.PullAsync();
         await TestHelpers.WaitForConvergenceAsync(() => renders.Contains((4, 20)));
+        Assert.Contains((4, 20), renders);
 
         // s: 4 -> 5. q recomputes (4 -> 5, fresh stamp); half recomputes to the SAME 2, so c's
         // scan skips the recompute and keeps its old stamp and sequence. Deliver only q's
@@ -1248,6 +1375,7 @@ public class DistributedPackageTests
         await s.Set(5);
         await qMirror.PullAsync();
         await TestHelpers.WaitForConvergenceAsync(() => renders.Contains((5, 20)));
+        Assert.Contains((5, 20), renders);
 
         // The pair moves on with a REAL change (both sides advance consistently), which
         // expires the affirmation ...
@@ -1255,11 +1383,13 @@ public class DistributedPackageTests
         await qMirror.PullAsync();
         await cMirror.PullAsync();
         await TestHelpers.WaitForConvergenceAsync(() => renders.Contains((6, 30)));
+        Assert.Contains((6, 30), renders);
 
         // ... and a NEW under-claim glitch earns its own heal round and still converges.
         await s.Set(7); // half stays 3: c scan-skips again
         await qMirror.PullAsync();
         await TestHelpers.WaitForConvergenceAsync(() => renders.Contains((7, 30)));
+        Assert.Contains((7, 30), renders);
         GC.KeepAlive(reaction);
     }
 
@@ -1289,6 +1419,7 @@ public class DistributedPackageTests
         await raceMirror.PullAsync();
         await cMirror.PullAsync();
         await TestHelpers.WaitForConvergenceAsync(() => renders.Contains((4, 20)));
+        Assert.Contains((4, 20), renders);
 
         // s: 4 -> 5. The race re-evaluates to 5 with a fresh stamp; c's scan-skip keeps its
         // old stamp. Deliver only the race's update: a spurious glitch whose every re-pull of
@@ -1296,6 +1427,7 @@ public class DistributedPackageTests
         await s.Set(5);
         await raceMirror.PullAsync();
         await TestHelpers.WaitForConvergenceAsync(() => renders.Contains((5, 20)));
+        Assert.Contains((5, 20), renders);
         GC.KeepAlive(reaction);
     }
 
@@ -1327,11 +1459,13 @@ public class DistributedPackageTests
         await dewMirror.PullAsync();
         await heatMirror.PullAsync();
         await TestHelpers.WaitForConvergenceAsync(() => renders.Contains((15.0, 25.0)));
+        Assert.Contains((15.0, 25.0), renders);
 
         await temperature.Set(30.0);
         await dewMirror.OnValueAsync(await dewExport.PullAsync());
 
         await TestHelpers.WaitForConvergenceAsync(() => renders.Contains((25.0, 35.0)));
+        Assert.Contains((25.0, 35.0), renders);
         Assert.Contains(reported, ex => ex is InvalidOperationException { Message: "glitch sink down" });
         GC.KeepAlive(reaction);
     }
@@ -1359,6 +1493,7 @@ public class DistributedPackageTests
         // The heal: b's host publishes verified again.
         await b.OnValueAsync(new ValuePayload<int>(1001, epoch, 2, 3, CausalityStamp.ForSignal(1001, 1, epoch).Serialize(), false));
         await TestHelpers.WaitForConvergenceAsync(() => Volatile.Read(ref renders) > 0);
+        Assert.True(Volatile.Read(ref renders) > 0);
         GC.KeepAlive(reaction);
     }
 }

@@ -14,8 +14,10 @@ public sealed class ExportedNode<T> : IDisposable
 {
     private readonly MemoHandlR<T> node;
     private readonly Func<StaleNotification, Task> publishStale;
+    private readonly object lifecycle = new();
     private Reaction? exportReaction;
     private ITimer? heartbeat;
+    private bool disposed;
     private volatile Exception? lastPublishError;
 
     /// <summary>The exported node's stable per-context id (what consumers key mirrors by).</summary>
@@ -102,7 +104,7 @@ public sealed class ExportedNode<T> : IDisposable
         {
             using (await scope.ContextLock.ExclusiveLockAsync())
             {
-                await InvalidateUnverifiableChainAsync(handle);
+                await InvalidateUnverifiableChainAsync(handle, visited: []);
             }
         }
         finally
@@ -111,8 +113,12 @@ public sealed class ExportedNode<T> : IDisposable
         }
     }
 
-    private static async Task InvalidateUnverifiableChainAsync(SignalHandlR handle)
+    private static async Task InvalidateUnverifiableChainAsync(SignalHandlR handle, HashSet<SignalHandlR> visited)
     {
+        if (!visited.Add(handle))
+        {
+            return; // a diamond shares its sources; once is enough
+        }
         foreach (var source in handle.Sources)
         {
             // Recurse into unverifiable sources AND non-clean ones: a dependency whose
@@ -127,10 +133,17 @@ public sealed class ExportedNode<T> : IDisposable
             if (source is SignalHandlR sourceHandle
                 && (sourceHandle.Evidence.Unverifiable || sourceHandle.stateCell.State != CacheState.CacheClean))
             {
-                await InvalidateUnverifiableChainAsync(sourceHandle);
+                await InvalidateUnverifiableChainAsync(sourceHandle, visited);
             }
         }
-        await handle.InvalidateAndPropagateAsync(CacheState.CacheDirty);
+        // Through the node's OWN staleness entry, not the shared cell: a ConcurrentRace keeps
+        // its inherited cell deliberately unused (it re-evaluates on every read), and forcing
+        // that cell dirty would never be undone -- every later pull would take this refresh and
+        // evaluate the race twice. Signals never reach here (never unverifiable, never non-clean).
+        if (handle is IMemoizR node)
+        {
+            await node.Stale(CacheState.CacheDirty);
+        }
     }
 
     /// <summary>
@@ -160,20 +173,29 @@ public sealed class ExportedNode<T> : IDisposable
     public void StartHeartbeat(TimeSpan period, TimeProvider? timeProvider = null)
     {
         ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(period, TimeSpan.Zero);
-        if (heartbeat != null)
-        {
-            throw new InvalidOperationException("The heartbeat is already running.");
-        }
-
         var provider = timeProvider ?? TimeProvider.System;
-        heartbeat = provider.CreateTimer(_ => NotifyStale(), null, period, period);
+        // Serialized with Dispose: a heartbeat started after (or racing) the dispose would
+        // otherwise leak a live timer advertising a node its owner believes is gone.
+        lock (lifecycle)
+        {
+            ObjectDisposedException.ThrowIf(disposed, this);
+            if (heartbeat != null)
+            {
+                throw new InvalidOperationException("The heartbeat is already running.");
+            }
+            heartbeat = provider.CreateTimer(_ => NotifyStale(), null, period, period);
+        }
     }
 
     public void Dispose()
     {
-        heartbeat?.Dispose();
-        heartbeat = null;
-        exportReaction?.Dispose();
-        exportReaction = null;
+        lock (lifecycle)
+        {
+            disposed = true;
+            heartbeat?.Dispose();
+            heartbeat = null;
+            exportReaction?.Dispose();
+            exportReaction = null;
+        }
     }
 }

@@ -33,7 +33,15 @@ internal static class DetachedFlow
         }
         catch (Exception ex)
         {
-            onError(ex);
+            try
+            {
+                onError(ex);
+            }
+            catch
+            {
+                // The sink is diagnostics (a logger that is itself down): letting it fault the
+                // detached task would only turn the failure into an unobserved exception.
+            }
         }
     }
 }

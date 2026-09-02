@@ -29,48 +29,31 @@ internal static class MirrorLocals
 
     // Whether the node is a mirror local or (transitively) depends on one: a memo built over a
     // mirror carries stamps captured from the consumer-local trigger, so re-exporting it is
-    // the same unsoundness one hop removed. Walks the CURRENT wiring from both ends: a memo
-    // wires source up-links, but a ConcurrentRace wires observer down-links only (its update
-    // never populates its own Sources), so the source walk alone cannot see through a race. A
-    // lazy memo has no wiring until its first evaluation, which is why the pull re-checks at
-    // the wire egress. A pure host (no mirror ever created) pays one field read per pull.
+    // the same unsoundness one hop removed. Walks the CURRENT source wiring, which every
+    // derived node type keeps (a ConcurrentRace records the sources all its branches read); a
+    // lazy memo has none until its first evaluation, which is why the pull re-checks at the
+    // wire egress. A pure host (no mirror ever created) pays one field read per pull.
     internal static bool TouchesMirrorLocal(SignalHandlR node) =>
-        anyRegistered
-        && (IsMirrorLocal(node)
-            || Reaches([node], n => n.Sources.OfType<SignalHandlR>(), IsMirrorLocal)
-            || Reaches(Registry.Select(entry => entry.Key), Observed, n => ReferenceEquals(n, node)));
+        anyRegistered && (IsMirrorLocal(node) || DependsOnMirrorLocal(node));
 
-    private static IEnumerable<SignalHandlR> Observed(SignalHandlR node)
-    {
-        foreach (var weak in node.Observers)
-        {
-            if (weak.TryGetTarget(out var observer) && observer is SignalHandlR handle)
-            {
-                yield return handle;
-            }
-        }
-    }
-
-    private static bool Reaches(
-        IEnumerable<SignalHandlR> seeds,
-        Func<SignalHandlR, IEnumerable<SignalHandlR>> next,
-        Func<SignalHandlR, bool> hit)
+    private static bool DependsOnMirrorLocal(SignalHandlR node)
     {
         var visited = new HashSet<SignalHandlR>();
-        var pending = new Stack<SignalHandlR>(seeds);
+        var pending = new Stack<SignalHandlR>();
+        pending.Push(node);
         while (pending.TryPop(out var current))
         {
-            foreach (var neighbour in next(current))
+            foreach (var source in current.Sources)
             {
-                if (!visited.Add(neighbour))
+                if (source is not SignalHandlR handle || !visited.Add(handle))
                 {
                     continue;
                 }
-                if (hit(neighbour))
+                if (IsMirrorLocal(handle))
                 {
                     return true;
                 }
-                pending.Push(neighbour);
+                pending.Push(handle);
             }
         }
         return false;
