@@ -672,6 +672,11 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         HashSet<IMethodSymbol>? visitedGetters = null,
         Dictionary<IParameterSymbol, IOperation>? argumentMap = null)
     {
+        if (IsNestedPatchReceiver(operation))
+        {
+            return;
+        }
+
         switch (operation)
         {
             case ILocalReferenceOperation local when IsSharedCapture(local.Local, scope, patchScope):
@@ -858,6 +863,11 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         IOperation operation,
         HashSet<ISymbol> reported)
     {
+        if (IsNestedPatchReceiver(operation))
+        {
+            return;
+        }
+
         switch (operation)
         {
             case IFieldReferenceOperation { Field: { IsStatic: true, IsConst: false } } staticField:
@@ -1968,6 +1978,28 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
     private static bool IsSettable(IPropertySymbol property)
     {
         return property.SetMethod is { IsInitOnly: false } || property.RefKind == RefKind.Ref;
+    }
+
+    // The RECEIVER of a method-group patch handed to a NESTED Apply (`ctx.Apply(state,
+    // helper.Patch)` built inside a patch): that Apply's own analysis gives it the
+    // method-group receiver verdict, so reporting it here too would double every such
+    // receiver. Only the receiver node itself is exempt -- what it EXECUTES (a call, the
+    // reads inside it) is still this walk's, exactly like a nested lambda's construction.
+    private static bool IsNestedPatchReceiver(IOperation operation)
+    {
+        if (operation.Parent is not IMethodReferenceOperation { Parent: IDelegateCreationOperation creation } reference
+            || !ReferenceEquals(reference.Instance, operation))
+        {
+            return false;
+        }
+
+        IOperation? current = creation.Parent;
+        while (current is IConversionOperation)
+        {
+            current = current.Parent;
+        }
+
+        return current is IArgumentOperation { Parent: IInvocationOperation host } && FactoryMethods.IsOptimisticPatchHost(host.TargetMethod);
     }
 
     // True when the reference is the receiver of a member read InspectCapture handles itself:

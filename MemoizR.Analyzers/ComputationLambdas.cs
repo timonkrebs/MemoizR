@@ -1468,8 +1468,10 @@ internal static class ComputationLambdas
     }
 
     // The storage a ref local ALIASES, through `= ref` initializer chains: `ref int alias =
-    // ref shared; alias++` writes shared. Null for anything but a ref local (the visited set
-    // bounds error-code cycles). The operation-level twin of WritesVariable's alias walk.
+    // ref shared; alias++` writes shared. Null for anything but a ref local, and for an alias
+    // ref-REASSIGNED anywhere (`alias = ref other`), which names no single referent (the
+    // visited set bounds error-code cycles). The operation-level twin of WritesVariable's
+    // alias walk.
     public static IOperation? RefAliasTarget(ILocalReferenceOperation reference)
     {
         IOperation? current = reference;
@@ -1478,13 +1480,22 @@ internal static class ComputationLambdas
         {
             visited ??= new HashSet<ISymbol>(SymbolEqualityComparer.Default);
             current = visited.Add(local)
+                && alias.SemanticModel is { } semanticModel
+                && !IsRefReassigned(local, semanticModel)
                 && local.DeclaringSyntaxReferences.FirstOrDefault()?.GetSyntax()
                     is VariableDeclaratorSyntax { Initializer.Value: RefExpressionSyntax { Expression: { } referent } }
-                ? alias.SemanticModel?.GetOperation(referent)
+                ? semanticModel.GetOperation(referent)
                 : null;
         }
 
         return ReferenceEquals(current, reference) ? null : current;
+    }
+
+    private static bool IsRefReassigned(ILocalSymbol local, SemanticModel semanticModel)
+    {
+        return semanticModel.SyntaxTree.GetRoot().DescendantNodes().OfType<AssignmentExpressionSyntax>().Any(assignment =>
+            assignment.Right is RefExpressionSyntax
+            && SymbolEqualityComparer.Default.Equals(semanticModel.GetSymbolInfo(assignment.Left).Symbol, local));
     }
 
     // A method group (`f.CreateMemoizR(Compute)`) or local-function reference is as much a
@@ -1523,8 +1534,9 @@ internal static class ComputationLambdas
     // The unpruned walk for STORED-closure facts (MZR004's capture verdicts): a nested
     // computation host's delegate is still BUILT by this body, so what it captures is pinned
     // in this body's display chain even though the nested invocation's own analysis covers it
-    // for the mutation/Set rules. Only a nested OPTIMISTIC PATCH is skipped -- its own Apply
-    // analysis repeats exactly this capture walk on the same operations.
+    // for the mutation/Set rules. Only a nested OPTIMISTIC PATCH's delegate bodies are skipped
+    // -- its own Apply analysis repeats exactly this capture walk on the same operations (and
+    // gives a method-group patch's receiver its verdict; see MZR004's IsNestedPatchReceiver).
     public static IEnumerable<IOperation> DescendStoredClosure(IOperation root)
     {
         return Walk(root, FactoryMethods.IsOptimisticPatchHost, pruneFunctions: false);
@@ -1570,20 +1582,27 @@ internal static class ComputationLambdas
     // What the OUTER computation evaluates of a nested host's argument: an ordinary argument
     // entirely, and of a delegate argument its CONSTRUCTION -- a method group's receiver
     // (`CreateMemoizR(Get(++shared).Compute)` runs `Get` now), a params element built by a
-    // call (`CreateConcurrentMap(Make(v.Set(1)))`). Only the delegate BODIES are deferred,
-    // and those the nested invocation's own analysis covers.
+    // call (`CreateConcurrentMap(Make(v.Set(1)))`), a conditional's condition (a switch's
+    // value, patterns and guards) before whichever arm it picks. Only the delegate BODIES
+    // are deferred, and those the nested invocation's own analysis covers.
     private static IEnumerable<IOperation> NestedHostArgument(IOperation value, Func<IMethodSymbol, bool> isNestedHost, bool pruneFunctions)
     {
         return Unwrap(value) switch
         {
-            IDelegateCreationOperation { Target: IMethodReferenceOperation { Instance: { } receiver } }
-                => Walk(receiver, isNestedHost, pruneFunctions).Prepend(receiver),
+            IDelegateCreationOperation { Target: IMethodReferenceOperation { Instance: { } receiver } } => Evaluated(receiver),
             IDelegateCreationOperation => Enumerable.Empty<IOperation>(),
-            IArrayCreationOperation array => array.Initializer?.ElementValues
-                .SelectMany(element => NestedHostArgument(element, isNestedHost, pruneFunctions))
-                ?? Enumerable.Empty<IOperation>(),
-            _ => Walk(value, isNestedHost, pruneFunctions).Prepend(value),
+            IArrayCreationOperation array => array.Initializer?.ElementValues.SelectMany(Nested) ?? Enumerable.Empty<IOperation>(),
+            IConditionalOperation conditional => Evaluated(conditional.Condition).Concat(ConditionalArms(conditional)!.SelectMany(Nested)),
+            ICoalesceOperation coalesce => Nested(coalesce.Value).Concat(Nested(coalesce.WhenNull)),
+            ISwitchExpressionOperation switchExpression => Evaluated(switchExpression.Value).Concat(switchExpression.Arms.SelectMany(NestedArm)),
+            _ => Evaluated(value),
         };
+
+        IEnumerable<IOperation> Evaluated(IOperation operation) => Walk(operation, isNestedHost, pruneFunctions).Prepend(operation);
+        IEnumerable<IOperation> Nested(IOperation operation) => NestedHostArgument(operation, isNestedHost, pruneFunctions);
+        IEnumerable<IOperation> NestedArm(ISwitchExpressionArmOperation arm) => Evaluated(arm.Pattern)
+            .Concat(arm.Guard is { } guard ? Evaluated(guard) : Enumerable.Empty<IOperation>())
+            .Concat(Nested(arm.Value));
     }
 
     // "Captured" = declared outside the computation's declaring syntax (the lambda expression,

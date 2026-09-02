@@ -4593,10 +4593,10 @@ public class OptimisticPatchCaptureAnalyzerTests
     [Fact]
     public async Task SwitchExpressionPatch_ArmsAreWalked()
     {
-        // The Apply argument is a switch expression: every arm is a candidate closure, so the
-        // capture in one is reported and the safe arm does not trip the already-built report.
+        // The Apply argument is a target-typed switch expression: every arm is a candidate
+        // closure, so the capture in one is reported and the safe arm does not trip the
+        // already-built report.
         var diagnostics = await AnalyzeAsync("""
-            using System;
             using System.Collections.Generic;
             using MemoizR;
 
@@ -4611,7 +4611,7 @@ public class OptimisticPatchCaptureAnalyzerTests
                     {
                         await ctx.Apply(state, choose switch
                         {
-                            true => (Func<int, int>)(x => x + list.Count),
+                            true => x => x + list.Count,
                             _ => static x => x,
                         });
                     });
@@ -4762,5 +4762,83 @@ public class OptimisticPatchCaptureAnalyzerTests
         Assert.Equal("MZR004", diagnostic.Id);
         Assert.Contains("op_Addition", diagnostic.GetMessage());
         Assert.Contains("another file", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task NestedApplyMethodGroupReceiver_IsReportedOnce_ByTheNestedAnalysis()
+    {
+        // The outer patch builds `helper.Patch` for a nested Apply on every replay: the nested
+        // Apply's analysis reports the receiver (and walks the patch body), and the outer
+        // capture walk must not report the same receiver a second time. (`state` is the
+        // nested Apply's ordinary argument, captured by the outer patch as before.)
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class Helper
+            {
+                public List<int> Items = new();
+
+                public int Patch(int x) => x + Items.Count;
+            }
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    var helper = new Helper();
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x =>
+                        {
+                            _ = ctx.Apply(state, helper.Patch);
+                            return x;
+                        });
+                    });
+                }
+            }
+            """);
+
+        Assert.Equal(3, diagnostics.Length);
+        Assert.All(diagnostics, d => Assert.Equal("MZR004", d.Id));
+        Assert.Single(diagnostics, d => d.GetMessage().StartsWith("'helper' is captured"));
+        Assert.Single(diagnostics, d => d.GetMessage().StartsWith("'state' is captured"));
+        Assert.Single(diagnostics, d => d.GetMessage().StartsWith("'Items' is captured"));
+    }
+
+    [Fact]
+    public async Task NestedApplyConditionalPatch_ArmsAreReportedOnce_ByTheNestedAnalysis()
+    {
+        // A conditional patch handed to a nested Apply: the arms' closures belong to the
+        // nested Apply's analysis, so the outer capture walk stops at them.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M(bool flag)
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    var list = new List<int>();
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x =>
+                        {
+                            _ = ctx.Apply(state, flag ? (Func<int, int>)(y => y + list.Count) : static y => y);
+                            return x;
+                        });
+                    });
+                }
+            }
+            """);
+
+        Assert.Equal(2, diagnostics.Length);
+        Assert.Single(diagnostics, d => d.GetMessage().Contains("'list'"));
+        Assert.Single(diagnostics, d => d.GetMessage().Contains("'state'"));
     }
 }

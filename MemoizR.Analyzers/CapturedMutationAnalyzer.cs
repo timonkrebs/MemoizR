@@ -376,7 +376,8 @@ public sealed class CapturedMutationAnalyzer : DiagnosticAnalyzer
     {
         switch (operation)
         {
-            case ISimpleAssignmentOperation assignment:
+            // A ref REASSIGNMENT (`alias = ref other`) rebinds the alias and writes nothing.
+            case ISimpleAssignmentOperation { IsRef: false } assignment:
                 return ImmutableArray.Create(assignment.Target);
             case ICompoundAssignmentOperation compound:
                 return ImmutableArray.Create(compound.Target);

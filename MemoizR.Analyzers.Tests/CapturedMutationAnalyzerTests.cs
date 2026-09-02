@@ -1714,4 +1714,101 @@ public class CapturedMutationAnalyzerTests
         Assert.Equal("MZR002", diagnostic.Id);
         Assert.Contains("static field 'hits'", diagnostic.GetMessage());
     }
+
+    [Fact]
+    public async Task NestedConditionalHost_IsReportedOnce_ByItsOwnAnalysis()
+    {
+        // The nested creation's computation is picked by a ternary: the outer walk evaluates
+        // the condition but must stop at the arms' bodies, which belong to the nested
+        // invocation's own analysis -- one report, not two.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using System.Threading.Tasks;
+            using MemoizR;
+
+            public class C
+            {
+                public void M(bool flag)
+                {
+                    var f = new MemoFactory();
+                    int counter = 0;
+                    f.CreateMemoizR(async () =>
+                    {
+                        var inner = f.CreateMemoizR(flag
+                            ? (Func<Task<int>>)(async () => { counter++; return 1; })
+                            : async () => 2);
+                        return await inner.Get();
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Contains("captured local 'counter'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task NestedConditionalHostsCondition_IsEvaluatedByTheOuterComputation()
+    {
+        // The condition itself runs on the outer computation's flow before either arm is
+        // built: a write inside it is the outer computation's mutation.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using System.Threading.Tasks;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    int counter = 0;
+                    f.CreateMemoizR(async () =>
+                    {
+                        var inner = f.CreateMemoizR(++counter > 1
+                            ? (Func<Task<int>>)(async () => 1)
+                            : async () => 2);
+                        return await inner.Get();
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Contains("captured local 'counter'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task RefReassignedAlias_IsNotResolvedToItsInitializer()
+    {
+        // `alias = ref local` rebinds the alias (it writes nothing), and after it the alias
+        // no longer names its initializer's referent: the increment lands on the patch's own
+        // local, so nothing shared is written.
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    int shared = 0;
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x =>
+                        {
+                            int local = 0;
+                            ref int alias = ref shared;
+                            alias = ref local;
+                            alias++;
+                            return x + local;
+                        });
+                    });
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
 }
