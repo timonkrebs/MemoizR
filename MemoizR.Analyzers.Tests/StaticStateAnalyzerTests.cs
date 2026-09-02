@@ -626,4 +626,50 @@ public class StaticStateAnalyzerTests
 
         Assert.Empty(diagnostics);
     }
+
+
+    [Fact]
+    public async Task GlobalAliasDirectives_DoNotActivateOtherFiles()
+    {
+        // `global using Factory = MemoizR.MemoFactory;` names ONE type; it does not put the
+        // namespace in scope for every file the way `global using MemoizR;` does, so a file
+        // that never mentions MemoizR stays outside the mandate.
+        var diagnostics = await AnalyzerTestHarness.AnalyzeAsync(
+            new[]
+            {
+                """
+                global using Factory = MemoizR.MemoFactory;
+                """,
+                """
+                public class Unrelated
+                {
+                    public static int Anything;
+                }
+                """,
+            },
+            new StaticStateAnalyzer());
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task PerFileAliasDirectives_StillActivateTheirOwnFile()
+    {
+        // A file that aliases a MemoizR type uses MemoizR: its statics are in the mandate.
+        var diagnostics = await AnalyzeAsync("""
+            using Factory = MemoizR.MemoFactory;
+
+            public class C
+            {
+                public static int Anything;
+
+                public void M()
+                {
+                    var f = new Factory();
+                }
+            }
+            """);
+
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR004");
+    }
 }

@@ -49,7 +49,10 @@ public sealed class StaticStateAnalyzer : DiagnosticAnalyzer
             // scan per compilation, computed lazily on the first static symbol seen.
             var compilation = compilationStart.Compilation;
             var hasGlobalMemoizRUsing = new System.Lazy<bool>(() =>
-                compilation.SyntaxTrees.Any(tree => MemoizRUsingsIn(tree).Any(directive => directive.GlobalKeyword != default)));
+                compilation.SyntaxTrees.Any(tree => MemoizRUsingsIn(tree).Any(directive => directive.GlobalKeyword != default
+                    // `global using Factory = MemoizR.MemoFactory;` names ONE type: it does not
+                    // put the namespace in scope for files that never mention MemoizR.
+                    && directive.Alias is null)));
 
             compilationStart.RegisterSymbolAction(
                 symbolContext => Analyze(symbolContext, classifier, treeUsesMemoizR, hasGlobalMemoizRUsing),

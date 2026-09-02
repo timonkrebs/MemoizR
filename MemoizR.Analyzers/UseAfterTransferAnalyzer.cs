@@ -249,6 +249,10 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             yield break;
         }
 
+        // A callee that never completes normally after its handoff turns each call into a
+        // THROWN transfer: only the caller's handlers and finallys observe it.
+        var calleeExits = CalleeCannotReturnAfter(transferBody, anchor.Syntax.Span.End);
+
         foreach (var invocation in block.DescendantsAndSelf().OfType<IInvocationOperation>())
         {
             if (!InvokesTheBody(invocation, transferBody, functionSymbol, anchor, block))
@@ -269,15 +273,58 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                 continue; // self-recursion: the body scan already covers it
             }
 
-            foreach (var entry in CallSiteEntries(invocation, callBody, variable, functionSymbol, block, classifier, visited))
+            foreach (var entry in CallSiteEntries(invocation, callBody, variable, functionSymbol, block, classifier, visited, calleeExits))
             {
                 yield return entry;
             }
         }
     }
 
+    // Whether the body never completes normally once the handoff ran: an uncaught throw on
+    // the transfer's own conditional level, with no return/break/continue/goto able to leave
+    // before it. Judged one level deep -- a caller of such a callee is read from its own body.
+    private static bool CalleeCannotReturnAfter(IOperation body, int transferPosition)
+    {
+        var later = body.DescendantsAndSelf()
+            .Where(operation => operation.Syntax.SpanStart >= transferPosition && !IsWithinANestedFunction(operation, body))
+            .ToList();
+        var exit = later.FirstOrDefault(operation => operation is IThrowOperation
+            && IsOnTheTransfersConditionalLevel(operation, transferPosition)
+            && !MayBeCaughtWithin(operation, body));
+        return exit is not null
+            && !later.Any(operation => operation.Syntax.SpanStart < exit.Syntax.SpanStart
+                && operation is IReturnOperation or IBranchOperation);
+    }
+
+    // The regions a thrown call of unknowable exception type is observable from: the
+    // handlers and finallys of the enclosing tries -- and, when a catch-everything resumes,
+    // the continuation after that try (the call is then an ordinary transfer again).
+    private static (List<IOperation> Roots, bool Escaped) ThrowingCallRoots(IInvocationOperation invocation, IOperation scope)
+    {
+        var roots = new List<IOperation>();
+        for (IOperation child = invocation; child.Parent is { } parent && !ReferenceEquals(parent, scope); child = parent)
+        {
+            if (IsNestedFunction(parent))
+            {
+                break;
+            }
+
+            if (parent is ITryOperation tryOperation)
+            {
+                AddHandlerRoots(roots, tryOperation, child, escapedByThrow: true);
+                if (ReferenceEquals(child, tryOperation.Body) && HasAbsorbingCatch(tryOperation, CatchesEverything))
+                {
+                    roots.Add(scope);
+                    return (roots, false);
+                }
+            }
+        }
+
+        return (roots, true);
+    }
+
     private static IEnumerable<TransferEntry> CallSiteEntries(
-        IInvocationOperation invocation, IOperation callBody, ISymbol variable, IMethodSymbol functionSymbol, IOperation block, SendableSymbolClassifier classifier, HashSet<IMethodSymbol> visited)
+        IInvocationOperation invocation, IOperation callBody, ISymbol variable, IMethodSymbol functionSymbol, IOperation block, SendableSymbolClassifier classifier, HashSet<IMethodSymbol> visited, bool calleeExits)
     {
         foreach (var callVariable in CallSiteVariables(invocation, variable, functionSymbol, classifier))
         {
@@ -291,7 +338,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                 continue;
             }
 
-            var (roots, escaped) = ScanRootsFor(invocation, callBody);
+            var (roots, escaped) = calleeExits ? ThrowingCallRoots(invocation, callBody) : ScanRootsFor(invocation, callBody);
             if (roots.Count > 0)
             {
                 yield return new TransferEntry(callVariable, invocation, roots, escaped, callBody);
@@ -570,9 +617,15 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             // Tuple.Create(list) is the constructor spelling of a framework value carrier,
             // and the immutable/frozen collection factories' Create store their ARGUMENTS
             // as elements the same way (ImmutableArray.Create(list) retains the list).
+            // An EXISTING array handed to the params overload is copied element by element
+            // (the array object is not retained); the compiler-built param array of the
+            // expanded form carries its elements like any inline container.
             IInvocationOperation { TargetMethod: { Name: "Create", ContainingType: { } factory } } factoryCall
                 when IsACarrierFactory(factory) =>
-                factoryCall.Arguments.Select(argument => (IOperation?)argument.Value),
+                factoryCall.Arguments.SelectMany(argument =>
+                    argument is { ArgumentKind: ArgumentKind.Explicit, Parameter.IsParams: true }
+                        ? CopiedElementParts(argument.Value)
+                        : new[] { (IOperation?)argument.Value }),
             // CreateRange, ToImmutable*/ToFrozen* and LINQ's ToArray/ToList/ToHashSet copy the
             // ELEMENTS out of their source: the source object is never retained (a variable
             // contributes nothing), but an inline container's elements reach the receiver --
@@ -580,6 +633,12 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             IInvocationOperation { TargetMethod: { ContainingType: { } copier } method } copyCall
                 when IsACopyingFactory(method, copier) =>
                 copyCall.Arguments.SelectMany(argument => CopiedElementParts(argument.Value)),
+            // A framework VIEW (list.AsReadOnly(), Where(...), AsEnumerable(), array.AsMemory())
+            // reads through its source on the receiver's schedule -- nothing was copied out --
+            // so the receiver and every retained argument ride along.
+            IInvocationOperation { TargetMethod: { ContainingType: { } viewSource } viewMethod } view
+                when IsAFrameworkView(viewMethod, viewSource) =>
+                new[] { (IOperation?)view.Instance }.Concat(view.Arguments.Select(argument => (IOperation?)argument.Value)),
             // Transfer([list]): matched by SYNTAX -- ICollectionExpressionOperation is not
             // public in the Roslyn this analyzer compiles against, but the children are
             // walkable regardless.
@@ -617,7 +676,19 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         return (method.Name == "CreateRange" && immutableFactory)
             || method.Name.StartsWith("ToImmutable", StringComparison.Ordinal)
             || method.Name.StartsWith("ToFrozen", StringComparison.Ordinal)
-            || (copier.Name == "Enumerable" && method.Name is "ToArray" or "ToList" or "ToHashSet");
+            || (copier.Name == "Enumerable" && method.Name is "ToArray" or "ToList" or "ToHashSet" or "ToDictionary" or "ToLookup");
+    }
+
+    // A framework method whose result is a live view over what it was handed: it returns an
+    // interface (IEnumerable<T>, IReadOnlyList<T>, IEnumerator<T>, ...) or a known view type
+    // rather than a collection of its own -- the materializers above are checked first.
+    private static bool IsAFrameworkView(IMethodSymbol method, INamedTypeSymbol source)
+    {
+        return IsFrameworkDeclared(source)
+            && method.ReturnType is INamedTypeSymbol returned
+            && (returned.TypeKind == TypeKind.Interface
+                || returned.OriginalDefinition.Name is "ReadOnlyCollection" or "ReadOnlyDictionary" or "ReadOnlyObservableCollection"
+                    or "Memory" or "ReadOnlyMemory" or "ArraySegment");
     }
 
     // Where the sender-side scan looks. Normally the whole scope; a transfer the flow
@@ -1369,7 +1440,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         if (type.ContainingAssembly?.Identity.Name is
             "System.Runtime" or "System.Collections" or "System.Collections.Concurrent"
             or "System.Collections.Immutable" or "System.Collections.Specialized"
-            or "System.Collections.NonGeneric" or "netstandard" or "mscorlib")
+            or "System.Collections.NonGeneric" or "System.Linq" or "netstandard" or "mscorlib")
         {
             return true;
         }

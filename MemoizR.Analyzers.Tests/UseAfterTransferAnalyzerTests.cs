@@ -4717,4 +4717,178 @@ public class UseAfterTransferAnalyzerTests
 
         Assert.Empty(diagnostics);
     }
+
+
+    [Fact]
+    public async Task FrameworkViews_RetainTheirSource()
+    {
+        // ReadOnlyCollection<T> is a VIEW over the list: the receiver reads through it while
+        // the sender's later Add races with that read.
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(list.AsReadOnly());
+                    list.Add(1);
+                }
+            """);
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task LazyLinqViews_RetainTheirSource()
+    {
+        // Where(...) enumerates the list on the receiver's schedule: nothing was copied out.
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(list.Where(x => x > 0));
+                    list.Add(1);
+                }
+            """, "using System.Collections.Generic;\nusing System.Linq;\nusing MemoizR;");
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task Materializers_CopyTheirSource()
+    {
+        // ToArray() copies the elements out: the array the receiver owns shares nothing
+        // with the list the sender keeps mutating.
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(list.ToArray());
+                    list.Add(1);
+                }
+            """, "using System.Collections.Generic;\nusing System.Linq;\nusing MemoizR;");
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task NonReturningCallees_DoNotPropagateTheTransfer()
+    {
+        // Move never completes normally after its handoff: no path runs the caller's
+        // continuation after the transfer, so the later Add is unreachable on that path.
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    void Move()
+                    {
+                        var sending = Sending.Transfer(list);
+                        throw new Exception();
+                    }
+
+                    Move();
+                    list.Add(1);
+                }
+            """, WithSystem);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task NonReturningCallees_InsideAnAbsorbingCatch_StillPropagate()
+    {
+        // The caller swallows the failure and resumes after the try: the transferred list
+        // is still what the continuation sees.
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    void Move()
+                    {
+                        var sending = Sending.Transfer(list);
+                        throw new Exception();
+                    }
+
+                    try
+                    {
+                        Move();
+                    }
+                    catch
+                    {
+                    }
+
+                    list.Add(1);
+                }
+            """, WithSystem);
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task ConditionallyThrowingCallees_StillPropagate()
+    {
+        // The throw is one path; the other completes the call normally with the handoff
+        // done.
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    void Move(bool fail)
+                    {
+                        var sending = Sending.Transfer(list);
+                        if (fail)
+                        {
+                            throw new Exception();
+                        }
+                    }
+
+                    Move(false);
+                    list.Add(1);
+                }
+            """, WithSystem);
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task ParamsArrayArguments_AreCopiedSources()
+    {
+        // An EXISTING array handed to the params overload is copied element by element: the
+        // array object itself is not retained, so a later slot write cannot reach the
+        // receiver's immutable array.
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var items = new[] { 1, 2 };
+                    var sending = Sending.Transfer(ImmutableArray.Create(items));
+                    items[0] = 2;
+                }
+            """, "using System.Collections.Immutable;\nusing MemoizR;");
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task ExpandedParamsElements_AreStillCarried()
+    {
+        // Five arguments bind to the params overload in EXPANDED form: each element is
+        // stored by reference, exactly like the fixed-arity overloads store theirs.
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var a = new List<int> { 1 };
+                    var b = new List<int>();
+                    var c = new List<int>();
+                    var d = new List<int>();
+                    var e = new List<int>();
+                    var sending = Sending.Transfer(ImmutableArray.Create(a, b, c, d, e));
+                    a.Add(1);
+                }
+            """, "using System.Collections.Generic;\nusing System.Collections.Immutable;\nusing MemoizR;");
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'a'", diagnostic.GetMessage());
+    }
 }
