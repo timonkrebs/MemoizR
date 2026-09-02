@@ -5049,4 +5049,32 @@ public class UseAfterTransferAnalyzerTests
 
         AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
+
+    [Fact]
+    public async Task ConstructorInitializerTransfers_ReachTheBody()
+    {
+        // `: base(Sending.Transfer(list))` runs before the constructor body: the body's use
+        // follows the handoff even though Roslyn hands the initializer and the body to the
+        // analyzer as separate operation blocks.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class B
+            {
+                public B(Sending<List<int>> sending) { }
+            }
+
+            public class D : B
+            {
+                public D(List<int> list) : base(Sending.Transfer(list))
+                {
+                    list.Add(1);
+                }
+            }
+            """);
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
 }

@@ -415,6 +415,21 @@ public class StrictSendableModeTests
     }
 
     [Fact]
+    public void StrictFactory_RejectsMutableTypes_OnTheActorAndProcessLayerNodesToo()
+    {
+        var f = new MemoFactory(options: MemoFactoryOptions.StrictSendableChecks);
+        var lax = new MemoFactory(options: MemoFactoryOptions.DisableSendableChecks);
+        var source = lax.CreateSignal(new List<int>());
+
+        Assert.Throws<InvalidOperationException>(() => f.CreateActorSignal(new List<int>()));
+        Assert.Throws<InvalidOperationException>(() => f.CreateActorMemoizR(async () => new List<int>()));
+        // ADR 0007's process layer: the optimistic view's T and the action's payload cross
+        // flows exactly like a signal value -- the source need not come from a strict factory.
+        Assert.Throws<InvalidOperationException>(() => f.CreateOptimistic(source));
+        Assert.Throws<InvalidOperationException>(() => f.CreateAction<List<int>>((_, _) => Task.CompletedTask));
+    }
+
+    [Fact]
     public void StrictFactory_TrustsSendableAttribute()
     {
         var f = new MemoFactory(options: MemoFactoryOptions.StrictSendableChecks);

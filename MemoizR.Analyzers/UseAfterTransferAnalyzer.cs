@@ -62,10 +62,25 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                 }
                 else
                 {
-                    ReportUsesAfter(context, entry, entry.ScanRoots);
+                    ReportUsesAfter(context, entry, ScanRootsAcrossBlocks(entry, block, context.OperationBlocks));
                 }
             }
         }
+    }
+
+    // A member with several operation blocks -- a constructor's initializer and its body --
+    // runs them in source order: a transfer scoped to one block is still live in the blocks
+    // that follow, so they join its scan roots. A transfer inside a nested function stays
+    // scoped to that function, and an escaping one already leaves its member.
+    private static List<IOperation> ScanRootsAcrossBlocks(TransferEntry entry, IOperation block, ImmutableArray<IOperation> blocks)
+    {
+        if (!ReferenceEquals(entry.Scope, block) || entry.Escaped)
+        {
+            return entry.ScanRoots;
+        }
+
+        var later = blocks.Where(other => other.Syntax.SpanStart >= block.Syntax.Span.End);
+        return entry.ScanRoots.Concat(later).ToList();
     }
 
     // A using-declared local -- or an existing local/parameter handed to a using STATEMENT
