@@ -200,6 +200,21 @@ arm counts as definite. Still deliberately a heuristic — Swift proves this wit
 isolation in the type system; source order approximates execution order, and aliases or loop
 back-edges can evade the rule. The receiver-side runtime check is the backstop.
 
+Known blind spots of the heuristic (documented non-goals, each backstopped by
+`Sending<T>.Receive`'s single-consumption check):
+
+- aliases the sender keeps through another path — a `ref` local, a `dynamic` view, a copy taken
+  before the transfer, or state reached through a field or property (only locals and parameters
+  are transfer sources; delegate invocation lists resolve from same-scope stores only);
+- loop back-edges: an iteration's use that textually precedes the transfer is not flagged for the
+  next iteration;
+- framework calls are classified by shape — `Create` factories carry their arguments, copiers
+  (`CreateRange`, `ToImmutable*`, LINQ materializers) copy inline elements only, and interface-
+  or view-returning methods retain their receiver — so a retaining method that fits none of
+  these (`Task.FromResult(list)`) is a leaf;
+- a callee that cannot return after its handoff is judged one level deep, and a declared-Sendable
+  but non-sealed source stays tracked because its runtime object may be a mutable subclass.
+
 ### MZR006 — subclass smuggling (Info)
 
 Sendable verdicts are computed from the DECLARED type, so a mutable subclass behind an upcast
