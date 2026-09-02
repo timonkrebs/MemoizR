@@ -2408,4 +2408,109 @@ public class SetInsideComputationAnalyzerTests
         Assert.Equal("MZR003", diagnostic.Id);
         Assert.Contains("Signal<int>.Set", diagnostic.GetMessage());
     }
+
+    [Fact]
+    public async Task SetInsideASwitchExpressionPatchArm_IsFlagged()
+    {
+        // A switch expression picks one of its arms at build time, exactly like a ternary:
+        // the Set in any arm still runs under the evaluation lock.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using MemoizR;
+
+            public class C
+            {
+                public void M(bool choose)
+                {
+                    var f = new MemoFactory();
+                    var v = f.CreateSignal(1);
+                    var state = f.CreateOptimistic<int>(v);
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, choose switch
+                        {
+                            true => (Func<int, int>)(x => { _ = v.Set(x); return x; }),
+                            _ => static x => x,
+                        });
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR003", diagnostic.Id);
+        Assert.Contains("Signal<int>.Set", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task SetWhileBuildingANestedHostsParamsElement_IsFlagged()
+    {
+        // The nested map's params element is built by a call the OUTER computation makes
+        // under its evaluation lock: only the element's delegate body is deferred.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using System.Threading.Tasks;
+            using MemoizR;
+            using MemoizR.StructuredConcurrency;
+
+            public class C
+            {
+                private static Func<IStructuredResourceGroup, Task<int>> Make(Task _) => async _ => 1;
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var v = f.CreateSignal(1);
+                    f.CreateMemoizR(async () =>
+                    {
+                        var map = f.CreateConcurrentMap<int>(Make(v.Set(2)));
+                        return 1;
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR003", diagnostic.Id);
+        Assert.Contains("Signal<int>.Set", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task SetHiddenInAnIncrementOperator_IsFlagged()
+    {
+        // `meter++` executes the user-defined `++` through an increment operation, which is
+        // not a unary operation: the Set inside it throws under the same evaluation lock.
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public class C
+            {
+                private static readonly MemoFactory F = new();
+                private static readonly Signal<int> V = F.CreateSignal(1);
+
+                public struct Meter
+                {
+                    public static Meter operator ++(Meter meter)
+                    {
+                        _ = V.Set(2);
+                        return meter;
+                    }
+                }
+
+                public void M()
+                {
+                    F.CreateMemoizR(async () =>
+                    {
+                        var meter = new Meter();
+                        meter++;
+                        return 0;
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR003", diagnostic.Id);
+        Assert.Contains("Signal<int>.Set", diagnostic.GetMessage());
+    }
 }

@@ -1535,4 +1535,183 @@ public class CapturedMutationAnalyzerTests
         Assert.Equal("MZR002", diagnostic.Id);
         Assert.Contains("captured local 'applied'", diagnostic.GetMessage());
     }
+
+    [Fact]
+    public async Task SwitchExpressionComputationArm_MutationIsFlagged()
+    {
+        // A switch expression picks one of its arms at build time, exactly like a ternary:
+        // a write inside any arm is the stored computation's shared mutation.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using System.Threading.Tasks;
+            using MemoizR;
+
+            public class C
+            {
+                public void M(bool choose)
+                {
+                    var f = new MemoFactory();
+                    int shared = 0;
+                    f.CreateMemoizR(choose switch
+                    {
+                        true => (Func<Task<int>>)(async () => { shared++; return shared; }),
+                        _ => async () => 2,
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR002", diagnostic.Id);
+        Assert.Contains("captured local 'shared'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task NestedHostMethodGroupReceiver_IsEvaluatedByTheOuterComputation()
+    {
+        // The nested creation stores `Compute` as a method group, but its RECEIVER expression
+        // runs while the outer computation builds the delegate: the write in it is the
+        // outer computation's, even though the nested body itself is pruned.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Threading.Tasks;
+            using MemoizR;
+
+            public class Source
+            {
+                public int Value;
+
+                public Task<int> Compute() => Task.FromResult(Value);
+            }
+
+            public class C
+            {
+                private static Source Get(int value) => new Source { Value = value };
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    int shared = 0;
+                    f.CreateMemoizR(async () =>
+                    {
+                        var inner = f.CreateMemoizR(Get(++shared).Compute);
+                        return await inner.Get();
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR002", diagnostic.Id);
+        Assert.Contains("captured local 'shared'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task WriteThroughARefLocalAlias_ResolvesToTheCapturedVariable()
+    {
+        // The increment's target is the patch-local `alias`, but a ref local is a window onto
+        // its `= ref` referent: the write lands on the captured variable.
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    int shared = 0;
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x =>
+                        {
+                            ref int alias = ref shared;
+                            alias++;
+                            return x;
+                        });
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR002", diagnostic.Id);
+        Assert.Contains("captured local 'shared'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task MemberWriteThroughARefLocalAlias_ResolvesToTheCapturedStruct()
+    {
+        // The alias references a captured mutable struct: a member write through it mutates
+        // that struct's storage, like `counter.Value++` would.
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public struct Counter
+            {
+                public int Value;
+            }
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    var counter = new Counter();
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x =>
+                        {
+                            ref var alias = ref counter;
+                            alias.Value++;
+                            return x;
+                        });
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR002", diagnostic.Id);
+        Assert.Contains("captured local 'counter'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task CompoundAssignmentOperator_IsChased()
+    {
+        // `meter += 1` executes the user-defined `+` through a compound assignment, which is
+        // not a binary operation: the operator body's static write runs on every evaluation.
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public class Meter
+            {
+                public static int hits;
+
+                public static Meter operator +(Meter meter, int x)
+                {
+                    hits += x;
+                    return meter;
+                }
+            }
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    f.CreateMemoizR(async () =>
+                    {
+                        var meter = new Meter();
+                        meter += 1;
+                        return 1;
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR002", diagnostic.Id);
+        Assert.Contains("static field 'hits'", diagnostic.GetMessage());
+    }
 }

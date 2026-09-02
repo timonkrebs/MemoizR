@@ -502,6 +502,10 @@ public sealed class CapturedMutationAnalyzer : DiagnosticAnalyzer
     {
         switch (target)
         {
+            // A ref local declared in the computation is a window onto whatever it was bound
+            // to: `ref int alias = ref shared; alias++;` writes the captured variable.
+            case ILocalReferenceOperation alias when ComputationLambdas.RefAliasTarget(alias) is { } referent:
+                return ResolveSharedRoot(referent, scope, thisParameters, foreignThis);
             case ILocalReferenceOperation local when ComputationLambdas.IsDeclaredOutside(local.Local, scope):
                 return ("captured local", local.Local);
             case IParameterReferenceOperation parameter when ComputationLambdas.IsDeclaredOutside(parameter.Parameter, scope):
@@ -535,6 +539,8 @@ public sealed class CapturedMutationAnalyzer : DiagnosticAnalyzer
         {
             case var enclosing when IsComputationInstance(enclosing, thisParameters, foreignThis):
                 return (memberKind, member);
+            case ILocalReferenceOperation alias when ComputationLambdas.RefAliasTarget(alias) is { } referent:
+                return ResolveThroughReceiver(referent, memberKind, member, scope, thisParameters, foreignThis);
             case ILocalReferenceOperation { Local.Type.IsValueType: true } local when ComputationLambdas.IsDeclaredOutside(local.Local, scope):
                 return ("captured local", local.Local);
             case IParameterReferenceOperation { Parameter.Type.IsValueType: true } parameter when ComputationLambdas.IsDeclaredOutside(parameter.Parameter, scope):

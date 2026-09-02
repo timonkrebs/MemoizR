@@ -97,9 +97,9 @@ internal static class ComputationLambdas
 
                 break;
 
-            // A conditional (or null-coalescing) computation stores whichever arm the flow
-            // picks: both are possible bodies, so both are walked.
-            case IConditionalOperation or ICoalesceOperation:
+            // A conditional (null-coalescing, switch-expression) computation stores whichever
+            // arm the flow picks: every arm is a possible body, so every arm is walked.
+            case IConditionalOperation or ICoalesceOperation or ISwitchExpressionOperation:
                 foreach (var body in ConditionalArms(value)!.SelectMany(arm => BodiesIn(arm, semanticModel, visitedVariables)))
                 {
                     yield return body;
@@ -172,9 +172,10 @@ internal static class ComputationLambdas
         return reference is IParameterReferenceOperation parameter ? parameter.Parameter : ReferencedVariable(reference);
     }
 
-    // The direct ARMS of a conditional or coalesced value: each is a candidate the flow can
-    // pick, and each resolves independently (ValueArms flattens nesting). Null when the
-    // value is neither -- callers distinguish "not a conditional" from "one arm".
+    // The direct ARMS of a conditional, coalesced, or switch-expression value: each is a
+    // candidate the flow can pick, and each resolves independently (ValueArms flattens
+    // nesting). Null when the value is none of those -- callers distinguish "not a
+    // conditional" from "one arm".
     public static IReadOnlyList<IOperation>? ConditionalArms(IOperation value)
     {
         return value switch
@@ -182,6 +183,7 @@ internal static class ComputationLambdas
             IConditionalOperation { WhenFalse: { } whenFalse } conditional => new[] { conditional.WhenTrue, whenFalse },
             IConditionalOperation conditional => new[] { conditional.WhenTrue },
             ICoalesceOperation coalesce => new[] { coalesce.Value, coalesce.WhenNull },
+            ISwitchExpressionOperation switchExpression => switchExpression.Arms.Select(arm => arm.Value).ToArray(),
             _ => null,
         };
     }
@@ -681,7 +683,7 @@ internal static class ComputationLambdas
         // A conditional patch stores whichever arm the flow picked: each arm resolves
         // through this same supplemental chain separately, so a direct lambda arm cannot
         // hide an assembled sibling.
-        if (reference is IConditionalOperation or ICoalesceOperation)
+        if (ConditionalArms(reference) is not null)
         {
             foreach (var body in ValueArms(reference).SelectMany(arm => AssembledPatchBodies(arm, semanticModel)))
             {
@@ -1465,6 +1467,26 @@ internal static class ComputationLambdas
         }
     }
 
+    // The storage a ref local ALIASES, through `= ref` initializer chains: `ref int alias =
+    // ref shared; alias++` writes shared. Null for anything but a ref local (the visited set
+    // bounds error-code cycles). The operation-level twin of WritesVariable's alias walk.
+    public static IOperation? RefAliasTarget(ILocalReferenceOperation reference)
+    {
+        IOperation? current = reference;
+        HashSet<ISymbol>? visited = null;
+        while (current is ILocalReferenceOperation { Local: { RefKind: RefKind.Ref } local } alias)
+        {
+            visited ??= new HashSet<ISymbol>(SymbolEqualityComparer.Default);
+            current = visited.Add(local)
+                && local.DeclaringSyntaxReferences.FirstOrDefault()?.GetSyntax()
+                    is VariableDeclaratorSyntax { Initializer.Value: RefExpressionSyntax { Expression: { } referent } }
+                ? alias.SemanticModel?.GetOperation(referent)
+                : null;
+        }
+
+        return ReferenceEquals(current, reference) ? null : current;
+    }
+
     // A method group (`f.CreateMemoizR(Compute)`) or local-function reference is as much a
     // computation as a lambda; its declaration is the body to analyze. Resolution is same-tree
     // by design: another tree's declarations have no operation model here, and the runtime
@@ -1521,9 +1543,8 @@ internal static class ComputationLambdas
         return Walk(root, FactoryMethods.IsComputationHost, pruneFunctions: true);
     }
 
-    // The depth-first walk behind the three: a nested host's ORDINARY arguments are still
-    // walked (they are evaluated as part of the outer computation), only its delegate
-    // arguments are skipped, and pruning drops nested functions altogether.
+    // The depth-first walk behind the three: a nested host's arguments are walked only as far
+    // as the outer computation EVALUATES them, and pruning drops nested functions altogether.
     private static IEnumerable<IOperation> Walk(IOperation root, Func<IMethodSymbol, bool> isNestedHost, bool pruneFunctions)
     {
         foreach (var child in root.ChildOperations)
@@ -1536,8 +1557,7 @@ internal static class ComputationLambdas
             yield return child;
 
             var below = child is IInvocationOperation invocation && isNestedHost(invocation.TargetMethod)
-                ? invocation.Arguments.Select(argument => argument.Value).Where(value => !IsComputationDelegateArgument(value))
-                    .SelectMany(value => Walk(value, isNestedHost, pruneFunctions).Prepend(value))
+                ? invocation.Arguments.SelectMany(argument => NestedHostArgument(argument.Value, isNestedHost, pruneFunctions))
                 : Walk(child, isNestedHost, pruneFunctions);
 
             foreach (var descendant in below)
@@ -1547,14 +1567,22 @@ internal static class ComputationLambdas
         }
     }
 
-    private static bool IsComputationDelegateArgument(IOperation value)
+    // What the OUTER computation evaluates of a nested host's argument: an ordinary argument
+    // entirely, and of a delegate argument its CONSTRUCTION -- a method group's receiver
+    // (`CreateMemoizR(Get(++shared).Compute)` runs `Get` now), a params element built by a
+    // call (`CreateConcurrentMap(Make(v.Set(1)))`). Only the delegate BODIES are deferred,
+    // and those the nested invocation's own analysis covers.
+    private static IEnumerable<IOperation> NestedHostArgument(IOperation value, Func<IMethodSymbol, bool> isNestedHost, bool pruneFunctions)
     {
-        return value switch
+        return Unwrap(value) switch
         {
-            IDelegateCreationOperation => true,
-            IConversionOperation conversion => IsComputationDelegateArgument(conversion.Operand),
-            IArrayCreationOperation => true, // the params array of computations the structured factories take
-            _ => false,
+            IDelegateCreationOperation { Target: IMethodReferenceOperation { Instance: { } receiver } }
+                => Walk(receiver, isNestedHost, pruneFunctions).Prepend(receiver),
+            IDelegateCreationOperation => Enumerable.Empty<IOperation>(),
+            IArrayCreationOperation array => array.Initializer?.ElementValues
+                .SelectMany(element => NestedHostArgument(element, isNestedHost, pruneFunctions))
+                ?? Enumerable.Empty<IOperation>(),
+            _ => Walk(value, isNestedHost, pruneFunctions).Prepend(value),
         };
     }
 
@@ -1882,6 +1910,12 @@ internal static class ComputationLambdas
                 break;
             case IUnaryOperation { OperatorMethod: { } unaryOperator }:
                 yield return unaryOperator;
+                break;
+            case ICompoundAssignmentOperation { OperatorMethod: { } compoundOperator }:
+                yield return compoundOperator;
+                break;
+            case IIncrementOrDecrementOperation { OperatorMethod: { } incrementOperator }:
+                yield return incrementOperator;
                 break;
             case IConversionOperation { OperatorMethod: { } conversionOperator }:
                 yield return conversionOperator;

@@ -4589,4 +4589,178 @@ public class OptimisticPatchCaptureAnalyzerTests
 
         Assert.Empty(diagnostics);
     }
+
+    [Fact]
+    public async Task SwitchExpressionPatch_ArmsAreWalked()
+    {
+        // The Apply argument is a switch expression: every arm is a candidate closure, so the
+        // capture in one is reported and the safe arm does not trip the already-built report.
+        var diagnostics = await AnalyzeAsync("""
+            using System;
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M(bool choose)
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    var list = new List<int>();
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, choose switch
+                        {
+                            true => (Func<int, int>)(x => x + list.Count),
+                            _ => static x => x,
+                        });
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR004", diagnostic.Id);
+        Assert.Contains("'list'", diagnostic.GetMessage());
+        Assert.Contains("not Sendable", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task NestedHostMethodGroupReceiver_StaticReadIsFlagged()
+    {
+        // The patch builds a nested computation from a method group whose RECEIVER reads a
+        // static: that receiver expression runs on every replay of the patch, even though the
+        // nested body itself belongs to the nested invocation's analysis.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Threading.Tasks;
+            using MemoizR;
+
+            public class Source
+            {
+                public readonly int Value;
+
+                public Source(int value) { Value = value; }
+
+                public Task<int> Compute() => Task.FromResult(Value);
+            }
+
+            public class C
+            {
+                private static int hits;
+
+                private static Source Get(int value) => new Source(value);
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x =>
+                        {
+                            _ = f.CreateMemoizR(Get(hits).Compute);
+                            return x;
+                        });
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR004", diagnostic.Id);
+        Assert.Contains("'hits'", diagnostic.GetMessage());
+        Assert.Contains("writable static state", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task IncrementOperator_HidingAStaticRead_IsChased()
+    {
+        // `meter++` executes the user-defined `++` through an increment operation, which is
+        // not a unary operation: its static read replays exactly like `meter + 1`'s would.
+        var diagnostics = await AnalyzeAsync("""
+            using MemoizR;
+
+            public class Meter
+            {
+                private static int hits;
+
+                public readonly int Sample;
+
+                public Meter(int sample) { Sample = sample; }
+
+                public static Meter operator ++(Meter meter) => new Meter(meter.Sample + hits);
+            }
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x =>
+                        {
+                            var meter = new Meter(x);
+                            meter++;
+                            return meter.Sample;
+                        });
+                    });
+                }
+            }
+            """);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR004", diagnostic.Id);
+        Assert.Contains("'hits'", diagnostic.GetMessage());
+        Assert.Contains("writable static state", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task CrossFileCompoundAssignmentOperator_IsUnverifiable()
+    {
+        // `meter += 1` executes a user-defined `+` declared in another file: unverifiable
+        // code on every replay, exactly like the binary form.
+        var diagnostics = await AnalyzerTestHarness.AnalyzeAsync(new[]
+        {
+            """
+            public class Meter
+            {
+                private static int hits;
+
+                public static Meter operator +(Meter meter, int x)
+                {
+                    hits += x;
+                    return meter;
+                }
+            }
+            """,
+            """
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    var state = f.CreateOptimistic<int>(f.CreateSignal(1));
+                    f.CreateAction<int>(async (p, ctx) =>
+                    {
+                        await ctx.Apply(state, x =>
+                        {
+                            var meter = new Meter();
+                            meter += x;
+                            return x;
+                        });
+                    });
+                }
+            }
+            """,
+        }, new OptimisticPatchCaptureAnalyzer());
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("MZR004", diagnostic.Id);
+        Assert.Contains("op_Addition", diagnostic.GetMessage());
+        Assert.Contains("another file", diagnostic.GetMessage());
+    }
 }

@@ -37,10 +37,10 @@ internal static class ReceiverChains
                     continue;
                 case IInvocationOperation creation:
                     return ResolveKnownCreationFactory(creation, semanticModel, argumentMap);
-                // A conditional node (`flag ? f.CreateSignal(1) : other`) is provable only
-                // when every arm agrees on the factory -- the same all-must-agree rule the
-                // computed getters below apply to their returns.
-                case IConditionalOperation or ICoalesceOperation:
+                // A conditional node (`flag ? f.CreateSignal(1) : other`, a switch expression)
+                // is provable only when every arm agrees on the factory -- the same
+                // all-must-agree rule the computed getters below apply to their returns.
+                case IConditionalOperation or ICoalesceOperation or ISwitchExpressionOperation:
                     return AgreedFactory(ComputationLambdas.ConditionalArms(reference)!, semanticModel, argumentMap, visitedGetters);
                 // A chased helper's PARAMETER hops to the call-site argument: `var a = s;
                 // a.Set(...)` inside `Write(other)` is `other`'s provenance. Not when the

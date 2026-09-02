@@ -1102,6 +1102,8 @@ public sealed class OptimisticPatchCaptureAnalyzer : DiagnosticAnalyzer
         return operation is IInvocationOperation or IObjectCreationOperation
             or IBinaryOperation { OperatorMethod: not null }
             or IUnaryOperation { OperatorMethod: not null }
+            or ICompoundAssignmentOperation { OperatorMethod: not null }
+            or IIncrementOrDecrementOperation { OperatorMethod: not null }
             or IConversionOperation { OperatorMethod: not null }
             or IEventAssignmentOperation
             or IUsingDeclarationOperation
