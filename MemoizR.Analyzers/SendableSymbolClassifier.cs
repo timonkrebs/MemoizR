@@ -471,9 +471,13 @@ internal sealed class SendableSymbolClassifier
 
     // POLYMORPHIC recursion constructs a FRESH closed symbol per level (Box<T> exposing a
     // Box<List<T>> member), which a visited set can never catch. Its signature is a
-    // NON-SHRINKING re-occurrence of the same definition on the recursion PATH: finite
+    // GROWING re-occurrence of the same definition on the recursion PATH: finite
     // hand-written nesting (Box<Box<Box<List<int>>>>) strictly shrinks at every recursive
-    // step and is walked to the bottom however deep it goes. A divergent expansion is walked
+    // step and is walked to the bottom however deep it goes. Equal-size
+    // re-instantiations (Node<A,B,C> exposing a Node<B,C,A> member) are a FINITE cycle --
+    // bounded size over finitely many definitions -- that the re-entry check closes once
+    // the exact type repeats, so they are walked in full.
+    // A divergent expansion is walked
     // through its FIRST re-instantiation -- substituted members can flip the verdict exactly
     // one level down (Box<T> { Box<List<T>> Next; T Value; } hides the List in the second
     // level's Value) -- and cut at the second. Counted on the path, not globally: sibling
@@ -485,7 +489,7 @@ internal sealed class SendableSymbolClassifier
         return priorOnPath.Count(prior => prior is INamedTypeSymbol other
             && !SymbolEqualityComparer.Default.Equals(other, named)
             && SymbolEqualityComparer.Default.Equals(other.OriginalDefinition, named.OriginalDefinition)
-            && TypeSize(other) <= TypeSize(named)) >= 2;
+            && TypeSize(other) < TypeSize(named)) >= 2;
     }
 
     // The number of type nodes in the constructed reference: Box<List<int>> is 3. Finite

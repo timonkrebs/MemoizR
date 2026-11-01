@@ -443,6 +443,16 @@ public class StrictSendableModeTests
     }
 
     [Fact]
+    public void RotatingGenericInstantiations_AreWalkedToTheirMutableLevel()
+    {
+        // RotatingNode<int,int,List<int>> reaches RotatingNode<List<int>,int,int> at the third
+        // level, where Value is a List<int>: equal-size re-instantiations are a finite cycle to
+        // walk, not a divergence to cut.
+        Assert.False(SendableChecker.IsSendable(typeof(RotatingNode<int, int, List<int>>), out var reason));
+        Assert.Contains("List", reason);
+    }
+
+    [Fact]
     public void StrictFactory_TrustsSendableAttribute()
     {
         var f = new MemoFactory(options: MemoFactoryOptions.StrictSendableChecks);
@@ -497,6 +507,14 @@ internal sealed class RecursiveBox<T>
 
 // A plain wrapper for FINITE hand-written nesting (WrapBox<WrapBox<...<List<int>>>>): each
 // recursive step SHRINKS, so the divergence cut must let the walk reach the bottom.
+// A rotation keeps every level the same size while substituting a different argument into
+// Value at each one: the mutable element surfaces only at the third level.
+internal sealed class RotatingNode<A, B, C>
+{
+    public readonly A Value = default!;
+    public readonly RotatingNode<B, C, A>? Next;
+}
+
 internal sealed class WrapBox<T>
 {
     public T? Value { get; init; }

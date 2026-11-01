@@ -5167,4 +5167,205 @@ public class UseAfterTransferAnalyzerTests
 
         AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
+
+    [Fact]
+    public async Task IntermediateLocalCallers_ScanTheirOwnContinuation()
+    {
+        // Use's body continues after Move(y) handed y off: that continuation is scanned
+        // besides propagating the handoff on to Use's own callers.
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    void Move(List<int> x) { var s = Sending.Transfer(x); }
+                    void Use(List<int> y)
+                    {
+                        Move(y);
+                        y.Add(1);
+                    }
+
+                    Use(list);
+                }
+            """);
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'y'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task ReceiversOfCallsWrappingTheTransfer_RunAfterIt()
+    {
+        // The receiver is evaluated before the arguments, but Add runs on it after them --
+        // after the handoff.
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    list.Add(Publish(Sending.Transfer(list)));
+                }
+
+                private static int Publish(Sending<List<int>> sending) => 0;
+            """);
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task EarlierArgumentsOfCallsWrappingTheTransfer_RunAfterIt()
+    {
+        // Store receives the list and runs after the handoff, exactly like a receiver would.
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    Store(list, Publish(Sending.Transfer(list)));
+                }
+
+                private static int Publish(Sending<List<int>> sending) => 0;
+
+                private static void Store(List<int> target, int value) => target.Add(value);
+            """);
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task RecursiveDelegates_DoNotLoopTheAnalysis()
+    {
+        // The lambda invokes its own delegate: the walk stops where it re-enters a callable
+        // already on it, and still sees the read after that call.
+        var diagnostics = await InClassC("""
+                public void M(bool flag)
+                {
+                    var list = new List<int> { 1 };
+                    Action use = null!;
+                    use = () =>
+                    {
+                        if (flag)
+                        {
+                            use();
+                        }
+
+                        list.Add(1);
+                    };
+                    var sending = Sending.Transfer(list);
+                    use();
+                }
+            """, WithSystem);
+
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+    }
+
+    [Fact]
+    public async Task RecursiveMethodGroups_DoNotLoopTheAnalysis()
+    {
+        // F invokes the delegate that holds F: same cycle through a method group.
+        var diagnostics = await InClassC("""
+                public void M(bool flag)
+                {
+                    var list = new List<int> { 1 };
+                    Action use = null!;
+                    void F()
+                    {
+                        if (flag)
+                        {
+                            use();
+                        }
+
+                        list.Add(1);
+                    }
+
+                    use = F;
+                    var sending = Sending.Transfer(list);
+                    use();
+                }
+            """, WithSystem);
+
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+    }
+
+    [Fact]
+    public async Task RecoveringHandlers_HandTheFinallyAFreshValue()
+    {
+        // Both paths into the finally replaced the variable first: the successful
+        // reinitialization, or the catch-everything that recovered its failure.
+        var diagnostics = await InClassC("""
+                public void M(List<int> replacement)
+                {
+                    var list = new List<int> { 1 };
+                    try
+                    {
+                        var sending = Sending.Transfer(list);
+                        list = CreateFresh();
+                    }
+                    catch
+                    {
+                        list = replacement;
+                    }
+                    finally
+                    {
+                        list.Add(1);
+                    }
+                }
+
+                private static List<int> CreateFresh() => new();
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task TypedHandlers_LeaveTheFinallyOnTheUncaughtPath()
+    {
+        // An exception the typed catch does not take still runs the finally with the
+        // transferred value.
+        var diagnostics = await InClassC("""
+                public void M(List<int> replacement)
+                {
+                    var list = new List<int> { 1 };
+                    try
+                    {
+                        var sending = Sending.Transfer(list);
+                        list = CreateFresh();
+                    }
+                    catch (InvalidOperationException)
+                    {
+                        list = replacement;
+                    }
+                    finally
+                    {
+                        list.Add(1);
+                    }
+                }
+
+                private static List<int> CreateFresh() => new();
+            """, WithSystem);
+
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+    }
+
+    [Fact]
+    public async Task UsesAfterATransfer_InsideTheSameLocalFunction_AreFlagged()
+    {
+        // The transferring local function keeps running after its own handoff: its body is
+        // the scan region, not a nested declaration to skip.
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    void Move()
+                    {
+                        var sending = Sending.Transfer(list);
+                        list.Add(1);
+                    }
+
+                    Move();
+                }
+            """);
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
 }

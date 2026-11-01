@@ -400,14 +400,14 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     {
         foreach (var callVariable in CallSiteVariables(invocation, variable, functionSymbol, classifier))
         {
+            // A call inside another local function hands the variable off for THAT body's own
+            // continuation (`Move(y); y.Add(1);`) and, through its callers, beyond it.
             if (callBody is ILocalFunctionOperation)
             {
                 foreach (var nested in CallSiteTransfers(callBody, callVariable, invocation, block, classifier, visited))
                 {
                     yield return nested;
                 }
-
-                continue;
             }
 
             var (roots, escaped) = calleeExits ? ThrowingCallRoots(invocation, callBody) : ScanRootsFor(invocation, callBody);
@@ -943,7 +943,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         // reference.
         var laterReferences = candidates
             .Where(operation => IsReferenceTo(operation, variable)
-                && operation.Syntax.SpanStart >= transferPosition
+                && (operation.Syntax.SpanStart >= transferPosition || IsOperandOfACallWrappingTheTransfer(operation, transferPosition))
                 && !IsInsideNameOf(operation)
                 && !IsDeferredInALocallyStoredLambda(operation, scanRoots)
                 && RunsOnTheTransferredPath(operation, entry, scanRoots))
@@ -1013,6 +1013,29 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         return false;
     }
 
+    // The receiver and the earlier arguments of a call WRAPPING the transfer are evaluated
+    // before it, but the call itself runs on them afterwards: list.Add(Publish(
+    // Sending.Transfer(list))) mutates the handed-off list. An `out` argument is a write the
+    // callee performs, not a read -- the reset classification owns it.
+    private static bool IsOperandOfACallWrappingTheTransfer(IOperation reference, int transferPosition)
+    {
+        var operand = reference;
+        while (operand.Parent is IConversionOperation)
+        {
+            operand = operand.Parent;
+        }
+
+        var arguments = operand.Parent switch
+        {
+            IInvocationOperation invocation when ReferenceEquals(invocation.Instance, operand) => invocation.Arguments,
+            IArgumentOperation { Parameter.RefKind: not RefKind.Out, Parent: IInvocationOperation invocation } => invocation.Arguments,
+            IArgumentOperation { Parameter.RefKind: not RefKind.Out, Parent: IObjectCreationOperation creation } => creation.Arguments,
+            _ => ImmutableArray<IArgumentOperation>.Empty,
+        };
+
+        return arguments.Any(argument => Covers(argument, transferPosition));
+    }
+
     // Whether the operation runs on the path the transfer took: not in a mutually exclusive
     // sibling arm of the construct holding the transfer (`if (move) Transfer(list); else
     // list.Add(1);` -- try constructs are not excluded, an exception after the transfer
@@ -1049,7 +1072,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                 && reference.Syntax.SpanStart >= transferPosition
                 && EscapesTheScope(reference, scope)
                 && RunsOnTheTransferredPath(reference, entry, scanRoots)
-                && AnyStoredCallableReads(delegateSymbol, variable, reference, transferPosition, scope))
+                && AnyStoredCallableReads(delegateSymbol, variable, reference, transferPosition, scope, NewSymbolSet<IMethodSymbol>()))
             .Select(reference => (Operation: reference, CallEffect: (BodyEffect?)BodyEffect.Reads));
 
         return methodGroupEscapes.Concat(delegateEscapes);
@@ -1059,7 +1082,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     {
         return invocation.TargetMethod.MethodKind == MethodKind.LocalFunction
             ? LocalFunctionCallEffect(invocation.TargetMethod, variable, scope, NewSymbolSet<IMethodSymbol>())
-            : DelegateCallEffect(invocation, variable, transferPosition, scope);
+            : DelegateCallEffect(invocation, variable, transferPosition, scope, NewSymbolSet<IMethodSymbol>());
     }
 
     // A reading call is the use itself -- unless its own ARGUMENTS definitely reset the
@@ -1245,18 +1268,21 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             || Inherits(thrownType, caughtType);
     }
 
+    // Inside a local-function DECLARATION nested in the scanned region -- the region itself may
+    // be a local function (a transfer inside one scans that function's own continuation), so
+    // reaching a scan root ends the walk before the root is judged.
     private static bool IsWithinALocalFunctionBody(IOperation operation, List<IOperation> scanRoots)
     {
         for (var current = operation.Parent; current is not null; current = current.Parent)
         {
-            if (current is ILocalFunctionOperation)
-            {
-                return true;
-            }
-
             if (scanRoots.Contains(current))
             {
                 return false;
+            }
+
+            if (current is ILocalFunctionOperation)
+            {
+                return true;
             }
         }
 
@@ -1377,7 +1403,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             // Delegate stores resolve without the transfer-arm filter here (position 0):
             // which arm holds the transfer is a scope-level question the body cannot ask.
             var callEffect = invocation.TargetMethod.MethodKind == MethodKind.DelegateInvoke
-                ? DelegateCallEffect(invocation, variable, transferPosition: 0, scope)
+                ? DelegateCallEffect(invocation, variable, transferPosition: 0, scope, inProgress)
                 : LocalFunctionCallEffect(invocation.TargetMethod, variable, scope, inProgress);
             if (argumentsEffect == BodyEffect.Resets)
             {
@@ -1666,29 +1692,48 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     // transferred value makes the call a use -- `Action use = () => list.Add(1);` declared
     // before the handoff runs after it. Never a reset: which stored callable actually runs
     // is dynamic.
-    private static BodyEffect DelegateCallEffect(IInvocationOperation invocation, ISymbol variable, int transferPosition, IOperation scope)
+    private static BodyEffect DelegateCallEffect(IInvocationOperation invocation, ISymbol variable, int transferPosition, IOperation scope, HashSet<IMethodSymbol> inProgress)
     {
         if (DelegateReceiver(invocation) is not { } delegateLocal)
         {
             return BodyEffect.None;
         }
 
-        return AnyStoredCallableReads(delegateLocal, variable, invocation, transferPosition, scope)
+        return AnyStoredCallableReads(delegateLocal, variable, invocation, transferPosition, scope, inProgress)
             ? BodyEffect.Reads
             : BodyEffect.None;
     }
 
-    private static bool AnyStoredCallableReads(ISymbol delegateLocal, ISymbol variable, IOperation consumer, int transferPosition, IOperation scope)
+    // The callables already on the walk travel INTO the stored bodies: a delegate that invokes
+    // itself -- directly or through a local function that invokes it -- would otherwise be
+    // re-entered forever, with each level minting a fresh guard.
+    private static bool AnyStoredCallableReads(ISymbol delegateLocal, ISymbol variable, IOperation consumer, int transferPosition, IOperation scope, HashSet<IMethodSymbol> inProgress)
     {
         return StoredCallables(delegateLocal, scope, consumer, transferPosition, NewSymbolSet<ISymbol>())
             .Any(callable => callable switch
             {
-                IAnonymousFunctionOperation lambda =>
-                    EffectOf(lambda, variable, scope, NewSymbolSet<IMethodSymbol>(), out _) == BodyEffect.Reads,
+                IAnonymousFunctionOperation lambda => LambdaCallEffect(lambda, variable, scope, inProgress) == BodyEffect.Reads,
                 IMethodReferenceOperation { Method: { MethodKind: MethodKind.LocalFunction } method } =>
-                    LocalFunctionCallEffect(method, variable, scope, NewSymbolSet<IMethodSymbol>()) == BodyEffect.Reads,
+                    LocalFunctionCallEffect(method, variable, scope, inProgress) == BodyEffect.Reads,
                 _ => false,
             });
+    }
+
+    private static BodyEffect LambdaCallEffect(IAnonymousFunctionOperation lambda, ISymbol variable, IOperation scope, HashSet<IMethodSymbol> inProgress)
+    {
+        if (!inProgress.Add(lambda.Symbol))
+        {
+            return BodyEffect.None;
+        }
+
+        try
+        {
+            return EffectOf(lambda, variable, scope, inProgress, out _);
+        }
+        finally
+        {
+            inProgress.Remove(lambda.Symbol);
+        }
     }
 
     // The delegate-typed local or parameter a reference names.
@@ -2359,11 +2404,14 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     // not a use -- the reinitialization classification applies inside the window too.
     private static IOperation? WindowUseIn(ITryOperation tryOperation, ISymbol variable, IOperation scope, List<IOperation> failures)
     {
+        var handlersRecover = HandlersRecoverEveryFailure(tryOperation, variable, scope, failures);
         foreach (var region in WindowRegionsOf(tryOperation))
         {
-            // A catch no failure of the window can reach never observes the value; the
-            // finally runs regardless.
-            if (region is ICatchClauseOperation clause && !failures.Any(failure => FailureReaches(failure, clause)))
+            // A catch no failure of the window can reach never observes the value. The finally
+            // runs regardless -- but sees a FRESH value when the success path reinitialized and
+            // every caught failure was recovered by a handler that replaced the variable.
+            if ((region is ICatchClauseOperation clause && !failures.Any(failure => FailureReaches(failure, clause)))
+                || (region is IBlockOperation && handlersRecover))
             {
                 continue;
             }
@@ -2375,6 +2423,16 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         }
 
         return null;
+    }
+
+    // The finally observes the transferred value only on a failure path no handler recovered:
+    // an unfiltered catch-everything must close the set of escaping failures, and every clause
+    // a failure can reach must definitely replace the variable before reading it.
+    private static bool HandlersRecoverEveryFailure(ITryOperation tryOperation, ISymbol variable, IOperation scope, List<IOperation> failures)
+    {
+        var reachable = tryOperation.Catches.Where(clause => failures.Any(failure => FailureReaches(failure, clause))).ToList();
+        return reachable.Any(clause => clause.Filter is null && (clause.ExceptionType is not { } caught || CatchesEverything(caught)))
+            && reachable.All(clause => EffectOf(clause, variable, scope, NewSymbolSet<IMethodSymbol>(), out _) == BodyEffect.Resets);
     }
 
     // The window reaches the handlers AND the finally: both run when the reinitializing

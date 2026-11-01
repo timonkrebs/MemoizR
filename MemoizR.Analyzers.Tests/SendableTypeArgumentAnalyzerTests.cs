@@ -909,4 +909,34 @@ public class SendableTypeArgumentAnalyzerTests
 
         AnalyzerTestHarness.AssertSingle(diagnostics, "MZR001");
     }
+
+    [Fact]
+    public async Task RotatingGenericInstantiations_AreWalkedToTheirMutableLevel()
+    {
+        // Node<int,int,List<int>> reaches Node<List<int>,int,int> at the third level, where
+        // Value is a List<int>: equal-size re-instantiations are a finite cycle to walk, not
+        // a divergence to cut.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public sealed class Node<A, B, C>
+            {
+                public readonly A Value = default!;
+                public readonly Node<B, C, A>? Next;
+            }
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    f.CreateSignal(new Node<int, int, List<int>>());
+                }
+            }
+            """);
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR001");
+        Assert.Contains("List", diagnostic.GetMessage());
+    }
 }

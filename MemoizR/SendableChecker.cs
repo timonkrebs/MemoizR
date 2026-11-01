@@ -269,14 +269,18 @@ public static class SendableChecker
 
         // POLYMORPHIC recursion constructs a FRESH closed type per level (Box<T> exposing a
         // Box<List<T>> member), which the re-entry check above can never catch. Its signature
-        // is a NON-SHRINKING re-occurrence of the same definition: finite hand-written nesting
+        // is a GROWING re-occurrence of the same definition: finite hand-written nesting
         // (Box<Box<Box<List<int>>>>) strictly shrinks at every recursive step and is walked to
-        // the bottom however deep it goes. A divergent expansion is walked through its FIRST
+        // the bottom however deep it goes. Equal-size
+        // re-instantiations (Node<A,B,C> exposing a Node<B,C,A> member) are a FINITE cycle --
+        // bounded size over finitely many definitions -- that the re-entry check closes once
+        // the exact type repeats, so they are walked in full.
+        // A divergent expansion is walked through its FIRST
         // re-instantiation -- substituted members can flip the verdict exactly one level down
         // (Box<T> { Box<List<T>> Next; T Value; } hides the List in the second level's Value)
         // -- and cut at the second, landing on the cycle assumption above.
         if (DefinitionOf(type) is { } definition
-            && inProgress.Count(entry => entry != type && DefinitionOf(entry) == definition && TypeSize(entry) <= TypeSize(type)) >= 2)
+            && inProgress.Count(entry => entry != type && DefinitionOf(entry) == definition && TypeSize(entry) < TypeSize(type)) >= 2)
         {
             inProgress.Remove(type);
             return null;
