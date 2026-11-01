@@ -167,6 +167,7 @@ public sealed class MemoFactory
     public Signal<T> CreateSignal<T>(string label, T value)
     {
         EnsureSendableIfStrict<T>();
+        ValidateCreationValue(value);
         return new(value, Context, ShouldValidateWrittenValues)
         {
             Label = label
@@ -181,6 +182,7 @@ public sealed class MemoFactory
     public EagerRelativeSignal<T> CreateEagerRelativeSignal<T>(string label, T value)
     {
         EnsureSendableIfStrict<T>();
+        ValidateCreationValue(value);
         return new(value, Context, ShouldValidateWrittenValues)
         {
             Label = label
@@ -197,6 +199,7 @@ public sealed class MemoFactory
     public ActorSignal<T> CreateActorSignal<T>(T value)
     {
         EnsureSendableIfStrict<T>();
+        ValidateCreationValue(value);
         return new(value, Context, ShouldValidateWrittenValues);
     }
 
@@ -221,6 +224,14 @@ public sealed class MemoFactory
     private bool ShouldValidateWrittenValues =>
         Options.HasFlag(MemoFactoryOptions.ValidateWrittenValues)
         && !Options.HasFlag(MemoFactoryOptions.DisableSendableChecks);
+
+    // The creation value is checked BEFORE the node exists: constructing it consumes a node id
+    // from the context's (possibly bounded, distributed) slice, which a rejected value must
+    // not burn.
+    private void ValidateCreationValue<T>(T value)
+    {
+        SendableChecker.EnsureWrittenValueSendable(ShouldValidateWrittenValues, value);
+    }
 
     internal void EnsureSendableIfStrict<T>()
     {

@@ -125,6 +125,23 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     // delegate stores resolve against the BODY even when the scanned regions are narrower
     // (an escaping `return Pair(Sending.Transfer(list), Use());` still calls a Use declared
     // outside the return expression).
+    private sealed class PropagationPathComparer : IEqualityComparer<(IMethodSymbol Function, ISymbol Variable)>
+    {
+        public static readonly PropagationPathComparer Instance = new();
+
+        public bool Equals((IMethodSymbol Function, ISymbol Variable) x, (IMethodSymbol Function, ISymbol Variable) y)
+        {
+            return SymbolEqualityComparer.Default.Equals(x.Function, y.Function)
+                && SymbolEqualityComparer.Default.Equals(x.Variable, y.Variable);
+        }
+
+        public int GetHashCode((IMethodSymbol Function, ISymbol Variable) pair)
+        {
+            return SymbolEqualityComparer.Default.GetHashCode(pair.Function) * 31
+                + SymbolEqualityComparer.Default.GetHashCode(pair.Variable);
+        }
+    }
+
     private sealed class TransferEntry
     {
         public TransferEntry(ISymbol variable, IOperation transfer, List<IOperation> scanRoots, bool escaped, IOperation scope)
@@ -164,14 +181,14 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                 _ => null,
             };
 
-            foreach (var source in TransferSources(argument))
+            // (list, list) hands the same variable off once: one entry per tracked variable.
+            var variables = TransferSources(argument)
+                .Select(source => TrackedVariableOf(source, classifier))
+                .Where(variable => variable is not null)
+                .Distinct(SymbolEqualityComparer.Default);
+            foreach (var variable in variables)
             {
-                if (TrackedVariableOf(source, classifier) is not { } variable)
-                {
-                    continue;
-                }
-
-                foreach (var entry in EntriesFor(operation, variable, block, classifier))
+                foreach (var entry in EntriesFor(operation, variable!, block, classifier))
                 {
                     yield return entry;
                 }
@@ -229,7 +246,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         // caller's continuation: every call site acts as a transfer of its own. A stored
         // but never-invoked callable stays deferred-scoped.
         foreach (var propagated in CallSiteTransfers(enclosingBody, variable, transfer, block, classifier,
-            NewSymbolSet<IMethodSymbol>()))
+            new HashSet<(IMethodSymbol Function, ISymbol Variable)>(PropagationPathComparer.Instance)))
         {
             yield return propagated;
         }
@@ -240,7 +257,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     // through that declaration's own callers. A transferred PARAMETER remaps to the caller's
     // argument at each site.
     private static IEnumerable<TransferEntry> CallSiteTransfers(
-        IOperation transferBody, ISymbol variable, IOperation anchor, IOperation block, SendableSymbolClassifier classifier, HashSet<IMethodSymbol> visited)
+        IOperation transferBody, ISymbol variable, IOperation anchor, IOperation block, SendableSymbolClassifier classifier, HashSet<(IMethodSymbol Function, ISymbol Variable)> visited)
     {
         var functionSymbol = transferBody switch
         {
@@ -248,7 +265,10 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             IAnonymousFunctionOperation lambda => lambda.Symbol,
             _ => null,
         };
-        if (functionSymbol is null || !visited.Add(functionSymbol))
+        // One propagation per (function, variable): the same wrapper reached through two
+        // routes carries a different remapped parameter each time, while re-entering it with
+        // the SAME variable is recursion and stops.
+        if (functionSymbol is null || !visited.Add((functionSymbol, variable)))
         {
             yield break;
         }
@@ -376,7 +396,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     }
 
     private static IEnumerable<TransferEntry> CallSiteEntries(
-        IInvocationOperation invocation, IOperation callBody, ISymbol variable, IMethodSymbol functionSymbol, IOperation block, SendableSymbolClassifier classifier, HashSet<IMethodSymbol> visited, bool calleeExits)
+        IInvocationOperation invocation, IOperation callBody, ISymbol variable, IMethodSymbol functionSymbol, IOperation block, SendableSymbolClassifier classifier, HashSet<(IMethodSymbol Function, ISymbol Variable)> visited, bool calleeExits)
     {
         foreach (var callVariable in CallSiteVariables(invocation, variable, functionSymbol, classifier))
         {
@@ -917,12 +937,15 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
 
         // Source-ordered walk of every later reference on the transferred path. A
         // local-function DECLARATION does not execute: its body's references count only
-        // through actual invocations (below). Lambda bodies stay direct references -- a
-        // delegate built after the transfer escapes into code that can only run after it.
+        // through actual invocations (below), and a lambda STORED INTO A LOCAL counts through
+        // that local's invocations and escapes. Any other lambda built after the transfer --
+        // an argument, a return value, a field store -- may run at once and stays a direct
+        // reference.
         var laterReferences = candidates
             .Where(operation => IsReferenceTo(operation, variable)
                 && operation.Syntax.SpanStart >= transferPosition
                 && !IsInsideNameOf(operation)
+                && !IsDeferredInALocallyStoredLambda(operation, scanRoots)
                 && RunsOnTheTransferredPath(operation, entry, scanRoots))
             .Select(operation => (Operation: operation, CallEffect: default(BodyEffect?)));
 
@@ -1304,7 +1327,38 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
 
         return IsReferenceTo(operation, variable)
             && !IsInsideNameOf(operation)
-            && !IsInAnUnreferencedNestedFunction(operation, region);
+            && !IsInAnUnreferencedNestedFunction(operation, region)
+            && !IsDeferredInALocallyStoredLambda(operation, new[] { region });
+    }
+
+    // A lambda stored into a LOCAL runs only when that local is invoked or escapes -- both
+    // classified at their own sites against the stored callable -- and it reads its captured
+    // variable when it RUNS: a definite reassignment before any such site hands it the fresh
+    // value, so building it is not a use. A lambda handed straight to a call, returned, or
+    // stored anywhere else may run at once and keeps counting where it is built.
+    private static bool IsDeferredInALocallyStoredLambda(IOperation reference, IEnumerable<IOperation> boundaries)
+    {
+        var lambda = Ancestors(reference)
+            .TakeWhile(parent => !boundaries.Contains(parent))
+            .OfType<IAnonymousFunctionOperation>()
+            .FirstOrDefault();
+        return lambda is not null && IsStoredIntoALocal(lambda);
+    }
+
+    private static bool IsStoredIntoALocal(IAnonymousFunctionOperation lambda)
+    {
+        IOperation stored = lambda;
+        while (stored.Parent is IDelegateCreationOperation or IConversionOperation)
+        {
+            stored = stored.Parent;
+        }
+
+        return stored.Parent switch
+        {
+            IVariableInitializerOperation { Parent: IVariableDeclaratorOperation { Symbol: ILocalSymbol } } => true,
+            ISimpleAssignmentOperation assignment => ReferenceEquals(assignment.Value, stored) && ReferencedVariable(assignment.Target) is ILocalSymbol,
+            _ => false,
+        };
     }
 
     private static (BodyEffect Effect, IOperation? Evidence, IOperation? Reset) ClassifyBodyEvent(

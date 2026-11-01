@@ -18,7 +18,6 @@ public sealed class ActorSignal<T> : ActorValueNode<T>
         : base(value, context, CacheState.CacheClean)
     {
         this.validateWrittenValues = validateWrittenValues;
-        SendableChecker.EnsureWrittenValueSendable(validateWrittenValues, value);
     }
 
     public Task Set(T value)

@@ -1894,9 +1894,8 @@ public class UseAfterTransferAnalyzerTests
     public async Task DelegateStores_AfterTheCall_CannotBeItsValue()
     {
         // The reading lambda lands in the local only after the call already ran the earlier
-        // no-op: the CALL is not a use. What remains is the standing escape stance on the
-        // post-transfer lambda itself -- so the report anchors at the lambda's read, not at
-        // use().
+        // no-op: the CALL is not a use. Nor is the store itself -- a lambda held in a local
+        // reads its capture only when that local is invoked or escapes, and here it never is.
         var diagnostics = await InClassC("""
                 public Sending<List<int>> M()
                 {
@@ -1909,8 +1908,7 @@ public class UseAfterTransferAnalyzerTests
                 }
             """, WithSystem);
 
-        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
-        Assert.Equal("list", diagnostic.Location.SourceTree!.GetText().ToString(diagnostic.Location.SourceSpan));
+        Assert.Empty(diagnostics);
     }
 
     [Fact]
@@ -5076,5 +5074,97 @@ public class UseAfterTransferAnalyzerTests
 
         var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
         Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task CallGraphVisitation_IsPerPropagatedVariable()
+    {
+        // Common is reached twice, once per wrapper, carrying a different remapped
+        // parameter each time: both routes must propagate.
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list1 = new List<int> { 1 };
+                    var list2 = new List<int> { 2 };
+                    void Move(List<int> x) { var s = Sending.Transfer(x); }
+                    void A(List<int> a) { Move(a); }
+                    void B(List<int> b) { Move(b); }
+                    void Common(List<int> x, List<int> y) { A(x); B(y); }
+                    Common(list1, list2);
+                    list2.Add(1);
+                }
+            """);
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'list2'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task LocallyStoredLambdas_ReadTheirCaptureWhenTheyRun()
+    {
+        // The lambda reads the closure slot when invoked -- after the definite
+        // reassignment -- so building it is not a use of the transferred value.
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(list);
+                    Action use = () => list.Add(1);
+                    list = new List<int>();
+                    use();
+                }
+            """, WithSystem);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task LocallyStoredLambdas_InvokedBeforeAReassignment_AreUses()
+    {
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(list);
+                    Action use = () => list.Add(1);
+                    use();
+                }
+            """, WithSystem);
+
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+    }
+
+    [Fact]
+    public async Task InlineLambdaArguments_StillCountAtTheirCreation()
+    {
+        // A lambda handed straight to a call can run at once: its body counts here.
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(list);
+                    Run(() => list.Add(1));
+                }
+
+                private static void Run(Action action) => action();
+            """, WithSystem);
+
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+    }
+
+    [Fact]
+    public async Task RepeatedVariablesInOneTransfer_ReportOnce()
+    {
+        // (list, list) names the same variable twice: one handoff, one report.
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer((list, list));
+                    list.Add(1);
+                }
+            """);
+
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
     }
 }

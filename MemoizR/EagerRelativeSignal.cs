@@ -15,7 +15,6 @@ public sealed class EagerRelativeSignal<T> : MemoHandlR<T>, IStampedGetR<T>
     internal EagerRelativeSignal(T value, Context context, bool validateWrittenValues = false) : base(context)
     {
         this.validateWrittenValues = validateWrittenValues;
-        SendableChecker.EnsureWrittenValueSendable(validateWrittenValues, value);
         if (context.StampsEnabled)
         {
             SetValueAndStamp(value, CausalityStamp.ForSignal(Id, 0, context.Epoch));

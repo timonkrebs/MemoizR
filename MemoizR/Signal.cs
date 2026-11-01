@@ -18,7 +18,6 @@ public sealed class Signal<T> : MemoHandlR<T>, IStampedGetR<T?>
     internal Signal(T value, Context context, bool validateWrittenValues = false) : base(context)
     {
         this.validateWrittenValues = validateWrittenValues;
-        SendableChecker.EnsureWrittenValueSendable(validateWrittenValues, value);
         if (context.StampsEnabled)
         {
             SetValueAndStamp(value, CausalityStamp.ForSignal(Id, 0, context.Epoch));

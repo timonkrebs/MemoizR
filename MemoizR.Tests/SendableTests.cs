@@ -430,6 +430,19 @@ public class StrictSendableModeTests
     }
 
     [Fact]
+    public void RejectedCreationValues_DoNotConsumeNodeIds()
+    {
+        // A rejected creation value never produced a node, so it must not burn an id from
+        // the context's (bounded, distributed) slice either.
+        var f = new MemoFactory(options: MemoFactoryOptions.StrictSendableChecks | MemoFactoryOptions.ValidateWrittenValues);
+        var before = f.CreateSignal<OpenBase>(new OpenBase()).Id;
+        Assert.Throws<InvalidOperationException>(() => f.CreateSignal<OpenBase>(new MutableChild()));
+        var after = f.CreateSignal<OpenBase>(new OpenBase()).Id;
+
+        Assert.Equal(before + 1, after);
+    }
+
+    [Fact]
     public void StrictFactory_TrustsSendableAttribute()
     {
         var f = new MemoFactory(options: MemoFactoryOptions.StrictSendableChecks);
