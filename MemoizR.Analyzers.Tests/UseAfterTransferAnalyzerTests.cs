@@ -7119,4 +7119,159 @@ public class UseAfterTransferAnalyzerTests
         var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
         Assert.Contains("'list'", diagnostic.GetMessage());
     }
+
+    [Fact]
+    public async Task RepeatedCallsThroughAWrapper_PropagateEachHandoff()
+    {
+        // The second Move() hands the replacement list off and nothing resets it afterwards.
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    void Move()
+                    {
+                        var sent = Sending.Transfer(list);
+                    }
+
+                    void Wrapper()
+                    {
+                        Move();
+                        list = new();
+                        Move();
+                    }
+
+                    Wrapper();
+                    list.Add(1);
+                }
+            """, WithSystem);
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task WrappersThatResetAfterTheirLastHandoff_HandBackAFreshVariable()
+    {
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    void Move()
+                    {
+                        var sent = Sending.Transfer(list);
+                    }
+
+                    void Wrapper()
+                    {
+                        Move();
+                        list = new();
+                        Move();
+                        list = new();
+                    }
+
+                    Wrapper();
+                    list.Add(1);
+                }
+            """, WithSystem);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task ResetsInCoalescingAssignmentValues_StayConditional()
+    {
+        // other is not null: the right-hand side never runs and list stays transferred.
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    List<int>? other = new();
+                    var sending = Sending.Transfer(list);
+                    other ??= (list = new());
+                    list.Add(1);
+                }
+            """, WithSystem);
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task CopyingCreateOverloads_CopyTheBuffer()
+    {
+        // Create(T[] items, int start, int length) copies the slice: the buffer stays the
+        // sender's.
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var buffer = new[] { 1, 2 };
+                    var sending = Sending.Transfer(ImmutableArray.Create(buffer, 0, 1));
+                    buffer[0] = 9;
+                }
+            """, "using System;\nusing System.Collections.Generic;\nusing System.Collections.Immutable;\nusing MemoizR;");
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task SingleItemCreate_RetainsTheItem()
+    {
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(ImmutableArray.Create(list));
+                    list.Add(1);
+                }
+            """, "using System;\nusing System.Collections.Generic;\nusing System.Collections.Immutable;\nusing MemoizR;");
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task NestedDeclarationsInCallees_ReadOnlyWhenCalled()
+    {
+        // Touch's body runs at Touch(), after the reset: the call reads the replacement list.
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    void ResetAndUse()
+                    {
+                        void Touch() { list.Add(1); }
+                        list = new();
+                        Touch();
+                    }
+
+                    var sending = Sending.Transfer(list);
+                    ResetAndUse();
+                }
+            """, WithSystem);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task NestedDeclarationsInCallees_CalledBeforeTheReset_AreUses()
+    {
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    void UseAndReset()
+                    {
+                        void Touch() { list.Add(1); }
+                        Touch();
+                        list = new();
+                    }
+
+                    var sending = Sending.Transfer(list);
+                    UseAndReset();
+                }
+            """, WithSystem);
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
 }

@@ -50,7 +50,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     {
         foreach (var block in context.OperationBlocks)
         {
-            foreach (var entry in Transfers(block, classifier))
+            foreach (var entry in MergedByTransfer(Transfers(block, classifier)))
             {
                 if (IsUsedByAnEnclosingConstruct(entry))
                 {
@@ -66,6 +66,29 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                 }
             }
         }
+    }
+
+    // One entry per (variable, handoff site): the same call site reached through several
+    // propagation paths (a wrapper calling the transferring function twice) carries the union
+    // of their roots -- handlers reachable when any path says so, later blocks joined unless
+    // every path escapes.
+    private static IEnumerable<TransferEntry> MergedByTransfer(IEnumerable<TransferEntry> entries)
+    {
+        return entries
+            .GroupBy(entry => (entry.Variable, entry.Transfer), SnapshotComparer.Instance)
+            .Select(paths => paths.Count() == 1 ? paths.First() : Merge(paths.ToList()));
+    }
+
+    private static TransferEntry Merge(List<TransferEntry> paths)
+    {
+        var first = paths[0];
+        return new TransferEntry(
+            first.Variable,
+            first.Transfer,
+            paths.SelectMany(path => path.ScanRoots).Distinct().ToList(),
+            paths.All(path => path.Escaped),
+            first.Scope,
+            paths.Any(path => path.Escaped || path.HandlersReachable));
     }
 
     // A member with several operation blocks -- a constructor's initializer and its body --
@@ -125,20 +148,22 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     // delegate stores resolve against the BODY even when the scanned regions are narrower
     // (an escaping `return Pair(Sending.Transfer(list), Use());` still calls a Use declared
     // outside the return expression).
-    private sealed class PropagationPathComparer : IEqualityComparer<(IMethodSymbol Function, ISymbol Variable)>
+    private sealed class PropagationPathComparer : IEqualityComparer<(IMethodSymbol Function, ISymbol Variable, IOperation Anchor)>
     {
         public static readonly PropagationPathComparer Instance = new();
 
-        public bool Equals((IMethodSymbol Function, ISymbol Variable) x, (IMethodSymbol Function, ISymbol Variable) y)
+        public bool Equals((IMethodSymbol Function, ISymbol Variable, IOperation Anchor) x, (IMethodSymbol Function, ISymbol Variable, IOperation Anchor) y)
         {
             return SymbolEqualityComparer.Default.Equals(x.Function, y.Function)
-                && SymbolEqualityComparer.Default.Equals(x.Variable, y.Variable);
+                && SymbolEqualityComparer.Default.Equals(x.Variable, y.Variable)
+                && ReferenceEquals(x.Anchor, y.Anchor);
         }
 
-        public int GetHashCode((IMethodSymbol Function, ISymbol Variable) pair)
+        public int GetHashCode((IMethodSymbol Function, ISymbol Variable, IOperation Anchor) path)
         {
-            return SymbolEqualityComparer.Default.GetHashCode(pair.Function) * 31
-                + SymbolEqualityComparer.Default.GetHashCode(pair.Variable);
+            return (SymbolEqualityComparer.Default.GetHashCode(path.Function) * 31
+                + SymbolEqualityComparer.Default.GetHashCode(path.Variable)) * 31
+                + path.Anchor.Syntax.SpanStart;
         }
     }
 
@@ -267,7 +292,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         // caller's continuation: every call site acts as a transfer of its own. A stored
         // but never-invoked callable stays deferred-scoped.
         foreach (var propagated in CallSiteTransfers(enclosingBody, variable, transfer, block, classifier,
-            new HashSet<(IMethodSymbol Function, ISymbol Variable)>(PropagationPathComparer.Instance)))
+            new HashSet<(IMethodSymbol Function, ISymbol Variable, IOperation Anchor)>(PropagationPathComparer.Instance)))
         {
             yield return propagated;
         }
@@ -278,7 +303,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     // through that declaration's own callers. A transferred PARAMETER remaps to the caller's
     // argument at each site.
     private static IEnumerable<TransferEntry> CallSiteTransfers(
-        IOperation transferBody, ISymbol variable, IOperation anchor, IOperation block, SendableSymbolClassifier classifier, HashSet<(IMethodSymbol Function, ISymbol Variable)> visited)
+        IOperation transferBody, ISymbol variable, IOperation anchor, IOperation block, SendableSymbolClassifier classifier, HashSet<(IMethodSymbol Function, ISymbol Variable, IOperation Anchor)> visited)
     {
         var functionSymbol = transferBody switch
         {
@@ -286,10 +311,12 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             IAnonymousFunctionOperation lambda => lambda.Symbol,
             _ => null,
         };
-        // One propagation per (function, variable): the same wrapper reached through two
-        // routes carries a different remapped parameter each time, while re-entering it with
-        // the SAME variable is recursion and stops.
-        if (functionSymbol is null || !visited.Add((functionSymbol, variable)))
+        // One propagation per (function, variable, handoff site): the same wrapper reached
+        // through two routes carries a different remapped parameter each time, and a wrapper
+        // calling the transferring function twice carries different facts (a reset between
+        // the calls) at each site -- while re-entering the same site with the SAME variable is
+        // recursion and stops.
+        if (functionSymbol is null || !visited.Add((functionSymbol, variable, anchor)))
         {
             yield break;
         }
@@ -477,7 +504,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     }
 
     private static IEnumerable<TransferEntry> CallSiteEntries(
-        IInvocationOperation invocation, IOperation callBody, ISymbol variable, IMethodSymbol functionSymbol, IOperation block, SendableSymbolClassifier classifier, HashSet<(IMethodSymbol Function, ISymbol Variable)> visited, bool calleeExits, bool calleeMayFail)
+        IInvocationOperation invocation, IOperation callBody, ISymbol variable, IMethodSymbol functionSymbol, IOperation block, SendableSymbolClassifier classifier, HashSet<(IMethodSymbol Function, ISymbol Variable, IOperation Anchor)> visited, bool calleeExits, bool calleeMayFail)
     {
         foreach (var callVariable in CallSiteVariables(invocation, variable, functionSymbol, classifier))
         {
@@ -770,13 +797,14 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             // Tuple.Create(list) is the constructor spelling of a framework value carrier,
             // and the immutable/frozen collection factories' Create store their ARGUMENTS
             // as elements the same way (ImmutableArray.Create(list) retains the list).
-            // An EXISTING array handed to the params overload is copied element by element
-            // (the array object is not retained); the compiler-built param array of the
-            // expanded form carries its elements like any inline container.
+            // An EXISTING array or span handed to an array- or span-typed parameter -- the
+            // params overload, Create(T[] items, int start, int length) -- is copied element
+            // by element (the buffer is not retained); the compiler-built param array of
+            // the expanded form carries its elements like any inline container.
             IInvocationOperation { TargetMethod: { Name: "Create", ContainingType: { } factory } } factoryCall
                 when IsACarrierFactory(factory) =>
                 factoryCall.Arguments.SelectMany(argument =>
-                    argument is { ArgumentKind: ArgumentKind.Explicit, Parameter.IsParams: true }
+                    argument.ArgumentKind == ArgumentKind.Explicit && CopiesItsElements(argument.Parameter)
                         ? CopiedElementParts(argument.Value)
                         : new[] { (IOperation?)argument.Value }),
             // CreateRange, ToImmutable*/ToFrozen* and LINQ's ToArray/ToList/ToHashSet copy the
@@ -810,6 +838,11 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     // Framework factories whose Create stores its arguments: the tuple family carries each
     // argument in a field, and the immutable/frozen collection factories build a container
     // around the argument REFERENCES -- freezing the shape shares the contents.
+    private static bool CopiesItsElements(IParameterSymbol? parameter)
+    {
+        return parameter?.Type is IArrayTypeSymbol or INamedTypeSymbol { Name: "ReadOnlySpan" or "Span" };
+    }
+
     private static bool IsACarrierFactory(INamedTypeSymbol factory)
     {
         return (factory.Name is "Tuple" or "ValueTuple" or "KeyValuePair"
@@ -1441,19 +1474,32 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     }
 
     // The operations EffectOf walks: references to the variable, plus LOCAL-FUNCTION and
-    // DELEGATE calls, whose bodies read or reset transitively (`void Outer() { Use(); }` /
-    // `void F() { use(); }` -- the callee's reference sits source-before the transfer, so
-    // only the call chain surfaces it).
+    // DELEGATE calls and local-function ESCAPES, whose bodies read or reset transitively
+    // (`void Outer() { Use(); }` / `void F() { use(); }` -- the callee's reference sits
+    // source-before the transfer, so only the call chain surfaces it). A nested local
+    // function's own body is no event: its declaration executes nothing, so its reads and
+    // resets count where it is invoked or escapes, after whatever ran before that site.
     private static bool IsABodyEvent(IOperation operation, ISymbol variable, IOperation region)
     {
+        if (EnclosingLocalFunctions(operation, region).Any())
+        {
+            return false;
+        }
+
         if (operation is IInvocationOperation { TargetMethod.MethodKind: MethodKind.LocalFunction or MethodKind.DelegateInvoke })
         {
-            return !IsInAnUnreferencedNestedFunction(operation, region);
+            return true;
+        }
+
+        // A local function converted to a delegate may run anywhere later -- unless stored
+        // into a local, which its invocation or departure judges.
+        if (operation is IMethodReferenceOperation { Method.MethodKind: MethodKind.LocalFunction })
+        {
+            return !IsStoredIntoALocal(operation);
         }
 
         return IsReferenceTo(operation, variable)
             && !IsInsideNameOf(operation)
-            && !IsInAnUnreferencedNestedFunction(operation, region)
             && !IsDeferredInALocallyStoredLambda(operation, new[] { region });
     }
 
@@ -1522,6 +1568,14 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             return callEffect == BodyEffect.Reads
                 ? (BodyEffect.Reads, invocation, null)
                 : (callEffect, null, invocation);
+        }
+
+        // An escaping local function reads when it runs; its resets promise nothing.
+        if (current is IMethodReferenceOperation { Method: { } escaping })
+        {
+            return LocalFunctionCallEffect(escaping, variable, scope, inProgress) == BodyEffect.Reads
+                ? (BodyEffect.Reads, current, null)
+                : (BodyEffect.None, null, null);
         }
 
         var reset = ResetShapeOf(current, variable, region.Syntax.SpanStart, out var resetRead);
@@ -2003,25 +2057,6 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     private static IOperation? ReadWithin(IOperation expression, ISymbol variable)
     {
         return ReadsOf(expression, variable).FirstOrDefault();
-    }
-
-    // A reference inside a nested local function that nothing in the region ever invokes (or
-    // lifts into a delegate) can never run by entering the region: the declaration alone
-    // executes nothing. Lambda bodies stay visible -- building the delegate is itself the
-    // escape.
-    private static bool IsInAnUnreferencedNestedFunction(IOperation reference, IOperation region)
-    {
-        return EnclosingLocalFunctions(reference, region).Any(nested => !IsReferencedWithin(region, nested.Symbol));
-    }
-
-    private static bool IsReferencedWithin(IOperation region, IMethodSymbol localFunction)
-    {
-        return region.DescendantsAndSelf().Any(operation => operation switch
-        {
-            IInvocationOperation invocation => SymbolEqualityComparer.Default.Equals(invocation.TargetMethod.OriginalDefinition, localFunction),
-            IMethodReferenceOperation methodReference => SymbolEqualityComparer.Default.Equals(methodReference.Method.OriginalDefinition, localFunction),
-            _ => false,
-        });
     }
 
     // Whether CALLING the local function reads the transferred value -- or definitely
@@ -3304,8 +3339,8 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         };
     }
 
-    // The right operand of && / || and the fallback of ?? run only when the left operand says
-    // so: a reset there is as skippable as one in an if-arm.
+    // The right operand of && / ||, the fallback of ?? and the value of ??= run only when the
+    // left operand says so: a reset there is as skippable as one in an if-arm.
     private static bool IsAConditionallyEvaluatedOperand(IOperation child, IOperation parent)
     {
         return parent switch
@@ -3313,6 +3348,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             IBinaryOperation { OperatorKind: BinaryOperatorKind.ConditionalAnd or BinaryOperatorKind.ConditionalOr } binary
                 => ReferenceEquals(child, binary.RightOperand),
             ICoalesceOperation coalesce => ReferenceEquals(child, coalesce.WhenNull),
+            ICoalesceAssignmentOperation coalesceAssignment => ReferenceEquals(child, coalesceAssignment.Value),
             _ => false,
         };
     }
