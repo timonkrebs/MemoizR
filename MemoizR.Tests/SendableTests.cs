@@ -471,6 +471,15 @@ public class StrictSendableModeTests
     }
 
     [Fact]
+    public void GrowingNestedGenericSubstitutions_AreNotAssumedSendable()
+    {
+        // The growth runs through the CONTAINING type's parameters (the CLR flattens them into
+        // Node's own generic arguments): Value is a List<int> by the fourth level.
+        Assert.False(SendableChecker.IsSendable(typeof(GrowingOuter<int, int, int>.Node<int>), out var reason));
+        Assert.Contains("List", reason);
+    }
+
+    [Fact]
     public void StrictFactory_TrustsSendableAttribute()
     {
         var f = new MemoFactory(options: MemoFactoryOptions.StrictSendableChecks);
@@ -655,5 +664,16 @@ internal sealed class HasCustomEvent
     {
         add => handlers += value;
         remove => handlers -= value;
+    }
+}
+
+// Growth through a CONTAINING type's parameters: the nested Node substitutes through
+// GrowingOuter's arguments, which the CLR flattens into Node's own generic arguments.
+internal static class GrowingOuter<A, B, C>
+{
+    internal sealed class Node<D>
+    {
+        public readonly A Value = default!;
+        public readonly GrowingOuter<B, C, List<A>>.Node<D>? Next;
     }
 }

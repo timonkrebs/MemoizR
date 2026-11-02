@@ -672,4 +672,55 @@ public class StaticStateAnalyzerTests
 
         AnalyzerTestHarness.AssertSingle(diagnostics, "MZR004");
     }
+
+    [Fact]
+    public async Task GloballyQualifiedUsings_PutTheFileInScope()
+    {
+        // `using global::MemoizR;` names the same namespace as `using MemoizR;`.
+        var diagnostics = await AnalyzeAsync("""
+            using global::MemoizR;
+            using System.Collections.Generic;
+
+            public class C
+            {
+                private static readonly List<int> Cache = new();
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    Cache.Add(1);
+                }
+            }
+            """);
+
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR004");
+    }
+
+    [Fact]
+    public async Task GloballyQualifiedGlobalUsings_PutEveryFileInScope()
+    {
+        var diagnostics = await AnalyzerTestHarness.AnalyzeAsync(
+            [
+                """
+                global using global::MemoizR;
+                """,
+                """
+                using System.Collections.Generic;
+
+                public class C
+                {
+                    private static readonly List<int> Cache = new();
+
+                    public void M()
+                    {
+                        var f = new MemoFactory();
+                        Cache.Add(1);
+                    }
+                }
+                """,
+            ],
+            new StaticStateAnalyzer());
+
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR004");
+    }
 }

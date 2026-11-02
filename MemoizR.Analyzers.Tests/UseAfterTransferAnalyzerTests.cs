@@ -6018,4 +6018,235 @@ public class UseAfterTransferAnalyzerTests
 
         Assert.Empty(diagnostics);
     }
+
+    [Fact]
+    public async Task ResetsInBranchConditions_AreDefinite()
+    {
+        // The condition runs on every path through the if: Reset hands list a fresh instance
+        // before any arm or the continuation.
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(list);
+                    if (Reset(out list))
+                    {
+                    }
+
+                    list.Add(1);
+                }
+
+                private static bool Reset(out List<int> list)
+                {
+                    list = new();
+                    return true;
+                }
+            """, WithSystem);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task ResetsInSwitchGoverningExpressions_AreDefinite()
+    {
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(list);
+                    switch (Reset(out list))
+                    {
+                        case true:
+                            break;
+                        default:
+                            break;
+                    }
+
+                    list.Add(1);
+                }
+
+                private static bool Reset(out List<int> list)
+                {
+                    list = new();
+                    return true;
+                }
+            """, WithSystem);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task ResetsInLoopConditions_AreDefinite()
+    {
+        // A while condition is evaluated at least once before anything after the loop runs.
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(list);
+                    while (Reset(out list))
+                    {
+                        break;
+                    }
+
+                    list.Add(1);
+                }
+
+                private static bool Reset(out List<int> list)
+                {
+                    list = new();
+                    return true;
+                }
+            """, WithSystem);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task ResetsInConditionalOperands_StayConditional()
+    {
+        // The right operand of && runs only when flag holds: the reset may be skipped.
+        var diagnostics = await InClassC("""
+                public void M(bool flag)
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(list);
+                    if (flag && Reset(out list))
+                    {
+                    }
+
+                    list.Add(1);
+                }
+
+                private static bool Reset(out List<int> list)
+                {
+                    list = new();
+                    return true;
+                }
+            """, WithSystem);
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task ResetsInBranchArms_StayConditional()
+    {
+        var diagnostics = await InClassC("""
+                public void M(bool flag)
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(list);
+                    if (flag)
+                    {
+                        Reset(out list);
+                    }
+
+                    list.Add(1);
+                }
+
+                private static bool Reset(out List<int> list)
+                {
+                    list = new();
+                    return true;
+                }
+            """, WithSystem);
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task GenericMethodGroupRemovals_MatchTheirConstruction()
+    {
+        // Touch<string> is a different delegate target than Touch<int>: the removal strips
+        // nothing, and use() still runs the reading Touch<int>.
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    void Touch<T>() { list.Add(1); }
+                    Action use = Touch<int>;
+                    use -= Touch<string>;
+                    var sending = Sending.Transfer(list);
+                    use();
+                }
+            """, WithSystem);
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task GenericMethodGroupRemovals_CancelTheSameConstruction()
+    {
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    void Touch<T>() { list.Add(1); }
+                    Action use = Touch<int>;
+                    use -= Touch<int>;
+                    var sending = Sending.Transfer(list);
+                    use();
+                }
+            """, WithSystem);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task UnawaitedAsyncTransfersPastTheFirstAwait_StillCount()
+    {
+        // Whether the handoff has happened when the caller continues depends on the awaited
+        // task: already completed, the whole body runs inside the call; pending, the
+        // continuation runs on whatever completes it, racing the caller. Neither ordering is
+        // knowable here, so the use is reported -- the same conservatism that keeps a
+        // deferred reset from ending tracking (UnawaitedAsyncResets_AreDeferred).
+        var diagnostics = await InClassC("""
+                public void M(Task gate)
+                {
+                    var list = new List<int> { 1 };
+                    async Task Move()
+                    {
+                        await gate;
+                        var sending = Sending.Transfer(list);
+                    }
+
+                    _ = Move();
+                    list.Add(1);
+                }
+            """, "using System.Collections.Generic;\nusing System.Threading.Tasks;\nusing MemoizR;");
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task ResetsInTrailingLoopConditions_DoNotCoverTheFirstIteration()
+    {
+        // A do-while condition runs only after the body: the first iteration mutates the
+        // transferred list before any reset.
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(list);
+                    do
+                    {
+                        list.Add(1);
+                    }
+                    while (Reset(out list));
+                }
+
+                private static bool Reset(out List<int> list)
+                {
+                    list = new();
+                    return false;
+                }
+            """, WithSystem);
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
 }

@@ -2037,9 +2037,10 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
 
     // A definite `-= M` strips ONE occurrence of M -- Delegate.Remove semantics: the last
     // occurrence definitely present among the prior stores, combined invocation lists
-    // included (only method groups are identifiable; removing a fresh lambda instance
-    // removes nothing, and an occurrence under a conditional arm is not definitely there
-    // to strip). Duplicate subscriptions survive their single removal.
+    // included (only method groups are identifiable, each generic construction its own
+    // target -- Touch<string> strips no Touch<int>; removing a fresh lambda instance removes
+    // nothing, and an occurrence under a conditional arm is not definitely there to strip).
+    // Duplicate subscriptions survive their single removal.
     private static Dictionary<int, List<IMethodSymbol>> CancelledComponents(
         List<(IOperation Site, IOperation Value, bool Replaces)> stores, ISymbol delegateLocal, IOperation scope, IOperation consumer)
     {
@@ -2069,7 +2070,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         IOperation value, IMethodSymbol method, Dictionary<int, List<IMethodSymbol>> cancelled, int index)
     {
         var present = DefiniteMethodGroups(value)
-            .Count(group => SymbolEqualityComparer.Default.Equals(group.Method.OriginalDefinition, method));
+            .Count(group => SymbolEqualityComparer.Default.Equals(group.Method, method));
         var taken = cancelled.TryGetValue(index, out var methods)
             ? methods.Count(taken => SymbolEqualityComparer.Default.Equals(taken, method))
             : 0;
@@ -2102,7 +2103,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             for (var position = components.Count - 1; position >= 0; position--)
             {
                 if (components[position] is IMethodReferenceOperation group
-                    && SymbolEqualityComparer.Default.Equals(group.Method.OriginalDefinition, method))
+                    && SymbolEqualityComparer.Default.Equals(group.Method, method))
                 {
                     components.RemoveAt(position);
                     break;
@@ -2122,7 +2123,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                 && !IsConditionalWithin(removal, scope)
                 && Callable(removal.Value) is IMethodReferenceOperation methodReference)
             {
-                removals.Add((operation.Syntax.SpanStart, methodReference.Method.OriginalDefinition));
+                removals.Add((operation.Syntax.SpanStart, methodReference.Method));
             }
         }
 
@@ -2335,7 +2336,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                 continue;
             }
 
-            if (IsBranching(parent) || IsAConditionallyEvaluatedOperand(child, parent))
+            if (IsAnArmOf(child, parent) || IsAConditionallyEvaluatedOperand(child, parent))
             {
                 return true;
             }
@@ -2526,7 +2527,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     {
         for (IOperation child = reinitialization; child.Parent is { } parent; child = parent)
         {
-            if (IsBranching(parent) || parent is ITryOperation || IsNestedFunction(parent) || IsAConditionallyEvaluatedOperand(child, parent))
+            if (IsAnArmOf(child, parent) || parent is ITryOperation || IsNestedFunction(parent) || IsAConditionallyEvaluatedOperand(child, parent))
             {
                 return child;
             }
@@ -2838,7 +2839,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     {
         for (IOperation child = reinitialization; child.Parent is { } parent; child = parent)
         {
-            var branches = IsBranching(parent) || parent is ITryOperation || IsAConditionallyEvaluatedOperand(child, parent);
+            var branches = IsAnArmOf(child, parent) || parent is ITryOperation || IsAConditionallyEvaluatedOperand(child, parent);
             if (!branches || (parent is ITryOperation tryOperation && RunsToCompletionOrExits(tryOperation, child)))
             {
                 continue;
@@ -2928,6 +2929,29 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     {
         return operation is IConditionalOperation or ISwitchOperation or ISwitchExpressionOperation
             or ILoopOperation or IConditionalAccessOperation;
+    }
+
+    // An arm of a branching construct -- as opposed to its GOVERNING expression (an if's
+    // condition, a switch's value, a loop's condition or collection, a ?.'s receiver), which
+    // runs on every path through the construct: a reset there is as definite as one before it.
+    private static bool IsAnArmOf(IOperation child, IOperation parent)
+    {
+        return IsBranching(parent) && !IsAGoverningExpression(child, parent);
+    }
+
+    private static bool IsAGoverningExpression(IOperation child, IOperation parent)
+    {
+        return parent switch
+        {
+            IConditionalOperation conditional => ReferenceEquals(child, conditional.Condition),
+            ISwitchOperation @switch => ReferenceEquals(child, @switch.Value),
+            ISwitchExpressionOperation switchExpression => ReferenceEquals(child, switchExpression.Value),
+            IWhileLoopOperation loop => ReferenceEquals(child, loop.Condition),
+            IForLoopOperation loop => ReferenceEquals(child, loop.Condition) || loop.Before.Contains(child),
+            IForEachLoopOperation loop => ReferenceEquals(child, loop.Collection),
+            IConditionalAccessOperation access => ReferenceEquals(child, access.Operation),
+            _ => false,
+        };
     }
 
     // The right operand of && / || and the fallback of ?? run only when the left operand says

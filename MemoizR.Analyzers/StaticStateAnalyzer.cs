@@ -275,7 +275,24 @@ public sealed class StaticStateAnalyzer : DiagnosticAnalyzer
         return tree.GetRoot()
             .DescendantNodes(node => node is CompilationUnitSyntax or BaseNamespaceDeclarationSyntax)
             .OfType<UsingDirectiveSyntax>()
-            .Where(directive => directive.Name?.ToString() is { } name
-                && (name == "MemoizR" || name.StartsWith("MemoizR.", StringComparison.Ordinal)));
+            .Where(directive => directive.Name is { } name && NamesMemoizR(DottedNameOf(name)));
+    }
+
+    private static bool NamesMemoizR(string dottedName)
+    {
+        return dottedName == "MemoizR" || dottedName.StartsWith("MemoizR.", StringComparison.Ordinal);
+    }
+
+    // The dotted name a directive imports, without an alias qualifier: `global::MemoizR` is
+    // the same namespace as `MemoizR`.
+    private static string DottedNameOf(NameSyntax name)
+    {
+        return name switch
+        {
+            QualifiedNameSyntax qualified => DottedNameOf(qualified.Left) + "." + qualified.Right.Identifier.ValueText,
+            AliasQualifiedNameSyntax aliased => aliased.Name.Identifier.ValueText,
+            SimpleNameSyntax simple => simple.Identifier.ValueText,
+            _ => name.ToString(),
+        };
     }
 }

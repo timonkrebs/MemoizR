@@ -997,4 +997,36 @@ public class SendableTypeArgumentAnalyzerTests
 
         Assert.Empty(diagnostics);
     }
+
+    [Fact]
+    public async Task GrowingNestedGenericSubstitutions_AreNotAssumedSendable()
+    {
+        // The growth runs through the CONTAINING type's parameters: Outer<int,int,int>.Node<int>
+        // reaches Outer<List<int>, ..>.Node<int> by the fourth level, where Value is a List<int>.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public static class Outer<A, B, C>
+            {
+                public sealed class Node<D>
+                {
+                    public readonly A Value = default!;
+                    public readonly Outer<B, C, List<A>>.Node<D>? Next;
+                }
+            }
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    f.CreateSignal(new Outer<int, int, int>.Node<int>());
+                }
+            }
+            """);
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR001");
+        Assert.Contains("List", diagnostic.GetMessage());
+    }
 }
