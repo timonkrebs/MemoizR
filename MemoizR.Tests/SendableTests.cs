@@ -471,6 +471,14 @@ public class StrictSendableModeTests
     }
 
     [Fact]
+    public void SendableShields_StopParameterReachability()
+    {
+        // The payload grows a List per level, but every level wraps it in Sending<T>: the
+        // shield answers for it, past the divergence cut too.
+        Assert.True(SendableChecker.IsSendable(typeof(ShieldedGrowth<int>), out _));
+    }
+
+    [Fact]
     public void GrowingNestedGenericSubstitutions_AreNotAssumedSendable()
     {
         // The growth runs through the CONTAINING type's parameters (the CLR flattens them into
@@ -676,4 +684,12 @@ internal static class GrowingOuter<A, B, C>
         public readonly A Value = default!;
         public readonly GrowingOuter<B, C, List<A>>.Node<D>? Next;
     }
+}
+
+// Growth whose payload is shielded by a [Sendable] wrapper at every level.
+internal sealed class ShieldedGrowth<T>
+{
+    public ShieldedGrowth<List<T>>? Next { get; init; }
+
+    public Sending<T>? Payload { get; init; }
 }

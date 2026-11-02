@@ -539,7 +539,9 @@ public static class SendableChecker
     }
 
     // The generic parameters a type mentions -- without descending into the definition's own
-    // constructions when asked: their arguments flow through the recursion instead.
+    // constructions when asked: their arguments flow through the recursion instead. A
+    // [Sendable]-attributed wrapper SHIELDS its arguments (its thread-safety does not rest on
+    // them, exactly as the main walk trusts it), so nothing inside one reaches a slot.
     private static IEnumerable<Type> ParametersIn(Type type, Type? stopAtSelf)
     {
         if (type.IsGenericParameter)
@@ -552,9 +554,14 @@ public static class SendableChecker
             return ParametersIn(type.GetElementType()!, stopAtSelf);
         }
 
-        return type.IsGenericType && (stopAtSelf == null || DefinitionOf(type) != stopAtSelf)
+        return type.IsGenericType && (stopAtSelf == null || DefinitionOf(type) != stopAtSelf) && !IsShielded(type)
             ? type.GetGenericArguments().SelectMany(argument => ParametersIn(argument, stopAtSelf))
             : Enumerable.Empty<Type>();
+    }
+
+    private static bool IsShielded(Type type)
+    {
+        return type.IsDefined(typeof(SendableAttribute), inherit: false);
     }
 
     private static IEnumerable<Type> SelfConstructionsIn(Type type, Type definition)
@@ -564,7 +571,7 @@ public static class SendableChecker
             return SelfConstructionsIn(type.GetElementType()!, definition);
         }
 
-        if (!type.IsGenericType)
+        if (!type.IsGenericType || IsShielded(type))
         {
             return Enumerable.Empty<Type>();
         }

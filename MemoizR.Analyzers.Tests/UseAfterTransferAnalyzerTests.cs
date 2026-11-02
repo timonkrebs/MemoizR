@@ -7274,4 +7274,84 @@ public class UseAfterTransferAnalyzerTests
         var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
         Assert.Contains("'list'", diagnostic.GetMessage());
     }
+
+    [Fact]
+    public async Task CarrierFactories_RetainArrayItems()
+    {
+        // Tuple.Create<T>(T item1) stores the array itself: its T is an array only by
+        // substitution, not by contract.
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var buffer = new[] { 1 };
+                    var sending = Sending.Transfer(Tuple.Create(buffer));
+                    buffer[0] = 9;
+                }
+            """, WithSystem);
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'buffer'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task SingleItemCreate_RetainsAnArrayItem()
+    {
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var buffer = new[] { 1 };
+                    var sending = Sending.Transfer(ImmutableArray.Create<int[]>(buffer));
+                    buffer[0] = 9;
+                }
+            """, "using System;\nusing System.Collections.Generic;\nusing System.Collections.Immutable;\nusing MemoizR;");
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'buffer'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task SwitchExpressionDelegateStores_ResolveEveryArm()
+    {
+        var diagnostics = await InClassC("""
+                public void M(bool flag)
+                {
+                    var list = new List<int> { 1 };
+                    Action use = flag switch
+                    {
+                        true => () => list.Add(1),
+                        _ => () => { },
+                    };
+                    var sending = Sending.Transfer(list);
+                    use();
+                }
+            """, WithSystem);
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task FailuresInAThrowsOperand_ReachUnrelatedHandlers()
+    {
+        // message() may throw an IOException before the InvalidOperationException exists: that
+        // failure lands in the handler with the transferred list.
+        var diagnostics = await InClassC("""
+                public void M(Func<string> message)
+                {
+                    var list = new List<int> { 1 };
+                    try
+                    {
+                        var sending = Sending.Transfer(list);
+                        throw new InvalidOperationException(message());
+                    }
+                    catch (IOException)
+                    {
+                        list.Add(1);
+                    }
+                }
+            """, "using System;\nusing System.Collections.Generic;\nusing System.IO;\nusing MemoizR;");
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
 }

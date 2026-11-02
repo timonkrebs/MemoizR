@@ -838,9 +838,11 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     // Framework factories whose Create stores its arguments: the tuple family carries each
     // argument in a field, and the immutable/frozen collection factories build a container
     // around the argument REFERENCES -- freezing the shape shares the contents.
+    // Judged by the parameter's DECLARED type: a `T item` instantiated with an array is still
+    // one retained item.
     private static bool CopiesItsElements(IParameterSymbol? parameter)
     {
-        return parameter?.Type is IArrayTypeSymbol or INamedTypeSymbol { Name: "ReadOnlySpan" or "Span" };
+        return parameter?.OriginalDefinition.Type is IArrayTypeSymbol or INamedTypeSymbol { Name: "ReadOnlySpan" or "Span" };
     }
 
     private static bool IsACarrierFactory(INamedTypeSymbol factory)
@@ -1359,8 +1361,10 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         return region.DescendantsAndSelf().Where(operation =>
             operation.Syntax.Span.End > transferPosition
             && CanThrow(operation)
-            // an explicit throw governs its subtree: its operand is not an independent failure
-            && (operation is IThrowOperation || !IsInsideAThrow(operation))
+            // the thrown exception's own construction is the throw's path, not a failure of
+            // its own -- unlike other operand work (`throw new X(message())`), which can fail
+            // with an exception of its own first
+            && !IsTheThrownConstruction(operation)
             && !IsWithinANestedFunction(operation, region)
             && !IsInASiblingArmOfTheTransfer(operation, transferPosition));
     }
@@ -2613,7 +2617,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     }
 
     // Every callable a stored value can BE at runtime: `flag ? Touch : fallback` puts
-    // either arm in the delegate, `a ?? b` likewise.
+    // either arm in the delegate, `a ?? b` likewise, and a switch expression any of its arms.
     private static IEnumerable<IOperation> Callables(IOperation? stored)
     {
         stored = UnwrapDelegate(stored);
@@ -2647,15 +2651,8 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                 }
 
                 break;
-            case IConditionalOperation { WhenFalse: { } whenFalse } conditional:
-                foreach (var callable in Callables(conditional.WhenTrue).Concat(Callables(whenFalse)))
-                {
-                    yield return callable;
-                }
-
-                break;
-            case ICoalesceOperation coalesce:
-                foreach (var callable in Callables(coalesce.Value).Concat(Callables(coalesce.WhenNull)))
+            case IConditionalOperation { WhenFalse: not null } or ICoalesceOperation or ISwitchExpressionOperation:
+                foreach (var callable in AlternativesOf(stored).SelectMany(Callables))
                 {
                     yield return callable;
                 }
@@ -3134,12 +3131,11 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     // throw, a call that may fail, ...) skips a reset that try still contains. The handler
     // is searched OUTWARD: a try none of whose clauses can take the failure (an explicit
     // throw's type passes them) hands it on, and a clause that DEFINITELY takes it ends the
-    // search -- unless that handler re-throws, handing on a failure of unknown type. An
-    // explicit throw governs its whole subtree (the operand evaluating is not an
-    // independent failure path worth modeling).
+    // search -- unless that handler re-throws, handing on a failure of unknown type. The
+    // thrown exception's own construction is the throw's path, not a failure of its own.
     private static bool ACaughtFailureCanResumePast(IOperation operation, int reinitPosition)
     {
-        if (operation is not IThrowOperation && IsInsideAThrow(operation))
+        if (IsTheThrownConstruction(operation))
         {
             return false;
         }
@@ -3170,9 +3166,20 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         return false;
     }
 
-    private static bool IsInsideAThrow(IOperation operation)
+    private static bool IsTheThrownConstruction(IOperation operation)
     {
-        return AncestorsWithinFunction(operation).Any(parent => parent is IThrowOperation);
+        if (operation is not IObjectCreationOperation)
+        {
+            return false;
+        }
+
+        var operand = operation;
+        while (operand.Parent is IConversionOperation)
+        {
+            operand = operand.Parent;
+        }
+
+        return operand.Parent is IThrowOperation;
     }
 
     // The tries whose BODY holds the operation, innermost first, within its own function (a

@@ -1051,4 +1051,33 @@ public class SendableTypeArgumentAnalyzerTests
 
         AnalyzerTestHarness.AssertSingle(diagnostics, "MZR001");
     }
+
+    [Fact]
+    public async Task SendableShields_StopParameterReachability()
+    {
+        // The payload grows a List per level, but every level wraps it in Sending<T>: the
+        // shield, not the argument, answers for it -- past the divergence cut too.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public sealed class Node<T>
+            {
+                public Node<List<T>>? Next { get; init; }
+
+                public Sending<T>? Payload { get; init; }
+            }
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    f.CreateSignal(new Node<int>());
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
 }

@@ -581,14 +581,16 @@ internal sealed class SendableSymbolClassifier
 
     // The definition's own type parameters (its containing types' included) a type mentions --
     // without descending into the definition's own constructions when asked: their arguments
-    // flow through the recursion instead.
+    // flow through the recursion instead. A [Sendable]-attributed wrapper SHIELDS its
+    // arguments (its thread-safety does not rest on them, exactly as the main walk trusts
+    // it), so nothing inside one reaches a slot.
     private static IEnumerable<ITypeParameterSymbol> OwnParametersIn(ITypeSymbol type, INamedTypeSymbol definition, bool stopAtSelf)
     {
         return type switch
         {
             ITypeParameterSymbol parameter when IsDeclaredBy(parameter, definition) => new[] { parameter },
             IArrayTypeSymbol array => OwnParametersIn(array.ElementType, definition, stopAtSelf),
-            INamedTypeSymbol named when !stopAtSelf || !SymbolEqualityComparer.Default.Equals(named.OriginalDefinition, definition)
+            INamedTypeSymbol named when (!stopAtSelf || !SymbolEqualityComparer.Default.Equals(named.OriginalDefinition, definition)) && !HasSendableAttribute(named)
                 => AllTypeArguments(named).SelectMany(argument => OwnParametersIn(argument, definition, stopAtSelf)),
             _ => Enumerable.Empty<ITypeParameterSymbol>(),
         };
@@ -621,7 +623,7 @@ internal sealed class SendableSymbolClassifier
         {
             case IArrayTypeSymbol array:
                 return SelfConstructionsIn(array.ElementType, definition);
-            case INamedTypeSymbol named:
+            case INamedTypeSymbol named when !HasSendableAttribute(named):
                 var nested = AllTypeArguments(named).SelectMany(argument => SelfConstructionsIn(argument, definition));
                 return SymbolEqualityComparer.Default.Equals(named.OriginalDefinition, definition) ? nested.Prepend(named) : nested;
             default:
