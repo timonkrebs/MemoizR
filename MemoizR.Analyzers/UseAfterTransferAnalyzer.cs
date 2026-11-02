@@ -1333,7 +1333,13 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     // functions resolve against `scope`; `inProgress` breaks recursion cycles.
     private static BodyEffect EffectOf(IOperation region, ISymbol variable, IOperation scope, HashSet<IMethodSymbol> inProgress, out IOperation? read, int deferredResetsFrom = int.MaxValue)
     {
+        return EffectOf(region, variable, scope, inProgress, out read, out _, deferredResetsFrom);
+    }
+
+    private static BodyEffect EffectOf(IOperation region, ISymbol variable, IOperation scope, HashSet<IMethodSymbol> inProgress, out IOperation? read, out IOperation? definiteReset, int deferredResetsFrom = int.MaxValue)
+    {
         read = null;
+        definiteReset = null;
         var events = region.DescendantsAndSelf()
             .Where(operation => IsABodyEvent(operation, variable, region))
             .OrderBy(operation => operation.Syntax.SpanStart);
@@ -1363,6 +1369,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             if (!IsConditionalWithin(reset!, region)
                 && !ABranchCanSkip(reset!, region.Syntax.SpanStart, region))
             {
+                definiteReset = reset;
                 return BodyEffect.Resets; // rewrites before any read on every path
             }
 
@@ -1696,11 +1703,12 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         // backing collection itself is never copied (list.Where(..).ToArray() owns a fresh
         // array), so only an inline source container contributes. A PROJECTING view's
         // elements are its selector's results instead.
-        if (operand is not null && ViewSourceOf(operand) is { } viewSource)
+        if (operand is not null && ViewSourcesOf(operand) is { } view)
         {
-            return ProjectionSelectorOf(operand) is { } selector
-                ? ProjectedParts(selector, viewSource)
-                : CopiedElementParts(viewSource);
+            var elements = ProjectionSelectorOf(operand) is { } selector
+                ? ProjectedParts(selector, view.Sequences)
+                : view.Sequences.SelectMany(CopiedElementParts);
+            return elements.Concat(view.Elements);
         }
 
         return operand is not null && CarriedParts(operand) is { } parts
@@ -1708,13 +1716,13 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             : Enumerable.Empty<IOperation?>();
     }
 
-    // The lambda whose results a projecting view (Select, SelectMany, Zip with a result
-    // selector) materializes -- none for an element-preserving view, and none for a selector
-    // the analysis cannot see into (a method group), which keeps the elements.
+    // The lambda whose results a projecting view (Select, SelectMany, Zip/Join/GroupJoin with
+    // a result selector) materializes -- none for an element-preserving view, and none for a
+    // selector the analysis cannot see into (a method group), which keeps the elements.
     private static IAnonymousFunctionOperation? ProjectionSelectorOf(IOperation view)
     {
         var call = view is IConditionalAccessOperation conditional ? PeelConversions(conditional.WhenNotNull) : view;
-        if (call is not IInvocationOperation { TargetMethod.Name: "Select" or "SelectMany" or "Zip" } projection)
+        if (call is not IInvocationOperation { TargetMethod.Name: "Select" or "SelectMany" or "Zip" or "Join" or "GroupJoin" } projection)
         {
             return null;
         }
@@ -1724,12 +1732,12 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     }
 
     // What a projection's results deliver: a captured variable rides along as itself, and a
-    // result that IS the element (the parameter) or may alias it (anything computed from it
-    // but a plain value or string) delivers the source's elements.
-    private static IEnumerable<IOperation?> ProjectedParts(IAnonymousFunctionOperation selector, IOperation viewSource)
+    // result that IS an element (a parameter) or may alias one (anything computed from it
+    // but a plain value or string) delivers the sources' elements.
+    private static IEnumerable<IOperation?> ProjectedParts(IAnonymousFunctionOperation selector, IEnumerable<IOperation> sources)
     {
         return SelectorParts(selector)
-            .Concat(DeliversTheElements(selector) ? CopiedElementParts(viewSource) : Enumerable.Empty<IOperation?>());
+            .Concat(DeliversTheElements(selector) ? sources.SelectMany(CopiedElementParts) : Enumerable.Empty<IOperation?>());
     }
 
     // What a materializer stores: its SELECTORS' results (a dictionary's keys and values are
@@ -1800,9 +1808,10 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                 || (type.IsValueType && type is not INamedTypeSymbol { IsTupleType: true }));
     }
 
-    // The expression a framework view reads through -- list.Where(..), list?.AsReadOnly() --
-    // or null when the operand is not a view.
-    private static IOperation? ViewSourceOf(IOperation operand)
+    // The sequences a framework view reads its elements through -- the receiver (list.Where(..),
+    // list?.AsReadOnly()) and, for Concat/Union/Zip/Join, the other sequences too -- plus the
+    // single elements Append/Prepend/DefaultIfEmpty add; null when the operand is not a view.
+    private static (List<IOperation> Sequences, List<IOperation?> Elements)? ViewSourcesOf(IOperation operand)
     {
         var (call, receiverBehindPlaceholder) = operand is IConditionalAccessOperation conditional
             ? (PeelConversions(conditional.WhenNotNull), conditional.Operation)
@@ -1813,7 +1822,32 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         }
 
         var receiver = view.Instance ?? view.Arguments.FirstOrDefault()?.Value;
-        return receiver is IConditionalAccessInstanceOperation ? receiverBehindPlaceholder : receiver;
+        var others = (view.Instance is null ? view.Arguments.Skip(1) : view.Arguments).Select(argument => argument.Value).ToList();
+        var sequences = new[] { receiver is IConditionalAccessInstanceOperation ? receiverBehindPlaceholder : receiver }
+            .OfType<IOperation>()
+            .Concat(ContributesItsSequences(method) ? others.Where(IsASequence) : Enumerable.Empty<IOperation>())
+            .ToList();
+        var elements = AddsItsArgument(method)
+            ? others.Take(1).Select(element => (IOperation?)element).ToList()
+            : new List<IOperation?>();
+        return (sequences, elements);
+    }
+
+    private static bool ContributesItsSequences(IMethodSymbol method)
+    {
+        return method.Name is "Concat" or "Union" or "UnionBy" or "Zip" or "Join" or "GroupJoin";
+    }
+
+    private static bool AddsItsArgument(IMethodSymbol method)
+    {
+        return method.Name is "Append" or "Prepend" or "DefaultIfEmpty";
+    }
+
+    private static bool IsASequence(IOperation operation)
+    {
+        return operation.Type is IArrayTypeSymbol
+            || (operation.Type is INamedTypeSymbol named
+                && named.AllInterfaces.Prepend(named).Any(candidate => candidate.OriginalDefinition.SpecialType == SpecialType.System_Collections_Generic_IEnumerable_T));
     }
 
     private static IOperation? ReadWithin(IOperation expression, ISymbol variable)
@@ -2537,8 +2571,11 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                 { Type.IsValueType: true } => false,
                 _ => true,
             },
+            // An explicit downcast, an unboxing and a nullable unwrap all throw on the wrong
+            // (or missing) runtime value; `as` and every implicit conversion cannot.
             IConversionOperation conversion => conversion.OperatorMethod is not null || conversion.IsChecked
-                || (conversion.Conversion is { IsReference: true, IsImplicit: false } && !conversion.IsTryCast),
+                || (conversion.Conversion is { IsImplicit: false } cast
+                    && ((cast.IsReference && !conversion.IsTryCast) || cast.IsNullable || IsAnUnboxing(conversion))),
             IUnaryOperation or IBinaryOperation or ICompoundAssignmentOperation or IIncrementOrDecrementOperation
                 => ArithmeticCanThrow(operation),
             _ => operation is IInvocationOperation or IObjectCreationOperation or IAwaitOperation
@@ -2552,6 +2589,11 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                 or IUsingOperation or IUsingDeclarationOperation or IForEachLoopOperation
                 or ILockOperation,
         };
+    }
+
+    private static bool IsAnUnboxing(IConversionOperation conversion)
+    {
+        return conversion.Operand.Type is { IsReferenceType: true } && conversion.Type is { IsReferenceType: false };
     }
 
     // User-defined operators are calls, checked arithmetic overflows, and integral or decimal
@@ -2740,12 +2782,21 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
 
     // The finally observes the transferred value only on a failure path no handler recovered:
     // an unfiltered catch-everything must close the set of escaping failures, and every clause
-    // a failure can reach must definitely replace the variable before reading it.
+    // a failure can reach must definitely replace the variable before reading it -- with
+    // nothing able to fail before the replacement is stored, or the finally runs with the
+    // old value after all.
     private static bool HandlersRecoverEveryFailure(ITryOperation tryOperation, ISymbol variable, IOperation scope, List<IOperation> failures)
     {
         var reachable = tryOperation.Catches.Where(clause => failures.Any(failure => FailureReaches(failure, clause))).ToList();
         return reachable.Any(clause => clause.Filter is null && (clause.ExceptionType is not { } caught || CatchesEverything(caught)))
-            && reachable.All(clause => EffectOf(clause, variable, scope, NewSymbolSet<IMethodSymbol>(), out _) == BodyEffect.Resets);
+            && reachable.All(clause => RecoversBeforeAnyFailure(clause, variable, scope));
+    }
+
+    private static bool RecoversBeforeAnyFailure(ICatchClauseOperation clause, ISymbol variable, IOperation scope)
+    {
+        return EffectOf(clause, variable, scope, NewSymbolSet<IMethodSymbol>(), out _, out var reset) == BodyEffect.Resets
+            && reset is { } stored
+            && !ThrowCapableOpsAfter(clause, clause.Syntax.SpanStart).Any(failure => failure.Syntax.SpanStart < stored.Syntax.Span.End);
     }
 
     // The window reaches the handlers AND the finally: both run when the reinitializing

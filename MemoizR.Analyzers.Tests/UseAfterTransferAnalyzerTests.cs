@@ -6668,4 +6668,207 @@ public class UseAfterTransferAnalyzerTests
         var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
         Assert.Contains("'list'", diagnostic.GetMessage());
     }
+
+    [Fact]
+    public async Task UnboxingConversions_CanThrow()
+    {
+        // (int)value throws InvalidCastException for a boxed string: the handler runs with the
+        // transferred list.
+        var diagnostics = await InClassC("""
+                public void M(object value)
+                {
+                    var list = new List<int> { 1 };
+                    try
+                    {
+                        var sending = Sending.Transfer(list);
+                        _ = (int)value;
+                    }
+                    catch (InvalidCastException)
+                    {
+                        list.Add(1);
+                    }
+                }
+            """, WithSystem);
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task BoxingConversions_CannotThrow()
+    {
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    try
+                    {
+                        var sending = Sending.Transfer(list);
+                        object boxed = 1;
+                    }
+                    catch (InvalidCastException)
+                    {
+                        list.Add(1);
+                    }
+                }
+            """, WithSystem);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task CatchHandlerResetsThatCanFail_DoNotCoverTheFinally()
+    {
+        // make() may throw inside the handler too: the finally then runs with the transferred
+        // list unchanged.
+        var diagnostics = await InClassC("""
+                public void M(Func<List<int>> make)
+                {
+                    var list = new List<int> { 1 };
+                    try
+                    {
+                        var sending = Sending.Transfer(list);
+                        list = make();
+                    }
+                    catch
+                    {
+                        list = make();
+                    }
+                    finally
+                    {
+                        list.Add(1);
+                    }
+                }
+            """, WithSystem);
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task CatchHandlerResetsThatCannotFail_CoverTheFinally()
+    {
+        var diagnostics = await InClassC("""
+                public void M(Func<List<int>> make)
+                {
+                    var list = new List<int> { 1 };
+                    var fresh = new List<int>();
+                    try
+                    {
+                        var sending = Sending.Transfer(list);
+                        list = make();
+                    }
+                    catch
+                    {
+                        list = fresh;
+                    }
+                    finally
+                    {
+                        list.Add(1);
+                    }
+                }
+            """, WithSystem);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task ConcatenatedViews_CopyEveryContributingSequence()
+    {
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var first = new List<int> { 1 };
+                    var second = new List<int> { 2 };
+                    var sending = Sending.Transfer(new[] { first }.Concat(new[] { second }).ToArray());
+                    second.Add(1);
+                }
+            """, "using System.Collections.Generic;\nusing System.Linq;\nusing MemoizR;");
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'second'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task UnionViews_CopyEveryContributingSequence()
+    {
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var first = new List<int> { 1 };
+                    var second = new List<int> { 2 };
+                    var sending = Sending.Transfer(new[] { first }.Union(new[] { second }).ToArray());
+                    second.Add(1);
+                }
+            """, "using System.Collections.Generic;\nusing System.Linq;\nusing MemoizR;");
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'second'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task ZippedViews_CopyBothSequences()
+    {
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var second = new List<int> { 2 };
+                    var sending = Sending.Transfer(new[] { 1 }.Zip(new[] { second }).ToArray());
+                    second.Add(1);
+                }
+            """, "using System.Collections.Generic;\nusing System.Linq;\nusing MemoizR;");
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'second'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task ZipSelectors_DeliverEitherSequencesElements()
+    {
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var second = new List<int> { 2 };
+                    var sending = Sending.Transfer(new[] { 1 }.Zip(new[] { second }, (a, b) => b).ToArray());
+                    second.Add(1);
+                }
+            """, "using System.Collections.Generic;\nusing System.Linq;\nusing MemoizR;");
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'second'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task AppendedElements_AreCopied()
+    {
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var first = new List<int> { 1 };
+                    var second = new List<int> { 2 };
+                    var sending = Sending.Transfer(new[] { first }.Append(second).ToArray());
+                    second.Add(1);
+                }
+            """, "using System.Collections.Generic;\nusing System.Linq;\nusing MemoizR;");
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'second'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task ExceptViews_CopyOnlyTheReceiversElements()
+    {
+        // Except keeps elements of the receiver only: second never reaches the array.
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var first = new List<int> { 1 };
+                    var second = new List<int> { 2 };
+                    var sending = Sending.Transfer(new[] { first }.Except(new[] { second }).ToArray());
+                    second.Add(1);
+                }
+            """, "using System.Collections.Generic;\nusing System.Linq;\nusing MemoizR;");
+
+        Assert.Empty(diagnostics);
+    }
 }
