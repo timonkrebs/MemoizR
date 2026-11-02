@@ -159,12 +159,13 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
 
     private sealed class TransferEntry
     {
-        public TransferEntry(ISymbol variable, IOperation transfer, List<IOperation> scanRoots, bool escaped, IOperation scope)
+        public TransferEntry(ISymbol variable, IOperation transfer, List<IOperation> scanRoots, bool escaped, IOperation scope, bool handlersReachable = false)
         {
             Variable = variable;
             Transfer = transfer;
             ScanRoots = scanRoots;
             Escaped = escaped;
+            HandlersReachable = handlersReachable;
             Scope = scope;
         }
 
@@ -175,6 +176,10 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         public List<IOperation> ScanRoots { get; }
 
         public bool Escaped { get; }
+
+        // A propagated call whose callee can still fail after its handoff: the caller's
+        // handlers covering the call observe the transferred value.
+        public bool HandlersReachable { get; }
 
         public IOperation Scope { get; }
 
@@ -300,31 +305,83 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             yield break;
         }
 
-        // A callee that never completes normally after its handoff turns each call into a
-        // THROWN transfer: only the caller's handlers and finallys observe it. An ASYNC
-        // callee faults into its returned task instead -- the caller continues unless it
-        // awaits the call right there.
-        var calleeExits = CalleeCannotReturnAfter(transferBody, anchor.Syntax.Span.End);
-        var calleeIsAsync = functionSymbol.IsAsync;
-
-        // An ITERATOR body runs only when enumerated: the call itself hands nothing off (the
-        // sequence may never be walked), so only an immediate enumeration propagates.
-        var deferred = IsIteratorBody(transferBody);
-
+        var facts = CalleeFactsOf(transferBody, functionSymbol, variable, anchor);
         foreach (var invocation in block.DescendantsAndSelf().OfType<IInvocationOperation>())
         {
-            if (!IsAPropagatingCallSite(invocation, transferBody, functionSymbol, anchor, block, deferred))
+            if (!IsAPropagatingCallSite(invocation, transferBody, functionSymbol, anchor, block, facts.Deferred))
+            {
+                continue;
+            }
+
+            var (skip, thrown, mayFail) = ObservationOf(invocation, transferBody, functionSymbol, facts);
+            if (skip)
             {
                 continue;
             }
 
             var callBody = EnclosingFunctionBody(invocation, block);
-            var callThrows = calleeExits && (!calleeIsAsync || IsAwaited(invocation));
-            foreach (var entry in CallSiteEntries(invocation, callBody, variable, functionSymbol, block, classifier, visited, callThrows))
+            foreach (var entry in CallSiteEntries(invocation, callBody, variable, functionSymbol, block, classifier, visited, thrown, mayFail))
             {
                 yield return entry;
             }
         }
+    }
+
+    // What the callee does after its handoff, judged once per body: whether it never completes
+    // normally (an uncaught throw), whether it is an ITERATOR (its body runs only when
+    // enumerated, so only an immediate enumeration propagates), the definite REPLACEMENT of
+    // the variable -- a captured one or a ref/out parameter; a by-value parameter's
+    // replacement is the callee's own business, and an iterator's runs only if the
+    // enumeration gets that far -- and whether anything can fail after the handoff, before
+    // that replacement if there is one.
+    private static (bool Exits, bool Deferred, IOperation? Reset, bool CanFailAfter) CalleeFactsOf(IOperation body, IMethodSymbol function, ISymbol variable, IOperation anchor)
+    {
+        var anchorEnd = anchor.Syntax.Span.End;
+        var deferred = IsIteratorBody(body);
+        var reset = deferred || IsAByValueParameterOf(variable, function) ? null : DefiniteResetAfter(body, variable, anchor);
+        var canFailAfter = ThrowCapableOpsAfter(body, anchorEnd).Any(failure => reset is null || failure.Syntax.SpanStart < reset.Syntax.Span.End);
+        return (CalleeCannotReturnAfter(body, anchorEnd), deferred, reset, canFailAfter);
+    }
+
+    // How one call site observes the handoff. A callee that never returns turns the call into
+    // a THROWN transfer: only the caller's handlers and finallys observe it. A callee that
+    // REPLACES the variable hands the caller a fresh value: nothing to scan, unless a failure
+    // between handoff and replacement can carry the transferred value into those handlers. A
+    // callee that merely CAN fail after its handoff keeps the normal continuation and reaches
+    // the handlers too. An UNAWAITED async callee faults into its returned task and lands a
+    // replacement past its first await later: the caller continues as if nothing happened.
+    private static (bool Skip, bool Thrown, bool MayFail) ObservationOf(IInvocationOperation invocation, IOperation body, IMethodSymbol function, (bool Exits, bool Deferred, IOperation? Reset, bool CanFailAfter) facts)
+    {
+        var observed = !function.IsAsync || IsAwaited(invocation);
+        var replaced = facts.Reset is { } reset && reset.Syntax.SpanStart < DeferredResetsFrom(body, function, invocation);
+        return (
+            Skip: replaced && !facts.CanFailAfter,
+            Thrown: (facts.Exits || replaced) && observed,
+            MayFail: facts.CanFailAfter && observed);
+    }
+
+    private static bool IsAByValueParameterOf(ISymbol variable, IMethodSymbol function)
+    {
+        return variable is IParameterSymbol { RefKind: RefKind.None } parameter
+            && SymbolEqualityComparer.Default.Equals(parameter.ContainingSymbol.OriginalDefinition, function);
+    }
+
+    // The first definite replacement of the variable after the handoff on the body's normal
+    // path -- none when a return or branch can leave before it, or it sits in an arm.
+    private static IOperation? DefiniteResetAfter(IOperation region, ISymbol variable, IOperation transfer)
+    {
+        var transferEnd = transfer.Syntax.Span.End;
+        var later = region.DescendantsAndSelf()
+            .Where(operation => operation.Syntax.SpanStart >= transferEnd && !IsWithinANestedFunction(operation, region))
+            .ToList();
+        var reset = later
+            .Where(operation => IsReferenceTo(operation, variable))
+            .Select(reference => ResetShapeOf(reference, variable, transferEnd, out var read) is { } shape && read is null ? shape : null)
+            .FirstOrDefault(shape => shape is not null && IsOnTheTransfersConditionalLevel(shape, transferEnd));
+        return reset is not null
+            && !later.Any(operation => operation.Syntax.SpanStart < reset.Syntax.SpanStart && operation is IReturnOperation or IBranchOperation)
+            ? reset
+            : null;
     }
 
     // A call site the transfer propagates to: it runs the body (an enumeration, for an
@@ -347,10 +404,12 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     }
 
     // The call's sequence is walked right away: it is a foreach's collection, or the
-    // receiver or an argument of a framework method that CONSUMES it (ToList(), First(),
-    // Count(), ...). A framework call that returns another view -- GetEnumerator(),
-    // Where(...), AsEnumerable() -- only wraps the sequence; the body still runs only when
-    // something advances it. Stored, returned or handed to user code, it stays deferred.
+    // receiver of a framework method that CONSUMES it (ToList(), First(), Count(), ...), or
+    // it is handed to a framework method or constructor through a SEQUENCE-typed parameter
+    // (string.Join, new List<T>(..)). A framework call that returns another view --
+    // GetEnumerator(), Where(...), AsEnumerable() -- only wraps the sequence, and a parameter
+    // typed object (ReferenceEquals) receives the iterator, not a walk. Stored, returned or
+    // handed to user code, it stays deferred.
     private static bool IsEnumeratedImmediately(IInvocationOperation call)
     {
         var consumer = call.Parent;
@@ -359,17 +418,19 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             consumer = consumer.Parent;
         }
 
-        var framework = consumer switch
+        var (framework, parameter) = consumer switch
         {
-            IInvocationOperation invocation => invocation,
-            IArgumentOperation { Parent: IInvocationOperation invocation } => invocation,
-            _ => null,
+            IInvocationOperation invocation => (invocation.TargetMethod, null),
+            IArgumentOperation { Parent: IInvocationOperation invocation } argument => (invocation.TargetMethod, argument.Parameter),
+            IArgumentOperation { Parent: IObjectCreationOperation creation } argument => (creation.Constructor, argument.Parameter),
+            _ => (null, null),
         };
 
         return consumer is IForEachLoopOperation
-            || (framework?.TargetMethod.ContainingType is { } consumerType
+            || (framework is { ContainingType: { } consumerType }
                 && IsFrameworkDeclared(consumerType)
-                && !IsAFrameworkView(framework.TargetMethod, consumerType));
+                && !IsAFrameworkView(framework, consumerType)
+                && (parameter is null || IsASequenceType(parameter.Type)));
     }
 
     // Whether the body never completes normally once the handoff ran: an uncaught throw on
@@ -416,7 +477,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     }
 
     private static IEnumerable<TransferEntry> CallSiteEntries(
-        IInvocationOperation invocation, IOperation callBody, ISymbol variable, IMethodSymbol functionSymbol, IOperation block, SendableSymbolClassifier classifier, HashSet<(IMethodSymbol Function, ISymbol Variable)> visited, bool calleeExits)
+        IInvocationOperation invocation, IOperation callBody, ISymbol variable, IMethodSymbol functionSymbol, IOperation block, SendableSymbolClassifier classifier, HashSet<(IMethodSymbol Function, ISymbol Variable)> visited, bool calleeExits, bool calleeMayFail)
     {
         foreach (var callVariable in CallSiteVariables(invocation, variable, functionSymbol, classifier))
         {
@@ -433,7 +494,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             var (roots, escaped) = calleeExits ? ThrowingCallRoots(invocation, callBody) : ScanRootsFor(invocation, callBody);
             if (roots.Count > 0)
             {
-                yield return new TransferEntry(callVariable, invocation, roots, escaped, callBody);
+                yield return new TransferEntry(callVariable, invocation, roots, escaped, callBody, handlersReachable: calleeMayFail);
             }
         }
     }
@@ -1065,7 +1126,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     {
         return !IsWithinALocalFunctionBody(operation, scanRoots)
             && !IsInASiblingArmOfTheTransfer(operation, entry.Position)
-            && (entry.Escaped || !IsInAnUnreachableCatch(operation, entry.Position));
+            && (entry.Escaped || entry.HandlersReachable || !IsInAnUnreachableCatch(operation, entry.Position));
     }
 
     // Post-transfer ESCAPES of callables that captured the transferred variable: a READING
@@ -1415,7 +1476,8 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         return StoredLocalOf(callable) is not null;
     }
 
-    // The local a lambda or method group is declared into or plainly assigned to, if any.
+    // The local a lambda or method group is declared into, plainly assigned to, added to
+    // (`use += ..`) or coalesced into (`use ??= ..`), if any.
     private static ILocalSymbol? StoredLocalOf(IOperation callable)
     {
         var stored = callable;
@@ -1428,6 +1490,8 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         {
             IVariableInitializerOperation { Parent: IVariableDeclaratorOperation { Symbol: ILocalSymbol local } } => local,
             ISimpleAssignmentOperation assignment when ReferenceEquals(assignment.Value, stored) => ReferencedVariable(assignment.Target) as ILocalSymbol,
+            ICompoundAssignmentOperation { OperatorKind: BinaryOperatorKind.Add } combined when ReferenceEquals(combined.Value, stored) => ReferencedVariable(combined.Target) as ILocalSymbol,
+            ICoalesceAssignmentOperation coalesce when ReferenceEquals(coalesce.Value, stored) => ReferencedVariable(coalesce.Target) as ILocalSymbol,
             _ => null,
         };
     }
@@ -1705,10 +1769,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         // elements are its selector's results instead.
         if (operand is not null && ViewSourcesOf(operand) is { } view)
         {
-            var elements = ProjectionSelectorOf(operand) is { } selector
-                ? ProjectedParts(selector, view.Sequences)
-                : view.Sequences.SelectMany(CopiedElementParts);
-            return elements.Concat(view.Elements);
+            return ViewElementParts(view).Concat(view.Elements);
         }
 
         return operand is not null && CarriedParts(operand) is { } parts
@@ -1803,7 +1864,12 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     // wrap the element itself (a tuple LITERAL was unfolded into its elements already).
     private static bool IsAPlainValue(IOperation leaf)
     {
-        return leaf.Type is { } type
+        return IsAPlainValueType(leaf.Type);
+    }
+
+    private static bool IsAPlainValueType(ITypeSymbol? type)
+    {
+        return type is not null
             && (type.SpecialType == SpecialType.System_String
                 || (type.IsValueType && type is not INamedTypeSymbol { IsTupleType: true }));
     }
@@ -1811,7 +1877,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     // The sequences a framework view reads its elements through -- the receiver (list.Where(..),
     // list?.AsReadOnly()) and, for Concat/Union/Zip/Join, the other sequences too -- plus the
     // single elements Append/Prepend/DefaultIfEmpty add; null when the operand is not a view.
-    private static (List<IOperation> Sequences, List<IOperation?> Elements)? ViewSourcesOf(IOperation operand)
+    private static (IInvocationOperation Call, List<IOperation> Sequences, List<IOperation?> Elements)? ViewSourcesOf(IOperation operand)
     {
         var (call, receiverBehindPlaceholder) = operand is IConditionalAccessOperation conditional
             ? (PeelConversions(conditional.WhenNotNull), conditional.Operation)
@@ -1830,7 +1896,86 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         var elements = AddsItsArgument(method)
             ? others.Take(1).Select(element => (IOperation?)element).ToList()
             : new List<IOperation?>();
-        return (sequences, elements);
+        return (view, sequences, elements);
+    }
+
+    // A view's materialized elements: its sources' elements, a projection's selector results,
+    // or -- for SelectMany, which ENUMERATES its collection selector's results -- those
+    // results' elements, shaped by a result selector when there is one.
+    private static IEnumerable<IOperation?> ViewElementParts((IInvocationOperation Call, List<IOperation> Sequences, List<IOperation?> Elements) view)
+    {
+        if (view.Call.TargetMethod.Name == "SelectMany")
+        {
+            return FlattenedParts(view.Call, view.Sequences);
+        }
+
+        return ProjectionSelectorOf(view.Call) is { } selector
+            ? ProjectedParts(selector, view.Sequences)
+            : view.Sequences.SelectMany(CopiedElementParts);
+    }
+
+    private static IEnumerable<IOperation?> FlattenedParts(IInvocationOperation selectMany, List<IOperation> sources)
+    {
+        var selectors = selectMany.Arguments.Where(IsASelector).Select(argument => UnwrapDelegate(argument.Value) as IAnonymousFunctionOperation).ToList();
+        if (selectors.Count == 0 || selectors[0] is not { } collectionSelector)
+        {
+            return sources.SelectMany(CopiedElementParts); // a selector the analysis cannot see into keeps the sources' elements
+        }
+
+        var flattened = ReturnedValuesOf(collectionSelector).SelectMany(AlternativesOf)
+            .SelectMany(collection => FlattenedCollectionParts(collection, collectionSelector, sources));
+        if (selectors.Count < 2)
+        {
+            return flattened;
+        }
+
+        // A result selector shapes the pairs: its results are the elements, and one that
+        // returns either side's element delivers the sources' elements and the flattened ones.
+        return selectors[1] is { } resultSelector
+            ? SelectorParts(resultSelector).Concat(DeliversTheElements(resultSelector) ? sources.SelectMany(CopiedElementParts).Concat(flattened) : Enumerable.Empty<IOperation?>())
+            : sources.SelectMany(CopiedElementParts).Concat(flattened);
+    }
+
+    // What walking one returned collection delivers: the parameter walks the sources'
+    // elements' own elements; any other collection's inline elements cross, and a collection
+    // of non-plain elements may alias state the sender keeps (the collection itself rides
+    // along for tracking, and the sources' elements it may have come from).
+    private static IEnumerable<IOperation?> FlattenedCollectionParts(IOperation collection, IAnonymousFunctionOperation collectionSelector, List<IOperation> sources)
+    {
+        if (IsAParameterOf(collection, collectionSelector))
+        {
+            return sources.SelectMany(CopiedElementParts).SelectMany(CopiedElementParts);
+        }
+
+        return IsAPlainValueType(ElementTypeOf(collection.Type))
+            ? CopiedElementParts(collection)
+            : CopiedElementParts(collection).Prepend(collection).Concat(sources.SelectMany(CopiedElementParts));
+    }
+
+    // A returned collection, alternatives (?:, ??, switch) unfolded: unlike LeavesOf, an
+    // inline container stays whole -- it is the collection to walk, not a carried part.
+    private static IEnumerable<IOperation> AlternativesOf(IOperation value)
+    {
+        var operand = PeelConversions(value) ?? value;
+        return operand switch
+        {
+            ICoalesceOperation coalesce => AlternativesOf(coalesce.Value).Concat(AlternativesOf(coalesce.WhenNull)),
+            IConditionalOperation { WhenFalse: { } whenFalse } conditional => AlternativesOf(conditional.WhenTrue).Concat(AlternativesOf(whenFalse)),
+            ISwitchExpressionOperation switchExpression => switchExpression.Arms.SelectMany(arm => AlternativesOf(arm.Value)),
+            _ => new[] { operand },
+        };
+    }
+
+    private static ITypeSymbol? ElementTypeOf(ITypeSymbol? type)
+    {
+        return type switch
+        {
+            IArrayTypeSymbol array => array.ElementType,
+            INamedTypeSymbol named => named.AllInterfaces.Prepend(named)
+                .FirstOrDefault(candidate => candidate.OriginalDefinition.SpecialType == SpecialType.System_Collections_Generic_IEnumerable_T)
+                ?.TypeArguments.FirstOrDefault(),
+            _ => null,
+        };
     }
 
     private static bool ContributesItsSequences(IMethodSymbol method)
@@ -1845,8 +1990,13 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
 
     private static bool IsASequence(IOperation operation)
     {
-        return operation.Type is IArrayTypeSymbol
-            || (operation.Type is INamedTypeSymbol named
+        return IsASequenceType(operation.Type);
+    }
+
+    private static bool IsASequenceType(ITypeSymbol? type)
+    {
+        return type is IArrayTypeSymbol
+            || (type is INamedTypeSymbol named
                 && named.AllInterfaces.Prepend(named).Any(candidate => candidate.OriginalDefinition.SpecialType == SpecialType.System_Collections_Generic_IEnumerable_T));
     }
 
@@ -1907,13 +2057,18 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
 
     private static int DeferredResetsFrom(ILocalFunctionOperation declaration, IInvocationOperation? call)
     {
-        if (call is null || !declaration.Symbol.IsAsync || IsAwaited(call))
+        return DeferredResetsFrom(declaration, declaration.Symbol, call);
+    }
+
+    private static int DeferredResetsFrom(IOperation body, IMethodSymbol function, IInvocationOperation? call)
+    {
+        if (call is null || !function.IsAsync || IsAwaited(call))
         {
             return int.MaxValue;
         }
 
-        return declaration.DescendantsAndSelf()
-            .Where(operation => operation is IAwaitOperation && !IsWithinANestedFunction(operation, declaration))
+        return body.DescendantsAndSelf()
+            .Where(operation => operation is IAwaitOperation && !IsWithinANestedFunction(operation, body))
             .Select(operation => operation.Syntax.SpanStart)
             .DefaultIfEmpty(int.MaxValue)
             .Min();

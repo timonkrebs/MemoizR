@@ -6871,4 +6871,252 @@ public class UseAfterTransferAnalyzerTests
 
         Assert.Empty(diagnostics);
     }
+
+    [Fact]
+    public async Task FlatteningSelectors_CopyTheirCollectionsElements()
+    {
+        // SelectMany enumerates the returned list: the int[] holds its ints, not the list.
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(new[] { 0 }.SelectMany(_ => list).ToArray());
+                    list.Add(1);
+                }
+            """, "using System.Collections.Generic;\nusing System.Linq;\nusing MemoizR;");
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task FlatteningSelectors_DeliverInlineCollectionsElements()
+    {
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(new[] { 0 }.SelectMany(_ => new[] { list }).ToArray());
+                    list.Add(1);
+                }
+            """, "using System.Collections.Generic;\nusing System.Linq;\nusing MemoizR;");
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task FlatteningResultSelectors_DeliverTheirResults()
+    {
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(new[] { 0 }.SelectMany(_ => new[] { 1 }, (a, b) => list).ToArray());
+                    list.Add(1);
+                }
+            """, "using System.Collections.Generic;\nusing System.Linq;\nusing MemoizR;");
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task CalleesThatResetAfterTheirTransfer_HandBackAFreshVariable()
+    {
+        // Move replaces the captured list before returning: the caller mutates the replacement.
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    Sending<List<int>> Move()
+                    {
+                        var sent = Sending.Transfer(list);
+                        list = new();
+                        return sent;
+                    }
+
+                    var sent = Move();
+                    list.Add(1);
+                }
+            """, WithSystem);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task CalleesThatMayNotReset_KeepTheCallerTransferred()
+    {
+        var diagnostics = await InClassC("""
+                public void M(bool flag)
+                {
+                    var list = new List<int> { 1 };
+                    Sending<List<int>> Move()
+                    {
+                        var sent = Sending.Transfer(list);
+                        if (flag)
+                        {
+                            list = new();
+                        }
+
+                        return sent;
+                    }
+
+                    var sent = Move();
+                    list.Add(1);
+                }
+            """, WithSystem);
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task CalleesWhoseResetCanFail_StillReachTheCallersHandlers()
+    {
+        // make() may throw between the handoff and the replacement: the caller's handler then
+        // runs with the transferred list.
+        var diagnostics = await InClassC("""
+                public void M(Func<List<int>> make)
+                {
+                    var list = new List<int> { 1 };
+                    Sending<List<int>> Move()
+                    {
+                        var sent = Sending.Transfer(list);
+                        list = make();
+                        return sent;
+                    }
+
+                    try
+                    {
+                        var sent = Move();
+                    }
+                    catch
+                    {
+                        list.Add(1);
+                    }
+                }
+            """, WithSystem);
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task IteratorsPassedToNonEnumeratingCalls_StayDeferred()
+    {
+        // ReferenceEquals receives the iterator object; nothing walks it.
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    IEnumerable<Sending<List<int>>> Move()
+                    {
+                        yield return Sending.Transfer(list);
+                    }
+
+                    _ = object.ReferenceEquals(Move(), null);
+                    list.Add(1);
+                }
+            """, WithSystem);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task IteratorsPassedToEnumeratingCalls_Propagate()
+    {
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    IEnumerable<Sending<List<int>>> Move()
+                    {
+                        yield return Sending.Transfer(list);
+                    }
+
+                    _ = Move().ToList();
+                    list.Add(1);
+                }
+            """, "using System;\nusing System.Collections.Generic;\nusing System.Linq;\nusing MemoizR;");
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task IteratorsPassedToCollectionConstructors_Propagate()
+    {
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    IEnumerable<Sending<List<int>>> Move()
+                    {
+                        yield return Sending.Transfer(list);
+                    }
+
+                    _ = new List<Sending<List<int>>>(Move());
+                    list.Add(1);
+                }
+            """, WithSystem);
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task LambdasAddedToLocalDelegates_AreDeferred()
+    {
+        // The added lambda runs only at use(), after the definite reset.
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    Action use = () => { };
+                    var sending = Sending.Transfer(list);
+                    use += () => list.Add(1);
+                    list = new();
+                    use();
+                }
+            """, WithSystem);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task LambdasCoalescedIntoLocalDelegates_AreDeferred()
+    {
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    Action? use = null;
+                    var sending = Sending.Transfer(list);
+                    use ??= () => list.Add(1);
+                    list = new();
+                    use();
+                }
+            """, WithSystem);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task LambdasAddedToLocalDelegates_InvokedBeforeAReassignment_AreUses()
+    {
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    Action use = () => { };
+                    var sending = Sending.Transfer(list);
+                    use += () => list.Add(1);
+                    use();
+                    list = new();
+                }
+            """, WithSystem);
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
 }

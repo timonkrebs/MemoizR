@@ -1029,4 +1029,26 @@ public class SendableTypeArgumentAnalyzerTests
         var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR001");
         Assert.Contains("List", diagnostic.GetMessage());
     }
+
+    [Fact]
+    public async Task ParenthesizedReassignments_RevokeTheInitializerOptOut()
+    {
+        // (f) = ... writes f exactly like f = ...: the strict replacement is what creates.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory(options: MemoFactoryOptions.DisableSendableChecks);
+                    (f) = new MemoFactory();
+                    f.CreateSignal(new List<int>());
+                }
+            }
+            """);
+
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR001");
+    }
 }

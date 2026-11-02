@@ -182,9 +182,21 @@ internal static class FactoryOptOut
             current = member;
         }
 
-        while (current.Parent is ArgumentSyntax { Parent: TupleExpressionSyntax tuple })
+        // `(f) = ..` and `((f), g) = ..` write f exactly like the bare spellings do.
+        while (true)
         {
-            current = tuple;
+            if (current.Parent is ParenthesizedExpressionSyntax parenthesized)
+            {
+                current = parenthesized;
+            }
+            else if (current.Parent is ArgumentSyntax { Parent: TupleExpressionSyntax tuple })
+            {
+                current = tuple;
+            }
+            else
+            {
+                break;
+            }
         }
 
         return current.Parent switch
