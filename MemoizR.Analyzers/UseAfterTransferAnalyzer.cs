@@ -723,8 +723,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             // contributes nothing), but an inline container's elements reach the receiver --
             // the same spread semantics as [.. new[] { list }].
             IInvocationOperation { TargetMethod: { ContainingType: { } copier } method } copyCall
-                when IsACopyingFactory(method, copier) =>
-                copyCall.Arguments.SelectMany(argument => CopiedElementParts(argument.Value)),
+                when IsACopyingFactory(method, copier) => CopierParts(copyCall),
             // A framework VIEW (list.AsReadOnly(), Where(...), AsEnumerable(), array.AsMemory())
             // reads through its source on the receiver's schedule -- nothing was copied out --
             // so the receiver and every retained argument ride along.
@@ -1729,26 +1728,46 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     // but a plain value or string) delivers the source's elements.
     private static IEnumerable<IOperation?> ProjectedParts(IAnonymousFunctionOperation selector, IOperation viewSource)
     {
-        var elementsCarried = false;
-        foreach (var leaf in ReturnedValuesOf(selector).SelectMany(LeavesOf))
-        {
-            if (IsAParameterOf(leaf, selector))
-            {
-                elementsCarried = true;
-                continue;
-            }
+        return SelectorParts(selector)
+            .Concat(DeliversTheElements(selector) ? CopiedElementParts(viewSource) : Enumerable.Empty<IOperation?>());
+    }
 
-            elementsCarried |= !IsAPlainValue(leaf);
-            yield return leaf;
-        }
+    // What a materializer stores: its SELECTORS' results (a dictionary's keys and values are
+    // its key and element selectors' results) and -- unless an element selector replaces
+    // them with plain values -- the elements copied out of its other arguments. A selector
+    // the analysis cannot see into (a method group) may return the element.
+    private static IEnumerable<IOperation?> CopierParts(IInvocationOperation copyCall)
+    {
+        var selectors = copyCall.Arguments
+            .Where(IsASelector)
+            .Select(argument => (Name: argument.Parameter!.Name, Lambda: UnwrapDelegate(argument.Value) as IAnonymousFunctionOperation))
+            .ToList();
+        var elementsCarried = selectors.All(selector => selector.Name != "elementSelector")
+            || selectors.Any(selector => selector.Lambda is null || DeliversTheElements(selector.Lambda));
 
-        if (elementsCarried)
-        {
-            foreach (var element in CopiedElementParts(viewSource))
-            {
-                yield return element;
-            }
-        }
+        var selectorParts = selectors
+            .Where(selector => selector.Lambda is not null)
+            .SelectMany(selector => SelectorParts(selector.Lambda!));
+        var elementParts = elementsCarried
+            ? copyCall.Arguments.Where(argument => !IsASelector(argument)).SelectMany(argument => CopiedElementParts(argument.Value))
+            : Enumerable.Empty<IOperation?>();
+        return selectorParts.Concat(elementParts);
+    }
+
+    private static bool IsASelector(IArgumentOperation argument)
+    {
+        return argument.Parameter?.Type.TypeKind == TypeKind.Delegate;
+    }
+
+    // A selector's returned leaves other than the element itself.
+    private static IEnumerable<IOperation?> SelectorParts(IAnonymousFunctionOperation selector)
+    {
+        return ReturnedValuesOf(selector).SelectMany(LeavesOf).Where(leaf => !IsAParameterOf(leaf, selector));
+    }
+
+    private static bool DeliversTheElements(IAnonymousFunctionOperation selector)
+    {
+        return ReturnedValuesOf(selector).SelectMany(LeavesOf).Any(leaf => IsAParameterOf(leaf, selector) || !IsAPlainValue(leaf));
     }
 
     private static IEnumerable<IOperation> ReturnedValuesOf(IAnonymousFunctionOperation lambda)

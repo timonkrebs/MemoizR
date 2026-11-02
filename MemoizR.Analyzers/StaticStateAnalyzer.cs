@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.Linq;
 using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.Diagnostics;
 
@@ -75,9 +76,10 @@ public sealed class StaticStateAnalyzer : DiagnosticAnalyzer
             return;
         }
 
-        // A [ThreadStatic] field is one slot PER THREAD: concurrently running flows never
-        // share it, so neither the slot rule nor the smuggle hint applies.
-        if (symbol is IFieldSymbol staticField && IsThreadStatic(staticField))
+        // A [ThreadStatic] slot is one slot PER THREAD: concurrently running flows never
+        // share it, so neither the slot rule nor the smuggle hint applies. An event's or an
+        // auto-property's `[field: ThreadStatic]` lands on its backing field.
+        if (IsThreadStatic(symbol, context.Compilation))
         {
             return;
         }
@@ -135,11 +137,39 @@ public sealed class StaticStateAnalyzer : DiagnosticAnalyzer
         }
     }
 
-    private static bool IsThreadStatic(IFieldSymbol field)
+    private static bool IsThreadStatic(ISymbol symbol, Compilation compilation)
     {
-        return field.GetAttributes().Any(attribute => attribute.AttributeClass is { Name: "ThreadStaticAttribute" } attributeClass
+        var attributeClasses = symbol switch
+        {
+            IFieldSymbol field => field.GetAttributes().Select(attribute => attribute.AttributeClass),
+            IPropertySymbol property => BackingFieldOf(property)?.GetAttributes().Select(attribute => attribute.AttributeClass)
+                ?? Enumerable.Empty<INamedTypeSymbol?>(),
+            // A field-like event's backing field is not among the type's members: its
+            // `[field: ...]` lists are read off the declaration instead.
+            IEventSymbol @event => FieldTargetedAttributeClassesOf(@event, compilation),
+            _ => Enumerable.Empty<INamedTypeSymbol?>(),
+        };
+
+        return attributeClasses.Any(attributeClass => attributeClass is { Name: "ThreadStaticAttribute" }
             && attributeClass.ContainingNamespace?.ToDisplayString() == "System"
             && SendableSymbolClassifier.IsDeclaredInFrameworkAssembly(attributeClass));
+    }
+
+    private static IFieldSymbol? BackingFieldOf(IPropertySymbol property)
+    {
+        return property.ContainingType.GetMembers().OfType<IFieldSymbol>()
+            .FirstOrDefault(field => SymbolEqualityComparer.Default.Equals(field.AssociatedSymbol, property));
+    }
+
+    private static IEnumerable<INamedTypeSymbol?> FieldTargetedAttributeClassesOf(IEventSymbol @event, Compilation compilation)
+    {
+        return @event.DeclaringSyntaxReferences
+            .Select(reference => reference.GetSyntax().FirstAncestorOrSelf<EventFieldDeclarationSyntax>())
+            .Where(declaration => declaration is not null)
+            .SelectMany(declaration => declaration!.AttributeLists)
+            .Where(list => list.Target?.Identifier.IsKind(SyntaxKind.FieldKeyword) == true)
+            .SelectMany(list => list.Attributes)
+            .Select(attribute => compilation.GetSemanticModel(attribute.SyntaxTree).GetSymbolInfo(attribute).Symbol?.ContainingType);
     }
 
     private static string? ClassifyField(IFieldSymbol field, SendableSymbolClassifier classifier)

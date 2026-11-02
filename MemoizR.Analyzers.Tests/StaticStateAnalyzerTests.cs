@@ -723,4 +723,56 @@ public class StaticStateAnalyzerTests
 
         AnalyzerTestHarness.AssertSingle(diagnostics, "MZR004");
     }
+
+    [Fact]
+    public async Task ThreadStaticEvents_AreExempt()
+    {
+        // The field-targeted attribute lands on the event's backing delegate field: one
+        // subscription list per thread, nothing shared.
+        var diagnostics = await InClassC("""
+                [field: ThreadStatic]
+                public static event Action? Changed;
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    Changed?.Invoke();
+                }
+            """, "using System;\nusing System.Collections.Generic;\nusing MemoizR;");
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task ThreadStaticAutoProperties_AreExempt()
+    {
+        var diagnostics = await InClassC("""
+                [field: ThreadStatic]
+                public static int Counter { get; set; }
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    Counter++;
+                }
+            """, "using System;\nusing System.Collections.Generic;\nusing MemoizR;");
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task StaticEvents_AreFlagged()
+    {
+        var diagnostics = await InClassC("""
+                public static event Action? Changed;
+
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    Changed?.Invoke();
+                }
+            """, "using System;\nusing System.Collections.Generic;\nusing MemoizR;");
+
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR004");
+    }
 }
