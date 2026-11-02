@@ -1070,10 +1070,11 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     }
 
     // Post-transfer ESCAPES of callables that captured the transferred variable: a READING
-    // local function converted to a delegate, or a stored delegate reference leaving the
-    // scope -- both can run later against the receiver-owned object. Calls are classified
-    // separately; a bare store target rewrites the local without running anything, and a
-    // resetting body makes no promise (it may never run).
+    // local function converted to a delegate that leaves the scope, or a stored delegate
+    // reference leaving it -- both can run later against the receiver-owned object. Calls
+    // are classified separately; a method group stored into a LOCAL is deferred like a
+    // lambda (judged at its invocation or departure), a bare store target rewrites the local
+    // without running anything, and a resetting body makes no promise (it may never run).
     private static IEnumerable<(IOperation Operation, BodyEffect? CallEffect)> EscapeUses(
         List<IOperation> candidates, TransferEntry entry, List<IOperation> scanRoots)
     {
@@ -1082,6 +1083,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             .OfType<IMethodReferenceOperation>()
             .Where(reference => reference.Method.MethodKind == MethodKind.LocalFunction
                 && reference.Syntax.SpanStart >= transferPosition
+                && !IsStoredIntoALocal(reference)
                 && RunsOnTheTransferredPath(reference, entry, scanRoots)
                 && LocalFunctionCallEffect(reference.Method, variable, scope, NewSymbolSet<IMethodSymbol>()) == BodyEffect.Reads)
             .Select(reference => (Operation: (IOperation)reference, CallEffect: (BodyEffect?)BodyEffect.Reads));
@@ -1402,15 +1404,15 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         return lambda is not null && IsStoredIntoALocal(lambda);
     }
 
-    private static bool IsStoredIntoALocal(IAnonymousFunctionOperation lambda)
+    private static bool IsStoredIntoALocal(IOperation callable)
     {
-        return StoredLocalOf(lambda) is not null;
+        return StoredLocalOf(callable) is not null;
     }
 
-    // The local a lambda is declared into or plainly assigned to, if any.
-    private static ILocalSymbol? StoredLocalOf(IAnonymousFunctionOperation lambda)
+    // The local a lambda or method group is declared into or plainly assigned to, if any.
+    private static ILocalSymbol? StoredLocalOf(IOperation callable)
     {
-        IOperation stored = lambda;
+        var stored = callable;
         while (stored.Parent is IDelegateCreationOperation or IConversionOperation)
         {
             stored = stored.Parent;
@@ -2172,6 +2174,36 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         }
     }
 
+    // A removed operand's whole invocation list, when every member is a definite method
+    // group -- the only lists Delegate.Remove can match; null otherwise.
+    private static List<IMethodSymbol>? DefiniteSequenceOf(IOperation? stored)
+    {
+        switch (UnwrapDelegate(stored))
+        {
+            case IMethodReferenceOperation group:
+                return new List<IMethodSymbol> { group.Method };
+            case IBinaryOperation { OperatorKind: BinaryOperatorKind.Add } combine:
+                var left = DefiniteSequenceOf(combine.LeftOperand);
+                var right = DefiniteSequenceOf(combine.RightOperand);
+                return left is not null && right is not null ? left.Concat(right).ToList() : null;
+            default:
+                return null;
+        }
+    }
+
+    private static void RemoveLastRun(List<IOperation> components, List<IMethodSymbol> run)
+    {
+        for (var start = components.Count - run.Count; start >= 0; start--)
+        {
+            if (Enumerable.Range(0, run.Count).All(offset => components[start + offset] is IMethodReferenceOperation group
+                && SymbolEqualityComparer.Default.Equals(group.Method, run[offset])))
+            {
+                components.RemoveRange(start, run.Count);
+                return;
+            }
+        }
+    }
+
     private static void RemoveLastOccurrences(List<IOperation> components, List<IMethodSymbol> removedMethods)
     {
         foreach (var method in removedMethods)
@@ -2355,11 +2387,17 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                 }
 
                 break;
-            // read - noop strips one occurrence of each method group DEFINITELY on the right
-            // (a lambda instance never matches another); everything else survives.
+            // read - noop: Delegate.Remove strips the LAST contiguous run equal to the right
+            // operand's whole invocation list -- or nothing, when that run is absent or the
+            // list holds anything but definite method groups (a lambda instance never
+            // matches another).
             case IBinaryOperation { OperatorKind: BinaryOperatorKind.Subtract } difference:
                 var survivors = Callables(difference.LeftOperand).ToList();
-                RemoveLastOccurrences(survivors, DefiniteMethodGroups(difference.RightOperand).Select(group => group.Method).ToList());
+                if (DefiniteSequenceOf(difference.RightOperand) is { } removed)
+                {
+                    RemoveLastRun(survivors, removed);
+                }
+
                 foreach (var callable in survivors)
                 {
                     yield return callable;

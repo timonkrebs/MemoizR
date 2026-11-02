@@ -6413,4 +6413,161 @@ public class UseAfterTransferAnalyzerTests
         var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
         Assert.Contains("'list'", diagnostic.GetMessage());
     }
+
+    [Fact]
+    public async Task LocallyStoredMethodGroups_ReadTheirCaptureWhenTheyRun()
+    {
+        // Converting Touch runs nothing: the stored delegate reads the list only at use(),
+        // after the definite reset.
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    void Touch() { list.Add(1); }
+                    var sending = Sending.Transfer(list);
+                    Action use = Touch;
+                    list = new();
+                    use();
+                }
+            """, WithSystem);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task LocallyStoredMethodGroups_InvokedBeforeAReassignment_AreUses()
+    {
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    void Touch() { list.Add(1); }
+                    var sending = Sending.Transfer(list);
+                    Action use = Touch;
+                    use();
+                    list = new();
+                }
+            """, WithSystem);
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task EscapingMethodGroups_AreUses()
+    {
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    void Touch() { list.Add(1); }
+                    var sending = Sending.Transfer(list);
+                    Run(Touch);
+                }
+
+                private static void Run(Action action) => action();
+            """, WithSystem);
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task LocallyStoredMethodGroups_EscapingLater_AreUses()
+    {
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    void Touch() { list.Add(1); }
+                    var sending = Sending.Transfer(list);
+                    Action use = Touch;
+                    Run(use);
+                }
+
+                private static void Run(Action action) => action();
+            """, WithSystem);
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task DelegateDifferences_RemoveOnlyAMatchingRun()
+    {
+        // [Read, Noop] holds no contiguous [Noop, Read]: Delegate.Remove strips nothing.
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    void Read() { list.Add(1); }
+                    void Noop() { }
+                    Action use = ((Action)Read + Noop) - ((Action)Noop + Read);
+                    var sending = Sending.Transfer(list);
+                    use();
+                }
+            """, WithSystem);
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task DelegateDifferences_RemoveTheLastMatchingRun()
+    {
+        // [Noop, Read, Noop] minus [Noop, Read] leaves [Noop].
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    void Read() { list.Add(1); }
+                    void Noop() { }
+                    Action use = ((Action)Noop + Read + Noop) - ((Action)Noop + Read);
+                    var sending = Sending.Transfer(list);
+                    use();
+                }
+            """, WithSystem);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task DelegateDifferences_KeepTargetsOutsideTheRun()
+    {
+        // [Read, Noop, Read] minus [Noop, Read] leaves [Read].
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    void Read() { list.Add(1); }
+                    void Noop() { }
+                    Action use = ((Action)Read + Noop + Read) - ((Action)Noop + Read);
+                    var sending = Sending.Transfer(list);
+                    use();
+                }
+            """, WithSystem);
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task DelegateDifferences_WithALambdaOnTheRight_RemoveNothing()
+    {
+        // A fresh lambda instance never matches, so the run containing it is absent.
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    void Read() { list.Add(1); }
+                    void Noop() { }
+                    Action use = ((Action)Read + Noop) - ((Action)Read + (() => { }));
+                    var sending = Sending.Transfer(list);
+                    use();
+                }
+            """, WithSystem);
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
 }
