@@ -147,6 +147,28 @@ public static class SendableChecker
             return CheckTypeArguments(type, inProgress);
         }
 
+        // The runtime hands out internal implementations of green-listed types: typeof(int) is
+        // a System.RuntimeType, an async method's Task is an AsyncStateMachineBox whose
+        // generic arguments carry the compiler-generated state machine, and ToFrozenSet picks
+        // a specialized FrozenSet subtype. The write-time check (ValidateWrittenValues) sees
+        // those instance types, so the green-list verdict extends to subtypes declared in the
+        // SAME ASSEMBLY as their entry -- trusted wholesale like the entry itself, type
+        // arguments included: they are runtime plumbing, not the declared surface (the
+        // DECLARED type's arguments were already vetted by the creation-time check). A USER
+        // subclass lives in a user assembly and still walks structurally: exactly the smuggle
+        // surface the write check exists to catch. (No analyzer mirror: declared types can
+        // never name these internals, so the lockstep contract is untouched.)
+        if (IsFrameworkImplementationOfAGreenListedType(type))
+        {
+            // Trusted -- except that the green-listed GENERIC bases it implements are still
+            // its visible contract: CreateSignal<Task>(ComputeListAsync()) hands an internal
+            // subtype of Task<List<int>> through the non-generic Task surface, and skipping
+            // the base's arguments would re-open the upcast-smuggling hole ValidateWrittenValues
+            // exists to close. The implementation's OWN arguments (state machines, comparers)
+            // stay unchecked plumbing.
+            return CheckGreenListedBaseArguments(type, inProgress);
+        }
+
         // The trust escape hatch comes before the structural rejections so that an interface or
         // internally-synchronized class can be opted in.
         if (type.IsDefined(typeof(SendableAttribute), inherit: false))
@@ -166,6 +188,40 @@ public static class SendableChecker
         }
 
         return CheckFields(type, inProgress);
+    }
+
+    // MemoFactoryOptions.ValidateWrittenValues: a node checks each written instance's RUNTIME
+    // type, closing the subclass-smuggling hole the declared-type check cannot see.
+    internal static void EnsureWrittenValueSendable<T>(bool enabled, T value)
+    {
+        if (enabled && value is not null)
+        {
+            EnsureSendable(value.GetType());
+        }
+    }
+
+    private static string? CheckGreenListedBaseArguments(Type type, HashSet<Type> inProgress)
+    {
+        return GreenListedGenericBases(type)
+            .Select(baseType => CheckTypeArguments(baseType, inProgress))
+            .FirstOrDefault(reason => reason is not null);
+    }
+
+    private static bool IsFrameworkImplementationOfAGreenListedType(Type type)
+    {
+        return KnownSendable.Any(entry => !entry.IsValueType && entry.IsAssignableFrom(type) && type.Assembly == entry.Assembly)
+            || GreenListedGenericBases(type).Any(baseType => type.Assembly == baseType.GetGenericTypeDefinition().Assembly);
+    }
+
+    private static IEnumerable<Type> GreenListedGenericBases(Type type)
+    {
+        for (var baseType = type.BaseType; baseType is not null; baseType = baseType.BaseType)
+        {
+            if (baseType.IsGenericType && KnownSendableGenericDefinitions.Contains(baseType.GetGenericTypeDefinition()))
+            {
+                yield return baseType;
+            }
+        }
     }
 
     // Categories that can never be verified structurally, whatever their fields say.
@@ -211,6 +267,26 @@ public static class SendableChecker
             return null;
         }
 
+        // POLYMORPHIC recursion constructs a FRESH closed type per level (Box<T> exposing a
+        // Box<List<T>> member), which the re-entry check above can never catch. Its signature
+        // is a GROWING re-occurrence of the same definition: finite hand-written nesting
+        // (Box<Box<Box<List<int>>>>) strictly shrinks at every recursive step and is walked to
+        // the bottom however deep it goes. Equal-size
+        // re-instantiations (Node<A,B,C> exposing a Node<B,C,A> member) are a FINITE cycle --
+        // bounded size over finitely many definitions -- that the re-entry check closes once
+        // the exact type repeats, so they are walked in full.
+        // A divergent expansion is walked through its FIRST
+        // re-instantiation -- substituted members can flip the verdict exactly one level down
+        // (Box<T> { Box<List<T>> Next; T Value; } hides the List in the second level's Value)
+        // -- and cut at the second. The levels past the cut are accepted only when nothing
+        // that can still land in a stored slot there is unverified (CheckReachingTypeArguments).
+        if (DefinitionOf(type) is { } definition
+            && inProgress.Count(entry => entry != type && DefinitionOf(entry) == definition && TypeSize(entry) < TypeSize(type)) >= 2)
+        {
+            inProgress.Remove(type);
+            return CheckReachingTypeArguments(type, definition, inProgress);
+        }
+
         try
         {
             for (var t = type; t != null && t != typeof(object) && t != typeof(ValueType); t = t.BaseType)
@@ -228,6 +304,23 @@ public static class SendableChecker
         {
             inProgress.Remove(type);
         }
+    }
+
+    private static Type? DefinitionOf(Type type)
+    {
+        return type.IsGenericType ? type.GetGenericTypeDefinition() : null;
+    }
+
+    // The number of type nodes in the constructed reference: Box<List<int>> is 3. Finite
+    // nesting shrinks this at every recursive step; polymorphic recursion grows it.
+    private static int TypeSize(Type type)
+    {
+        if (type.IsArray)
+        {
+            return 1 + TypeSize(type.GetElementType()!);
+        }
+
+        return type.IsGenericType ? 1 + type.GetGenericArguments().Sum(TypeSize) : 1;
     }
 
     private static string? CheckDeclaredMembers(Type type, Type declaringLevel, HashSet<Type> inProgress)
@@ -374,6 +467,153 @@ public static class SendableChecker
         }
 
         return false;
+    }
+
+    // Past the cut, a level stores only its type arguments -- wrapped by the definition's own
+    // member types and constants -- at positions the definition STORES: directly, inside
+    // another type, or after flowing through the recursion into such a position. Sendability
+    // is monotone in a wrapped argument, so the cut level's arguments at those positions
+    // decide; a phantom parameter that never reaches a slot (RecursiveBox<List<T>> carrying
+    // T along) stays free. Kept in lockstep with the analyzer's classifier.
+    private static string? CheckReachingTypeArguments(Type type, Type definition, HashSet<Type> inProgress)
+    {
+        var arguments = type.GetGenericArguments();
+        foreach (var position in StoredParameterPositions(definition))
+        {
+            var reason = CheckCached(arguments[position], inProgress);
+            if (reason != null)
+            {
+                return $"{Pretty(type)} carries non-Sendable type argument {Pretty(arguments[position])} ({reason})";
+            }
+        }
+
+        return null;
+    }
+
+    private static HashSet<int> StoredParameterPositions(Type definition)
+    {
+        return StoredParameterPositions(definition, new HashSet<Type>());
+    }
+
+    private static HashSet<int> StoredParameterPositions(Type definition, HashSet<Type> inProgress)
+    {
+        // A definition re-entered through a wrapper that mentions it (mutual recursion) is
+        // taken to store every parameter while its own answer is still being computed.
+        if (!inProgress.Add(definition))
+        {
+            return new HashSet<int>(Enumerable.Range(0, definition.GetGenericArguments().Length));
+        }
+
+        try
+        {
+            var members = StoredMemberTypesOf(definition).ToList();
+            var reaching = new HashSet<int>(members
+                .SelectMany(member => ParametersIn(member, stopAtSelf: definition, inProgress))
+                .Select(parameter => parameter.GenericParameterPosition));
+            var selfArguments = members
+                .SelectMany(member => SelfConstructionsIn(member, definition, inProgress))
+                .Select(self => self.GetGenericArguments())
+                .ToList();
+
+            // An argument passed into a reaching position reaches a slot one level down.
+            var grew = true;
+            while (grew)
+            {
+                grew = false;
+                foreach (var arguments in selfArguments)
+                {
+                    foreach (var position in reaching.ToList())
+                    {
+                        foreach (var parameter in ParametersIn(arguments[position], stopAtSelf: null, inProgress))
+                        {
+                            grew |= reaching.Add(parameter.GenericParameterPosition);
+                        }
+                    }
+                }
+            }
+
+            return reaching;
+        }
+        finally
+        {
+            inProgress.Remove(definition);
+        }
+    }
+
+    // The arguments a construction lets reach a slot: none for a [Sendable]-attributed
+    // wrapper (its thread-safety does not rest on them, exactly as the main walk trusts it);
+    // every argument of a green-listed framework container, whose contract stores its
+    // payload; for any other wrapper, the arguments at its own storing positions (an empty
+    // Phantom<T> stores nothing of T).
+    private static IEnumerable<Type> ReachingArgumentsOf(Type type, HashSet<Type> inProgress)
+    {
+        if (IsShielded(type))
+        {
+            return Enumerable.Empty<Type>();
+        }
+
+        var arguments = type.GetGenericArguments();
+        return IsFrameworkImplementationOfAGreenListedType(type)
+            ? arguments
+            : StoredParameterPositions(DefinitionOf(type), inProgress).Select(position => arguments[position]);
+    }
+
+    private static IEnumerable<Type> StoredMemberTypesOf(Type definition)
+    {
+        const BindingFlags declared = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly;
+        for (var t = definition; t != null && t != typeof(object) && t != typeof(ValueType); t = t.BaseType)
+        {
+            foreach (var field in t.GetFields(declared))
+            {
+                yield return field.FieldType;
+            }
+
+            foreach (var property in t.GetProperties(declared))
+            {
+                yield return property.PropertyType;
+            }
+        }
+    }
+
+    // The generic parameters a type mentions in a REACHING position -- without descending
+    // into the definition's own constructions when asked: their arguments flow through the
+    // recursion instead.
+    private static IEnumerable<Type> ParametersIn(Type type, Type? stopAtSelf, HashSet<Type> inProgress)
+    {
+        if (type.IsGenericParameter)
+        {
+            return new[] { type };
+        }
+
+        if (type.HasElementType)
+        {
+            return ParametersIn(type.GetElementType()!, stopAtSelf, inProgress);
+        }
+
+        return type.IsGenericType && (stopAtSelf == null || DefinitionOf(type) != stopAtSelf)
+            ? ReachingArgumentsOf(type, inProgress).SelectMany(argument => ParametersIn(argument, stopAtSelf, inProgress))
+            : Enumerable.Empty<Type>();
+    }
+
+    private static bool IsShielded(Type type)
+    {
+        return type.IsDefined(typeof(SendableAttribute), inherit: false);
+    }
+
+    private static IEnumerable<Type> SelfConstructionsIn(Type type, Type definition, HashSet<Type> inProgress)
+    {
+        if (type.HasElementType)
+        {
+            return SelfConstructionsIn(type.GetElementType()!, definition, inProgress);
+        }
+
+        if (!type.IsGenericType)
+        {
+            return Enumerable.Empty<Type>();
+        }
+
+        var nested = ReachingArgumentsOf(type, inProgress).SelectMany(argument => SelfConstructionsIn(argument, definition, inProgress));
+        return DefinitionOf(type) == definition ? nested.Prepend(type) : nested;
     }
 
     private static string? CheckTypeArguments(Type type, HashSet<Type> inProgress)

@@ -63,6 +63,13 @@ internal static class FactoryMethods
         return IsMemoFactoryMethod(method, "CreateActorMemoizR");
     }
 
+    // The signal creations whose written instances MemoFactoryOptions.ValidateWrittenValues
+    // checks at runtime (MZR006's mitigation hint).
+    public static bool IsSignalCreation(IMethodSymbol method)
+    {
+        return IsMemoFactoryMethod(method, "CreateSignal", "CreateEagerRelativeSignal", "CreateActorSignal");
+    }
+
     private static bool IsMemoFactoryMethod(IMethodSymbol method, params string[] names)
     {
         return IsOn(method, "MemoizR", "MemoFactory", names);
@@ -86,29 +93,28 @@ internal static class FactoryMethods
 
     private static bool IsOn(IMethodSymbol method, string namespaceName, string typeName, string[] names)
     {
-        var type = method.ContainingType;
-        if (type is null || type.Name != typeName || type.ContainingNamespace?.ToDisplayString() != namespaceName
-            || !IsLibraryType(type))
-        {
-            return false;
-        }
+        return method.ContainingType is { } type
+            && IsLibraryType(type, namespaceName, typeName)
+            && names.Contains(method.Name);
+    }
 
-        foreach (var name in names)
-        {
-            if (method.Name == name)
-            {
-                return true;
-            }
-        }
-
-        return false;
+    // THE library's type of that name: namespace and assembly identity both hold, so a
+    // source-declared lookalike never matches.
+    internal static bool IsLibraryType(INamedTypeSymbol type, string namespaceName, string name)
+    {
+        return type.Name == name
+            && type.ContainingNamespace?.ToDisplayString() == namespaceName
+            && IsLibraryType(type);
     }
 
     // A source-shadowed lookalike (a project's own MemoizR.MemoFactory, which source-wins over
     // the referenced one) must not be classified as the reactive factory: its APIs publish
     // nothing into a MemoizR graph, so firing MZR001-003 on them would be pure false positives
     // (a build break under warnings-as-errors). Kept in lockstep with the identity checks on
-    // the SendableAttribute and the green-lists in SendableSymbolClassifier.
+    // the SendableAttribute and the green-lists in SendableSymbolClassifier. MemoizR.Wpf and
+    // MemoizR.Blazor are in the set for the fluent opt-out follows (AddWpfDispatcher /
+    // AddBlazorDispatcher); no factory-method names live there, so they draw no
+    // creation/computation classifications.
     internal static bool IsLibraryType(INamedTypeSymbol type)
     {
         if (type.Locations.Any(location => location.IsInSource))
@@ -117,6 +123,6 @@ internal static class FactoryMethods
         }
 
         return type.ContainingAssembly?.Identity.Name is
-            "MemoizR" or "MemoizR.Reactive" or "MemoizR.StructuredConcurrency";
+            "MemoizR" or "MemoizR.Reactive" or "MemoizR.StructuredConcurrency" or "MemoizR.Wpf" or "MemoizR.Blazor";
     }
 }

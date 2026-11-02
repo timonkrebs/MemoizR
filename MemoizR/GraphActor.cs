@@ -18,6 +18,7 @@ namespace MemoizR;
 /// other executor-isolated state. The loop parks on its own channel when idle and holds no
 /// external roots, so an unreachable actor (its Context dropped) is collectable, loop and all.
 /// </remarks>
+[Sendable] // internally synchronized by design: safe to share across flows (and to hold in statics, see MZR004)
 public sealed class GraphActor : IExecutor
 {
     private readonly Channel<Action> turns = Channel.CreateUnbounded<Action>(

@@ -11,6 +11,7 @@ namespace MemoizR;
 /// (the UI contexts do), best-effort false for contexts that post to foreign threads without
 /// setting Current -- a missed assertion there reports not-isolated, which is the safe direction.
 /// </remarks>
+[Sendable] // internally synchronized by design: safe to share across flows (and to hold in statics, see MZR004)
 public sealed class SynchronizationContextExecutor(SynchronizationContext synchronizationContext) : IExecutor
 {
     public void Enqueue(Action work)

@@ -18,6 +18,7 @@ namespace MemoizR;
 /// onto the captured context) are re-thrown on the thread pool, preserving the platform's
 /// "async-void exceptions are fatal" convention without wedging the executor's queue.
 /// </remarks>
+[Sendable] // internally synchronized by design: safe to share across flows (and to hold in statics, see MZR004)
 public sealed class DedicatedThreadExecutor : IExecutor, IDisposable
 {
     private readonly BlockingCollection<(SendOrPostCallback Callback, object? State)> queue = new();

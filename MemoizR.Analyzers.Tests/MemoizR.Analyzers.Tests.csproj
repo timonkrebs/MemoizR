@@ -15,6 +15,7 @@
     <!-- The snippets compile against the REAL MemoizR assemblies, so the analyzers' symbol
          matching is validated against the actual API, not hand-written stubs. -->
     <ProjectReference Include="..\MemoizR\MemoizR.csproj" />
+    <ProjectReference Include="..\MemoizR.Blazor\MemoizR.Blazor.csproj" />
     <ProjectReference Include="..\MemoizR.Reactive\MemoizR.Reactive.csproj" />
     <ProjectReference Include="..\MemoizR.StructuredConcurrency\MemoizR.StructuredConcurrency.csproj" />
   </ItemGroup>

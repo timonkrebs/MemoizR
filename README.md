@@ -192,14 +192,15 @@ graph's stamps are never confused with their pre-restart incarnation), and docum
 A runnable two-peer bridge — stale/pull protocol, glitch barrier, late-delivery dropping and
 reset detection — lives in [samples/DistributedGraphSample](samples/DistributedGraphSample).
 
-### Data-race safety (strict mode)
+### Data-race safety (strict mode, on by default)
 
 MemoizR publishes value *references* tear-free across concurrent flows, but only an immutable
 (or thread-safe) type makes the object behind the reference safe to share. Strict mode — the
-runtime analog of Swift's `Sendable` checking — validates this at node creation:
+runtime analog of Swift's `Sendable` checking — validates this at node creation, and since the
+Swift-6-parity step (issue #145) it is the **default**:
 
 ```cs
-var f = new MemoFactory("strict", MemoFactoryOptions.StrictSendableChecks);
+var f = new MemoFactory();
 
 record Person(string Name, int Age);          // init-only members => Sendable
 var p = f.CreateSignal(new Person("Ada", 36)); // ok
@@ -207,10 +208,25 @@ var xs = f.CreateSignal(ImmutableArray.Create(1, 2, 3)); // ok
 
 f.CreateSignal(new List<int>()); // throws: List<int> is not Sendable
                                  // (writable instance field '_items')
+
+// The migration escape hatch (the analog of staying on Swift 5's language mode):
+var lax = new MemoFactory(options: MemoFactoryOptions.DisableSendableChecks);
 ```
 
 Types the structural check cannot prove (internally synchronized ones) can opt in with
-`[Sendable]`, the analog of Swift's `@unchecked Sendable`. Code that must only run inside a
+`[Sendable]`, the analog of Swift's `@unchecked Sendable`. A non-Sendable value can still be
+handed to ONE other flow by **transfer** — `Sending<T>`, the analog of Swift's `sending`
+parameters: the sender promises to stop touching it, `Receive()` enforces single consumption,
+and the MZR005 analyzer flags sender-side uses after the handoff (best-effort):
+
+```cs
+var sending = Sending.Transfer(list); // strict mode accepts Sending<List<int>>; `list` is handed off
+var owned = sending.Receive();        // exactly once -- a second Receive() throws
+```
+
+`MemoFactoryOptions.ValidateWrittenValues` additionally checks the *runtime* type of each
+written signal value, closing the subclass-smuggling hole a declared-type check cannot see (a
+non-sealed class at a creation site gets the MZR006 hint). Code that must only run inside a
 serialized graph evaluation can assert it dynamically — the `preconditionIsolated()` analog:
 
 ```cs
@@ -218,13 +234,17 @@ f.AssertEvaluationIsolated(); // throws outside a Get/Set/recompute/reaction upd
 ```
 
 The same discipline is checked at **build time** by analyzers bundled in the NuGet package
-(severity configurable per rule via `.editorconfig`):
+(MZR001–003 default to Error, the heuristic rules to Warning and Info; severity configurable
+per rule via `.editorconfig`, and MZR001/MZR006 honor a visible `DisableSendableChecks` opt-out):
 
 | Rule | Flags |
 |------|-------|
 | `MZR001` | A non-Sendable value type at a `Create*` call — the compile-time mirror of strict mode |
 | `MZR002` | A computation writing captured locals, fields, or statics — lift that state into a `Signal` |
 | `MZR003` | `Signal.Set` inside a computation, which throws `InvalidOperationException` at runtime |
+| `MZR004` | A mutable static slot, or a readonly one of non-Sendable type, in a MemoizR-using file — the SE-0412 analog |
+| `MZR005` | A use of a variable after it was handed off with `Sending.Transfer` — the SE-0430 analog, best-effort |
+| `MZR006` | A non-sealed class at a creation site, which can smuggle a mutable subclass past the declared-type check (Info) |
 
 Reaction side effects can be pinned to an **executor** — the analog of Swift's custom actor
 executors (SE-0392). `AddSynchronizationContext(uiContext)` covers UI threads;

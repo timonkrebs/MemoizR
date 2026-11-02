@@ -1,5 +1,6 @@
 namespace MemoizR.StructuredConcurrency;
 
+[Sendable] // internally synchronized by design: safe to share across flows (and to hold in statics, see MZR004)
 public sealed class ConcurrentMapReduce<T> : MemoBase<T>
 {
     private readonly IReadOnlyCollection<Func<IStructuredResourceGroup, Task<T>>> fns;
@@ -7,7 +8,9 @@ public sealed class ConcurrentMapReduce<T> : MemoBase<T>
 
     internal ConcurrentMapReduce(IReadOnlyCollection<Func<IStructuredResourceGroup, Task<T>>> fns, Func<T, T, T?> reduce, Context context) : base(context)
     {
-        this.fns = fns;
+        // Snapshot: see ConcurrentMap -- the caller keeps the params array and must not be able
+        // to swap the computation set out from under a recompute.
+        this.fns = fns.ToArray();
         this.reduce = reduce;
     }
 

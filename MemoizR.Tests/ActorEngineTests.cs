@@ -583,8 +583,17 @@ public class ActorEngineTests
         Assert.Equal(10, await c.Get());
     }
 
-    private sealed class ThrowsOnEquals(int seed)
+    private sealed class ThrowsOnEquals
     {
+        // A readonly field, not a primary-constructor capture: captures compile to WRITABLE
+        // fields, which the (now default) strict Sendable check rightly rejects.
+        private readonly int seed;
+
+        public ThrowsOnEquals(int seed)
+        {
+            this.seed = seed;
+        }
+
         public override bool Equals(object? obj) => throw new InvalidOperationException("equals boom");
 
         public override int GetHashCode() => seed;

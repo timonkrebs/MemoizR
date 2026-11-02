@@ -707,7 +707,9 @@ recorded in [ADR 0003](../adr/0003-sendable-checking-and-isolation-assertions.md
 These are boundary checks, not new synchronization: they change nothing in layers 1–5. The same
 discipline is enforced at build time by the bundled `MemoizR.Analyzers` rules — MZR001
 (non-Sendable creation type), MZR002 (computation writes captured/shared state), MZR003 (`Set`
-inside a computation) — see [ADR 0004](../adr/0004-compile-time-data-race-diagnostics.md).
+inside a computation), MZR004 (mutable or non-Sendable static state next to the graph), MZR005
+(use of a variable after a `Sending` transfer) and MZR006 (non-sealed class at a creation site,
+the subclass-smuggling hint) — see [ADR 0004](../adr/0004-compile-time-data-race-diagnostics.md).
 
 An experimental **actor engine** (`CreateActorSignal`/`CreateActorMemoizR`,
 [ADR 0006](../adr/0006-actor-engine-prototype.md)) replaces layers 1–3 wholesale for its nodes:
