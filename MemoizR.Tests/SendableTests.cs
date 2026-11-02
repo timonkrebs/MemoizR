@@ -453,6 +453,24 @@ public class StrictSendableModeTests
     }
 
     [Fact]
+    public void GrowingGenericSubstitutions_AreNotAssumedSendable()
+    {
+        // GrowingNode<int,int> grows into GrowingNode<List<int>, List<List<int>>> by the third
+        // level, where Value is a List<int>: the levels past the divergence cut are accepted
+        // only when every type argument that can still reach a stored slot is Sendable.
+        Assert.False(SendableChecker.IsSendable(typeof(GrowingNode<int, int>), out var reason));
+        Assert.Contains("List", reason);
+    }
+
+    [Fact]
+    public void ImmutableGrowth_StaysSendable()
+    {
+        // Every level wraps the previous arguments in ImmutableArray: nothing mutable can
+        // reach a slot, however deep the expansion goes.
+        Assert.True(SendableChecker.IsSendable(typeof(ImmutableChain<int, int>), out _));
+    }
+
+    [Fact]
     public void StrictFactory_TrustsSendableAttribute()
     {
         var f = new MemoFactory(options: MemoFactoryOptions.StrictSendableChecks);
@@ -513,6 +531,20 @@ internal sealed class RotatingNode<A, B, C>
 {
     public readonly A Value = default!;
     public readonly RotatingNode<B, C, A>? Next;
+}
+
+// Growth that rotates: Value receives B's lineage one level later, and B grows a List each
+// level -- the mutable element surfaces only at the third level.
+internal sealed class GrowingNode<A, B>
+{
+    public readonly A Value = default!;
+    public readonly GrowingNode<B, List<A>>? Next;
+}
+
+internal sealed class ImmutableChain<A, B>
+{
+    public readonly A Value = default!;
+    public readonly ImmutableChain<B, ImmutableArray<A>>? Next;
 }
 
 internal sealed class WrapBox<T>

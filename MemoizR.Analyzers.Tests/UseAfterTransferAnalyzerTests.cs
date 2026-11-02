@@ -5368,4 +5368,204 @@ public class UseAfterTransferAnalyzerTests
         var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
         Assert.Contains("'list'", diagnostic.GetMessage());
     }
+
+    [Fact]
+    public async Task MaterializedViews_CopyTheirElementsNotTheirSource()
+    {
+        // ToArray() enumerates the Where view and copies its ELEMENTS: the receiver owns a
+        // fresh int[] and never sees the backing list.
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(list.Where(x => x > 0).ToArray());
+                    list.Add(1);
+                }
+            """, "using System.Collections.Generic;\nusing System.Linq;\nusing MemoizR;");
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task MaterializedViewsOverInlineContainers_StillCarryTheElements()
+    {
+        // The view's elements ARE the inline array's elements: the same list reference lands
+        // in the receiver's array.
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(new[] { list }.Where(l => l.Count > 0).ToArray());
+                    list.Add(1);
+                }
+            """, "using System.Collections.Generic;\nusing System.Linq;\nusing MemoizR;");
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task UnawaitedAsyncResets_AreDeferred()
+    {
+        // The reset lands only after the await completes; the caller mutates the transferred
+        // list first.
+        var diagnostics = await InClassC("""
+                public void M(Task gate)
+                {
+                    var list = new List<int> { 1 };
+                    async Task Reset()
+                    {
+                        await gate;
+                        list = new List<int>();
+                    }
+
+                    var sending = Sending.Transfer(list);
+                    _ = Reset();
+                    list.Add(1);
+                }
+            """, "using System.Collections.Generic;\nusing System.Threading.Tasks;\nusing MemoizR;");
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task AwaitedAsyncResets_ApplyBeforeTheContinuation()
+    {
+        var diagnostics = await InClassC("""
+                public async Task M(Task gate)
+                {
+                    var list = new List<int> { 1 };
+                    async Task Reset()
+                    {
+                        await gate;
+                        list = new List<int>();
+                    }
+
+                    var sending = Sending.Transfer(list);
+                    await Reset();
+                    list.Add(1);
+                }
+            """, "using System.Collections.Generic;\nusing System.Threading.Tasks;\nusing MemoizR;");
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task AsyncResetsBeforeTheFirstAwait_ApplyAtTheCall()
+    {
+        // The synchronous prefix of an async body runs inside the call itself.
+        var diagnostics = await InClassC("""
+                public void M(Task gate)
+                {
+                    var list = new List<int> { 1 };
+                    async Task Reset()
+                    {
+                        list = new List<int>();
+                        await gate;
+                    }
+
+                    var sending = Sending.Transfer(list);
+                    _ = Reset();
+                    list.Add(1);
+                }
+            """, "using System.Collections.Generic;\nusing System.Threading.Tasks;\nusing MemoizR;");
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task IteratorResets_RunOnlyWhenEnumerated()
+    {
+        // Calling an iterator runs nothing: the discarded sequence never reset the variable.
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    IEnumerable<int> Reset()
+                    {
+                        list = new List<int>();
+                        yield break;
+                    }
+
+                    var sending = Sending.Transfer(list);
+                    Reset();
+                    list.Add(1);
+                }
+            """);
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task ShortCircuitedResets_StayConditional()
+    {
+        // The right operand of && runs only when flag is true: a false flag leaves the
+        // transferred list in use.
+        var diagnostics = await InClassC("""
+                public void M(bool flag)
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(list);
+                    _ = flag && Reset(out list);
+                    list.Add(1);
+                }
+
+                private static bool Reset(out List<int> target)
+                {
+                    target = new List<int>();
+                    return true;
+                }
+            """);
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task LeftOperandResets_AreDefinite()
+    {
+        var diagnostics = await InClassC("""
+                public void M(bool flag)
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(list);
+                    _ = Reset(out list) && flag;
+                    list.Add(1);
+                }
+
+                private static bool Reset(out List<int> target)
+                {
+                    target = new List<int>();
+                    return true;
+                }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task CoalesceFallbackResets_StayConditional()
+    {
+        // The fallback of ?? runs only for a null left operand.
+        var diagnostics = await InClassC("""
+                public void M(object? maybe)
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(list);
+                    var chosen = maybe ?? MakeFresh(out list);
+                    list.Add(1);
+                }
+
+                private static object MakeFresh(out List<int> target)
+                {
+                    target = new List<int>();
+                    return target;
+                }
+            """);
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
 }

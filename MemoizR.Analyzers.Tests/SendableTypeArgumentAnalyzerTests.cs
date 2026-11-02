@@ -939,4 +939,62 @@ public class SendableTypeArgumentAnalyzerTests
         var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR001");
         Assert.Contains("List", diagnostic.GetMessage());
     }
+
+    [Fact]
+    public async Task GrowingGenericSubstitutions_AreNotAssumedSendable()
+    {
+        // Node<int,int> grows into Node<List<int>, List<List<int>>> by the third level, where
+        // Value is a List<int>: the levels past the divergence cut are accepted only when
+        // every type argument that can still reach a stored slot is Sendable.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public sealed class Node<A, B>
+            {
+                public readonly A Value = default!;
+                public readonly Node<B, List<A>>? Next;
+            }
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    f.CreateSignal(new Node<int, int>());
+                }
+            }
+            """);
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR001");
+        Assert.Contains("List", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task ImmutableGrowth_StaysSendable()
+    {
+        // Every level wraps the previous arguments in ImmutableArray: nothing mutable can ever
+        // reach a slot, however deep the expansion goes.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Immutable;
+            using MemoizR;
+
+            public sealed class Chain<A, B>
+            {
+                public readonly A Value = default!;
+                public readonly Chain<B, ImmutableArray<A>>? Next;
+            }
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    f.CreateSignal(new Chain<int, int>());
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
 }

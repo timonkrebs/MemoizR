@@ -278,12 +278,13 @@ public static class SendableChecker
         // A divergent expansion is walked through its FIRST
         // re-instantiation -- substituted members can flip the verdict exactly one level down
         // (Box<T> { Box<List<T>> Next; T Value; } hides the List in the second level's Value)
-        // -- and cut at the second, landing on the cycle assumption above.
+        // -- and cut at the second. The levels past the cut are accepted only when nothing
+        // that can still land in a stored slot there is unverified (CheckReachingTypeArguments).
         if (DefinitionOf(type) is { } definition
             && inProgress.Count(entry => entry != type && DefinitionOf(entry) == definition && TypeSize(entry) < TypeSize(type)) >= 2)
         {
             inProgress.Remove(type);
-            return null;
+            return CheckReachingTypeArguments(type, definition, inProgress);
         }
 
         try
@@ -466,6 +467,110 @@ public static class SendableChecker
         }
 
         return false;
+    }
+
+    // Past the cut, a level stores only its type arguments -- wrapped by the definition's own
+    // member types and constants -- at positions the definition STORES: directly, inside
+    // another type, or after flowing through the recursion into such a position. Sendability
+    // is monotone in a wrapped argument, so the cut level's arguments at those positions
+    // decide; a phantom parameter that never reaches a slot (RecursiveBox<List<T>> carrying
+    // T along) stays free. Kept in lockstep with the analyzer's classifier.
+    private static string? CheckReachingTypeArguments(Type type, Type definition, HashSet<Type> inProgress)
+    {
+        var arguments = type.GetGenericArguments();
+        foreach (var position in StoredParameterPositions(definition))
+        {
+            var reason = CheckCached(arguments[position], inProgress);
+            if (reason != null)
+            {
+                return $"{Pretty(type)} carries non-Sendable type argument {Pretty(arguments[position])} ({reason})";
+            }
+        }
+
+        return null;
+    }
+
+    private static HashSet<int> StoredParameterPositions(Type definition)
+    {
+        var members = StoredMemberTypesOf(definition).ToList();
+        var reaching = new HashSet<int>(members
+            .SelectMany(member => ParametersIn(member, stopAtSelf: definition))
+            .Select(parameter => parameter.GenericParameterPosition));
+        var selfArguments = members
+            .SelectMany(member => SelfConstructionsIn(member, definition))
+            .Select(self => self.GetGenericArguments())
+            .ToList();
+
+        // An argument passed into a reaching position reaches a slot one level down.
+        var grew = true;
+        while (grew)
+        {
+            grew = false;
+            foreach (var arguments in selfArguments)
+            {
+                foreach (var position in reaching.ToList())
+                {
+                    foreach (var parameter in ParametersIn(arguments[position], stopAtSelf: null))
+                    {
+                        grew |= reaching.Add(parameter.GenericParameterPosition);
+                    }
+                }
+            }
+        }
+
+        return reaching;
+    }
+
+    private static IEnumerable<Type> StoredMemberTypesOf(Type definition)
+    {
+        const BindingFlags declared = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly;
+        for (var t = definition; t != null && t != typeof(object) && t != typeof(ValueType); t = t.BaseType)
+        {
+            foreach (var field in t.GetFields(declared))
+            {
+                yield return field.FieldType;
+            }
+
+            foreach (var property in t.GetProperties(declared))
+            {
+                yield return property.PropertyType;
+            }
+        }
+    }
+
+    // The generic parameters a type mentions -- without descending into the definition's own
+    // constructions when asked: their arguments flow through the recursion instead.
+    private static IEnumerable<Type> ParametersIn(Type type, Type? stopAtSelf)
+    {
+        if (type.IsGenericParameter)
+        {
+            return new[] { type };
+        }
+
+        if (type.HasElementType)
+        {
+            return ParametersIn(type.GetElementType()!, stopAtSelf);
+        }
+
+        return type.IsGenericType && (stopAtSelf == null || DefinitionOf(type) != stopAtSelf)
+            ? type.GetGenericArguments().SelectMany(argument => ParametersIn(argument, stopAtSelf))
+            : Enumerable.Empty<Type>();
+    }
+
+    private static IEnumerable<Type> SelfConstructionsIn(Type type, Type definition)
+    {
+        if (type.HasElementType)
+        {
+            return SelfConstructionsIn(type.GetElementType()!, definition);
+        }
+
+        if (!type.IsGenericType)
+        {
+            return Enumerable.Empty<Type>();
+        }
+
+        var nested = type.GetGenericArguments().SelectMany(argument => SelfConstructionsIn(argument, definition));
+        return DefinitionOf(type) == definition ? nested.Prepend(type) : nested;
     }
 
     private static string? CheckTypeArguments(Type type, HashSet<Type> inProgress)

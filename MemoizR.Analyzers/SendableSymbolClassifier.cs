@@ -337,11 +337,12 @@ internal sealed class SendableSymbolClassifier
         }
 
         // Polymorphic recursion, which the re-entry check above can never catch, is cut by
-        // the shared divergence bound and lands on the cycle assumption.
+        // the shared divergence bound; the levels past the cut are accepted only when nothing
+        // that can still land in a stored slot there is unverified.
         if (named.IsGenericType && IsDivergentReinstantiation(named, inProgress))
         {
             inProgress.Remove(named);
-            return null;
+            return CheckReachingTypeArguments(named, inProgress);
         }
 
         try
@@ -505,6 +506,86 @@ internal sealed class SendableSymbolClassifier
                 + (named.ContainingType is { } containing ? TypeSize(containing) - 1 : 0),
             _ => 1,
         };
+    }
+
+    // Past the cut, a level stores only its type arguments -- wrapped by the definition's own
+    // member types and constants -- at positions the definition STORES: directly, inside
+    // another type, or after flowing through the recursion into such a position. Sendability
+    // is monotone in a wrapped argument, so the cut level's arguments at those positions
+    // decide; a phantom parameter that never reaches a slot stays free. Kept in lockstep with
+    // the runtime checker.
+    private string? CheckReachingTypeArguments(INamedTypeSymbol named, HashSet<ITypeSymbol> inProgress)
+    {
+        foreach (var position in StoredParameterPositions(named.OriginalDefinition))
+        {
+            var argument = named.TypeArguments[position];
+            if (CheckCached(argument, inProgress) is { } inner)
+            {
+                return $"{Display(named)} carries non-Sendable type argument {Display(argument)} ({inner})";
+            }
+        }
+
+        return null;
+    }
+
+    private static HashSet<int> StoredParameterPositions(INamedTypeSymbol definition)
+    {
+        var members = StoredInstanceMemberTypesOf(definition).ToList();
+        var reaching = new HashSet<int>(members
+            .SelectMany(member => OwnParametersIn(member, definition, stopAtSelf: true))
+            .Select(parameter => parameter.Ordinal));
+        var selfArguments = members
+            .SelectMany(member => SelfConstructionsIn(member, definition))
+            .Select(self => self.TypeArguments)
+            .ToList();
+
+        // An argument passed into a reaching position reaches a slot one level down.
+        var grew = true;
+        while (grew)
+        {
+            grew = false;
+            foreach (var arguments in selfArguments)
+            {
+                foreach (var position in reaching.ToList())
+                {
+                    foreach (var parameter in OwnParametersIn(arguments[position], definition, stopAtSelf: false))
+                    {
+                        grew |= reaching.Add(parameter.Ordinal);
+                    }
+                }
+            }
+        }
+
+        return reaching;
+    }
+
+    // The definition's own type parameters a type mentions -- without descending into the
+    // definition's own constructions when asked: their arguments flow through the recursion
+    // instead.
+    private static IEnumerable<ITypeParameterSymbol> OwnParametersIn(ITypeSymbol type, INamedTypeSymbol definition, bool stopAtSelf)
+    {
+        return type switch
+        {
+            ITypeParameterSymbol parameter when SymbolEqualityComparer.Default.Equals(parameter.ContainingSymbol, definition) => new[] { parameter },
+            IArrayTypeSymbol array => OwnParametersIn(array.ElementType, definition, stopAtSelf),
+            INamedTypeSymbol named when !stopAtSelf || !SymbolEqualityComparer.Default.Equals(named.OriginalDefinition, definition)
+                => named.TypeArguments.SelectMany(argument => OwnParametersIn(argument, definition, stopAtSelf)),
+            _ => Enumerable.Empty<ITypeParameterSymbol>(),
+        };
+    }
+
+    private static IEnumerable<INamedTypeSymbol> SelfConstructionsIn(ITypeSymbol type, INamedTypeSymbol definition)
+    {
+        switch (type)
+        {
+            case IArrayTypeSymbol array:
+                return SelfConstructionsIn(array.ElementType, definition);
+            case INamedTypeSymbol named:
+                var nested = named.TypeArguments.SelectMany(argument => SelfConstructionsIn(argument, definition));
+                return SymbolEqualityComparer.Default.Equals(named.OriginalDefinition, definition) ? nested.Prepend(named) : nested;
+            default:
+                return Enumerable.Empty<INamedTypeSymbol>();
+        }
     }
 
     private string? CheckTypeArguments(INamedTypeSymbol named, HashSet<ITypeSymbol> inProgress)

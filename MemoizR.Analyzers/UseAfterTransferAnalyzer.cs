@@ -1081,7 +1081,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     private static BodyEffect CallEffectOf(IInvocationOperation invocation, ISymbol variable, int transferPosition, IOperation scope)
     {
         return invocation.TargetMethod.MethodKind == MethodKind.LocalFunction
-            ? LocalFunctionCallEffect(invocation.TargetMethod, variable, scope, NewSymbolSet<IMethodSymbol>())
+            ? LocalFunctionCallEffect(invocation.TargetMethod, variable, scope, NewSymbolSet<IMethodSymbol>(), invocation)
             : DelegateCallEffect(invocation, variable, transferPosition, scope, NewSymbolSet<IMethodSymbol>());
     }
 
@@ -1301,7 +1301,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     // reset dominates (same arm, after it) see the fresh value, and references inside nested
     // local functions the region never invokes cannot run at all. Calls to sibling local
     // functions resolve against `scope`; `inProgress` breaks recursion cycles.
-    private static BodyEffect EffectOf(IOperation region, ISymbol variable, IOperation scope, HashSet<IMethodSymbol> inProgress, out IOperation? read)
+    private static BodyEffect EffectOf(IOperation region, ISymbol variable, IOperation scope, HashSet<IMethodSymbol> inProgress, out IOperation? read, int deferredResetsFrom = int.MaxValue)
     {
         read = null;
         var events = region.DescendantsAndSelf()
@@ -1323,7 +1323,9 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                 return BodyEffect.Reads;
             }
 
-            if (effect != BodyEffect.Resets)
+            // A reset the caller does not wait for (past an unawaited async body's first await)
+            // lands later: it neither resets nor dominates here.
+            if (effect != BodyEffect.Resets || current.Syntax.SpanStart >= deferredResetsFrom)
             {
                 continue;
             }
@@ -1404,7 +1406,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             // which arm holds the transfer is a scope-level question the body cannot ask.
             var callEffect = invocation.TargetMethod.MethodKind == MethodKind.DelegateInvoke
                 ? DelegateCallEffect(invocation, variable, transferPosition: 0, scope, inProgress)
-                : LocalFunctionCallEffect(invocation.TargetMethod, variable, scope, inProgress);
+                : LocalFunctionCallEffect(invocation.TargetMethod, variable, scope, inProgress, invocation);
             if (argumentsEffect == BodyEffect.Resets)
             {
                 return (BodyEffect.Resets, null, invocation);
@@ -1636,9 +1638,33 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     private static IEnumerable<IOperation?> CopiedElementParts(IOperation? source)
     {
         var operand = PeelConversions(source);
+        // Enumerating a VIEW copies the view's elements, which are its source's elements: the
+        // backing collection itself is never copied (list.Where(..).ToArray() owns a fresh
+        // array), so only an inline source container contributes.
+        if (operand is not null && ViewSourceOf(operand) is { } viewSource)
+        {
+            return CopiedElementParts(viewSource);
+        }
+
         return operand is not null && CarriedParts(operand) is { } parts
             ? parts
             : Enumerable.Empty<IOperation?>();
+    }
+
+    // The expression a framework view reads through -- list.Where(..), list?.AsReadOnly() --
+    // or null when the operand is not a view.
+    private static IOperation? ViewSourceOf(IOperation operand)
+    {
+        var (call, receiverBehindPlaceholder) = operand is IConditionalAccessOperation conditional
+            ? (PeelConversions(conditional.WhenNotNull), conditional.Operation)
+            : (operand, null);
+        if (call is not IInvocationOperation { TargetMethod: { ContainingType: { } source } method } view || !IsAFrameworkView(method, source))
+        {
+            return null;
+        }
+
+        var receiver = view.Instance ?? view.Arguments.FirstOrDefault()?.Value;
+        return receiver is IConditionalAccessInstanceOperation ? receiverBehindPlaceholder : receiver;
     }
 
     private static IOperation? ReadWithin(IOperation expression, ISymbol variable)
@@ -1669,7 +1695,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     // rewrites it, making the call act as a reinitialization at the call site. A recursive
     // chain re-entering a body already on the walk contributes nothing new: mutation is
     // detected at the reference where it occurs.
-    private static BodyEffect LocalFunctionCallEffect(IMethodSymbol localFunction, ISymbol variable, IOperation scope, HashSet<IMethodSymbol> inProgress)
+    private static BodyEffect LocalFunctionCallEffect(IMethodSymbol localFunction, ISymbol variable, IOperation scope, HashSet<IMethodSymbol> inProgress, IInvocationOperation? call = null)
     {
         var definition = localFunction.OriginalDefinition;
         if (LocalFunctionDeclarationIn(scope, localFunction) is not { } declaration || !inProgress.Add(definition))
@@ -1679,12 +1705,46 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
 
         try
         {
-            return EffectOf(declaration, variable, scope, inProgress, out _);
+            // An iterator's body runs only when enumerated: a plain call runs nothing. An async
+            // body runs synchronously up to its first await; when the call is not awaited, the
+            // continuation past it lands later -- its resets do not apply at the call, while its
+            // reads still happen after the handoff and keep counting.
+            if (call is not null && IsIteratorBody(declaration) && !IsEnumeratedImmediately(call))
+            {
+                return BodyEffect.None;
+            }
+
+            return EffectOf(declaration, variable, scope, inProgress, out _, DeferredResetsFrom(declaration, call));
         }
         finally
         {
             inProgress.Remove(definition);
         }
+    }
+
+    private static int DeferredResetsFrom(ILocalFunctionOperation declaration, IInvocationOperation? call)
+    {
+        if (call is null || !declaration.Symbol.IsAsync || IsAwaited(call))
+        {
+            return int.MaxValue;
+        }
+
+        return declaration.DescendantsAndSelf()
+            .Where(operation => operation is IAwaitOperation && !IsWithinANestedFunction(operation, declaration))
+            .Select(operation => operation.Syntax.SpanStart)
+            .DefaultIfEmpty(int.MaxValue)
+            .Min();
+    }
+
+    private static bool IsAwaited(IInvocationOperation call)
+    {
+        IOperation awaited = call;
+        while (awaited.Parent is IConversionOperation || awaited.Parent is IInvocationOperation { TargetMethod.Name: "ConfigureAwait" })
+        {
+            awaited = awaited.Parent;
+        }
+
+        return awaited.Parent is IAwaitOperation;
     }
 
     // What invoking the delegate held by a LOCAL does: any lambda (or local function lifted
@@ -1714,7 +1774,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             {
                 IAnonymousFunctionOperation lambda => LambdaCallEffect(lambda, variable, scope, inProgress) == BodyEffect.Reads,
                 IMethodReferenceOperation { Method: { MethodKind: MethodKind.LocalFunction } method } =>
-                    LocalFunctionCallEffect(method, variable, scope, inProgress) == BodyEffect.Reads,
+                    LocalFunctionCallEffect(method, variable, scope, inProgress, consumer as IInvocationOperation) == BodyEffect.Reads,
                 _ => false,
             });
     }
@@ -2167,7 +2227,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                 continue;
             }
 
-            if (IsBranching(parent))
+            if (IsBranching(parent) || IsAConditionallyEvaluatedOperand(child, parent))
             {
                 return true;
             }
@@ -2358,7 +2418,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     {
         for (IOperation child = reinitialization; child.Parent is { } parent; child = parent)
         {
-            if (IsBranching(parent) || parent is ITryOperation || IsNestedFunction(parent))
+            if (IsBranching(parent) || parent is ITryOperation || IsNestedFunction(parent) || IsAConditionallyEvaluatedOperand(child, parent))
             {
                 return child;
             }
@@ -2642,7 +2702,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     {
         for (IOperation child = reinitialization; child.Parent is { } parent; child = parent)
         {
-            var branches = IsBranching(parent) || parent is ITryOperation;
+            var branches = IsBranching(parent) || parent is ITryOperation || IsAConditionallyEvaluatedOperand(child, parent);
             if (!branches || (parent is ITryOperation tryOperation && RunsToCompletionOrExits(tryOperation, child)))
             {
                 continue;
@@ -2727,6 +2787,19 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     {
         return operation is IConditionalOperation or ISwitchOperation or ISwitchExpressionOperation
             or ILoopOperation or IConditionalAccessOperation;
+    }
+
+    // The right operand of && / || and the fallback of ?? run only when the left operand says
+    // so: a reset there is as skippable as one in an if-arm.
+    private static bool IsAConditionallyEvaluatedOperand(IOperation child, IOperation parent)
+    {
+        return parent switch
+        {
+            IBinaryOperation { OperatorKind: BinaryOperatorKind.ConditionalAnd or BinaryOperatorKind.ConditionalOr } binary
+                => ReferenceEquals(child, binary.RightOperand),
+            ICoalesceOperation coalesce => ReferenceEquals(child, coalesce.WhenNull),
+            _ => false,
+        };
     }
 
     // Built-in conversions only: a user-defined conversion yields a new value, not its operand.
