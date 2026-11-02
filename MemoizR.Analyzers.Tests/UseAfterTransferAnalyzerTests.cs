@@ -5454,14 +5454,16 @@ public class UseAfterTransferAnalyzerTests
     [Fact]
     public async Task AsyncResetsBeforeTheFirstAwait_ApplyAtTheCall()
     {
-        // The synchronous prefix of an async body runs inside the call itself.
+        // The synchronous prefix of an async body runs inside the call itself: a reset that
+        // cannot fail there applies at the call.
         var diagnostics = await InClassC("""
                 public void M(Task gate)
                 {
                     var list = new List<int> { 1 };
+                    var fresh = new List<int>();
                     async Task Reset()
                     {
-                        list = new List<int>();
+                        list = fresh;
                         await gate;
                     }
 
@@ -7677,6 +7679,54 @@ public class UseAfterTransferAnalyzerTests
                     list.Add(1);
                 }
             """, "using System;\nusing System.Collections.Generic;\nusing System.Linq;\nusing MemoizR;");
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task UnawaitedAsyncResetsThatCanFault_KeepTheCallerTransferred()
+    {
+        // make() may throw before the store; the fault is captured in the discarded task and the
+        // caller carries on with the transferred list.
+        var diagnostics = await InClassC("""
+                public void M(Func<List<int>> make)
+                {
+                    var list = new List<int> { 1 };
+                    async Task Reset()
+                    {
+                        list = make();
+                        await Task.Yield();
+                    }
+
+                    var sending = Sending.Transfer(list);
+                    _ = Reset();
+                    list.Add(1);
+                }
+            """, "using System;\nusing System.Collections.Generic;\nusing System.Threading.Tasks;\nusing MemoizR;");
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task AwaitedAsyncResetsThatCanFault_StillApply()
+    {
+        // Awaited, the fault rethrows at the await: nothing after it runs.
+        var diagnostics = await InClassC("""
+                public async Task M(Func<List<int>> make)
+                {
+                    var list = new List<int> { 1 };
+                    async Task Reset()
+                    {
+                        list = make();
+                        await Task.Yield();
+                    }
+
+                    var sending = Sending.Transfer(list);
+                    await Reset();
+                    list.Add(1);
+                }
+            """, "using System;\nusing System.Collections.Generic;\nusing System.Threading.Tasks;\nusing MemoizR;");
 
         Assert.Empty(diagnostics);
     }

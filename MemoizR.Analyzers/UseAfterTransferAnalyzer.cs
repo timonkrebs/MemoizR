@@ -1261,16 +1261,22 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
 
         // The callee can fail BEFORE its reset lands: a caller-side catch that resumes then
         // continues with the ORIGINAL value still in the variable -- the reset is only
-        // conditional for such callers.
+        // conditional for such callers. An UNAWAITED async callee needs no catch: its fault
+        // is captured in the discarded task and the caller carries on regardless.
         if (effect == BodyEffect.Resets
             && CalleeCanThrowBeforeItsReset(call, variable, scope)
-            && ACaughtFailureCanResumePast(call, call.Syntax.Span.End))
+            && (IsAnUnawaitedAsyncCall(call) || ACaughtFailureCanResumePast(call, call.Syntax.Span.End)))
         {
             dominated.Add(call, call.Syntax.Span.End);
             return null;
         }
 
         return false;
+    }
+
+    private static bool IsAnUnawaitedAsyncCall(IOperation call)
+    {
+        return call is IInvocationOperation { TargetMethod.IsAsync: true } invocation && !IsAwaited(invocation);
     }
 
     private static bool CalleeCanThrowBeforeItsReset(IOperation call, ISymbol variable, IOperation scope)
