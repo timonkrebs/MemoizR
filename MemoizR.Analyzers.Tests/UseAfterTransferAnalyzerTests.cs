@@ -7354,4 +7354,169 @@ public class UseAfterTransferAnalyzerTests
         var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
         Assert.Contains("'list'", diagnostic.GetMessage());
     }
+
+    [Fact]
+    public async Task ForwardedRecordArguments_CarryIntoInheritedStorage()
+    {
+        // Derived forwards Value to Base's primary constructor, whose positional property
+        // stores it: the receiver reaches the list through Base.Value.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public record Base(List<int> Value);
+
+            public record Derived(List<int> Value) : Base(Value);
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(new Derived(list));
+                    list.Add(1);
+                }
+            }
+            """);
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task ForwardedRecordArguments_FollowRenames()
+    {
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public record Base(List<int> Value);
+
+            public record Derived(List<int> Items) : Base(Value: Items);
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(new Derived(list));
+                    list.Add(1);
+                }
+            }
+            """);
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task ForwardedRecordArguments_OverwrittenInTheInitializer_AreDropped()
+    {
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public record Base(List<int> Value);
+
+            public record Derived(List<int> Value) : Base(Value);
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(new Derived(list) { Value = new() });
+                    list.Add(1);
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task UnforwardedRecordArguments_CarryNothing()
+    {
+        // Derived's Value is neither stored by a property of its own nor forwarded.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public record Base(List<int> Value);
+
+            public record Derived(List<int> Value) : Base(new List<int>());
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(new Derived(list));
+                    list.Add(1);
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task CalleeResetsWhoseRhsCanFail_LeaveTheCallerTransferred()
+    {
+        // make() may throw before the store: the swallowing handler resumes with the
+        // transferred list unchanged.
+        var diagnostics = await InClassC("""
+                public void M(Func<List<int>> make)
+                {
+                    var list = new List<int> { 1 };
+                    void Reset()
+                    {
+                        list = make();
+                    }
+
+                    try
+                    {
+                        var sending = Sending.Transfer(list);
+                        Reset();
+                    }
+                    catch
+                    {
+                    }
+
+                    list.Add(1);
+                }
+            """, WithSystem);
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task CalleeResetsThatCannotFail_EndTracking()
+    {
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    var fresh = new List<int>();
+                    void Reset()
+                    {
+                        list = fresh;
+                    }
+
+                    try
+                    {
+                        var sending = Sending.Transfer(list);
+                        Reset();
+                    }
+                    catch
+                    {
+                    }
+
+                    list.Add(1);
+                }
+            """, WithSystem);
+
+        Assert.Empty(diagnostics);
+    }
 }

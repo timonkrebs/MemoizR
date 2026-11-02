@@ -1266,10 +1266,12 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             return false;
         }
 
-        var reset = declaration.DescendantsAndSelf().FirstOrDefault(operation =>
-            IsReferenceTo(operation, variable)
-            && ResetShapeOf(operation, variable, declaration.Syntax.SpanStart, out _) is not null);
-        var limit = reset?.Syntax.SpanStart ?? int.MaxValue;
+        // Up to the reset's COMPLETION: its own right-hand side (`list = make()`) can fail
+        // before the store, leaving the caller the transferred value.
+        var reset = declaration.DescendantsAndSelf()
+            .Select(operation => IsReferenceTo(operation, variable) ? ResetShapeOf(operation, variable, declaration.Syntax.SpanStart, out _) : null)
+            .FirstOrDefault(shape => shape is not null);
+        var limit = reset?.Syntax.Span.End ?? int.MaxValue;
 
         return declaration.DescendantsAndSelf().Any(operation =>
             operation.Syntax.Span.End <= limit
@@ -1674,9 +1676,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     private static IEnumerable<IOperation?> RecordConstructorCarriedParts(
         IObjectCreationOperation creation, HashSet<string>? alsoOverwritten)
     {
-        if (creation.Constructor is not { ContainingType: { IsRecord: true } recordType } constructor
-            || !constructor.DeclaringSyntaxReferences.Any(reference =>
-                reference.GetSyntax() is RecordDeclarationSyntax))
+        if (creation.Constructor is not { ContainingType: { IsRecord: true } recordType } constructor || !IsAPrimaryConstructor(constructor))
         {
             yield break;
         }
@@ -1689,20 +1689,66 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
 
         foreach (var argument in creation.Arguments)
         {
-            // Only the SYNTHESIZED positional property stores its parameter (its declaring
-            // syntax IS the parameter); an explicitly redeclared property replaces the
-            // storage and may never read it -- and an object initializer that definitely
-            // OVERWRITES the slot drops the constructor's value before the object escapes.
-            if (argument.Parameter is { } parameter
-                && !overwritten.Contains(parameter.Name)
-                && recordType.GetMembers(parameter.Name).OfType<IPropertySymbol>().Any(property =>
-                    SendableSymbolClassifier.HasBackingSlot(property)
-                    && property.DeclaringSyntaxReferences.Any(reference =>
-                        reference.GetSyntax() is ParameterSyntax)))
+            if (argument.Parameter is { } parameter && StoresPositionally(recordType, constructor, parameter, overwritten))
             {
                 yield return argument.Value;
             }
         }
+    }
+
+    private static bool IsAPrimaryConstructor(IMethodSymbol constructor)
+    {
+        return constructor.DeclaringSyntaxReferences.Any(reference => reference.GetSyntax() is RecordDeclarationSyntax);
+    }
+
+    // Only the SYNTHESIZED positional property stores its parameter (its declaring syntax IS
+    // the parameter); an explicitly redeclared property replaces the storage and may never
+    // read it -- and an object initializer that definitely OVERWRITES the slot drops the
+    // constructor's value before the object escapes. A parameter FORWARDED to the base
+    // record's primary constructor (`record Derived(List<int> Value) : Base(Value)`) stores
+    // wherever that parameter does.
+    private static bool StoresPositionally(INamedTypeSymbol recordType, IMethodSymbol constructor, IParameterSymbol parameter, HashSet<string> overwritten)
+    {
+        if (overwritten.Contains(parameter.Name))
+        {
+            return false;
+        }
+
+        if (recordType.GetMembers(parameter.Name).OfType<IPropertySymbol>().Any(property =>
+            SendableSymbolClassifier.HasBackingSlot(property)
+            && property.DeclaringSyntaxReferences.Any(reference => reference.GetSyntax() is ParameterSyntax)))
+        {
+            return true;
+        }
+
+        return ForwardedBaseParameterOf(constructor, parameter) is { } forwarded
+            && recordType.BaseType is { IsRecord: true } baseType
+            && forwarded.ContainingSymbol is IMethodSymbol baseConstructor
+            && StoresPositionally(baseType, baseConstructor, forwarded, overwritten);
+    }
+
+    // The base primary-constructor parameter the record's `: Base(..)` initializer hands this
+    // parameter to -- matched by position, or by name for a named argument.
+    private static IParameterSymbol? ForwardedBaseParameterOf(IMethodSymbol constructor, IParameterSymbol parameter)
+    {
+        var baseInitializer = constructor.DeclaringSyntaxReferences
+            .Select(reference => reference.GetSyntax())
+            .OfType<RecordDeclarationSyntax>()
+            .Select(declaration => declaration.BaseList?.Types.OfType<PrimaryConstructorBaseTypeSyntax>().FirstOrDefault())
+            .FirstOrDefault(initializer => initializer is not null);
+        var baseConstructor = constructor.ContainingType.BaseType?.InstanceConstructors.FirstOrDefault(IsAPrimaryConstructor);
+        if (baseInitializer is null || baseConstructor is null)
+        {
+            return null;
+        }
+
+        return baseInitializer.ArgumentList.Arguments
+            .Select((argument, index) => (Argument: argument, Index: index))
+            .Where(pair => pair.Argument.Expression is IdentifierNameSyntax forwarded && forwarded.Identifier.ValueText == parameter.Name)
+            .Select(pair => pair.Argument.NameColon is { } named
+                ? baseConstructor.Parameters.FirstOrDefault(candidate => candidate.Name == named.Name.Identifier.ValueText)
+                : baseConstructor.Parameters.ElementAtOrDefault(pair.Index))
+            .FirstOrDefault(candidate => candidate is not null);
     }
 
     // Member writes carry through compiler-known slots only; an INDEXER initializer
