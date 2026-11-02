@@ -142,6 +142,21 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         }
     }
 
+    private sealed class SnapshotComparer : IEqualityComparer<(ISymbol Slot, IOperation Site)>
+    {
+        public static readonly SnapshotComparer Instance = new();
+
+        public bool Equals((ISymbol Slot, IOperation Site) x, (ISymbol Slot, IOperation Site) y)
+        {
+            return SymbolEqualityComparer.Default.Equals(x.Slot, y.Slot) && ReferenceEquals(x.Site, y.Site);
+        }
+
+        public int GetHashCode((ISymbol Slot, IOperation Site) snapshot)
+        {
+            return SymbolEqualityComparer.Default.GetHashCode(snapshot.Slot) * 31 + snapshot.Site.Syntax.SpanStart;
+        }
+    }
+
     private sealed class TransferEntry
     {
         public TransferEntry(ISymbol variable, IOperation transfer, List<IOperation> scanRoots, bool escaped, IOperation scope)
@@ -430,7 +445,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         if (invocation.TargetMethod.MethodKind == MethodKind.DelegateInvoke)
         {
             return DelegateReceiver(invocation) is { } receiver
-                && StoredCallables(receiver, block, invocation, anchor.Syntax.Span.End, NewSymbolSet<ISymbol>())
+                && StoredCallables(receiver, block, invocation, anchor.Syntax.Span.End, NewSnapshotSet())
                     .Any(callable => ReferenceEquals(callable, transferBody)
                         || (callable is IMethodReferenceOperation methodReference
                             && SymbolEqualityComparer.Default.Equals(methodReference.Method.OriginalDefinition, functionSymbol)));
@@ -1269,7 +1284,16 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         return ThrownType(thrown) is not { } thrownType
             || catchClause.ExceptionType is not { } caughtType
             || caughtType.SpecialType == SpecialType.System_Object
-            || Inherits(thrownType, caughtType);
+            || Inherits(thrownType, caughtType)
+            // A thrown VARIABLE's static type is only an upper bound: the instance may be
+            // any derived type a narrower clause takes. A fresh `new` (or a sealed type)
+            // is exact.
+            || (!IsExactlyTyped(thrown, thrownType) && caughtType is INamedTypeSymbol caught && Inherits(caught, thrownType));
+    }
+
+    private static bool IsExactlyTyped(IThrowOperation thrown, INamedTypeSymbol thrownType)
+    {
+        return thrownType.IsSealed || PeelConversions(thrown.Exception) is IObjectCreationOperation;
     }
 
     // Inside a local-function DECLARATION nested in the scanned region -- the region itself may
@@ -1379,6 +1403,12 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
 
     private static bool IsStoredIntoALocal(IAnonymousFunctionOperation lambda)
     {
+        return StoredLocalOf(lambda) is not null;
+    }
+
+    // The local a lambda is declared into or plainly assigned to, if any.
+    private static ILocalSymbol? StoredLocalOf(IAnonymousFunctionOperation lambda)
+    {
         IOperation stored = lambda;
         while (stored.Parent is IDelegateCreationOperation or IConversionOperation)
         {
@@ -1387,9 +1417,9 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
 
         return stored.Parent switch
         {
-            IVariableInitializerOperation { Parent: IVariableDeclaratorOperation { Symbol: ILocalSymbol } } => true,
-            ISimpleAssignmentOperation assignment => ReferenceEquals(assignment.Value, stored) && ReferencedVariable(assignment.Target) is ILocalSymbol,
-            _ => false,
+            IVariableInitializerOperation { Parent: IVariableDeclaratorOperation { Symbol: ILocalSymbol local } } => local,
+            ISimpleAssignmentOperation assignment when ReferenceEquals(assignment.Value, stored) => ReferencedVariable(assignment.Target) as ILocalSymbol,
+            _ => null,
         };
     }
 
@@ -1791,7 +1821,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     // re-entered forever, with each level minting a fresh guard.
     private static bool AnyStoredCallableReads(ISymbol delegateLocal, ISymbol variable, IOperation consumer, int transferPosition, IOperation scope, HashSet<IMethodSymbol> inProgress)
     {
-        return StoredCallables(delegateLocal, scope, consumer, transferPosition, NewSymbolSet<ISymbol>())
+        return StoredCallables(delegateLocal, scope, consumer, transferPosition, NewSnapshotSet())
             .Any(callable => callable switch
             {
                 IAnonymousFunctionOperation lambda => LambdaCallEffect(lambda, variable, scope, inProgress) == BodyEffect.Reads,
@@ -1933,11 +1963,13 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     // stores in a sibling arm of the transfer never run on the transferred path, a store
     // that only happens after the call cannot be what it invoked (unless a loop carries it
     // back around), a definite `=` overwrite KILLS every earlier target, `-=` never adds
-    // one, and a plain delegate-to-delegate copy carries the SOURCE local's candidates.
+    // one, and a plain delegate-to-delegate copy carries the SOURCE local's candidates as
+    // of THAT copy. One resolution per (slot, snapshot site): the same source copied at two
+    // sites holds two different lists, while re-entering it for the same site is a cycle.
     private static IEnumerable<IOperation> StoredCallables(
-        ISymbol delegateLocal, IOperation scope, IOperation consumer, int transferPosition, HashSet<ISymbol> visited)
+        ISymbol delegateLocal, IOperation scope, IOperation consumer, int transferPosition, HashSet<(ISymbol Slot, IOperation Site)> visited)
     {
-        if (!visited.Add(delegateLocal))
+        if (!visited.Add((delegateLocal, consumer)))
         {
             yield break;
         }
@@ -1976,8 +2008,13 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         }
     }
 
+    private static HashSet<(ISymbol Slot, IOperation Site)> NewSnapshotSet()
+    {
+        return new HashSet<(ISymbol Slot, IOperation Site)>(SnapshotComparer.Instance);
+    }
+
     private static IEnumerable<IOperation> ResolvedCallables(
-        IOperation value, IOperation site, IOperation scope, int transferPosition, HashSet<ISymbol> visited)
+        IOperation value, IOperation site, IOperation scope, int transferPosition, HashSet<(ISymbol Slot, IOperation Site)> visited)
     {
         foreach (var item in Callables(value))
         {
@@ -2131,15 +2168,28 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         return stores;
     }
 
-    // A store inside a nested local function is in the list at the call only if its
-    // function can have RUN by then: an invocation source-before the consumer (or carried
-    // back around by a loop) qualifies -- transitively so when that invocation itself sits
-    // in a nested function -- and a method-group lift may travel and run anywhere. A
-    // function nothing references cannot have run at all.
+    // A store inside a nested function is in the list at the call only if its function can
+    // have RUN by then. A local function runs through an invocation source-before the
+    // consumer (or carried back around by a loop) -- transitively so when that invocation
+    // itself sits in a nested function -- and a method-group lift may travel and run
+    // anywhere; a function nothing references cannot have run at all. A LAMBDA runs through
+    // the delegate it builds: stored into a local, it is judged by that local's reads the
+    // same way (an invocation by position, any other read as travel); stored anywhere else
+    // it may run anywhere.
     private static bool NestedStoreCanBeCurrent(IOperation store, IOperation scope, IOperation consumer)
     {
-        return EnclosingLocalFunctions(store, scope)
-            .All(nested => CanHaveRunBefore(nested.Symbol, scope, consumer, NewSymbolSet<IMethodSymbol>()));
+        return EnclosingNestedFunctions(store, scope)
+            .All(nested => CanHaveRunBefore(nested, scope, consumer, NewSymbolSet<IMethodSymbol>()));
+    }
+
+    private static bool CanHaveRunBefore(IOperation nested, IOperation scope, IOperation consumer, HashSet<IMethodSymbol> visited)
+    {
+        return nested switch
+        {
+            ILocalFunctionOperation declaration => CanHaveRunBefore(declaration.Symbol, scope, consumer, visited),
+            IAnonymousFunctionOperation lambda => LambdaCanHaveRunBefore(lambda, scope, consumer, visited),
+            _ => true,
+        };
     }
 
     private static bool CanHaveRunBefore(IMethodSymbol localFunction, IOperation scope, IOperation consumer, HashSet<IMethodSymbol> visited)
@@ -2153,17 +2203,48 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         {
             IInvocationOperation invocation
                 when SymbolEqualityComparer.Default.Equals(invocation.TargetMethod.OriginalDefinition, localFunction.OriginalDefinition)
-                => (operation.Syntax.SpanStart < consumer.Syntax.Span.End || SharesALoopWith(operation, consumer))
-                    && NestedCallSiteCanRun(operation, scope, consumer, visited),
+                => InvocationCanHaveRunBefore(invocation, scope, consumer, visited),
             IMethodReferenceOperation methodReference
                 => SymbolEqualityComparer.Default.Equals(methodReference.Method.OriginalDefinition, localFunction.OriginalDefinition),
             _ => false,
         });
     }
 
+    private static bool LambdaCanHaveRunBefore(IAnonymousFunctionOperation lambda, IOperation scope, IOperation consumer, HashSet<IMethodSymbol> visited)
+    {
+        if (!visited.Add(lambda.Symbol))
+        {
+            return false;
+        }
+
+        // A local declared outside the scanned scope has reads the scan never sees.
+        if (StoredLocalOf(lambda) is not { } local
+            || local.DeclaringSyntaxReferences.Length == 0
+            || !scope.Syntax.Span.Contains(local.DeclaringSyntaxReferences[0].Span))
+        {
+            return true;
+        }
+
+        return scope.DescendantsAndSelf().OfType<ILocalReferenceOperation>()
+            .Where(reference => SymbolEqualityComparer.Default.Equals(reference.Local, local) && !IsAnAssignmentTarget(reference))
+            .Any(reference => reference.Parent is not IInvocationOperation { TargetMethod.MethodKind: MethodKind.DelegateInvoke } invocation
+                || InvocationCanHaveRunBefore(invocation, scope, consumer, visited));
+    }
+
+    private static bool IsAnAssignmentTarget(IOperation reference)
+    {
+        return reference.Parent is IAssignmentOperation assignment && ReferenceEquals(assignment.Target, reference);
+    }
+
+    private static bool InvocationCanHaveRunBefore(IInvocationOperation invocation, IOperation scope, IOperation consumer, HashSet<IMethodSymbol> visited)
+    {
+        return (invocation.Syntax.SpanStart < consumer.Syntax.Span.End || SharesALoopWith(invocation, consumer))
+            && NestedCallSiteCanRun(invocation, scope, consumer, visited);
+    }
+
     private static bool NestedCallSiteCanRun(IOperation callSite, IOperation scope, IOperation consumer, HashSet<IMethodSymbol> visited)
     {
-        return EnclosingLocalFunctions(callSite, scope).All(nested => CanHaveRunBefore(nested.Symbol, scope, consumer, visited));
+        return EnclosingNestedFunctions(callSite, scope).All(nested => CanHaveRunBefore(nested, scope, consumer, visited));
     }
 
     private static bool SharesALoopWith(IOperation store, IOperation consumer)
@@ -2664,10 +2745,12 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     }
 
     // A caught FAILURE resumes AFTER its try: any throw-capable operation (an explicit
-    // throw, a call that may fail, ...) skips a reset that try still contains. An EXPLICIT
-    // throw carries its type -- a catch that cannot catch it absorbs nothing -- and it
-    // governs its whole subtree (the operand evaluating is not an independent failure path
-    // worth modeling).
+    // throw, a call that may fail, ...) skips a reset that try still contains. The handler
+    // is searched OUTWARD: a try none of whose clauses can take the failure (an explicit
+    // throw's type passes them) hands it on, and a clause that DEFINITELY takes it ends the
+    // search -- unless that handler re-throws, handing on a failure of unknown type. An
+    // explicit throw governs its whole subtree (the operand evaluating is not an
+    // independent failure path worth modeling).
     private static bool ACaughtFailureCanResumePast(IOperation operation, int reinitPosition)
     {
         if (operation is not IThrowOperation && IsInsideAThrow(operation))
@@ -2675,9 +2758,30 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             return false;
         }
 
-        return NearestCatchingTry(operation) is { } catchingTry
-            && catchingTry.Syntax.Span.Contains(reinitPosition)
-            && (operation is not IThrowOperation thrown || CatchesTheThrow(catchingTry, thrown));
+        var thrown = operation as IThrowOperation;
+        foreach (var tryOperation in EnclosingTriesOf(operation))
+        {
+            var handlers = tryOperation.Catches.Where(catchClause => thrown is null || ClauseCanCatch(catchClause, thrown)).ToList();
+            if (handlers.Any(CanResume) && tryOperation.Syntax.Span.Contains(reinitPosition))
+            {
+                return true;
+            }
+
+            var taker = handlers.FirstOrDefault(catchClause => DefinitelyTakes(catchClause, thrown));
+            if (taker is null)
+            {
+                continue;
+            }
+
+            if (HandlerExit(taker) is not IThrowOperation)
+            {
+                return false; // resumed before the reset, or left the function
+            }
+
+            thrown = null;
+        }
+
+        return false;
     }
 
     private static bool IsInsideAThrow(IOperation operation)
@@ -2685,37 +2789,42 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         return AncestorsWithinFunction(operation).Any(parent => parent is IThrowOperation);
     }
 
-    private static ITryOperation? NearestCatchingTry(IOperation thrown)
+    // The tries whose BODY holds the operation, innermost first, within its own function (a
+    // deferred body's throw does not run on this path).
+    private static IEnumerable<ITryOperation> EnclosingTriesOf(IOperation operation)
     {
-        for (IOperation child = thrown; child.Parent is { } parent; child = parent)
+        for (IOperation child = operation; child.Parent is { } parent && !IsNestedFunction(parent); child = parent)
         {
-            if (IsNestedFunction(parent))
+            if (parent is ITryOperation tryOperation && ReferenceEquals(child, tryOperation.Body))
             {
-                return null; // a deferred body's throw does not run on this path
-            }
-
-            if (parent is ITryOperation tryOperation && ReferenceEquals(child, tryOperation.Body)
-                && tryOperation.Catches.Any(CanResume))
-            {
-                return tryOperation;
+                yield return tryOperation;
             }
         }
+    }
 
-        return null;
+    // An unfiltered clause the failure cannot pass: a catch-all, or -- for an explicit
+    // throw -- a type its static type inherits.
+    private static bool DefinitelyTakes(ICatchClauseOperation catchClause, IThrowOperation? thrown)
+    {
+        return catchClause.Filter is null
+            && (catchClause.ExceptionType is not { } caughtType
+                || CatchesEverything(caughtType)
+                || (thrown is not null && ThrownType(thrown) is { } thrownType && Inherits(thrownType, caughtType)));
     }
 
     // A handler that ends in an unconditional throw/return never completes normally:
     // control does not resume after its try on that path (catch { throw; } re-escapes).
     private static bool CanResume(ICatchClauseOperation catchClause)
     {
-        var last = catchClause.Handler.Operations.LastOrDefault();
-        if (last is IExpressionStatementOperation expressionStatement)
-        {
-            last = expressionStatement.Operation;
-        }
+        var exit = HandlerExit(catchClause);
+        return exit is not IThrowOperation
+            && exit is not IReturnOperation { Kind: not OperationKind.YieldReturn };
+    }
 
-        return last is not IThrowOperation
-            && last is not IReturnOperation { Kind: not OperationKind.YieldReturn };
+    private static IOperation? HandlerExit(ICatchClauseOperation catchClause)
+    {
+        var last = catchClause.Handler.Operations.LastOrDefault();
+        return last is IExpressionStatementOperation expressionStatement ? expressionStatement.Operation : last;
     }
 
     // True when the reassignment DEFINITELY executes on the path that transferred: walking up
@@ -2801,7 +2910,12 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
 
     private static IEnumerable<ILocalFunctionOperation> EnclosingLocalFunctions(IOperation operation, IOperation boundary)
     {
-        return Ancestors(operation).TakeWhile(parent => !ReferenceEquals(parent, boundary)).OfType<ILocalFunctionOperation>();
+        return EnclosingNestedFunctions(operation, boundary).OfType<ILocalFunctionOperation>();
+    }
+
+    private static IEnumerable<IOperation> EnclosingNestedFunctions(IOperation operation, IOperation boundary)
+    {
+        return Ancestors(operation).TakeWhile(parent => !ReferenceEquals(parent, boundary)).Where(IsNestedFunction);
     }
 
     private static bool IsNestedFunction(IOperation operation)

@@ -5733,4 +5733,289 @@ public class UseAfterTransferAnalyzerTests
         var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
         Assert.Contains("'list'", diagnostic.GetMessage());
     }
+
+    [Fact]
+    public async Task StoresInsideNeverInvokedLambdas_AreNotCurrent()
+    {
+        // configure never runs: use still holds the no-op when it is called.
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    Action use = () => { };
+                    Action configure = () => { use = () => list.Add(1); };
+                    var sending = Sending.Transfer(list);
+                    use();
+                }
+            """, WithSystem);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task StoresInsideLambdasInvokedOnlyLater_AreNotCurrent()
+    {
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    Action use = () => { };
+                    Action configure = () => { use = () => list.Add(1); };
+                    var sending = Sending.Transfer(list);
+                    use();
+                    configure();
+                }
+            """, WithSystem);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task StoresInsideInvokedLambdas_StayCurrent()
+    {
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    Action use = () => { };
+                    Action configure = () => { use = () => list.Add(1); };
+                    configure();
+                    var sending = Sending.Transfer(list);
+                    use();
+                }
+            """, WithSystem);
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task StoresInsideEscapingLambdas_StayCurrent()
+    {
+        // Handed to another method, configure may run anywhere before the call.
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    Action use = () => { };
+                    Action configure = () => { use = () => list.Add(1); };
+                    Run(configure);
+                    var sending = Sending.Transfer(list);
+                    use();
+                }
+
+                private static void Run(Action action) => action();
+            """, WithSystem);
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task FailuresEscapingAnUnmatchingInnerCatch_ReachOuterHandlersPastTheReset()
+    {
+        // The IOException passes the inner catch (wrong type) and resumes after the OUTER try,
+        // skipping the reset.
+        var diagnostics = await InClassC("""
+                public void M(bool fail)
+                {
+                    var list = new List<int> { 1 };
+                    try
+                    {
+                        var sending = Sending.Transfer(list);
+                        try
+                        {
+                            if (fail) throw new IOException();
+                        }
+                        catch (InvalidOperationException)
+                        {
+                        }
+
+                        list = new();
+                    }
+                    catch (IOException)
+                    {
+                    }
+
+                    list.Add(1);
+                }
+            """, "using System;\nusing System.Collections.Generic;\nusing System.IO;\nusing MemoizR;");
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task FailuresCaughtByTheInnerHandler_ResumeBeforeTheReset()
+    {
+        var diagnostics = await InClassC("""
+                public void M(bool fail)
+                {
+                    var list = new List<int> { 1 };
+                    try
+                    {
+                        var sending = Sending.Transfer(list);
+                        try
+                        {
+                            if (fail) throw new IOException();
+                        }
+                        catch (IOException)
+                        {
+                        }
+
+                        list = new();
+                    }
+                    catch (InvalidOperationException)
+                    {
+                    }
+
+                    list.Add(1);
+                }
+            """, "using System;\nusing System.Collections.Generic;\nusing System.IO;\nusing MemoizR;");
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task FailuresNoHandlerCatches_LeaveTheMethod()
+    {
+        // Neither handler matches: the failure leaves M, and the use never runs on that path.
+        var diagnostics = await InClassC("""
+                public void M(bool fail)
+                {
+                    var list = new List<int> { 1 };
+                    try
+                    {
+                        var sending = Sending.Transfer(list);
+                        try
+                        {
+                            if (fail) throw new IOException();
+                        }
+                        catch (InvalidOperationException)
+                        {
+                        }
+
+                        list = new();
+                    }
+                    catch (ArgumentException)
+                    {
+                    }
+
+                    list.Add(1);
+                }
+            """, "using System;\nusing System.Collections.Generic;\nusing System.IO;\nusing MemoizR;");
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task AliasSnapshots_AreResolvedPerSite()
+    {
+        // `use += source` snapshots the source AFTER its reassignment: the reading lambda is
+        // in use's invocation list.
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    Action source = () => { };
+                    Action use = source;
+                    source = () => list.Add(1);
+                    use += source;
+                    var sending = Sending.Transfer(list);
+                    use();
+                }
+            """, WithSystem);
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task AliasSnapshots_IgnoreLaterSourceStores()
+    {
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    Action source = () => { };
+                    Action use = source;
+                    use += source;
+                    source = () => list.Add(1);
+                    var sending = Sending.Transfer(list);
+                    use();
+                }
+            """, WithSystem);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task AliasCyclesInLoops_Terminate()
+    {
+        var diagnostics = await InClassC("""
+                public void M(bool flag)
+                {
+                    var list = new List<int> { 1 };
+                    Action a = () => { };
+                    Action b = () => { };
+                    while (flag)
+                    {
+                        a = b;
+                        b = a;
+                    }
+
+                    var sending = Sending.Transfer(list);
+                    b();
+                }
+            """, WithSystem);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task RethrownVariables_CanBeCaughtByDerivedHandlers()
+    {
+        // The static type is only an upper bound: the instance behind `ex` may well be the
+        // IOException this handler takes.
+        var diagnostics = await InClassC("""
+                public void M(Exception ex)
+                {
+                    var list = new List<int> { 1 };
+                    try
+                    {
+                        var sending = Sending.Transfer(list);
+                        throw ex;
+                    }
+                    catch (IOException)
+                    {
+                        list.Add(1);
+                    }
+                }
+            """, "using System;\nusing System.Collections.Generic;\nusing System.IO;\nusing MemoizR;");
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task FreshlyCreatedThrows_StillSkipUnrelatedHandlers()
+    {
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    try
+                    {
+                        var sending = Sending.Transfer(list);
+                        throw new InvalidOperationException();
+                    }
+                    catch (IOException)
+                    {
+                        list.Add(1);
+                    }
+                }
+            """, "using System;\nusing System.Collections.Generic;\nusing System.IO;\nusing MemoizR;");
+
+        Assert.Empty(diagnostics);
+    }
 }
