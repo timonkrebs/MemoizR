@@ -223,11 +223,12 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         }
 
         // A TYPE PARAMETER passes the classifier by design (creation sites check the closed
-        // type), but no closed check exists for a generic transfer helper: track it unless
-        // its constraints prove it harmless.
-        if (source.Type is ITypeParameterSymbol typeParameter)
+        // type), but no closed check exists for a generic transfer helper: a parameter
+        // anywhere in the source's type -- T itself, an ImmutableArray<T>, a Holder<T>'s T
+        // member -- keeps it tracked unless its constraints prove it harmless.
+        if (source.Type is { } type && StaticStateAnalyzer.HasUnshieldedTypeParameter(type))
         {
-            return SendableSymbolClassifier.IsProvenSendableByConstraints(typeParameter) ? null : variable;
+            return variable;
         }
 
         // Sendable by DECLARATION alone is not enough: a non-sealed class -- or a container
@@ -1692,15 +1693,90 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         var operand = PeelConversions(source);
         // Enumerating a VIEW copies the view's elements, which are its source's elements: the
         // backing collection itself is never copied (list.Where(..).ToArray() owns a fresh
-        // array), so only an inline source container contributes.
+        // array), so only an inline source container contributes. A PROJECTING view's
+        // elements are its selector's results instead.
         if (operand is not null && ViewSourceOf(operand) is { } viewSource)
         {
-            return CopiedElementParts(viewSource);
+            return ProjectionSelectorOf(operand) is { } selector
+                ? ProjectedParts(selector, viewSource)
+                : CopiedElementParts(viewSource);
         }
 
         return operand is not null && CarriedParts(operand) is { } parts
             ? parts
             : Enumerable.Empty<IOperation?>();
+    }
+
+    // The lambda whose results a projecting view (Select, SelectMany, Zip with a result
+    // selector) materializes -- none for an element-preserving view, and none for a selector
+    // the analysis cannot see into (a method group), which keeps the elements.
+    private static IAnonymousFunctionOperation? ProjectionSelectorOf(IOperation view)
+    {
+        var call = view is IConditionalAccessOperation conditional ? PeelConversions(conditional.WhenNotNull) : view;
+        if (call is not IInvocationOperation { TargetMethod.Name: "Select" or "SelectMany" or "Zip" } projection)
+        {
+            return null;
+        }
+
+        var selector = projection.Arguments.LastOrDefault(argument => argument.Parameter?.Type.TypeKind == TypeKind.Delegate);
+        return selector is not null ? UnwrapDelegate(selector.Value) as IAnonymousFunctionOperation : null;
+    }
+
+    // What a projection's results deliver: a captured variable rides along as itself, and a
+    // result that IS the element (the parameter) or may alias it (anything computed from it
+    // but a plain value or string) delivers the source's elements.
+    private static IEnumerable<IOperation?> ProjectedParts(IAnonymousFunctionOperation selector, IOperation viewSource)
+    {
+        var elementsCarried = false;
+        foreach (var leaf in ReturnedValuesOf(selector).SelectMany(LeavesOf))
+        {
+            if (IsAParameterOf(leaf, selector))
+            {
+                elementsCarried = true;
+                continue;
+            }
+
+            elementsCarried |= !IsAPlainValue(leaf);
+            yield return leaf;
+        }
+
+        if (elementsCarried)
+        {
+            foreach (var element in CopiedElementParts(viewSource))
+            {
+                yield return element;
+            }
+        }
+    }
+
+    private static IEnumerable<IOperation> ReturnedValuesOf(IAnonymousFunctionOperation lambda)
+    {
+        return lambda.Body.DescendantsAndSelf()
+            .OfType<IReturnOperation>()
+            .Where(returned => returned.ReturnedValue is not null && !IsWithinANestedFunction(returned, lambda))
+            .Select(returned => returned.ReturnedValue!);
+    }
+
+    private static IEnumerable<IOperation> LeavesOf(IOperation part)
+    {
+        return CarriedParts(part) is { } inner
+            ? inner.Where(child => child is not null).SelectMany(child => LeavesOf(child!))
+            : new[] { part };
+    }
+
+    private static bool IsAParameterOf(IOperation leaf, IAnonymousFunctionOperation lambda)
+    {
+        return leaf is IParameterReferenceOperation { Parameter: { } parameter }
+            && SymbolEqualityComparer.Default.Equals(parameter.ContainingSymbol, lambda.Symbol);
+    }
+
+    // A value or string computed from the element shares none of its state; a tuple may
+    // wrap the element itself (a tuple LITERAL was unfolded into its elements already).
+    private static bool IsAPlainValue(IOperation leaf)
+    {
+        return leaf.Type is { } type
+            && (type.SpecialType == SpecialType.System_String
+                || (type.IsValueType && type is not INamedTypeSymbol { IsTupleType: true }));
     }
 
     // The expression a framework view reads through -- list.Where(..), list?.AsReadOnly() --
@@ -2274,6 +2350,17 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             // read + noop keeps BOTH operands in the invocation list.
             case IBinaryOperation { OperatorKind: BinaryOperatorKind.Add } combine:
                 foreach (var callable in Callables(combine.LeftOperand).Concat(Callables(combine.RightOperand)))
+                {
+                    yield return callable;
+                }
+
+                break;
+            // read - noop strips one occurrence of each method group DEFINITELY on the right
+            // (a lambda instance never matches another); everything else survives.
+            case IBinaryOperation { OperatorKind: BinaryOperatorKind.Subtract } difference:
+                var survivors = Callables(difference.LeftOperand).ToList();
+                RemoveLastOccurrences(survivors, DefiniteMethodGroups(difference.RightOperand).Select(group => group.Method).ToList());
+                foreach (var callable in survivors)
                 {
                     yield return callable;
                 }

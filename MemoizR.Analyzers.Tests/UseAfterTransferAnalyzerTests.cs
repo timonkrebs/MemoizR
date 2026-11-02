@@ -6249,4 +6249,168 @@ public class UseAfterTransferAnalyzerTests
         var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
         Assert.Contains("'list'", diagnostic.GetMessage());
     }
+
+    [Fact]
+    public async Task NestedTypeParameters_KeepTheSourceTracked()
+    {
+        // ImmutableArray<T> passes the classifier only because T is open: closed with a
+        // List<int>, the element handed to mutate is the receiver's.
+        var diagnostics = await InClassC("""
+                public void Move<T>(ImmutableArray<T> items, Action<T> mutate)
+                {
+                    var sending = Sending.Transfer(items);
+                    mutate(items[0]);
+                }
+            """, "using System;\nusing System.Collections.Immutable;\nusing MemoizR;");
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'items'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task ClosedSendableContainers_AreNotTracked()
+    {
+        var diagnostics = await InClassC("""
+                public void Move(ImmutableArray<int> items)
+                {
+                    var sending = Sending.Transfer(items);
+                    _ = items[0];
+                }
+            """, "using System;\nusing System.Collections.Immutable;\nusing MemoizR;");
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task ConstrainedNestedTypeParameters_AreNotTracked()
+    {
+        // An enum-constrained T is proven Sendable, wrapped or not.
+        var diagnostics = await InClassC("""
+                public void Move<T>(ImmutableArray<T> items) where T : struct, Enum
+                {
+                    var sending = Sending.Transfer(items);
+                    _ = items[0];
+                }
+            """, "using System;\nusing System.Collections.Immutable;\nusing MemoizR;");
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task DelegateDifferences_KeepTheSurvivingTargets()
+    {
+        // Removing a distinct lambda instance strips nothing: use still runs read.
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    Action read = () => list.Add(1);
+                    Action noop = () => { };
+                    Action use = read - noop;
+                    var sending = Sending.Transfer(list);
+                    use();
+                }
+            """, WithSystem);
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task DelegateDifferences_StripTheMethodGroup()
+    {
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    void Touch() { list.Add(1); }
+                    Action use = (Action)Touch - Touch;
+                    var sending = Sending.Transfer(list);
+                    use();
+                }
+            """, WithSystem);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task ProjectingViews_CopyTheirSelectorResults()
+    {
+        // The materialized int[] holds counts, not the list: the sender keeps sole ownership.
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(new[] { list }.Select(x => x.Count).ToArray());
+                    list.Add(1);
+                }
+            """, "using System.Collections.Generic;\nusing System.Linq;\nusing MemoizR;");
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task IdentityProjections_CopyTheElements()
+    {
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(new[] { list }.Select(x => x).ToArray());
+                    list.Add(1);
+                }
+            """, "using System.Collections.Generic;\nusing System.Linq;\nusing MemoizR;");
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task ElementPreservingViews_CopyTheElements()
+    {
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(new[] { list }.Where(x => x.Count > 0).ToArray());
+                    list.Add(1);
+                }
+            """, "using System.Collections.Generic;\nusing System.Linq;\nusing MemoizR;");
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task ProjectionsCapturingTheVariable_CarryIt()
+    {
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(new[] { 1 }.Select(x => list).ToArray());
+                    list.Add(1);
+                }
+            """, "using System.Collections.Generic;\nusing System.Linq;\nusing MemoizR;");
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task ProjectionsWrappingTheElement_CopyTheElements()
+    {
+        // new[] { x } delivers the element inside a fresh array: the list still crosses.
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(new[] { list }.Select(x => new[] { x }).ToArray());
+                    list.Add(1);
+                }
+            """, "using System.Collections.Generic;\nusing System.Linq;\nusing MemoizR;");
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
 }

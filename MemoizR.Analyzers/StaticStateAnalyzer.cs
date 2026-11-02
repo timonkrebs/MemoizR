@@ -209,7 +209,7 @@ public sealed class StaticStateAnalyzer : DiagnosticAnalyzer
     // walked: a nested `sealed class Holder { public T Value ... }` carries the OUTER type
     // parameter on its members, not in its own argument list, and the shared classifier's
     // member walk would accept that T through the exemption this rule exists to remove.
-    private static bool HasUnshieldedTypeParameter(ITypeSymbol type)
+    internal static bool HasUnshieldedTypeParameter(ITypeSymbol type)
     {
         return HasUnshieldedTypeParameter(
             type,
