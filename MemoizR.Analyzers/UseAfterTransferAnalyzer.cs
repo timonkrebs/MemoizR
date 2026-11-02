@@ -1906,9 +1906,10 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     }
 
     // What a materializer stores: its SELECTORS' results (a dictionary's keys and values are
-    // its key and element selectors' results) and -- unless an element selector replaces
-    // them with plain values -- the elements copied out of its other arguments. A selector
-    // the analysis cannot see into (a method group) may return the element.
+    // its key and element selectors' results), -- unless an element selector replaces them
+    // with plain values -- the elements copied out of its SEQUENCE arguments, and every
+    // other argument as itself (a comparer is retained and consulted on the receiver's
+    // side). A selector the analysis cannot see into (a method group) may return the element.
     private static IEnumerable<IOperation?> CopierParts(IInvocationOperation copyCall)
     {
         var selectors = copyCall.Arguments
@@ -1922,9 +1923,12 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             .Where(selector => selector.Lambda is not null)
             .SelectMany(selector => SelectorParts(selector.Lambda!));
         var elementParts = elementsCarried
-            ? copyCall.Arguments.Where(argument => !IsASelector(argument)).SelectMany(argument => CopiedElementParts(argument.Value))
+            ? copyCall.Arguments.Where(argument => IsASequence(argument.Value)).SelectMany(argument => CopiedElementParts(argument.Value))
             : Enumerable.Empty<IOperation?>();
-        return selectorParts.Concat(elementParts);
+        var retained = copyCall.Arguments
+            .Where(argument => !IsASelector(argument) && !IsASequence(argument.Value))
+            .Select(argument => (IOperation?)argument.Value);
+        return selectorParts.Concat(elementParts).Concat(retained);
     }
 
     private static bool IsASelector(IArgumentOperation argument)
@@ -2561,6 +2565,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             if (matched is { } store
                 && !IsInASiblingArmOfTheTransfer(operation, transferPosition)
                 && (operation.Syntax.SpanStart < consumer.Syntax.Span.End || SharesALoopWith(operation, consumer))
+                && !IsStillBeingStoredAt(operation, consumer)
                 && NestedStoreCanBeCurrent(operation, scope, consumer))
             {
                 stores.Add((operation, store.Value, store.Replaces));
@@ -2568,6 +2573,16 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         }
 
         return stores;
+    }
+
+    // A store whose own expression is still being evaluated when the consumer runs -- the
+    // consumer sits inside it, outside any nested function (`use = use + Noop` reads use
+    // before the store completes) -- has not happened yet; a consumer inside a lambda the
+    // store builds runs later, after it.
+    private static bool IsStillBeingStoredAt(IOperation store, IOperation consumer)
+    {
+        return store.Syntax.Span.Contains(consumer.Syntax.Span)
+            && !Ancestors(consumer).TakeWhile(parent => !ReferenceEquals(parent, store)).Any(IsNestedFunction);
     }
 
     // A store inside a nested function is in the list at the call only if its function can

@@ -534,33 +534,82 @@ internal sealed class SendableSymbolClassifier
     // the nested type's own generic arguments, so this stays in lockstep).
     private static HashSet<ITypeParameterSymbol> StoredParameters(INamedTypeSymbol definition)
     {
-        var members = StoredInstanceMemberTypesOf(definition).ToList();
-        var reaching = new HashSet<ITypeParameterSymbol>(
-            members.SelectMany(member => OwnParametersIn(member, definition, stopAtSelf: true)),
-            SymbolEqualityComparer.Default);
-        var substitutions = members
-            .SelectMany(member => SelfConstructionsIn(member, definition))
-            .Select(SubstitutionOf)
-            .ToList();
+        return StoredParameters(definition, new HashSet<INamedTypeSymbol>(SymbolEqualityComparer.Default));
+    }
 
-        // An argument passed for a reaching parameter reaches a slot one level down.
-        var grew = true;
-        while (grew)
+    private static HashSet<ITypeParameterSymbol> StoredParameters(INamedTypeSymbol definition, HashSet<INamedTypeSymbol> inProgress)
+    {
+        // A definition re-entered through a wrapper that mentions it (mutual recursion) is
+        // taken to store every parameter while its own answer is still being computed.
+        if (!inProgress.Add(definition))
         {
-            grew = false;
-            foreach (var substitution in substitutions)
+            return new HashSet<ITypeParameterSymbol>(AllTypeParameters(definition), SymbolEqualityComparer.Default);
+        }
+
+        try
+        {
+            var members = StoredInstanceMemberTypesOf(definition).ToList();
+            var reaching = new HashSet<ITypeParameterSymbol>(
+                members.SelectMany(member => OwnParametersIn(member, definition, stopAtSelf: true, inProgress)),
+                SymbolEqualityComparer.Default);
+            var substitutions = members
+                .SelectMany(member => SelfConstructionsIn(member, definition, inProgress))
+                .Select(SubstitutionOf)
+                .ToList();
+
+            // An argument passed for a reaching parameter reaches a slot one level down.
+            var grew = true;
+            while (grew)
             {
-                foreach (var parameter in reaching.ToList())
+                grew = false;
+                foreach (var substitution in substitutions)
                 {
-                    foreach (var inner in OwnParametersIn(substitution[parameter], definition, stopAtSelf: false))
+                    foreach (var parameter in reaching.ToList())
                     {
-                        grew |= reaching.Add(inner);
+                        foreach (var inner in OwnParametersIn(substitution[parameter], definition, stopAtSelf: false, inProgress))
+                        {
+                            grew |= reaching.Add(inner);
+                        }
                     }
                 }
             }
+
+            return reaching;
+        }
+        finally
+        {
+            inProgress.Remove(definition);
+        }
+    }
+
+    private static IEnumerable<ITypeParameterSymbol> AllTypeParameters(INamedTypeSymbol definition)
+    {
+        return definition.ContainingType is { } containing
+            ? AllTypeParameters(containing.OriginalDefinition).Concat(definition.TypeParameters)
+            : definition.TypeParameters;
+    }
+
+    // The arguments a construction lets reach a slot: none for a [Sendable]-attributed
+    // wrapper (its thread-safety does not rest on them, exactly as the main walk trusts it);
+    // for a SOURCE-DECLARED wrapper, the arguments at its own storing parameters (an empty
+    // Phantom<T> stores nothing of T); for a metadata wrapper, every argument -- a
+    // green-listed container's contract stores its payload, and the import hides any
+    // other's members, so the analyzer lets a superset of what the runtime computes
+    // structurally reach.
+    private static IEnumerable<ITypeSymbol> ReachingArgumentsOf(INamedTypeSymbol named, HashSet<INamedTypeSymbol> inProgress)
+    {
+        if (HasSendableAttribute(named))
+        {
+            return Enumerable.Empty<ITypeSymbol>();
         }
 
-        return reaching;
+        if (!named.Locations.Any(location => location.IsInSource))
+        {
+            return AllTypeArguments(named);
+        }
+
+        var substitution = SubstitutionOf(named);
+        return StoredParameters(named.OriginalDefinition, inProgress).Select(parameter => substitution[parameter]);
     }
 
     // Each type parameter of the constructed type's definition -- containing types' included
@@ -579,19 +628,17 @@ internal sealed class SendableSymbolClassifier
         return substitution;
     }
 
-    // The definition's own type parameters (its containing types' included) a type mentions --
-    // without descending into the definition's own constructions when asked: their arguments
-    // flow through the recursion instead. A [Sendable]-attributed wrapper SHIELDS its
-    // arguments (its thread-safety does not rest on them, exactly as the main walk trusts
-    // it), so nothing inside one reaches a slot.
-    private static IEnumerable<ITypeParameterSymbol> OwnParametersIn(ITypeSymbol type, INamedTypeSymbol definition, bool stopAtSelf)
+    // The definition's own type parameters (its containing types' included) a type mentions
+    // in a REACHING position -- without descending into the definition's own constructions
+    // when asked: their arguments flow through the recursion instead.
+    private static IEnumerable<ITypeParameterSymbol> OwnParametersIn(ITypeSymbol type, INamedTypeSymbol definition, bool stopAtSelf, HashSet<INamedTypeSymbol> inProgress)
     {
         return type switch
         {
             ITypeParameterSymbol parameter when IsDeclaredBy(parameter, definition) => new[] { parameter },
-            IArrayTypeSymbol array => OwnParametersIn(array.ElementType, definition, stopAtSelf),
-            INamedTypeSymbol named when (!stopAtSelf || !SymbolEqualityComparer.Default.Equals(named.OriginalDefinition, definition)) && !HasSendableAttribute(named)
-                => AllTypeArguments(named).SelectMany(argument => OwnParametersIn(argument, definition, stopAtSelf)),
+            IArrayTypeSymbol array => OwnParametersIn(array.ElementType, definition, stopAtSelf, inProgress),
+            INamedTypeSymbol named when !stopAtSelf || !SymbolEqualityComparer.Default.Equals(named.OriginalDefinition, definition)
+                => ReachingArgumentsOf(named, inProgress).SelectMany(argument => OwnParametersIn(argument, definition, stopAtSelf, inProgress)),
             _ => Enumerable.Empty<ITypeParameterSymbol>(),
         };
     }
@@ -617,14 +664,14 @@ internal sealed class SendableSymbolClassifier
             : named.TypeArguments;
     }
 
-    private static IEnumerable<INamedTypeSymbol> SelfConstructionsIn(ITypeSymbol type, INamedTypeSymbol definition)
+    private static IEnumerable<INamedTypeSymbol> SelfConstructionsIn(ITypeSymbol type, INamedTypeSymbol definition, HashSet<INamedTypeSymbol> inProgress)
     {
         switch (type)
         {
             case IArrayTypeSymbol array:
-                return SelfConstructionsIn(array.ElementType, definition);
-            case INamedTypeSymbol named when !HasSendableAttribute(named):
-                var nested = AllTypeArguments(named).SelectMany(argument => SelfConstructionsIn(argument, definition));
+                return SelfConstructionsIn(array.ElementType, definition, inProgress);
+            case INamedTypeSymbol named:
+                var nested = ReachingArgumentsOf(named, inProgress).SelectMany(argument => SelfConstructionsIn(argument, definition, inProgress));
                 return SymbolEqualityComparer.Default.Equals(named.OriginalDefinition, definition) ? nested.Prepend(named) : nested;
             default:
                 return Enumerable.Empty<INamedTypeSymbol>();

@@ -492,33 +492,70 @@ public static class SendableChecker
 
     private static HashSet<int> StoredParameterPositions(Type definition)
     {
-        var members = StoredMemberTypesOf(definition).ToList();
-        var reaching = new HashSet<int>(members
-            .SelectMany(member => ParametersIn(member, stopAtSelf: definition))
-            .Select(parameter => parameter.GenericParameterPosition));
-        var selfArguments = members
-            .SelectMany(member => SelfConstructionsIn(member, definition))
-            .Select(self => self.GetGenericArguments())
-            .ToList();
+        return StoredParameterPositions(definition, new HashSet<Type>());
+    }
 
-        // An argument passed into a reaching position reaches a slot one level down.
-        var grew = true;
-        while (grew)
+    private static HashSet<int> StoredParameterPositions(Type definition, HashSet<Type> inProgress)
+    {
+        // A definition re-entered through a wrapper that mentions it (mutual recursion) is
+        // taken to store every parameter while its own answer is still being computed.
+        if (!inProgress.Add(definition))
         {
-            grew = false;
-            foreach (var arguments in selfArguments)
+            return new HashSet<int>(Enumerable.Range(0, definition.GetGenericArguments().Length));
+        }
+
+        try
+        {
+            var members = StoredMemberTypesOf(definition).ToList();
+            var reaching = new HashSet<int>(members
+                .SelectMany(member => ParametersIn(member, stopAtSelf: definition, inProgress))
+                .Select(parameter => parameter.GenericParameterPosition));
+            var selfArguments = members
+                .SelectMany(member => SelfConstructionsIn(member, definition, inProgress))
+                .Select(self => self.GetGenericArguments())
+                .ToList();
+
+            // An argument passed into a reaching position reaches a slot one level down.
+            var grew = true;
+            while (grew)
             {
-                foreach (var position in reaching.ToList())
+                grew = false;
+                foreach (var arguments in selfArguments)
                 {
-                    foreach (var parameter in ParametersIn(arguments[position], stopAtSelf: null))
+                    foreach (var position in reaching.ToList())
                     {
-                        grew |= reaching.Add(parameter.GenericParameterPosition);
+                        foreach (var parameter in ParametersIn(arguments[position], stopAtSelf: null, inProgress))
+                        {
+                            grew |= reaching.Add(parameter.GenericParameterPosition);
+                        }
                     }
                 }
             }
+
+            return reaching;
+        }
+        finally
+        {
+            inProgress.Remove(definition);
+        }
+    }
+
+    // The arguments a construction lets reach a slot: none for a [Sendable]-attributed
+    // wrapper (its thread-safety does not rest on them, exactly as the main walk trusts it);
+    // every argument of a green-listed framework container, whose contract stores its
+    // payload; for any other wrapper, the arguments at its own storing positions (an empty
+    // Phantom<T> stores nothing of T).
+    private static IEnumerable<Type> ReachingArgumentsOf(Type type, HashSet<Type> inProgress)
+    {
+        if (IsShielded(type))
+        {
+            return Enumerable.Empty<Type>();
         }
 
-        return reaching;
+        var arguments = type.GetGenericArguments();
+        return IsFrameworkImplementationOfAGreenListedType(type)
+            ? arguments
+            : StoredParameterPositions(DefinitionOf(type), inProgress).Select(position => arguments[position]);
     }
 
     private static IEnumerable<Type> StoredMemberTypesOf(Type definition)
@@ -538,11 +575,10 @@ public static class SendableChecker
         }
     }
 
-    // The generic parameters a type mentions -- without descending into the definition's own
-    // constructions when asked: their arguments flow through the recursion instead. A
-    // [Sendable]-attributed wrapper SHIELDS its arguments (its thread-safety does not rest on
-    // them, exactly as the main walk trusts it), so nothing inside one reaches a slot.
-    private static IEnumerable<Type> ParametersIn(Type type, Type? stopAtSelf)
+    // The generic parameters a type mentions in a REACHING position -- without descending
+    // into the definition's own constructions when asked: their arguments flow through the
+    // recursion instead.
+    private static IEnumerable<Type> ParametersIn(Type type, Type? stopAtSelf, HashSet<Type> inProgress)
     {
         if (type.IsGenericParameter)
         {
@@ -551,11 +587,11 @@ public static class SendableChecker
 
         if (type.HasElementType)
         {
-            return ParametersIn(type.GetElementType()!, stopAtSelf);
+            return ParametersIn(type.GetElementType()!, stopAtSelf, inProgress);
         }
 
-        return type.IsGenericType && (stopAtSelf == null || DefinitionOf(type) != stopAtSelf) && !IsShielded(type)
-            ? type.GetGenericArguments().SelectMany(argument => ParametersIn(argument, stopAtSelf))
+        return type.IsGenericType && (stopAtSelf == null || DefinitionOf(type) != stopAtSelf)
+            ? ReachingArgumentsOf(type, inProgress).SelectMany(argument => ParametersIn(argument, stopAtSelf, inProgress))
             : Enumerable.Empty<Type>();
     }
 
@@ -564,19 +600,19 @@ public static class SendableChecker
         return type.IsDefined(typeof(SendableAttribute), inherit: false);
     }
 
-    private static IEnumerable<Type> SelfConstructionsIn(Type type, Type definition)
+    private static IEnumerable<Type> SelfConstructionsIn(Type type, Type definition, HashSet<Type> inProgress)
     {
         if (type.HasElementType)
         {
-            return SelfConstructionsIn(type.GetElementType()!, definition);
+            return SelfConstructionsIn(type.GetElementType()!, definition, inProgress);
         }
 
-        if (!type.IsGenericType || IsShielded(type))
+        if (!type.IsGenericType)
         {
             return Enumerable.Empty<Type>();
         }
 
-        var nested = type.GetGenericArguments().SelectMany(argument => SelfConstructionsIn(argument, definition));
+        var nested = ReachingArgumentsOf(type, inProgress).SelectMany(argument => SelfConstructionsIn(argument, definition, inProgress));
         return DefinitionOf(type) == definition ? nested.Prepend(type) : nested;
     }
 

@@ -7519,4 +7519,84 @@ public class UseAfterTransferAnalyzerTests
 
         Assert.Empty(diagnostics);
     }
+
+    [Fact]
+    public async Task MaterializerComparers_AreRetained()
+    {
+        // The sorted set keeps the comparer and consults it on the receiver's side.
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var comparer = new Direction();
+                    var sending = Sending.Transfer(new[] { 1, 2 }.ToImmutableSortedSet(comparer));
+                    comparer.Sign = -1;
+                }
+
+                private sealed class Direction : IComparer<int>
+                {
+                    public int Sign = 1;
+
+                    public int Compare(int x, int y) => Sign * x.CompareTo(y);
+                }
+            """, "using System;\nusing System.Collections.Generic;\nusing System.Collections.Immutable;\nusing MemoizR;");
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'comparer'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task MaterializerSources_StillCopyTheirElements()
+    {
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var items = new List<int> { 1 };
+                    var sending = Sending.Transfer(items.ToImmutableSortedSet());
+                    items.Add(1);
+                }
+            """, "using System;\nusing System.Collections.Generic;\nusing System.Collections.Immutable;\nusing MemoizR;");
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task DelegateSelfCombines_KeepTheEarlierTargets()
+    {
+        // `use = use + Noop` reads the list use held BEFORE the store: Touch stays in it.
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    void Touch() { list.Add(1); }
+                    void Noop() { }
+                    Action use = Touch;
+                    use = use + Noop;
+                    var sending = Sending.Transfer(list);
+                    use();
+                }
+            """, WithSystem);
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task DelegateSelfCombines_DropTargetsBeforeAnOverwrite()
+    {
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    void Touch() { list.Add(1); }
+                    void Noop() { }
+                    Action use = Touch;
+                    use = Noop;
+                    use = use + Noop;
+                    var sending = Sending.Transfer(list);
+                    use();
+                }
+            """, WithSystem);
+
+        Assert.Empty(diagnostics);
+    }
 }

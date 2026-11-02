@@ -1080,4 +1080,70 @@ public class SendableTypeArgumentAnalyzerTests
 
         Assert.Empty(diagnostics);
     }
+
+    [Fact]
+    public async Task PhantomWrappers_DoNotCarryTheirArgument()
+    {
+        // Phantom<T> stores nothing: mentioning T in it reaches no slot, past the divergence
+        // cut either.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public sealed class Phantom<T>
+            {
+            }
+
+            public sealed class Node<T>
+            {
+                public Node<List<T>>? Next { get; init; }
+
+                public Phantom<T>? Payload { get; init; }
+            }
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    f.CreateSignal(new Node<int>());
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task StoringWrappers_CarryTheirArgument()
+    {
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public sealed class Box<T>
+            {
+                public T? Value { get; init; }
+            }
+
+            public sealed class Node<T>
+            {
+                public Node<List<T>>? Next { get; init; }
+
+                public Box<T>? Payload { get; init; }
+            }
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    f.CreateSignal(new Node<int>());
+                }
+            }
+            """);
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR001");
+        Assert.Contains("List", diagnostic.GetMessage());
+    }
 }

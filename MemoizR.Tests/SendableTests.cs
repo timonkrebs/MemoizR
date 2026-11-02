@@ -479,6 +479,21 @@ public class StrictSendableModeTests
     }
 
     [Fact]
+    public void PhantomWrappers_DoNotCarryTheirArgument()
+    {
+        // Phantom<T> stores nothing: mentioning T in it reaches no slot, past the divergence
+        // cut either.
+        Assert.True(SendableChecker.IsSendable(typeof(PhantomGrowth<int>), out _));
+    }
+
+    [Fact]
+    public void StoringWrappers_CarryTheirArgument()
+    {
+        Assert.False(SendableChecker.IsSendable(typeof(BoxedGrowth<int>), out var reason));
+        Assert.Contains("List", reason);
+    }
+
+    [Fact]
     public void GrowingNestedGenericSubstitutions_AreNotAssumedSendable()
     {
         // The growth runs through the CONTAINING type's parameters (the CLR flattens them into
@@ -692,4 +707,29 @@ internal sealed class ShieldedGrowth<T>
     public ShieldedGrowth<List<T>>? Next { get; init; }
 
     public Sending<T>? Payload { get; init; }
+}
+
+internal sealed class Phantom<T>
+{
+}
+
+internal sealed class WrapBoxOf<T>
+{
+    public T? Value { get; init; }
+}
+
+// Growth whose payload sits in a wrapper that stores NOTHING.
+internal sealed class PhantomGrowth<T>
+{
+    public PhantomGrowth<List<T>>? Next { get; init; }
+
+    public Phantom<T>? Payload { get; init; }
+}
+
+// Growth whose payload sits in a wrapper that stores it.
+internal sealed class BoxedGrowth<T>
+{
+    public BoxedGrowth<List<T>>? Next { get; init; }
+
+    public WrapBoxOf<T>? Payload { get; init; }
 }
