@@ -285,8 +285,11 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         }
 
         // A callee that never completes normally after its handoff turns each call into a
-        // THROWN transfer: only the caller's handlers and finallys observe it.
+        // THROWN transfer: only the caller's handlers and finallys observe it. An ASYNC
+        // callee faults into its returned task instead -- the caller continues unless it
+        // awaits the call right there.
         var calleeExits = CalleeCannotReturnAfter(transferBody, anchor.Syntax.Span.End);
+        var calleeIsAsync = functionSymbol.IsAsync;
 
         // An ITERATOR body runs only when enumerated: the call itself hands nothing off (the
         // sequence may never be walked), so only an immediate enumeration propagates.
@@ -300,7 +303,8 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             }
 
             var callBody = EnclosingFunctionBody(invocation, block);
-            foreach (var entry in CallSiteEntries(invocation, callBody, variable, functionSymbol, block, classifier, visited, calleeExits))
+            var callThrows = calleeExits && (!calleeIsAsync || IsAwaited(invocation));
+            foreach (var entry in CallSiteEntries(invocation, callBody, variable, functionSymbol, block, classifier, visited, callThrows))
             {
                 yield return entry;
             }
@@ -400,9 +404,9 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     {
         foreach (var callVariable in CallSiteVariables(invocation, variable, functionSymbol, classifier))
         {
-            // A call inside another local function hands the variable off for THAT body's own
-            // continuation (`Move(y); y.Add(1);`) and, through its callers, beyond it.
-            if (callBody is ILocalFunctionOperation)
+            // A call inside another local function or lambda hands the variable off for THAT
+            // body's own continuation (`Move(y); y.Add(1);`) and, through its callers, beyond it.
+            if (IsNestedFunction(callBody))
             {
                 foreach (var nested in CallSiteTransfers(callBody, callVariable, invocation, block, classifier, visited))
                 {
@@ -1477,7 +1481,7 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     {
         if (creation.Initializer is { } initializer)
         {
-            foreach (var part in InitializerCarriedParts(initializer))
+            foreach (var part in InitializerCarriedParts(initializer, alsoOverwritten))
             {
                 yield return part;
             }
@@ -1542,8 +1546,9 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
 
     // Member writes carry through compiler-known slots only; an INDEXER initializer
     // (["x"] = list) stores value AND keys into the collection; a collection initializer's
-    // Add elements carry like collection expressions.
-    private static IEnumerable<IOperation?> InitializerCarriedParts(IObjectOrCollectionInitializerOperation initializer)
+    // Add elements carry like collection expressions. A slot an enclosing with-initializer
+    // definitely OVERWRITES is dropped before the clone escapes.
+    private static IEnumerable<IOperation?> InitializerCarriedParts(IObjectOrCollectionInitializerOperation initializer, HashSet<string>? overwritten = null)
     {
         return initializer.Initializers.SelectMany(element => element switch
         {
@@ -1552,12 +1557,14 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             ISimpleAssignmentOperation { Target: IPropertyReferenceOperation { Property.IsIndexer: true } indexer } member
                 when IsFrameworkDeclared(indexer.Property.ContainingType) =>
                 indexer.Arguments.Select(argument => (IOperation?)argument.Value).Concat(new[] { (IOperation?)member.Value }),
-            ISimpleAssignmentOperation member when RetainsItsSlot(member.Target) => new[] { (IOperation?)member.Value },
+            ISimpleAssignmentOperation member
+                when RetainsItsSlot(member.Target) && !IsOverwritten(member.Target, overwritten) => new[] { (IOperation?)member.Value },
             // Child = { Value = list }: writes INTO the object the transferred payload
             // already reaches -- when Child is a RETAINED slot. A computed member hands out
             // a temporary the payload never keeps.
             IMemberInitializerOperation { Initializer: { } nested } memberInitializer
-                when RetainsItsSlot(memberInitializer.InitializedMember) => InitializerCarriedParts(nested),
+                when RetainsItsSlot(memberInitializer.InitializedMember) && !IsOverwritten(memberInitializer.InitializedMember, overwritten)
+                => InitializerCarriedParts(nested),
             IInvocationOperation add when IsFrameworkDeclared(add.TargetMethod.ContainingType) =>
                 add.Arguments.Select(argument => (IOperation?)argument.Value),
             _ => Enumerable.Empty<IOperation?>(),
@@ -1620,8 +1627,23 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
         return new HashSet<string>(
             (initializer?.Initializers ?? ImmutableArray<IOperation>.Empty)
                 .OfType<ISimpleAssignmentOperation>()
-                .Select(member => (member.Target as IPropertyReferenceOperation)?.Property.Name)
+                .Select(member => SlotName(member.Target))
                 .Where(name => name is not null)!);
+    }
+
+    private static bool IsOverwritten(IOperation? member, HashSet<string>? overwritten)
+    {
+        return overwritten is not null && SlotName(member) is { } name && overwritten.Contains(name);
+    }
+
+    private static string? SlotName(IOperation? member)
+    {
+        return member switch
+        {
+            IFieldReferenceOperation field => field.Field.Name,
+            IPropertyReferenceOperation { Property.IsIndexer: false } property => property.Property.Name,
+            _ => null,
+        };
     }
 
     private static bool RetainsItsSlot(IOperation? member)
@@ -2089,6 +2111,11 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                 ICompoundAssignmentOperation { OperatorKind: BinaryOperatorKind.Add } combined
                     when SymbolEqualityComparer.Default.Equals(ReferencedSlot(combined.Target), delegateLocal)
                     => (combined.Value, false),
+                // use ??= fills an EMPTY slot and leaves a filled one alone: earlier targets
+                // may still be what runs.
+                ICoalesceAssignmentOperation coalesce
+                    when SymbolEqualityComparer.Default.Equals(ReferencedSlot(coalesce.Target), delegateLocal)
+                    => (coalesce.Value, false),
                 _ => null,
             };
 

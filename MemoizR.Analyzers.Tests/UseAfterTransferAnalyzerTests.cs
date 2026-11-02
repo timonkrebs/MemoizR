@@ -5568,4 +5568,169 @@ public class UseAfterTransferAnalyzerTests
         var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
         Assert.Contains("'list'", diagnostic.GetMessage());
     }
+
+    [Fact]
+    public async Task TransfersPropagate_ThroughStoredLambdaCallers()
+    {
+        // wrapper() runs move(), which hands the list off: the handoff reaches the outer
+        // method through two stored lambdas.
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    Action move = () => Sending.Transfer(list);
+                    Action wrapper = () => move();
+                    wrapper();
+                    list.Add(1);
+                }
+            """, WithSystem);
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task FaultingAsyncCallees_StillReturnTheirTask()
+    {
+        // The async body transfers synchronously, then faults into the returned task: the
+        // unawaited caller continues and mutates the handed-off list.
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    async Task Move()
+                    {
+                        var sending = Sending.Transfer(list);
+                        await Task.Yield();
+                        throw new Exception();
+                    }
+
+                    _ = Move();
+                    list.Add(1);
+                }
+            """, "using System;\nusing System.Collections.Generic;\nusing System.Threading.Tasks;\nusing MemoizR;");
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task AwaitedFaultingAsyncCallees_SkipTheContinuation()
+    {
+        // Awaiting the faulted task rethrows at the await: nothing after it runs.
+        var diagnostics = await InClassC("""
+                public async Task M()
+                {
+                    var list = new List<int> { 1 };
+                    async Task Move()
+                    {
+                        var sending = Sending.Transfer(list);
+                        await Task.Yield();
+                        throw new Exception();
+                    }
+
+                    await Move();
+                    list.Add(1);
+                }
+            """, "using System;\nusing System.Collections.Generic;\nusing System.Threading.Tasks;\nusing MemoizR;");
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task CoalescingDelegateStores_AreStores()
+    {
+        // `use ??= lambda` installs the reading lambda into the empty slot before the handoff.
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    Action? use = null;
+                    use ??= () => list.Add(1);
+                    var sending = Sending.Transfer(list);
+                    use();
+                }
+            """, WithSystem);
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task CoalescingDelegateStores_DoNotDiscardEarlierTargets()
+    {
+        // `??=` leaves a non-null slot alone: the reading Touch is still what use() runs.
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    void Touch() { list.Add(1); }
+                    Action use = Touch;
+                    use ??= () => { };
+                    var sending = Sending.Transfer(list);
+                    use();
+                }
+            """, WithSystem);
+
+        AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+    }
+
+    [Fact]
+    public async Task WithInitializerOverwrites_DropObjectInitializerSlotsToo()
+    {
+        // The clone replaces Value: the list the creation stored there never reaches the
+        // receiver.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public record Box
+            {
+                public List<int>? Value { get; init; }
+
+                public int Other { get; init; }
+            }
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(new Box { Value = list } with { Value = new() });
+                    list.Add(1);
+                }
+            }
+            """);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task WithInitializerOverwrites_LeaveOtherObjectInitializerSlotsCarried()
+    {
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public record Box
+            {
+                public List<int>? Value { get; init; }
+
+                public int Other { get; init; }
+            }
+
+            public class C
+            {
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(new Box { Value = list } with { Other = 1 });
+                    list.Add(1);
+                }
+            }
+            """);
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
 }
