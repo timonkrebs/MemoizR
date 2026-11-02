@@ -167,7 +167,7 @@ internal sealed class SendableSymbolClassifier
     // lookalike (`namespace System { class Uri { public int State; } }`) binds over the BCL
     // type and must go through the structural walk, as the runtime's typeof identity would
     // reject it.
-    private static bool IsKnownImmutable(ITypeSymbol type)
+    internal static bool IsKnownImmutable(ITypeSymbol type)
     {
         if (type is not INamedTypeSymbol named || named.Arity != 0 || !IsDeclaredInFrameworkAssembly(named))
         {
@@ -548,7 +548,7 @@ internal sealed class SendableSymbolClassifier
 
         try
         {
-            var members = StoredInstanceMemberTypesOf(definition).ToList();
+            var members = ExposedInstanceMemberTypesOf(definition).ToList();
             var reaching = new HashSet<ITypeParameterSymbol>(
                 members.SelectMany(member => OwnParametersIn(member, definition, stopAtSelf: true, inProgress)),
                 SymbolEqualityComparer.Default);
@@ -720,6 +720,20 @@ internal sealed class SendableSymbolClassifier
     // metadata types contribute nothing.
     internal static IEnumerable<ITypeSymbol> StoredInstanceMemberTypesOf(INamedTypeSymbol named)
     {
+        return InstanceMemberTypesOf(named, storedOnly: true);
+    }
+
+    // The member types the ORDINARY walk checks -- fields and every instance property, a
+    // computed getter included (it hands out whatever it computes) -- which the divergence
+    // analysis must see too, or the runtime, whose member scan includes computed properties,
+    // throws where the build was silent.
+    private static IEnumerable<ITypeSymbol> ExposedInstanceMemberTypesOf(INamedTypeSymbol named)
+    {
+        return InstanceMemberTypesOf(named, storedOnly: false);
+    }
+
+    private static IEnumerable<ITypeSymbol> InstanceMemberTypesOf(INamedTypeSymbol named, bool storedOnly)
+    {
         if (!named.Locations.Any(location => location.IsInSource))
         {
             yield break;
@@ -732,7 +746,7 @@ internal sealed class SendableSymbolClassifier
                 var memberType = member switch
                 {
                     IFieldSymbol { IsStatic: false, IsImplicitlyDeclared: false } field => field.Type,
-                    IPropertySymbol { IsStatic: false } property when HasBackingSlot(property) => property.Type,
+                    IPropertySymbol { IsStatic: false } property when !storedOnly || HasBackingSlot(property) => property.Type,
                     _ => null,
                 };
 

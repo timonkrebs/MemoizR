@@ -815,10 +815,11 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
                 when IsACopyingFactory(method, copier) => CopierParts(copyCall),
             // A framework VIEW (list.AsReadOnly(), Where(...), AsEnumerable(), array.AsMemory())
             // reads through its source on the receiver's schedule -- nothing was copied out --
-            // so the receiver and every retained argument ride along.
+            // so the receiver and every retained argument ride along, a retained selector or
+            // predicate through the variables it captured.
             IInvocationOperation { TargetMethod: { ContainingType: { } viewSource } viewMethod } view
                 when IsAFrameworkView(viewMethod, viewSource) =>
-                new[] { (IOperation?)view.Instance }.Concat(view.Arguments.Select(argument => (IOperation?)argument.Value)),
+                new[] { (IOperation?)view.Instance }.Concat(view.Arguments.SelectMany(RetainedByAView)),
             // Transfer([list]): matched by SYNTAX -- ICollectionExpressionOperation is not
             // public in the Roslyn this analyzer compiles against, but the children are
             // walkable regardless.
@@ -840,6 +841,24 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
     // around the argument REFERENCES -- freezing the shape shares the contents.
     // Judged by the parameter's DECLARED type: a `T item` instantiated with an array is still
     // one retained item.
+    // What a retained view argument delivers: a lambda's CAPTURED variables -- the receiver
+    // runs the selector or predicate on its own schedule, reading them then -- and any other
+    // argument as itself.
+    private static IEnumerable<IOperation?> RetainedByAView(IArgumentOperation argument)
+    {
+        return UnwrapDelegate(argument.Value) is IAnonymousFunctionOperation lambda
+            ? CapturedReferencesOf(lambda)
+            : new[] { (IOperation?)argument.Value };
+    }
+
+    private static IEnumerable<IOperation?> CapturedReferencesOf(IAnonymousFunctionOperation lambda)
+    {
+        return lambda.Body.DescendantsAndSelf()
+            .Where(operation => ReferencedVariable(operation) is { } variable
+                && !variable.DeclaringSyntaxReferences.Any(reference => lambda.Syntax.Span.Contains(reference.Span)))
+            .Select(operation => (IOperation?)operation);
+    }
+
     private static bool CopiesItsElements(IParameterSymbol? parameter)
     {
         return parameter?.OriginalDefinition.Type is IArrayTypeSymbol or INamedTypeSymbol { Name: "ReadOnlySpan" or "Span" };
@@ -1968,8 +1987,11 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
             && SymbolEqualityComparer.Default.Equals(parameter.ContainingSymbol, lambda.Symbol);
     }
 
-    // A value or string computed from the element shares none of its state; a tuple may
-    // wrap the element itself (a tuple LITERAL was unfolded into its elements already).
+    // A value computed from the element shares none of its state when it is a primitive or
+    // string, an enum, a known immutable framework struct, a nullable of one, or a source
+    // struct whose own fields are plain. A struct whose fields the import hides is not proven
+    // harmless (List<T>.Enumerator keeps its list), and a tuple may wrap the element itself
+    // (a tuple LITERAL was unfolded into its elements already).
     private static bool IsAPlainValue(IOperation leaf)
     {
         return IsAPlainValueType(leaf.Type);
@@ -1977,9 +1999,26 @@ public sealed class UseAfterTransferAnalyzer : DiagnosticAnalyzer
 
     private static bool IsAPlainValueType(ITypeSymbol? type)
     {
-        return type is not null
-            && (type.SpecialType == SpecialType.System_String
-                || (type.IsValueType && type is not INamedTypeSymbol { IsTupleType: true }));
+        return type switch
+        {
+            null => false,
+            { TypeKind: TypeKind.Enum } => true,
+            INamedTypeSymbol { IsTupleType: true } => false,
+            INamedTypeSymbol { OriginalDefinition.SpecialType: SpecialType.System_Nullable_T } nullable => IsAPlainValueType(nullable.TypeArguments[0]),
+            _ when IsAPrimitive(type) || SendableSymbolClassifier.IsKnownImmutable(type) => true,
+            INamedTypeSymbol { IsValueType: true } named when named.Locations.Any(location => location.IsInSource)
+                => SendableSymbolClassifier.StoredInstanceMemberTypesOf(named).All(IsAPlainValueType),
+            _ => false,
+        };
+    }
+
+    private static bool IsAPrimitive(ITypeSymbol type)
+    {
+        return type.SpecialType is SpecialType.System_Boolean or SpecialType.System_Char
+            or SpecialType.System_SByte or SpecialType.System_Byte or SpecialType.System_Int16 or SpecialType.System_UInt16
+            or SpecialType.System_Int32 or SpecialType.System_UInt32 or SpecialType.System_Int64 or SpecialType.System_UInt64
+            or SpecialType.System_Decimal or SpecialType.System_Single or SpecialType.System_Double
+            or SpecialType.System_String or SpecialType.System_IntPtr or SpecialType.System_UIntPtr or SpecialType.System_DateTime;
     }
 
     // The sequences a framework view reads its elements through -- the receiver (list.Where(..),

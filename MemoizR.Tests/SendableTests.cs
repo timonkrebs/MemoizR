@@ -487,6 +487,15 @@ public class StrictSendableModeTests
     }
 
     [Fact]
+    public void ComputedPayloads_CountInTheDivergenceAnalysis()
+    {
+        // Value exposes A through a getter: the divergence analysis sees it like the ordinary
+        // member walk does.
+        Assert.False(SendableChecker.IsSendable(typeof(ComputedGrowth<int, int, int>), out var reason));
+        Assert.Contains("List", reason);
+    }
+
+    [Fact]
     public void StoringWrappers_CarryTheirArgument()
     {
         Assert.False(SendableChecker.IsSendable(typeof(BoxedGrowth<int>), out var reason));
@@ -732,4 +741,12 @@ internal sealed class BoxedGrowth<T>
     public BoxedGrowth<List<T>>? Next { get; init; }
 
     public WrapBoxOf<T>? Payload { get; init; }
+}
+
+// Growth whose payload is EXPOSED by a computed getter rather than stored.
+internal sealed class ComputedGrowth<A, B, C>
+{
+    public A Value => default!;
+
+    public ComputedGrowth<B, C, List<C>>? Next { get; init; }
 }

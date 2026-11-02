@@ -7599,4 +7599,85 @@ public class UseAfterTransferAnalyzerTests
 
         Assert.Empty(diagnostics);
     }
+
+    [Fact]
+    public async Task LazyViews_RetainTheirSelectorsCaptures()
+    {
+        // The receiver enumerates the view later; its selector reads the captured list then.
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(new[] { 0 }.Select(_ => list));
+                    list.Add(1);
+                }
+            """, "using System.Collections.Generic;\nusing System.Linq;\nusing MemoizR;");
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task LazyFilters_RetainTheirPredicatesCaptures()
+    {
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(new[] { 0 }.Where(x => list.Contains(x)));
+                    list.Add(1);
+                }
+            """, "using System.Collections.Generic;\nusing System.Linq;\nusing MemoizR;");
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task LazyViews_IgnoreValuesComputedBeforeTheView()
+    {
+        // list.Count is evaluated into the array before the view exists: nothing retains the list.
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(new[] { list.Count }.Select(y => y + 1));
+                    list.Add(1);
+                }
+            """, "using System.Collections.Generic;\nusing System.Linq;\nusing MemoizR;");
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task StructProjectionsWithReferences_DeliverTheElements()
+    {
+        // List<int>.Enumerator is a struct that keeps the list it walks.
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(new[] { list }.Select(x => x.GetEnumerator()).ToArray());
+                    list.Add(1);
+                }
+            """, "using System.Collections.Generic;\nusing System.Linq;\nusing MemoizR;");
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR005");
+        Assert.Contains("'list'", diagnostic.GetMessage());
+    }
+
+    [Fact]
+    public async Task KnownImmutableStructProjections_StayPlain()
+    {
+        var diagnostics = await InClassC("""
+                public void M()
+                {
+                    var list = new List<int> { 1 };
+                    var sending = Sending.Transfer(new[] { list }.Select(x => new DateTime(x.Count)).ToArray());
+                    list.Add(1);
+                }
+            """, "using System;\nusing System.Collections.Generic;\nusing System.Linq;\nusing MemoizR;");
+
+        Assert.Empty(diagnostics);
+    }
 }

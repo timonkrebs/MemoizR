@@ -1146,4 +1146,35 @@ public class SendableTypeArgumentAnalyzerTests
         var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR001");
         Assert.Contains("List", diagnostic.GetMessage());
     }
+
+    [Fact]
+    public async Task ComputedPayloads_CountInTheDivergenceAnalysis()
+    {
+        // Value exposes A through a getter, which the ordinary walk checks like any property;
+        // the divergence analysis must see the same member, or the runtime throws where the
+        // build was silent.
+        var diagnostics = await AnalyzeAsync("""
+            using System.Collections.Generic;
+            using MemoizR;
+
+            public sealed class Node<A, B, C>
+            {
+                public A Value => default!;
+
+                public Node<B, C, List<C>>? Next { get; init; }
+            }
+
+            public class C
+            {
+                public void M()
+                {
+                    var f = new MemoFactory();
+                    f.CreateSignal(new Node<int, int, int>());
+                }
+            }
+            """);
+
+        var diagnostic = AnalyzerTestHarness.AssertSingle(diagnostics, "MZR001");
+        Assert.Contains("List", diagnostic.GetMessage());
+    }
 }
